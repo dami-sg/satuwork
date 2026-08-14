@@ -1,0 +1,148 @@
+/* Satuwork 主题：覆盖 dsh 的 --dsw-alias-* 语义令牌
+ *
+ * dsh 的样式体系里，ui-theme 是唯一的主题 owner，功能组件只准读
+ * --dsw-alias-*，不准写字面色值。所以换肤 = 覆盖同名 alias，不用碰任何
+ * 功能组件——这正是 ui-theme README 说的第三方主题扩展点。
+ *
+ * 值来自 design/theme.css，映射关系见每段注释。
+ * 必须在 design-platform.css 之后加载，选择器与它保持一致（body /
+ * body[data-ds-dark-theme]）才能覆盖成功。
+ *
+ * 未覆盖的 alias 保留 dsh 默认值：state-*（语义红/绿/琥珀，设计稿不冲突）、
+ * markdown-tag、markdown-placeholder、bg-mask-*。 */
+
+:root {
+  /* 设计稿用 Outfit。CDN 在这里不可用时退到系统栈，CJK 由后续字体承接。 */
+  --dsw-font-family: Outfit, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue',
+    Helvetica, Arial, sans-serif;
+}
+
+/* ── 亮色：直接取自 design/theme.css ──────────────────────────────────── */
+body {
+  /* 背景层。dsh 默认三层都是纯白，Satuwork 用暖白纸面 + 白色浮层拉开层次 */
+  --dsw-alias-bg-base: #faf9f5;             /* --background */
+  --dsw-alias-bg-layer-1: #ffffff;          /* --popover，浮起面 */
+  --dsw-alias-bg-layer-2: #f5f4ef;          /* --card */
+  --dsw-alias-bg-layer-3: #ffffff;          /* 菜单（--dsw-specific-menu 读这层） */
+  --dsw-alias-bg-module-platform: #f5f4ee;  /* --sidebar */
+  --dsw-alias-bg-skeleton: #ede9de;         /* --muted */
+  --dsw-alias-bg-multi-select: #f8ece7;     /* --color-accent-100 */
+  --dsw-alias-bg-overlay: rgba(61, 57, 41, 0.32);
+
+  /* 描边。dsh 用中性黑透明度，换成暖墨色，避免灰调压过纸面 */
+  --dsw-alias-border-l1: rgba(61, 57, 41, 0.05);
+  --dsw-alias-border-l2: rgba(61, 57, 41, 0.11);
+  --dsw-alias-border-l2-darkmode-thin: rgba(61, 57, 41, 0.11);
+  --dsw-alias-border-l3: rgba(61, 57, 41, 0.14);
+  --dsw-alias-border-l4: rgba(61, 57, 41, 0.2);
+
+  /* 品牌。dsh 出厂的 brand-primary 是近黑色（所以主按钮是黑的），
+     Satuwork 是赭红 —— 这一条改完视觉差异最大 */
+  --dsw-alias-brand-primary: #c96442;          /* --primary */
+  --dsw-alias-brand-primary-invert: #ffffff;   /* --primary-foreground */
+  --dsw-alias-brand-text: #3d3929;             /* 字标用正文墨色，不用主色 */
+
+  /* 按钮 */
+  --dsw-alias-button-primary-fill: var(--dsw-alias-brand-primary);
+  --dsw-alias-button-primary-hover: #b05730;   /* --color-accent-600 */
+  --dsw-alias-button-primary-dimmed: #f8ece7;  /* --color-accent-100 */
+  --dsw-alias-button-ghost-active-fill: #e9e6dc;    /* --secondary */
+  --dsw-alias-button-ghost-active-hover: #ede9de;   /* --muted */
+  --dsw-alias-button-ghost-active-border: #b4b2a7;  /* --input-border */
+  --dsw-alias-button-elevated-fill: #ffffff;
+  --dsw-alias-button-floating-fill: #ffffff;
+  --dsw-alias-button-floating-hover: #f5f4ef;
+
+  /* 文字 */
+  --dsw-alias-label-primary: #3d3929;           /* --foreground */
+  --dsw-alias-label-primary-dimmed: #141413;    /* --card-foreground */
+  --dsw-alias-label-secondary: #535146;         /* --secondary-foreground */
+  --dsw-alias-label-tertiary: #6e6d68;          /* --muted-foreground */
+  --dsw-alias-label-caption: rgba(61, 57, 41, 0.45);
+  --dsw-alias-label-primary-foreground: #ffffff;
+  --dsw-alias-label-primary-inverted: #faf9f5;
+
+  /* 交互态 */
+  --dsw-alias-interactive-bg-hover: rgba(61, 57, 41, 0.06);
+  --dsw-alias-interactive-bg-active: rgba(61, 57, 41, 0.1);
+  --dsw-alias-interactive-bg-hover-accent: rgba(201, 100, 66, 0.1);
+  --dsw-alias-interactive-bg-hover-solid: #f5f4ef;
+
+  /* Markdown 与代码 */
+  --dsw-alias-markdown-inline-code: #ede9de;
+  --dsw-alias-markdown-code-block: #f5f4ef;
+  --dsw-alias-markdown-code-block-banner: #e9e6dc;
+  --dsw-alias-markdown-citation: #914628;       /* --color-accent-700，正文链接色 */
+
+  /* 浮层 */
+  --dsw-alias-tooltip-bg: #3d3929;
+  --dsw-alias-toast-bg: #ffffff;
+
+  /* 滚动条 */
+  --dsw-alias-scrollbar-bg-l1: rgba(61, 57, 41, 0.16);
+  --dsw-alias-scrollbar-hover-l1: rgba(61, 57, 41, 0.28);
+  --dsw-alias-scrollbar-bg-l2: rgba(61, 57, 41, 0.22);
+  --dsw-alias-scrollbar-hover-l2: rgba(61, 57, 41, 0.34);
+}
+
+/* ── 暗色：设计稿没有暗色方案，以下由亮色调板推导 ──────────────────────
+ * 保持同一色相族（暖墨底 + 提亮的赭红），不是简单反相。设计稿补了暗色之后
+ * 这一段应当整体替换。 */
+body[data-ds-dark-theme] {
+  --dsw-alias-bg-base: #16150f;
+  --dsw-alias-bg-layer-1: #1d1c14;
+  --dsw-alias-bg-layer-2: #24221a;
+  --dsw-alias-bg-layer-3: #24221a;
+  --dsw-alias-bg-module-platform: #1b1a13;
+  --dsw-alias-bg-skeleton: #2a281e;
+  --dsw-alias-bg-multi-select: #38241a;
+  --dsw-alias-bg-overlay: rgba(0, 0, 0, 0.55);
+
+  --dsw-alias-border-l1: rgba(236, 232, 218, 0.07);
+  --dsw-alias-border-l2: rgba(236, 232, 218, 0.11);
+  --dsw-alias-border-l2-darkmode-thin: rgba(236, 232, 218, 0.11);
+  --dsw-alias-border-l3: rgba(236, 232, 218, 0.15);
+  --dsw-alias-border-l4: rgba(236, 232, 218, 0.22);
+
+  /* 赭红在深底上要提亮，否则对比度不足 */
+  --dsw-alias-brand-primary: #e4906b;
+  --dsw-alias-brand-primary-invert: #16150f;
+  --dsw-alias-brand-text: #ece8da;
+
+  --dsw-alias-button-primary-fill: var(--dsw-alias-brand-primary);
+  --dsw-alias-button-primary-hover: #d1795a;
+  --dsw-alias-button-primary-dimmed: #38241a;
+  --dsw-alias-button-ghost-active-fill: #2a281e;
+  --dsw-alias-button-ghost-active-hover: #332f24;
+  --dsw-alias-button-ghost-active-border: #4a4638;
+  --dsw-alias-button-elevated-fill: #24221a;
+  --dsw-alias-button-floating-fill: #24221a;
+  --dsw-alias-button-floating-hover: #2f2c21;
+
+  --dsw-alias-label-primary: #ece8da;
+  --dsw-alias-label-primary-dimmed: #faf9f5;
+  --dsw-alias-label-secondary: #a8a390;
+  --dsw-alias-label-tertiary: #7d7969;
+  --dsw-alias-label-caption: rgba(236, 232, 218, 0.45);
+  --dsw-alias-label-primary-foreground: #16150f;
+  --dsw-alias-label-primary-inverted: #16150f;
+
+  --dsw-alias-interactive-bg-hover: rgba(236, 232, 218, 0.06);
+  --dsw-alias-interactive-bg-active: rgba(236, 232, 218, 0.1);
+  --dsw-alias-interactive-bg-hover-accent: rgba(228, 144, 107, 0.14);
+  --dsw-alias-interactive-bg-hover-solid: #2a281e;
+
+  --dsw-alias-markdown-inline-code: #2a281e;
+  --dsw-alias-markdown-code-block: #1d1c14;
+  --dsw-alias-markdown-code-block-banner: #24221a;
+  --dsw-alias-markdown-citation: #e4906b;
+
+  --dsw-alias-tooltip-bg: #2f2c21;
+  --dsw-alias-toast-bg: #24221a;
+
+  --dsw-alias-scrollbar-bg-l1: rgba(236, 232, 218, 0.16);
+  --dsw-alias-scrollbar-hover-l1: rgba(236, 232, 218, 0.28);
+  --dsw-alias-scrollbar-bg-l2: rgba(236, 232, 218, 0.22);
+  --dsw-alias-scrollbar-hover-l2: rgba(236, 232, 218, 0.34);
+}

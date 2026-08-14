@@ -52,6 +52,46 @@ pnpm dsh --profile web --dump-config
 
 同一个道理以后做「按场景选模型」时也要记账：**跨 provider 切换会丢 KV cache**，路由策略不能只看单价。
 
+## 主题
+
+[`satuwork-theme.css`](satuwork-theme.css) 把 dsh 的 `--dsw-alias-*` 语义令牌覆盖成 [design/theme.css](../../design/theme.css) 的值。
+
+这条路是官方认的：ui-theme 的 README 写着第三方主题「**就是覆盖同名 alias 变量**」。dsh 的样式纪律是功能组件只准读 `--dsw-alias-*`、不准写字面色值，所以换肤不用碰任何功能组件。
+
+### 试跑（临时，改的是 vendored 源码）
+
+```bash
+scp infra/dsh/satuwork-theme.css root@<服务器>:/tmp/
+```
+
+服务器上追加到 dsh 自己的令牌表末尾：
+
+```bash
+cat /tmp/satuwork-theme.css >> ~/deepseek-harness/packages/client/ui-theme/src/styles/design-platform.css
+```
+
+追加到 `design-platform.css` 末尾是安全的：`scrollbar.css` 必须排在它之后，仍然读得到覆盖后的滚动条令牌。
+
+客户端有 `client-hmr`，CSS 改动大概率热更新；没反应就重启 `pnpm dsh web`，仍没有就单独构建 `packages/client/ui-theme`。
+
+**这是实验用的一次性改法**，验证完要改成一个 Satuwork 自己的客户端插件，别把 vendored 源码的修改留在那里——下次同步 dsh 会冲突。
+
+### 预期能看到什么
+
+改完最明显的是**主按钮从近黑变赭红**——dsh 出厂的 `brand-primary` 是 `neutral-bluish-1000`（近黑），Satuwork 是 `#c96442`。其次是纸面从纯白变暖白 `#faf9f5`、侧栏变 `#f5f4ee`、描边从中性灰透明度变暖墨色。
+
+### 已知改不动的
+
+- **圆角**：令牌表里没有 radius 变量，各组件在自己的 CSS Modules 里写死。设计稿的 `--radius: 1rem` 覆盖不到，要逐组件改
+- **字体**：`--dsw-font-family` 已指向 Outfit，但服务器上没有这个字体文件，浏览器会退到系统栈。要真用上得把 Outfit 装进客户端资源
+- **信息架构**：颜色变了，布局和导航结构还是 dsh 的
+
+前两条是「改造 dsh 客户端」这条路的头两个具体摩擦点，值得在决定继续之前先看看实际效果有多接近。
+
+### 暗色
+
+设计稿只有亮色。CSS 里的暗色一段是从亮色调板推导的（同色相族、赭红提亮），不是设计产出。设计稿补了暗色之后应当整体替换那一段。
+
 ## 待验证
 
 - `!!js dshHomePath(...)` 在补丁层的表达式上下文里能不能用。base 层用了它，补丁层应该同样可用，但没实测过——如果 dump 出来报错，换成绝对路径
