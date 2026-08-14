@@ -1,0 +1,29 @@
+{
+  "name": "satuwork-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Satuwork 的 dsh 组合层：配置补丁 + 客户端主题",
+  "files": [
+    "cordis.patch.yml",
+    "host.js",
+    "dist"
+  ],
+  "exports": {
+    ".": "./host.js",
+    "./client": "./dist/client.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "main": "host.js"
+}

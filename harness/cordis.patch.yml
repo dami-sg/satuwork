@@ -95,3 +95,8 @@
 #   name: '@deepseek-ai/satu-session-persistence'
 #   config:
 #     root: ...
+
+# ── 宿主锚点：让 client-modules 扫描到本包的 dsh.client 声明 ──────────────
+- insert:
+    - id: satuwork
+      name: satuwork-harness
