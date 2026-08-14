@@ -1,0 +1,54 @@
+[2m2026-08-14T15:24:23Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Pulling container image registry.fly.io/satuwork-dsh-probe@sha256:13eaa4d84c29293e414026c22ec2413f40e69f2987f3c7a9bddb7a16e5a4873c
+[2m2026-08-14T15:24:32Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Successfully prepared image registry.fly.io/satuwork-dsh-probe@sha256:13eaa4d84c29293e414026c22ec2413f40e69f2987f3c7a9bddb7a16e5a4873c (8.421463107s)
+[2m2026-08-14T15:24:32Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Setting up volume 'probe_data'
+[2m2026-08-14T15:24:32Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Uninitialized volume 'probe_data', initializing...
+[2m2026-08-14T15:24:32Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Encrypting volume
+[2m2026-08-14T15:24:33Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Opening encrypted volume
+[2m2026-08-14T15:24:33Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Formatting volume
+[2m2026-08-14T15:24:34Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Configuring firecracker
+[2m2026-08-14T15:24:35Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]2026-08-14T15:24:35.303115137 [01M00DZMQY14HBW3E2GMTSSRK5:main] Running Firecracker v1.14.4
+[2m2026-08-14T15:24:35Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]2026-08-14T15:24:35.303322871 [01M00DZMQY14HBW3E2GMTSSRK5:main] Listening on API socket ("/fc.sock").
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m][32m INFO[0m Starting init (commit: a3f1cf3)...
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m][32m INFO[0m Checking filesystem on /data
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]/dev/vdc: clean, 11/64512 files, 8785/258048 blocks
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m][32m INFO[0m Mounting /dev/vdc at /data w/ uid: 0, gid: 0 and chmod 0755
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m][32m INFO[0m Resized /data to 1056964608 bytes
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m][32m INFO[0m Preparing to run: `/usr/local/bin/probe.sh` as root
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m][32m INFO[0m [fly api proxy] listening at /.fly/api
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]════════════════════════════════════════════════════
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m] dsh host capability probe
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m] 2026-08-14 15:24:36Z
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]════════════════════════════════════════════════════
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]── Host ────────────────────────────────────
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  kernel        6.12.91-fly
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  arch          x86_64
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  cpus          1
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  memory        0.4 GB
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  uid           0 (root)
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  pid1          init
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]── 1. Landlock (dsh sandbox: filesystem confinement) ────────────────────────────────────
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  FAIL  landlock UNAVAILABLE (errno 38: Function not implemented)
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  -> kernel has no Landlock support
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  WARN  /sys/kernel/security/lsm unreadable (securityfs not mounted)
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]── 2. User namespaces (bubblewrap prerequisite) ────────────────────────────────────
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  max_user_namespaces  1720
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  PASS  unshare -Un as root
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  PASS  unshare -Un as unprivileged uid 10001
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]── 3. bubblewrap (dsh sandbox: process confinement) ────────────────────────────────────
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  PASS  bwrap full unshare as root
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  PASS  bwrap full unshare as unprivileged uid 10001
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]── 4. seccomp (syscall filtering) ────────────────────────────────────
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  Seccomp:	0
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]── 5. PTY (dsh terminal package) ────────────────────────────────────
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  PASS  /dev/ptmx and /dev/pts present
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]── 6. Process tree (dsh subprocess: killing a whole group) ────────────────────────────────────
+[2m2026-08-14T15:24:36Z[0m runner[80e091f6613218] [32msin[0m [[34minfo[0m]Machine created and started in 12.515s
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]2026/08/14 15:24:36 INFO SSH listening listen_address=[fdaa:b2:7883:a7b:185:faeb:8cd4:2]:22
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  PASS  setsid + process-group kill
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]── 7. Writable persistent path (SQLite + LanceDB) ────────────────────────────────────
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  PASS  /data writable, 908M free
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]  PASS  /tmp writable, 7.4G free
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]════════════════════════════════════════════════════
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m] probe complete — holding the machine open for logs
+[2m2026-08-14T15:24:36Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m]════════════════════════════════════════════════════
+[2m2026-08-14T15:24:37Z[0m app[80e091f6613218] [32msin[0m [[34minfo[0m][33m WARN[0m Reaped child process with pid: 687 and signal: SIGKILL, core dumped? false

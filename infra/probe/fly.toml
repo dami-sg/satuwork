@@ -1,0 +1,16 @@
+# Throwaway capability probe. No services, no public IP, one machine, one volume.
+app = "satuwork-dsh-probe"
+primary_region = "sin"
+
+[build]
+
+[mounts]
+  source = "probe_data"
+  destination = "/data"
+
+[[restart]]
+  policy = "never"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

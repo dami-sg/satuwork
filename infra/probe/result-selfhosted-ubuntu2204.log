@@ -1,0 +1,33 @@
+=== dsh host capability probe · 2026-08-14T16:29:26Z ===
+自购云服务器 · Ubuntu 22.04.5 LTS
+
+── Host ──────────────────────
+  kernel 5.15.0-164-generic / x86_64 / 2 cpu / 3.8GB
+
+── 1. Landlock ──────────────────────
+  PASS  landlock ABI v1
+  active LSMs: lockdown,capability,landlock,yama,apparmor
+
+── 2. User namespaces ──────────────────────
+  max_user_namespaces 15185
+  unprivileged_userns_clone 1
+  PASS  unshare -Un as root
+  PASS  unshare -Un as uid 10001
+
+── 3. bubblewrap ──────────────────────
+  PASS  bwrap as root
+  PASS  bwrap as uid 10001
+
+── 4. seccomp ──────────────────────
+Seccomp:        0
+
+── 5. PTY ──────────────────────
+  PASS  /dev/ptmx + /dev/pts
+
+── 6. Process group ──────────────────────
+  PASS  setsid + group kill
+
+── 7. Disk ──────────────────────
+  / 31G free of 50G
+
+=== done ===
