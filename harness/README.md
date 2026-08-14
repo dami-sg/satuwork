@@ -80,6 +80,26 @@ cat /tmp/satuwork-theme.css >> ~/deepseek-harness/packages/client/ui-theme/src/s
 
 改完最明显的是**主按钮从近黑变赭红**——dsh 出厂的 `brand-primary` 是 `neutral-bluish-1000`（近黑），Satuwork 是 `#c96442`。其次是纸面从纯白变暖白 `#faf9f5`、侧栏变 `#f5f4ee`、描边从中性灰透明度变暖墨色。
 
+### 客户端 bundle 的格式（踩过两个坑）
+
+产物**不是 ESM**，是 dsh 客户端模块表要求的 lazy-CJS：
+
+```js
+window.__ModuleLoader__.load({ id: 'satuwork-harness', factory: (require) => { … } })
+```
+
+脚本执行时只注册工厂；模块体的副作用（**包括注入 CSS**，这是它文档里明写的预期用法）在首次 materialize 时才跑。发普通 ESM 会得到 `loaded without registering "…" via __ModuleLoader__.load` 并让整页启动失败。
+
+另一个坑更隐蔽：扫描用的是 `require.resolve('<pkg>/package.json')`，而一旦包声明了 `exports`，Node 的 exports 闸门会挡掉 `./package.json`，包直接被判为「不是客户端包」、静默跳过。`exports` 里必须显式写 `"./package.json": "./package.json"`。
+
+改完 CSS 要重启服务：bundle 按内容哈希的 `rev` 做缓存，只有 `rebuilt()` 才会更新它。
+
+### 令牌覆盖不到的地方
+
+实测：**151 个客户端 UI 包里 16 个含字面色值，共约 35 处**（同包多路径有重复，去重后更少）。也就是说令牌纪律在九成以上的界面成立，剩下的是明确的例外——ui-theme 的 README 自己承认了这一点（"values absent from cssdesign… are deliberately not appended"）。
+
+已确认的一处：**输入框的发送按钮硬编码 `rgb(65, 118, 230)`**，即使 `--dsw-alias-brand-primary-new-colorprimary-new-color` 已被覆盖成 `#c96442` 也不跟着变。这类要逐个用组件级 CSS 规则盖，不能靠令牌。
+
 ### 已知改不动的
 
 - **圆角**：令牌表里没有 radius 变量，各组件在自己的 CSS Modules 里写死。设计稿的 `--radius: 1rem` 覆盖不到，要逐组件改

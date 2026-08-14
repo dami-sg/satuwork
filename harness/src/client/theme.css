@@ -40,6 +40,9 @@ body {
   /* 品牌。dsh 出厂的 brand-primary 是近黑色（所以主按钮是黑的），
      Satuwork 是赭红 —— 这一条改完视觉差异最大 */
   --dsw-alias-brand-primary: #c96442;          /* --primary */
+  /* 名字是历史包袱（ui-theme README 提到的 #4176E6 tab 蓝），但发送按钮等
+     主操作走的是它，不覆盖就会在暖色页面上留一块冷蓝。 */
+  --dsw-alias-brand-primary-new-colorprimary-new-color: #c96442;
   --dsw-alias-brand-primary-invert: #ffffff;   /* --primary-foreground */
   --dsw-alias-brand-text: #3d3929;             /* 字标用正文墨色，不用主色 */
 
@@ -107,6 +110,7 @@ body[data-ds-dark-theme] {
 
   /* 赭红在深底上要提亮，否则对比度不足 */
   --dsw-alias-brand-primary: #e4906b;
+  --dsw-alias-brand-primary-new-colorprimary-new-color: #e4906b;
   --dsw-alias-brand-primary-invert: #16150f;
   --dsw-alias-brand-text: #ece8da;
 

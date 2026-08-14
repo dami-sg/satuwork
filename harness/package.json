@@ -11,7 +11,8 @@
   ],
   "exports": {
     ".": "./host.js",
-    "./client": "./dist/client.js"
+    "./client": "./dist/client.js",
+    "./package.json": "./package.json"
   },
   "dsh": {
     "bundle": {
