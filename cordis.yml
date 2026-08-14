@@ -1,3 +1,16 @@
+# Satuwork 的根组合。
+#
+# 这是**我们自己的 Cordis 树**：每一行是一个被挂进来的插件，dsh 的包在这里是依赖，
+# 不是宿主。要哪行、不要哪行、换成谁，都在这个文件里直说；没有 profile、没有 bundle、
+# 没有补丁层——那种形态下组合权在 dsh 手里，我们只能覆盖。
+#
+# 启动：`node bin/satuwork.mjs --port 3081`（见 bin/satuwork.mjs 的说明）。
+# 加包时记得同时加进 package.json 的 dependencies——裸包名要能从项目根解析，
+# 包括那些被其他插件按裸名挂载的子插件（目前有两个 directory-picker-native）。
+#
+# 行的初稿来自 dsh web profile 的 --dump-config，之后按 Satuwork 的需要逐条调整。
+# 下面标了「Satuwork 决定」的地方是我们主动偏离 dsh 默认值的，改动前先读理由。
+
 - id: timer
   name: '@deepseek-ai/cordis-plugin-timer'
 - id: hmr
@@ -34,6 +47,9 @@
   name: '@deepseek-ai/dsh-user-questions'
 - id: agent
   name: '@deepseek-ai/dsh-agent'
+
+# Satuwork 决定：路由名跟着换。llm-deepseek 注册的是 `deepseek-official`，
+# pi-ai 的目录 route 叫 `deepseek`；停用前者后这里必须改指，否则加载即失败。
 - id: agent-default-model
   name: '@deepseek-ai/dsh-agent-default-model'
   config:
@@ -47,6 +63,15 @@
   name: '@deepseek-ai/dsh-settings-file'
 - id: credentials
   name: '@deepseek-ai/dsh-credentials-local'
+
+# ── Satuwork 决定：模型只走通用适配器 ─────────────────────────────────────
+# dsh 出厂带两个 llm 适配器，是它自己的「设计验证孪生」——两套不同内核实现打同一个
+# StreamChunk 契约，凡是不能同时表达两边的就是核心词汇表的 bug。那是给 dsh 维护者的
+# 装置，下游维护两套配置面没有收益，所以下面把 llm-deepseek 停用。
+#
+# pi-ai 的 catalog route 直接继承它自带 provider 的端点、协议、模型目录再逐字段覆盖；
+# 它没有的 route 整个手写声明。加一个 provider 是配置，不是代码。
+# apiKeyEnv 是凭据「引用」，按请求经 ctx.credentials 解析，密钥不进这个文件。
 - id: llm-pi-ai
   name: '@deepseek-ai/dsh-llm-pi-ai'
   config:
@@ -58,12 +83,21 @@
         models:
           - id: claude-sonnet-4-5
             contextWindow: 200000
+
+# ── TODO：会话持久化要换成我们自己的 ──────────────────────────────────────
+# session 根记录里的 version 是 0，dsh 明确不作兼容承诺，backend 会直接拒绝旧格式。
+# 会话历史是 Satuwork 的产品资产，不能压在这个格式上。satu-session-persistence
+# 写完后替换这一行。见 docs/dsh-capability-map.md 决策 1。
 - id: session-persistence-jsonl
   name: '@deepseek-ai/dsh-session-persistence-jsonl'
   config:
     root: !!js dshHomePath('sessions')
 - id: attachment-local
   name: '@deepseek-ai/dsh-attachment-local'
+
+# ── Satuwork 决定：会话检索落盘 ───────────────────────────────────────────
+# 出厂是 `:memory:` + `openAt: never`（web 表面把全文检索当可选功能）。设计稿的
+# 「全部对话」搜索要用，改成文件 + 首次搜索时才打开，让 Node 启动阶段保持安静。
 - id: session-query-sqlite
   name: '@deepseek-ai/dsh-session-query-sqlite'
   config:
@@ -71,6 +105,10 @@
     openAt: first-search
 - id: session-projection
   name: '@deepseek-ai/dsh-session-projection'
+
+# ── Satuwork 决定：关死遥测 ───────────────────────────────────────────────
+# 出厂 exporter 硬编码指向 harness-telemetry.deepseeksvc.com。默认 mode 已是 DISABLED，
+# 但这条在「数据不出网」的合规问答里会被问到，显式停用整行，不依赖环境变量默认值。
 - id: session-telemetry-otel
   name: '@deepseek-ai/dsh-session-telemetry-otel'
   config:
@@ -344,6 +382,8 @@
     agents: []
 - id: fs-sandbox
   name: '@deepseek-ai/dsh-fs-sandbox'
+
+# Satuwork 决定：停用直连 DeepSeek 适配器，理由见上面 llm-pi-ai 一段。
 - id: llm-deepseek
   name: '@deepseek-ai/dsh-llm-deepseek'
   disabled: true
@@ -475,5 +515,10 @@
   name: '@deepseek-ai/dsh-agent-presets'
   config:
     default: standard
+
+# ── Satuwork 自己的插件 ───────────────────────────────────────────────────
+# 现在只是个宿主锚点：client-modules 扫描「宿主 Loader 的 entries 里声明了 dsh.client
+# 的包」来决定往浏览器启动图里放哪些 bundle，只贡献配置的包不是 entry、扫不到，
+# 客户端主题也就不会加载。以后 satu-kb / satu-scheduler 各自成行。
 - id: satuwork
   name: satuwork-harness

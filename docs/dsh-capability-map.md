@@ -92,7 +92,7 @@ dsh 的硬规则是 **model-visible ⟺ logged**：任何进入模型请求的�
 
 宿主能力必须先用 [`infra/probe`](../infra/probe/README.md) 验证，重点是 bwrap 与 Landlock——Fly 的实测结果是 Landlock 缺失、bwrap 可用，普通发行版内核两者通常都有。
 
-配置层的决定集中在 [`infra/dsh/cordis.patch.yml`](../infra/dsh/cordis.patch.yml)：只用 `llm-pi-ai` 一个适配器、关死遥测、会话检索落盘、MCP 待挂、持久化待换。每条的理由和验收方式见[那份 README](../infra/dsh/README.md)。
+**组合形态**：Satuwork 拥有自己的 Cordis 根 [`cordis.yml`](../cordis.yml)，dsh 的包是逐行挂进来的依赖，由 [`bin/satuwork.mjs`](../bin/satuwork.mjs) 启动。不是「装一个 dsh 再打补丁」——那种形态下组合权在 dsh 手里。每条偏离 dsh 默认值的决定都在 `cordis.yml` 里标了「Satuwork 决定」并附理由：只用 `llm-pi-ai` 一个适配器、关死遥测、会话检索落盘、持久化待换。我们自己的插件在 [`harness/`](../harness/README.md)。
 
 **将来做多租户时**：另起一个 gateway 项目，每租户一台服务器，Satuwork 实例连它。届时有两处要改，现在先记下：
 

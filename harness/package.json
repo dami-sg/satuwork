@@ -5,7 +5,6 @@
   "type": "module",
   "description": "Satuwork 的 dsh 组合层：配置补丁 + 客户端主题",
   "files": [
-    "cordis.patch.yml",
     "host.js",
     "dist"
   ],
@@ -15,9 +14,6 @@
     "./package.json": "./package.json"
   },
   "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
     "client": {
       "platform": "web",
       "immediately": true
