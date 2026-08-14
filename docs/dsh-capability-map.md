@@ -35,7 +35,7 @@
 | 17 | 集合详情 `collection` | **B** 「建集合 / 改结构需人工确认」= `ctx.approval`；「记录完整查询审计日志」= `tools/post-execute` 或自有 session 事件 | **B** 同 `satu-db` | 表格 |
 | 18 | Agent 配置 `agents` | **A** 核心是 `ctx.agentPresets`（per-session 能力组合，service row 需 `isolate` realm） | **B** `satu-agent-registry`：把 UI 上的 Agent 定义编译成 preset `cordis.yml` | 列表、上线开关 |
 | 19 | Agent 详情 `agentDetail` | **A** `soul.md` → `ctx.systemPrompt` 的 prompt section；可用 Skill → `ctx.skills`；可用 MCP → `packages/mcp`；三条行为边界 → `ctx.approval` + tools guard；升级人工条件 → `agent/turn-stopping`（serial，无 `next()`） | **B** `satu-memory`：长期记忆的范围（用户/团队/客户）、保留时长、**注入上限 20 条**、写入前确认 → `agent.inject()` + `ctx.storage` + 在 `agent/pre-step` 里做注入预算 | 编辑器 UI |
-| 20 | 模型配置 `models` | **A** `ctx.llm` 适配器注册表 + `ctx.agentDefaultModel`；dsh 自带 providers 配置页可直接参考 | **B** 按场景选模型（对话与问答 / 定时与批量 / 图像与文档识别）→ 在 `agent/request` waterfall 上按标签路由 | 表单 |
+| 20 | 模型配置 `models` | **A** 覆盖度比预期高得多。`llm-pi-ai` 是**通用多 provider 适配器**（基于 `@earendil-works/pi-ai`）：catalog route 直接继承 pi-ai 自带 provider 的端点/协议/模型目录再逐字段覆盖，pi-ai 没有的 route 整个手写声明——README 原话是"配置而不是代码改动"。它把自己的 Config schema 注册到 `ctx.settings` 并按 provider 逐个合并，**改完下一次请求即生效、无需重启**；写入经 `validate` 校验，不合法直接 `settings-rejected`。`ctx.llm.registerModelDiscovery` 专供配置界面探测某 route 有哪些模型；`listModels` / `resolveModelInfo` 给上下文窗口、输出上限、可选推理档位 | **B** 只剩按场景路由（对话与问答 / 定时与批量 / 图像与文档识别）→ `agent/request` waterfall 按标签选 route。**provider 管理本身不用写** | 表单（含自定义 provider 与"测试连接/拉取模型"，后端现成） |
 | 21 | Skill 与 MCP `skills` | **A** `ctx.skills`（provider 注册表 + filesystem provider + 目录/加载工具）；MCP 走 `packages/mcp`；「试运行」= headless profile 起一次性会话 | **B** Skill 编辑与版本；调用次数从 session 日志投影 | 卡片、编辑器 |
 | 22 | 账号管理 `accounts` | **C** dsh 的 `identity` 只是共享匿名身份，`interaction/permission` 是**工具权限**不是组织权限 | — | 成员 / 角色 / 席位 / 邀请 / 注册审核，全部产品层；dsh 侧只消费"当前用户"作为 `withInitiator()` 的 initiator |
 | 23 | 用量统计 `usage` | **A** `ctx.tokenMeter` + `ctx.sessionTelemetry` + session 日志聚合 | **B** 按成员 / Agent / 渠道的聚合与配额 | 图表 |
@@ -91,6 +91,8 @@ dsh 的硬规则是 **model-visible ⟺ logged**：任何进入模型请求的�
 | Railway | ❌ 共享内核容器，bwrap 能力未验证；4C8G 常驻 $160/月 |
 
 宿主能力必须先用 [`infra/probe`](../infra/probe/README.md) 验证，重点是 bwrap 与 Landlock——Fly 的实测结果是 Landlock 缺失、bwrap 可用，普通发行版内核两者通常都有。
+
+配置层的决定集中在 [`infra/dsh/cordis.patch.yml`](../infra/dsh/cordis.patch.yml)：只用 `llm-pi-ai` 一个适配器、关死遥测、会话检索落盘、MCP 待挂、持久化待换。每条的理由和验收方式见[那份 README](../infra/dsh/README.md)。
 
 **将来做多租户时**：另起一个 gateway 项目，每租户一台服务器，Satuwork 实例连它。届时有两处要改，现在先记下：
 
