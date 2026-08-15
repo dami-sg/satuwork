@@ -90,7 +90,14 @@ dsh 的硬规则是 **model-visible ⟺ logged**：任何进入模型请求的�
 | Cloudflare | ❌ 容器磁盘全 ephemeral，睡醒即回镜像初始状态；LanceDB/SQLite 只能 FUSE 挂 R2，官方明说慢于原生 SSD |
 | Railway | ❌ 共享内核容器，bwrap 能力未验证；4C8G 常驻 $160/月 |
 
-宿主能力必须先用 [`infra/probe`](../infra/probe/README.md) 验证，重点是 bwrap 与 Landlock——Fly 的实测结果是 Landlock 缺失、bwrap 可用，普通发行版内核两者通常都有。
+**宿主内核能力**（2026-08-14 实测，Ubuntu 22.04.5 / 内核 `5.15.0-164-generic` / 2 vCPU / 3.8GB）：Landlock、user namespace（含非特权）、bubblewrap 全 unshare、PTY、进程组信号全部可用，dsh 的两个 Linux 沙箱后端都能选。
+
+两条要记住：
+
+- **Landlock 只有 ABI v1**（5.15 的上限）。v1 缺 `REFER`（跨目录 rename，5.19）、`TRUNCATE`（6.2）、网络限制（6.7）——也就是说它**管不住 truncate，也管不了网络**。网络隔离靠 bwrap 的 netns 补。升到 24.04（内核 6.8）会带来更高 ABI
+- **换宿主要重测**。Fly.io 的实测结果是 Landlock **完全缺失**（`ENOSYS`——它的 6.12 内核编译时就没开），只有 bwrap 可用。内核版本够新不等于能力在，这条不能靠推断
+
+（一次性的探测脚本已删除；结论保留在此。同样的检查用 `landlock-abi` 系统调用探测 + `bwrap --unshare-all` + `unshare -Un` 三条即可重建。）
 
 **组合形态**：Satuwork 拥有自己的 Cordis 根 [`cordis.yml`](../cordis.yml)，dsh 的包是逐行挂进来的依赖，由 [`bin/satuwork.mjs`](../bin/satuwork.mjs) 启动。不是「装一个 dsh 再打补丁」——那种形态下组合权在 dsh 手里。每条偏离 dsh 默认值的决定都在 `cordis.yml` 里标了「Satuwork 决定」并附理由：只用 `llm-pi-ai` 一个适配器、关死遥测、会话检索落盘、持久化待换。我们自己的插件在 [`harness/`](../harness/README.md)。
 
