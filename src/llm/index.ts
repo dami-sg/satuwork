@@ -1,5 +1,6 @@
 import { Service, type Context as Ctx } from '@deepseek-ai/cordis'
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
+import { createCredentialStore } from './credentials.ts'
 import type { Message, StreamChunk, Usage } from '../session/types.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -36,10 +37,27 @@ export interface ModelRequest {
  */
 export class LlmService extends Service {
   /** pi-ai 的模型集合。目录查询、鉴权状态这些直接用它的 API。 */
-  readonly models = builtinModels()
+  readonly models
 
   constructor(ctx: Ctx) {
     super(ctx, 'llm')
+    // 把凭据存储接到我们的 SQLite 上：界面上填的 key 存这里，
+    // 环境变量退化成「什么都没存时」的回落。
+    this.models = builtinModels({ credentials: createCredentialStore(ctx.storage) } as any)
+  }
+
+  /** 哪些 provider 已经配了凭据。契约保证这里不会解析出密钥本身。 */
+  async configured(): Promise<string[]> {
+    const list = await (this.models as any).credentials?.list?.()
+    if (list) return list.map((c: { providerId: string }) => c.providerId)
+    return []
+  }
+
+  /** 存一把 key。传 null 表示删除，之后该 provider 重新回落到环境变量。 */
+  async setCredential(providerId: string, key: string | null) {
+    const store = createCredentialStore(this.ctx.storage)
+    if (!key) return store.delete(providerId)
+    await store.modify(providerId, () => ({ type: 'api_key', key }))
   }
 
   /** 目录里的全部 provider 与模型。 */
@@ -178,6 +196,7 @@ function safeParse(s: string): unknown {
 }
 
 export const name = 'satu-llm'
+export const inject = ['storage']
 
 export function apply(ctx: Ctx) {
   ctx.plugin(LlmService)

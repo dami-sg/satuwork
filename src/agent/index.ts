@@ -38,11 +38,27 @@ export class AgentService extends Service {
     super(ctx, 'agents')
   }
 
+  /**
+   * 生效配置：设置库 > cordis.yml > 内置默认。
+   *
+   * **在使用点读取**，不在构造时缓存——这样界面上改完下一轮就生效，既不用监听
+   * 变更事件，也不会出现「缓存和库不一致」这类只在重启后才暴露的问题。
+   */
+  private setting<T>(key: string, fallback: T): T {
+    return this.ctx.storage.getSetting<T>('agent', key) ?? fallback
+  }
+
   get provider() {
-    return this.config.provider ?? 'deepseek'
+    return this.setting('provider', this.config.provider ?? 'deepseek')
   }
   get model() {
-    return this.config.model ?? 'deepseek-chat'
+    return this.setting('model', this.config.model ?? 'deepseek-v4-flash')
+  }
+  get system() {
+    return this.setting(
+      'system',
+      this.config.system ?? '你是 Satuwork 的 AI 员工，用简洁、专业的中文回答。',
+    )
   }
 
   isRunning(sessionId: string) {
@@ -115,7 +131,7 @@ export class AgentService extends Service {
     const { sessions, tools, llm } = this.ctx
     await sessions.append(sessionId, 'step/start', { turn, step })
 
-    const system = this.config.system ?? '你是 Satuwork 的 AI 员工，用简洁、专业的中文回答。'
+    const system = this.system
     const schemas = tools.schemas()
     const messages = deriveMessages(await sessions.events(sessionId))
 
@@ -259,7 +275,7 @@ function deriveMessages(events: Awaited<ReturnType<Context['sessions']['events']
 }
 
 export const name = 'satu-agent'
-export const inject = ['sessions', 'llm', 'tools']
+export const inject = ['sessions', 'llm', 'tools', 'storage']
 
 export function apply(ctx: Context, config: Config = {}) {
   ctx.plugin(AgentService, config)

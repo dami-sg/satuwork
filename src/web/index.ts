@@ -15,7 +15,7 @@ import type { SessionEvent } from '../session/types.ts'
  * 所以下面不需要任何「服务还在吗」的防御判断。
  */
 export const name = 'satu-web'
-export const inject = ['server', 'sessions', 'agents', 'llm']
+export const inject = ['server', 'sessions', 'agents', 'llm', 'storage']
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -36,10 +36,42 @@ export function apply(ctx: Context, config: Config = {}) {
 
   ctx.server.get('/api/health', async (req, res) => res.json({ ok: true }))
 
-  /** 模型目录。前端下拉读 available（凭据就绪的那些），不读整本目录。 */
+  /** 模型目录 + 哪些 provider 已配凭据。凭据本身不出现在响应里。 */
   ctx.server.get('/api/models', async (req, res) =>
-    res.json({ catalog: ctx.llm.catalog(), available: await ctx.llm.available() }),
+    res.json({
+      catalog: ctx.llm.catalog(),
+      configured: await ctx.llm.configured(),
+    }),
   )
+
+  /** 生效设置。前端设置面板读它，改完立刻对下一轮生效。 */
+  ctx.server.get('/api/settings', async (req, res) =>
+    res.json({
+      provider: ctx.agents.provider,
+      model: ctx.agents.model,
+      system: ctx.agents.system,
+    }),
+  )
+
+  ctx.server.put('/api/settings', async (req, res) => {
+    const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
+    for (const key of ['provider', 'model', 'system'] as const) {
+      if (typeof body[key] === 'string') ctx.storage.setSetting('agent', key, body[key])
+    }
+    return res.json({ provider: ctx.agents.provider, model: ctx.agents.model, system: ctx.agents.system })
+  })
+
+  /**
+   * 存一把 provider 密钥。
+   *
+   * 响应里**不回显密钥**，只回「配好了」。key 传空表示删除，之后该 provider
+   * 重新回落到环境变量——pi-ai 的规则是存了的凭据拥有该 provider。
+   */
+  ctx.server.put('/api/credentials/:provider', async (req, res) => {
+    const body = (await req.json().catch(() => ({}))) as { key?: string }
+    await ctx.llm.setCredential(req.params.provider, body.key?.trim() || null)
+    return res.json({ configured: await ctx.llm.configured() })
+  })
 
   ctx.server.get('/api/sessions', async (req, res) => res.json(await ctx.sessions.list()))
 
