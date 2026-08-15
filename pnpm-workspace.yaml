@@ -1,11 +1,4 @@
-# pnpm 11 起，设置从 package.json 的 "pnpm" 字段搬到这里。
-#
-# 放行一个 build script 等于允许它在安装时执行代码，所以逐个表态而不是全开：
-# PTY、子进程与 landlock 绑定要在安装时编译原生模块，dsh 的 terminal / shell /
-# sandbox 依赖它们；@google/genai 与 protobufjs 属于我们没启用的 provider，拒绝。
+# 放行一个 build script 等于允许它在安装时执行代码，所以逐个表态。
+# esbuild 是 tsx 的依赖，安装时要下载对应平台的原生二进制。
 allowBuilds:
-  '@deepseek-ai/dsh-subprocess-local': true
-  node-pty: true
-  koffi: true
-  '@google/genai': false
-  protobufjs: false
+  esbuild: true
