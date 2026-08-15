@@ -1,6 +1,9 @@
 # 放行一个 build script 等于允许它在安装时执行代码，所以逐个表态。
-# esbuild 是 tsx 的依赖，安装时要下载对应平台的原生二进制。
+# pnpm 遇到新的带脚本依赖会写成 "set this to true or false" 占位符，那不算表态——
+# 留着占位符会让每次 pnpm install 直接失败（连 pnpm run 前的依赖检查都过不去）。
 allowBuilds:
-  '@google/genai': set this to true or false
+  # tsx 的依赖，安装时下载对应平台的原生二进制。
   esbuild: true
-  protobufjs: set this to true or false
+  # pi-ai 的可选 provider 依赖。我们没启用 Gemini / Vertex，不放行。
+  '@google/genai': false
+  protobufjs: false
