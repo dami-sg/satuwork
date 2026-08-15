@@ -4,11 +4,13 @@
 # 挂载，先后顺序不由行序决定，而由 `inject` 的服务依赖决定——所以这里的排列只是
 # 给人看的分组，不是加载顺序。
 #
-# 启动：`pnpm dev`（走 cordis 自带的 bin.js，它建根 Context、挂 Loader、读本文件）
+# 启动：`pnpm dev`（bin/satuwork.mjs 建根 Context、挂 Loader、读本文件）
+#
+# 框架包用 DeepSeek vendor 的那套（@deepseek-ai/cordis 4.0.1，上游主线还在 RC）；
+# dsh 的产品包一个不用。
 
 # ── 基础设施 ──────────────────────────────────────────────────────────────
-- name: '@cordisjs/logger'
-- name: '@cordisjs/plugin-timer'
+- name: '@deepseek-ai/cordis-plugin-timer'
 
 - name: '@cordisjs/plugin-server'
   config:

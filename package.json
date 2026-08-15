@@ -3,20 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": {
-    "satuwork": "./bin/satuwork.mjs"
-  },
   "scripts": {
-    "dev": "node --import tsx node_modules/cordis/bin.js",
-    "start": "node --import tsx node_modules/cordis/bin.js"
+    "dev": "node --import tsx bin/satuwork.mjs",
+    "start": "node --import tsx bin/satuwork.mjs"
   },
   "dependencies": {
-    "@cordisjs/logger": "^0.3.3",
-    "@cordisjs/plugin-include": "^1.0.4",
-    "@cordisjs/plugin-loader": "^1.0.0-rc.5",
-    "@cordisjs/plugin-server": "^1.7.0",
-    "@cordisjs/plugin-timer": "^1.1.2",
-    "cordis": "^4.0.0-rc.8"
+    "cordis": "npm:@deepseek-ai/cordis@^4.0.1",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/cordis-plugin-include": "^1.0.6",
+    "@deepseek-ai/cordis-plugin-timer": "^1.1.3",
+    "@cordisjs/plugin-server": "^1.7.0"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

@@ -2,6 +2,14 @@
 
 基于 [Cordis](https://github.com/cordiverse/cordis) 的 AI 员工平台。
 
+框架包用 DeepSeek vendor 的那套（`@deepseek-ai/cordis` 4.0.1）而不是上游——上游主线
+还在 4.0.0-rc.8，vendored 那份是 dsh 每天在跑的。dsh 的**产品**包（agent、llm、tools…）
+一个不用，那些自己写。
+
+`package.json` 里有一条别名把 `cordis` 指向同一个物理包，因为上游的
+`@cordisjs/plugin-server` 是 `import { Service } from 'cordis'`。没有它就会加载两份
+框架，Service 与 Context 不是同一个类，服务注册不上去。启动器里有断言守着这条线。
+
 ## 跑起来
 
 ```bash
