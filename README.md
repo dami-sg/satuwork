@@ -19,6 +19,30 @@ pnpm dev
 
 打开 http://127.0.0.1:3082。
 
+## 数据存在哪
+
+默认 `~/.satuwork`，可用 `SATUWORK_HOME` 覆盖。**不用启动目录**——否则「在哪儿敲的
+命令」会决定「看到谁的历史」。
+
+```
+~/.satuwork/
+├── sessions/<id>.jsonl   会话日志：追加式，一行一条事件
+└── satuwork.db           运行时配置与非会话数据（SQLite）
+```
+
+两种数据分开存，是因为访问形态不同：
+
+- **会话日志**只追加不改写，要能按 `seq` 增量拉取（SSE 断线重连靠它）、能直接 grep、
+  能整目录拷走备份。格式带自己的版本号，对不上直接拒绝加载，不猜也不半读
+- **配置与业务数据**要被**查询**——定时任务按下次运行时间、Agent 按启用状态。这类
+  用文件做会很快变难看，所以放 SQLite
+
+SQLite 用 Node 24 内置的 `node:sqlite`：零依赖，不用编译原生模块。
+
+`ctx.storage` 给三样东西：命名空间化的设置（写入后广播 `settings/change`，插件据此
+自我更新，不用重启）、文档集合（Agent、任务、连接器），以及一个原生库句柄——需要
+真正的 SQL 时用它，别硬套文档接口。
+
 ## 结构
 
 ```
@@ -39,10 +63,36 @@ cp .env.example .env   # 填入一个 provider 的 key
 目录、线协议、鉴权与**单价**都在它那里，我们不写任何一家的适配器。换 provider 是改
 `cordis.yml` 里 agent 那行的 `provider`/`model`，不是改代码。
 
+## 数据存在哪
+
+默认 `~/.satuwork`，可用 `SATUWORK_HOME` 覆盖。**不用启动目录**——否则「在哪儿敲的
+命令」会决定「看到谁的历史」。
+
+```
+~/.satuwork/
+├── sessions/<id>.jsonl   会话日志：追加式，一行一条事件
+└── satuwork.db           运行时配置与非会话数据（SQLite）
+```
+
+两种数据分开存，是因为访问形态不同：
+
+- **会话日志**只追加不改写，要能按 `seq` 增量拉取（SSE 断线重连靠它）、能直接 grep、
+  能整目录拷走备份。格式带自己的版本号，对不上直接拒绝加载，不猜也不半读
+- **配置与业务数据**要被**查询**——定时任务按下次运行时间、Agent 按启用状态。这类
+  用文件做会很快变难看，所以放 SQLite
+
+SQLite 用 Node 24 内置的 `node:sqlite`：零依赖，不用编译原生模块。
+
+`ctx.storage` 给三样东西：命名空间化的设置（写入后广播 `settings/change`，插件据此
+自我更新，不用重启）、文档集合（Agent、任务、连接器），以及一个原生库句柄——需要
+真正的 SQL 时用它，别硬套文档接口。
+
 ## 结构
 
 ```
 cordis.yml        根组合：每行一个插件条目
+src/home.ts       数据目录解析（$SATUWORK_HOME）
+src/storage/      运行时配置与非会话数据（ctx.storage，SQLite）
 src/session/      追加式事件日志（ctx.sessions），一切从它派生
 src/llm/          模型接缝（ctx.llm），pi-ai 之上的一层薄翻译
 src/tools/        工具注册表与执行管道（ctx.tools），策略挂在它的 waterfall 上

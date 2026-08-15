@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { satuworkHome } from '../home.ts'
 import {
   SESSION_FORMAT_VERSION,
   type EventEnvelope,
@@ -23,7 +24,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export interface Config {
-  /** JSONL 落盘目录。 */
+  /** JSONL 落盘目录。默认 `$SATUWORK_HOME/sessions`（见 src/home.ts）。 */
   root?: string
 }
 
@@ -48,7 +49,7 @@ export class SessionService extends Service {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'sessions')
-    this.root = config.root ?? join(process.cwd(), '.satuwork', 'sessions')
+    this.root = config.root ?? satuworkHome('sessions')
   }
 
   async create(title?: string): Promise<string> {
