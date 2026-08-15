@@ -1,13 +1,12 @@
 # Satuwork 的根组合。
 #
-# 每一行是一个插件条目：`name` 是模块说明符（相对路径或 npm 包名）。条目**并发**
-# 挂载，先后顺序不由行序决定，而由 `inject` 的服务依赖决定——所以这里的排列只是
-# 给人看的分组，不是加载顺序。
+# 每行一个插件条目，`name` 是模块说明符。条目**并发**挂载——先后由 `inject` 的服务
+# 依赖决定，不由行序决定。下面的分组只是给人看的。
 #
-# 启动：`pnpm dev`（bin/satuwork.mjs 建根 Context、挂 Loader、读本文件）
+# 启动：`pnpm dev`
 #
-# 框架包用 DeepSeek vendor 的那套（@deepseek-ai/cordis 4.0.1，上游主线还在 RC）；
-# dsh 的产品包一个不用。
+# 框架用 DeepSeek vendor 的那套（@deepseek-ai/cordis 4.0.1，上游主线还在 RC）；
+# dsh 的产品包一个不用，产品代码全部在 src/ 下。
 
 # ── 基础设施 ──────────────────────────────────────────────────────────────
 - name: '@deepseek-ai/cordis-plugin-timer'
@@ -17,5 +16,24 @@
     host: 127.0.0.1
     port: 3082
 
-# ── Satuwork ──────────────────────────────────────────────────────────────
+# ── 核心 ──────────────────────────────────────────────────────────────────
+# 事件日志。一切从它派生：模型看到的历史、UI、以后的投影与统计。
+- name: './src/session/index.ts'
+
+# 模型接缝，底下是 @earendil-works/pi-ai（40 家 provider 的目录、协议、鉴权、单价）。
+# 加一个 provider 是配置，不是代码。
+- name: './src/llm/index.ts'
+
+# 工具注册表与执行管道；策略挂在它的 waterfall 上。
+- name: './src/tools/index.ts'
+- name: './src/tools/builtin.ts'
+
+# turn/step 循环，把上面三者串起来。
+- name: './src/agent/index.ts'
+  config:
+    provider: deepseek
+    model: deepseek-v4-flash
+    system: 你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间或精确计算时调用工具，不要凭猜测。
+
+# ── 前端 ──────────────────────────────────────────────────────────────────
 - name: './src/web/index.ts'

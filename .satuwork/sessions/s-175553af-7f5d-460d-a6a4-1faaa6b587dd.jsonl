@@ -1,0 +1,9 @@
+{"seq":1,"time":1786759867966,"type":"session","data":{"version":1,"id":"s-175553af-7f5d-460d-a6a4-1faaa6b587dd","createdAt":1786759867966,"title":"冒烟"}}
+{"seq":2,"time":1786759867995,"type":"user/message","data":{"message":{"id":"5dd47827-dd3f-436a-b75c-cb32043a987a","role":"user","content":[{"type":"text","text":"现在几点？"}]},"source":{"kind":"user"}}}
+{"seq":3,"time":1786759867996,"type":"turn/start","data":{"turn":1}}
+{"seq":4,"time":1786759867996,"type":"step/start","data":{"turn":1,"step":1}}
+{"seq":5,"time":1786759867996,"type":"request/header","data":{"turn":1,"step":1,"provider":"deepseek","model":"deepseek-v4-flash","system":"你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间或精确计算时调用工具，不要凭猜测。","tools":[{"name":"now","description":"返回当前日期与时间。需要知道“今天”“现在”时用它，不要凭猜测回答。"},{"name":"calc","description":"计算一个算术表达式，支持 + - * / % ( ) 与小数。需要精确数值时用它。"}]}}
+{"seq":6,"time":1786759867997,"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"finish","reason":"error","error":"Provider is not configured: deepseek"}}}
+{"seq":7,"time":1786759867998,"type":"assistant/message","data":{"turn":1,"step":1,"message":{"id":"6d14a311-2b9b-4036-bfbc-21d8e7092a99","role":"assistant","content":[]},"usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"reasoningTokens":0}}}
+{"seq":8,"time":1786759867998,"type":"step/end","data":{"turn":1,"step":1}}
+{"seq":9,"time":1786759867998,"type":"turn/end","data":{"turn":1,"reason":"completed"}}

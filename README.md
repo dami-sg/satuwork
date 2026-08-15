@@ -29,7 +29,42 @@ design/           设计稿（25 个视图）
 docs/             事件模型与能力设计参考
 ```
 
+## 配置模型
+
+```bash
+cp .env.example .env   # 填入一个 provider 的 key
+```
+
+模型底下是 [`@earendil-works/pi-ai`](https://github.com/earendil-works/pi)：40 家 provider 的
+目录、线协议、鉴权与**单价**都在它那里，我们不写任何一家的适配器。换 provider 是改
+`cordis.yml` 里 agent 那行的 `provider`/`model`，不是改代码。
+
+## 结构
+
+```
+cordis.yml        根组合：每行一个插件条目
+src/session/      追加式事件日志（ctx.sessions），一切从它派生
+src/llm/          模型接缝（ctx.llm），pi-ai 之上的一层薄翻译
+src/tools/        工具注册表与执行管道（ctx.tools），策略挂在它的 waterfall 上
+src/agent/        turn/step 循环（ctx.agents）
+src/web/          SPA 与 API，含 SSE 事件流
+ui/               前端
+design/           设计稿（25 个视图）
+docs/             事件模型设计参考
+```
+
+## API
+
+| 路由 | 作用 |
+|---|---|
+| `GET /api/sessions` | 会话列表 |
+| `POST /api/sessions` | 新建会话 |
+| `GET /api/sessions/:id/events` | **SSE**：先补历史再转推实时，`?after=<seq>` 用于断线重连 |
+| `POST /api/sessions/:id/messages` | 发消息，立即返回；结果走 SSE |
+| `GET /api/models` | 模型目录与凭据就绪的那些 |
+
 ## Cordis 的工作方式
+
 
 插件是一个导出 `apply(ctx)` 的模块。`ctx` 是它注册一切的入口，注册项在插件卸载时
 自动撤销——事件监听、服务、路由都不需要手工清理，非框架管理的资源用
