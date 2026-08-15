@@ -84,18 +84,30 @@ export function apply(ctx: Context, config: Config = {}) {
     sse(ctx, req.params.id, Number(req.query.get('after') ?? 0), res),
   )
 
+  /**
+   * 发消息。
+   *
+   * agent 正在跑就走 **steering**——工具跑到一半也能插话，不用等这一轮结束。
+   * 否则开新的一轮。前端不需要知道这个分支，一个入口就够。
+   */
   ctx.server.post('/api/sessions/:id/messages', async (req, res) => {
     const body = (await req.json().catch(() => ({}))) as { text?: string }
     if (!body.text?.trim()) {
       res.status = 400
       return res.json({ error: 'text 不能为空' })
     }
+    if (ctx.agents.steer(req.params.id, body.text)) return res.json({ steered: true })
     // 不等 turn 跑完就返回：结果通过 SSE 推，HTTP 只负责「收到了」。
     void ctx.agents.send(req.params.id, body.text).catch((e: Error) => {
       ctx.logger?.warn?.(`agents.send 失败：${e.message}`)
     })
     return res.json({ accepted: true })
   })
+
+  /** 中止当前这一轮。 */
+  ctx.server.post('/api/sessions/:id/abort', async (req, res) =>
+    res.json({ aborted: ctx.agents.abort(req.params.id) }),
+  )
 
   // 未知的 /api/* 必须是 JSON 404，不能掉进下面的 SPA 兜底——否则前端 fetch
   // 拿到一段 HTML，报错会指向 JSON 解析而不是真正的路由缺失。
