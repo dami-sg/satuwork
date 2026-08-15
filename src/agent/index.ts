@@ -98,7 +98,7 @@ export class AgentService extends Service {
       initialState: {
         systemPrompt: this.system,
         model,
-        messages: toAgentMessages(history),
+        messages: toAgentMessages(history, model),
         tools: this.bridgeTools(sessionId),
       },
       streamFn: (llm.models as any).streamSimple.bind(llm.models),
@@ -308,15 +308,36 @@ function fromAgentContent(content: any[]): ContentBlock[] {
  * 从日志重建 pi 的历史。
  *
  * 只读三种事件；推理块不回传——它是给人看的，回传既费 token 又可能干扰下一轮。
+ *
+ * **顺序要重排**：日志按真实时序记录，而 pi 在 `turn_end` 才给出最终助手消息，
+ * 所以带 tool-call 的那条排在它自己的 tool/result 之后。直接按 seq 喂回去，
+ * provider 会拒绝——「role 'tool' 必须紧跟在带 tool_calls 的消息之后」。
+ * 这里把每个 step 的工具结果挂到该 step 助手消息的后面。
  */
 function toAgentMessages(
   events: Awaited<ReturnType<Context['sessions']['events']>>,
+  model: { api?: string; provider?: string; id?: string } = {},
 ): AgentMessage[] {
-  const out: AgentMessage[] = []
   const ts = Date.now()
+  const stepKey = (t: number, s: number) => `${t}:${s}`
+
+  // 先找出每个 step 的助手消息落在哪个 seq，工具结果据此排到它后面。
+  const assistantSeq = new Map<string, number>()
+  for (const e of events) {
+    if (e.type === 'assistant/message') {
+      assistantSeq.set(stepKey(e.data.turn, e.data.step), e.seq)
+    }
+  }
+
+  const entries: { order: number; message: AgentMessage }[] = []
+  let resultIndex = 0
+
   for (const e of events) {
     if (e.type === 'user/message') {
-      out.push({ role: 'user', content: textFrom(e.data.message), timestamp: ts } as AgentMessage)
+      entries.push({
+        order: e.seq,
+        message: { role: 'user', content: textFrom(e.data.message), timestamp: ts } as AgentMessage,
+      })
     } else if (e.type === 'assistant/message') {
       const content = e.data.message.content
         .filter((c) => c.type !== 'reasoning')
@@ -325,22 +346,57 @@ function toAgentMessages(
             ? { type: 'toolCall', id: c.callId, name: c.name, arguments: safeParse(c.arguments) }
             : { type: 'text', text: (c as { text: string }).text },
         )
-      if (content.length) out.push({ role: 'assistant', content, timestamp: ts } as any)
+      if (!content.length) continue
+      // 重建的助手消息必须跟 pi 自己产出的**同形**：除了 content，还要带 usage 与
+      // api/provider/model。少了 usage，pi 在后续轮次读它的 totalTokens 时会炸——
+      // 症状是第一轮正常、第二轮起全部失败。
+      entries.push({
+        order: e.seq,
+        message: {
+          role: 'assistant',
+          content,
+          api: model.api ?? 'unknown',
+          provider: model.provider ?? 'unknown',
+          model: model.id ?? 'unknown',
+          usage: piUsage(e.data.usage),
+          timestamp: ts,
+        } as any,
+      })
     } else if (e.type === 'tool/result') {
-      out.push({
-        role: 'toolResult',
-        toolCallId: e.data.callId,
-        toolName: '',
-        content: [{ type: 'text', text: e.data.text }],
-        isError: e.data.failed,
-        timestamp: ts,
-      } as any)
+      const anchor = assistantSeq.get(stepKey(e.data.turn, e.data.step)) ?? e.seq
+      entries.push({
+        // 小数偏移把结果排到锚点之后、下一条整数 seq 之前，同时保持批内先后。
+        order: anchor + 1e-6 * ++resultIndex,
+        message: {
+          role: 'toolResult',
+          toolCallId: e.data.callId,
+          toolName: '',
+          content: [{ type: 'text', text: e.data.text }],
+          isError: e.data.failed,
+          timestamp: ts,
+        } as any,
+      })
     }
   }
-  return out
+
+  return entries.sort((a, b) => a.order - b.order).map((x) => x.message)
 }
 
 const textFrom = (m: Message) => m.content.map((c) => (c.type === 'text' ? c.text : '')).join('')
+
+/** 我们的 usage → pi 的形状。字段名不同，且它多一个 totalTokens 与分项成本。 */
+function piUsage(u: Usage | undefined) {
+  const input = u?.inputTokens ?? 0
+  const output = u?.outputTokens ?? 0
+  return {
+    input,
+    output,
+    cacheRead: u?.cacheReadTokens ?? 0,
+    cacheWrite: 0,
+    totalTokens: input + output,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: u?.cost ?? 0 },
+  }
+}
 
 function safeParse(s: string): unknown {
   try {
