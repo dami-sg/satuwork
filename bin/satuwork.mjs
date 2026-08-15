@@ -37,6 +37,12 @@ const ctx = new Context()
 // 相对说明符（'./src/web/index.ts'）按这个基址解析，所以从任何工作目录启动都一样。
 ctx.baseUrl = pathToFileURL(root).href + '/'
 
+// 启动就把**用的是哪个数据目录**说出来。这台实例的账号、会话、历史全在那一份库
+// 里，而它可以被 $SATUWORK_HOME 换掉——不打出来的话，「同一个地址、口令却不对」
+// 这种事根本无从查起：看到的是同一个端口，背后却是另一份数据。
+const { satuworkHome } = await import('../src/home.ts')
+console.log(`satuwork: 数据目录 ${satuworkHome()}${process.env.SATUWORK_HOME ? '（来自 $SATUWORK_HOME）' : ''}`)
+
 await ctx.plugin(Loader)
 await ctx.loader.create({
   name: '@deepseek-ai/cordis-plugin-include',

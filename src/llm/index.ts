@@ -50,19 +50,50 @@ export class LlmService extends Service {
     await store.modify(providerId, () => ({ type: 'api_key', key }))
   }
 
-  /** 目录里的全部 provider 与模型。 */
+  /**
+   * 目录里的全部 provider 与模型。
+   *
+   * 把 pi-ai 的元数据**原样透出来**（上下文窗口、输出上限、单价、是否支持推理），
+   * 而不是只给一串 id：模型配置那屏的每一列都在这份数据里，我们不需要另外维护
+   * 一张表——那张表迟早会和目录对不上。
+   */
   catalog() {
-    return this.models.getProviders().map((p: any) => ({
-      provider: typeof p === 'string' ? p : p.id,
-      models: (this.models.getModels(typeof p === 'string' ? p : p.id) ?? []).map((m: any) => m.id),
-    }))
+    return this.models.getProviders().map((p: any) => {
+      const id = typeof p === 'string' ? p : p.id
+      const models = (this.models.getModels(id) ?? []).map((m: any) => ({
+        id: m.id,
+        name: m.name ?? m.id,
+        api: m.api,
+        baseUrl: m.baseUrl,
+        reasoning: !!m.reasoning,
+        input: m.input ?? ['text'],
+        contextWindow: m.contextWindow,
+        maxTokens: m.maxTokens,
+        /** 每 100 万 token 的美元单价。 */
+        cost: m.cost,
+      }))
+      return {
+        provider: id,
+        name: typeof p === 'string' ? id : (p.name ?? id),
+        /** 这家要什么样的凭据。界面据此决定填什么。 */
+        auth: typeof p === 'string' ? undefined : p.auth,
+        endpoint: models[0]?.baseUrl,
+        models,
+      }
+    })
   }
 
-  /** 凭据已就绪、真的能调的那些。模型下拉读这个，而不是整本目录。 */
+  /**
+   * 凭据已就绪、真的能调的 **provider**。
+   *
+   * pi-ai 的 `getAvailable()` 返回的是**模型**列表，不是 provider——按 provider 去重
+   * 是这里的事。它比 `configured()` 宽：只设了环境变量、没在界面里存过 key 的那些
+   * 也算就绪。
+   */
   async available(): Promise<string[]> {
     try {
       const list = await this.models.getAvailable()
-      return list.map((p: any) => (typeof p === 'string' ? p : p.id))
+      return [...new Set(list.map((m: any) => (typeof m === 'string' ? m : (m.provider ?? m.id))))]
     } catch {
       return []
     }

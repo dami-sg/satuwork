@@ -92,6 +92,77 @@
   --shadow-lg: var(--shadow-lg-t);
 }
 
+/* ── 深色 ────────────────────────────────────────────────────────────────
+   只覆盖颜色令牌，间距、圆角、字体不动——那些与明暗无关。
+
+   两条规则：
+   - **中性阶整体翻转**（100 最亮 ↔ 900 最暗 的语义保持不变，值对调），所以
+     所有写着 `--color-neutral-800` 的地方在深色下自动变成浅字，不用改一行组件。
+   - **强调色只往亮处挪一档**：品牌那个赭红在深底上偏闷，提亮后可读，但仍是
+     同一个色相——换成另一个颜色就不是「深色版的 Satuwork」了。 */
+:root[data-theme='dark'] {
+  --background: #17161a;
+  --foreground: #eae7e0;
+  --card: #201f24;
+  --card-foreground: #f5f3ee;
+  --popover: #1c1b20;
+  --popover-foreground: #eae7e0;
+  --primary: #d97757;
+  --primary-foreground: #17161a;
+  --secondary: #2c2a31;
+  --secondary-foreground: #c6c2b8;
+  --muted: #26252b;
+  --muted-foreground: #9a968d;
+  --accent-surface: #2c2a31;
+  --accent-surface-foreground: #eae7e0;
+  --destructive: #f5a79c;
+  --border: #34323a;
+  --input-border: #4a4751;
+  --ring: #d97757;
+  --sidebar: #1b1a1f;
+  --sidebar-foreground: #d6d2ca;
+  --sidebar-border: #2c2a31;
+
+  --color-neutral-100: #201f24;
+  --color-neutral-200: #26252b;
+  --color-neutral-300: #34323a;
+  --color-neutral-400: #45424c;
+  --color-neutral-500: #6b6774;
+  --color-neutral-600: #9a968d;
+  --color-neutral-700: #c0bcb2;
+  --color-neutral-800: #e0dcd3;
+  --color-neutral-900: #f5f3ee;
+
+  --color-accent-100: #3a241c;
+  --color-accent-200: #4d2f23;
+  --color-accent-300: #7a4632;
+  --color-accent-400: #a95c3f;
+  --color-accent-500: #d97757;
+  --color-accent-600: #e08b6d;
+  --color-accent-700: #eaa78e;
+  --color-accent-800: #f2c4b1;
+  --color-accent-900: #f8ddd2;
+
+  --color-accent-2-100: #262040;
+  --color-accent-2-200: #322a55;
+  --color-accent-2-300: #453a74;
+  --color-accent-2-400: #6d5cb8;
+  --color-accent-2-500: #8a78d8;
+  --color-accent-2-600: #a294e4;
+  --color-accent-2-700: #bbb0ee;
+  --color-accent-2-800: #d3ccf5;
+  --color-accent-2-900: #e7e2fa;
+
+  /* 深底上的投影靠加深而不是加透明度，否则等于没有。 */
+  --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.35);
+  --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.35);
+  --shadow-sm-t: 0 1px 3px 0px hsl(0 0% 0% / 0.45), 0 1px 2px -1px hsl(0 0% 0% / 0.45);
+  --shadow-md-t: 0 1px 3px 0px hsl(0 0% 0% / 0.45), 0 2px 4px -1px hsl(0 0% 0% / 0.45);
+  --shadow-lg-t: 0 1px 3px 0px hsl(0 0% 0% / 0.5), 0 4px 6px -1px hsl(0 0% 0% / 0.5);
+
+  color-scheme: dark;
+}
+
 * { border-color: var(--border); }
 body {
   margin: 0; background: var(--color-bg); color: var(--color-text);
