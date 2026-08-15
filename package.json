@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node harness/build.mjs",
     "dev": "node bin/satuwork.mjs",
     "dump": "node bin/satuwork.mjs --dump-config"
   },

@@ -439,86 +439,119 @@
     printUrl: true
     surfaceContext: true
     trustedHosts: !!js ctx.webStartup.trustedHosts
+  disabled: true
 - id: client-hmr
   name: '@deepseek-ai/dsh-client-hmr'
+  disabled: true
 - id: modules
   name: '@deepseek-ai/dsh-client-modules'
+  disabled: true
 - id: connection
   name: '@deepseek-ai/dsh-client-connection'
   inject:
     - webRuntime
   config:
     trustedHosts: !!js ctx.webRuntime.trustedHosts
+  disabled: true
 - id: api-remotes
   name: '@deepseek-ai/dsh-api-remotes'
+  disabled: true
 - id: client-runtime
   name: '@deepseek-ai/dsh-client-runtime'
+  disabled: true
 - id: cordis-client-runner
   name: '@deepseek-ai/dsh-cordis-client-runner'
+  disabled: true
 - id: ui-theme
   name: '@deepseek-ai/dsh-client-ui-theme'
+  disabled: true
 - id: locale
   name: '@deepseek-ai/dsh-client-locale'
 - id: ui-layout
   name: '@deepseek-ai/dsh-client-ui-layout'
+  disabled: true
 - id: ui-sidebar
   name: '@deepseek-ai/dsh-client-ui-sidebar'
+  disabled: true
 - id: ui-settings
   name: '@deepseek-ai/dsh-client-ui-settings'
+  disabled: true
 - id: ui-settings-general
   name: '@deepseek-ai/dsh-client-ui-settings-general'
+  disabled: true
 - id: ui-settings-models
   name: '@deepseek-ai/dsh-client-ui-settings-models'
+  disabled: true
 - id: ui-settings-plugin-inventory
   name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'
+  disabled: true
 - id: ui-conversation
   name: '@deepseek-ai/dsh-client-ui-conversation'
+  disabled: true
 - id: ui-tool
   name: '@deepseek-ai/dsh-client-ui-tool'
+  disabled: true
 - id: ui-cordis
   name: '@deepseek-ai/dsh-client-ui-cordis'
+  disabled: true
 - id: ui-workflow-run
   name: '@deepseek-ai/dsh-client-ui-workflow-run'
+  disabled: true
 - id: ui-deliverables
   name: '@deepseek-ai/dsh-client-ui-deliverables'
+  disabled: true
 - id: ui-workspace
   name: '@deepseek-ai/dsh-client-ui-workspace'
+  disabled: true
 - id: ui-input-trigger
   name: '@deepseek-ai/dsh-client-ui-input-trigger'
+  disabled: true
 - id: ui-commands
   name: '@deepseek-ai/dsh-client-ui-commands'
+  disabled: true
 - id: ui-skill
   name: '@deepseek-ai/dsh-client-ui-skill'
+  disabled: true
 - id: ui-subagent
   name: '@deepseek-ai/dsh-client-ui-subagent'
+  disabled: true
 - id: ui-jobs
   name: '@deepseek-ai/dsh-client-ui-jobs'
+  disabled: true
 - id: ui-goal
   name: '@deepseek-ai/dsh-client-ui-goal'
+  disabled: true
 - id: ui-message-feedback
   name: '@deepseek-ai/dsh-client-ui-message-feedback'
+  disabled: true
 - id: ui-model-selection
   name: '@deepseek-ai/dsh-client-ui-model-selection'
+  disabled: true
 - id: ui-permission
   name: '@deepseek-ai/dsh-client-ui-permission-presets'
+  disabled: true
 - id: ui-agent-preset
   name: '@deepseek-ai/dsh-client-ui-agent-preset'
+  disabled: true
 - id: ui-settings-plugins
   name: '@deepseek-ai/dsh-client-ui-settings-plugins'
+  disabled: true
 - id: ui-plan
   name: '@deepseek-ai/dsh-client-ui-plan'
+  disabled: true
 - id: ui-user-questions
   name: '@deepseek-ai/dsh-client-ui-user-questions'
+  disabled: true
 - id: ui-trajectory
   name: '@deepseek-ai/dsh-client-ui-trajectory'
+  disabled: true
 - id: agent-presets
   name: '@deepseek-ai/dsh-agent-presets'
   config:
     default: standard
 
-# ── Satuwork 自己的插件 ───────────────────────────────────────────────────
-# 现在只是个宿主锚点：client-modules 扫描「宿主 Loader 的 entries 里声明了 dsh.client
-# 的包」来决定往浏览器启动图里放哪些 bundle，只贡献配置的包不是 entry、扫不到，
-# 客户端主题也就不会加载。以后 satu-kb / satu-scheduler 各自成行。
-- id: satuwork
-  name: satuwork-harness
+# ── Satuwork 自己的前端 ───────────────────────────────────────────────────
+# 接管 webServer 的 SPA 座位发 ui/dist，并挂我们自己的 API 路由。dsh 的浏览器
+# 客户端（web-runtime 与全部 ui-* / client-*）在上面已停用——座位只能有一个主人。
+- id: satu-web
+  name: satuwork-harness/web

@@ -3,24 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Satuwork 的 dsh 组合层：配置补丁 + 客户端主题",
+  "description": "Satuwork 的宿主插件：前端服务与 API 路由",
   "files": [
-    "host.js",
-    "dist"
+    "web.js"
   ],
   "exports": {
-    ".": "./host.js",
-    "./client": "./dist/client.js",
+    "./web": "./web.js",
     "./package.json": "./package.json"
   },
-  "dsh": {
-    "client": {
-      "platform": "web",
-      "immediately": true
-    }
-  },
-  "scripts": {
-    "build": "node build.mjs"
-  },
-  "main": "host.js"
+  "dsh": {}
 }
