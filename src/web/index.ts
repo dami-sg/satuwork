@@ -26,6 +26,19 @@ export interface Config {
 export function apply(ctx: Context, config: Config = {}) {
   const root = config.root ?? fileURLToPath(new URL('../../ui/', import.meta.url))
 
+  /**
+   * 启动时把**该在浏览器里打开哪个地址**打出来，和数据目录那行并排。
+   *
+   * 报的是 `server.baseUrl`，不是 `cordis.yml` 里写的那个端口：真正听在哪个端口
+   * 由 server 服务说了算，而它和配置可以不一样（端口被占时会顺延）。照着配置念，
+   * 迟早念出一个打不开的地址。监听地址是 0.0.0.0 时它也会换成 127.0.0.1——
+   * 前者不是一个能点开的地址。
+   *
+   * 打在这里而不是启动脚本里：这一行的意思是「界面在这儿」，而界面是这个插件
+   * 发出去的。启动脚本那时候连端口都还不知道。
+   */
+  console.log(`satuwork: 打开 ${ctx.server.baseUrl}`)
+
   ctx.server.get('/api/health', async (req, res) => res.json({ ok: true }))
 
   /**
