@@ -59,7 +59,8 @@
 # 模型配置：整屏真数据（pi-ai 目录 + 本机凭据 + 生效设置），没有 mock。
 - name: './src/views/models/index.ts'
 
-# Skill 与 MCP：内置工具那一段是真的（读 ctx.tools），其余 mock。
+# Skill 与 MCP：内置工具读 ctx.tools，Skill 与 MCP 服务器的定义落库。执行与连接
+# 还没接上，所以调用次数、工具数这些要跑起来才有的数字，界面上空着而不是编。
 - name: './src/views/skills/index.ts'
 
 # 后端还没有的屏：路由回的是 mock.ts 里的假数据，响应里带 `mock: true`。
