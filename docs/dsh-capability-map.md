@@ -106,6 +106,8 @@ dsh 的硬规则是 **model-visible ⟺ logged**：任何进入模型请求的�
 1. `satu-scheduler` 的**触发器上移到 gateway**（执行仍在实例内），否则每台租户机器都得常驻，吃掉按需计费的全部收益
 2. 席位、成员、角色、账单归 gateway，实例侧只消费一个 initiator——这正是[决策 2](#2--租户席位账单放在-dsh-之外) 说的事
 
+> 控制面 / 运行面的执行规范已另写：[gateway-runtime.md](./gateway-runtime.md)。和本段或决策 2 冲突时以那份为准。
+
 ## 需要新写的插件清单
 
 | 插件 | 依赖的 dsh 挂点 | 粒度 |
