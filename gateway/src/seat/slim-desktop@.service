@@ -1,0 +1,22 @@
+[Unit]
+Description=Satuwork slim desktop for %i
+After=network.target
+Conflicts=gdm.service
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+PAMName=login
+Environment=HOME=/home/%i
+Environment=XDG_SESSION_TYPE=x11
+Environment=GDK_BACKEND=x11
+UnsetEnvironment=WAYLAND_DISPLAY
+ExecStart=/usr/local/bin/slim-desktop.sh %i
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

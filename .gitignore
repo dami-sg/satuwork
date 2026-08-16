@@ -1,8 +1,18 @@
 node_modules/
-ui/dist/
 *.log
 .DS_Store
 .env
 
-# 会话历史与本地数据：是运行时数据，不进版本库
+# 运行时数据，不进版本库
 .satuwork/
+.satuwork-gateway/
+
+# 前端构建产物
+ui/dist/
+bot/ui/dist/
+
+# e2e 启动器临时改写的组合
+bot/cordis.e2e.yml
+
+# 本机运行时（Gateway/Bot 数据与密钥）
+.data/

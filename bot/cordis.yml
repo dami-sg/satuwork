@@ -1,0 +1,55 @@
+# Satuwork 的根组合。
+#
+# 每行一个插件条目，`name` 是模块说明符。条目**并发**挂载——先后由 `inject` 的服务
+# 依赖决定，不由行序决定。下面的分组只是给人看的。
+#
+# 启动：`pnpm dev`
+#
+# 框架用 DeepSeek vendor 的那套（@deepseek-ai/cordis 4.0.1，上游主线还在 RC）；
+# dsh 的产品包一个不用，产品代码全部在 src/ 下。
+
+# ── 基础设施 ──────────────────────────────────────────────────────────────
+- name: '@deepseek-ai/cordis-plugin-timer'
+
+- name: '@cordisjs/plugin-server'
+  config:
+    host: 127.0.0.1
+    port: 3082
+
+# ── 核心 ──────────────────────────────────────────────────────────────────
+# 运行时配置与非会话数据（SQLite，$SATUWORK_HOME/satuwork.db）。
+# 会话日志不在这里——那是追加式 JSONL，两种数据的访问形态不一样。
+- name: './src/storage/index.ts'
+
+# 事件日志。一切从它派生：模型看到的历史、UI、以后的投影与统计。
+- name: './src/session/index.ts'
+
+# 本机 Bot 名册。会话属于 Bot。不接 Gateway。
+- name: './src/registry/index.ts'
+
+# 账号与会话。守卫用 server.use（prepend），跑在所有路由之前——没有会话的
+# `/api/*` 在路由之前就被挡住，前端那次跳转只是体验。
+- name: './src/auth/index.ts'
+
+# 模型接缝：Gateway 的薄客户端（GATEWAY_URL + /v1/*）。密钥不在本机。
+- name: './src/llm/index.ts'
+
+# 工具注册表与执行管道；策略挂在它的 waterfall 上。
+- name: './src/tools/index.ts'
+- name: './src/tools/builtin.ts'
+
+# Gateway 目录：拉 Skill / MCP / Bot，钉到名册，连 HTTP MCP。
+- name: './src/catalog/index.ts'
+
+# 会话索引上报 + 给 Gateway 按 sessionId 拉全文（机器凭证）+ 实例 ready。
+- name: './src/session/gateway.ts'
+
+# turn/step 循环，把上面三者串起来。
+- name: './src/agent/index.ts'
+  config:
+    provider: deepseek
+    model: deepseek-v4-flash
+    system: 你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间或精确计算时调用工具，不要凭猜测。
+
+# HTTP API（无 SPA）。对话 UI 在 Gateway。
+- name: './src/web/index.ts'

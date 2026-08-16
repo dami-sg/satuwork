@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Satuwork Gateway</title>
+<link rel="icon" type="image/png" href="/assets/satuwork-logo.png">
+<link rel="apple-touch-icon" href="/assets/satuwork-logo.png">
+<link rel="stylesheet" href="/theme.css">
+<link rel="stylesheet" href="/shell.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="app"></div>
+<script type="module">
+import { unzip, stripTopDir, toPayload } from '/unzip.js';
+window.satuUnzip = { unzip, stripTopDir, toPayload };
+</script>
+<script src="/app.js"></script>
+</body>
+</html>

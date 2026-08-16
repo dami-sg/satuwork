@@ -1,0 +1,191 @@
+import { createReadStream, statSync } from 'node:fs'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { extname, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+export class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+    public extra: Record<string, unknown> = {},
+  ) {
+    super(message)
+  }
+}
+
+export type Req = IncomingMessage & {
+  params: Record<string, string>
+  query: URLSearchParams
+  body: unknown
+}
+
+export type Handler = (req: Req, res: ServerResponse) => Promise<void> | void
+
+export function json(res: ServerResponse, status: number, body: unknown) {
+  const data = JSON.stringify(body)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  })
+  res.end(data)
+}
+
+export function bearer(req: IncomingMessage): string | undefined {
+  const h = req.headers.authorization
+  if (!h?.startsWith('Bearer ')) return
+  const token = h.slice(7).trim()
+  return token || undefined
+}
+
+const BODY_LIMIT = 8_000_000
+
+async function readBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  let n = 0
+  for await (const chunk of req) {
+    n += (chunk as Buffer).length
+    if (n > BODY_LIMIT) throw new HttpError(413, '请求体太大')
+    chunks.push(chunk as Buffer)
+  }
+  if (!chunks.length) return undefined
+  const raw = Buffer.concat(chunks).toString('utf8').trim()
+  if (!raw) return undefined
+  try {
+    return JSON.parse(raw)
+  } catch {
+    throw new HttpError(400, 'JSON 解析失败')
+  }
+}
+
+interface Route {
+  method: string
+  parts: string[]
+  handler: Handler
+}
+
+function match(parts: string[], path: string): Record<string, string> | null {
+  const segs = path.split('/').filter(Boolean)
+  if (parts.length !== segs.length) return null
+  const params: Record<string, string> = {}
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]
+    if (p.startsWith(':')) params[p.slice(1)] = decodeURIComponent(segs[i])
+    else if (p !== segs[i]) return null
+  }
+  return params
+}
+
+const UI_DIR = resolve(fileURLToPath(new URL('../ui', import.meta.url)))
+
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.json': 'application/json; charset=utf-8',
+}
+
+const SPA_PATHS = new Set(['/', '/index.html', '/ui', '/ui/', '/models', '/providers', '/company', '/accounts', '/audit', '/companies', '/users', '/plans', '/stats', '/costs', '/billing', '/usage', '/catalog', '/profile', '/bots', '/skills', '/chat', '/releases'])
+const ROOT_FILES = new Set(['theme.css', 'shell.css', 'app.css', 'app.js', 'index.html', 'unzip.js'])
+
+/** GET / 与各管理屏、GET /ui/*、/theme.css、/assets/* 从 gateway/ui 出。路径不得逃出该目录。 */
+function serveUi(pathname: string, res: ServerResponse): boolean {
+  let rel = ''
+  if (SPA_PATHS.has(pathname) || pathname.startsWith('/join/') || pathname.startsWith('/bots/') || pathname.startsWith('/companies/') || pathname.startsWith('/users/') || pathname.startsWith('/audit') || pathname.startsWith('/a/')) rel = 'index.html'
+  else if (pathname.startsWith('/ui/')) rel = decodeURIComponent(pathname.slice('/ui/'.length))
+  else if (pathname.startsWith('/assets/')) rel = decodeURIComponent(pathname.slice(1))
+  else if (pathname.startsWith('/') && ROOT_FILES.has(pathname.slice(1))) rel = pathname.slice(1)
+  else return false
+  if (!rel || rel.includes('\0')) return false
+  const file = resolve(UI_DIR, rel)
+  const root = UI_DIR.endsWith(sep) ? UI_DIR : UI_DIR + sep
+  if (file !== UI_DIR && !file.startsWith(root)) return false
+  try {
+    if (!statSync(file).isFile()) return false
+  } catch {
+    return false
+  }
+  const type = MIME[extname(file).toLowerCase()] ?? 'application/octet-stream'
+  res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store' })
+  createReadStream(file).pipe(res)
+  return true
+}
+
+/**
+ * 很小的路由器。路径按段精确匹配，`:id` 是参数。先注册的先中——所以更具体的
+ * 路径要写在带参数的前面（`/orgs/:id/sessions/:sessionId` 和 `/orgs/:id/sessions`
+ * 段数不同，互不抢）。未命中时 GET / 与 GET /ui/* 走静态管理页。
+ */
+export class Router {
+  private routes: Route[] = []
+
+  on(method: string, path: string, handler: Handler) {
+    this.routes.push({ method, parts: path.split('/').filter(Boolean), handler })
+  }
+
+  get(path: string, handler: Handler) {
+    this.on('GET', path, handler)
+  }
+  post(path: string, handler: Handler) {
+    this.on('POST', path, handler)
+  }
+  put(path: string, handler: Handler) {
+    this.on('PUT', path, handler)
+  }
+  patch(path: string, handler: Handler) {
+    this.on('PATCH', path, handler)
+  }
+  delete(path: string, handler: Handler) {
+    this.on('DELETE', path, handler)
+  }
+
+  async handle(raw: IncomingMessage, res: ServerResponse) {
+    const host = raw.headers.host ?? '127.0.0.1'
+    const url = new URL(raw.url ?? '/', `http://${host}`)
+    const method = (raw.method ?? 'GET').toUpperCase()
+    try {
+      for (const route of this.routes) {
+        if (route.method !== method) continue
+        const params = match(route.parts, url.pathname)
+        if (!params) continue
+        const req = raw as Req
+        req.params = params
+        req.query = url.searchParams
+        req.body = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? undefined : await readBody(raw)
+        await route.handler(req, res)
+        if (!res.writableEnded) json(res, 204, null)
+        return
+      }
+      if ((method === 'GET' || method === 'HEAD') && serveUi(url.pathname, res)) return
+      json(res, 404, { error: 'unknown endpoint', path: url.pathname })
+    } catch (e) {
+      if (res.headersSent) {
+        try { res.end() } catch {}
+        return
+      }
+      if (e instanceof HttpError) {
+        json(res, e.status, { error: e.message, ...e.extra })
+        return
+      }
+      const err = e as Error
+      console.error(`satuwork-gateway: ${err.stack ?? err.message}`)
+      json(res, 500, { error: 'internal error' })
+    }
+  }
+}
+
+export function listen(router: Router) {
+  const host = process.env.GATEWAY_HOST ?? '127.0.0.1'
+  const port = Number(process.env.GATEWAY_PORT ?? 3080)
+  const server = createServer((req, res) => {
+    void router.handle(req, res)
+  })
+  server.listen(port, host, () => {
+    console.log(`satuwork-gateway: 听在 http://${host}:${port}`)
+  })
+  return server
+}
