@@ -31,6 +31,15 @@ const EMPTY_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0
 export class AgentService extends Service {
   /** 正在跑的 agent。steering 要够得着它，所以不能只是个局部变量。 */
   private live = new Map<string, Agent>()
+  /**
+   * 已经开跑、但 Agent 还没造出来的会话。
+   *
+   * send() 里「检查在不在跑」和「登记进 live」之间隔着好几个 await（读历史、组 system、
+   * 查模型）。只看 live 的话，两个并发的 send 会双双通过检查，于是同一条会话上跑起两个
+   * agent：事件交错写进同一份 JSONL，用量也记两遍。占位必须在**第一个 await 之前**
+   * 同步做掉。
+   */
+  private starting = new Set<string>()
 
   constructor(
     ctx: Context,
@@ -60,7 +69,7 @@ export class AgentService extends Service {
   }
 
   isRunning(sessionId: string) {
-    return this.live.has(sessionId)
+    return this.live.has(sessionId) || this.starting.has(sessionId)
   }
 
   /** 跑到一半插话。agent 不在跑时返回 false，由调用方决定改成普通消息。 */
@@ -79,8 +88,17 @@ export class AgentService extends Service {
   }
 
   async send(sessionId: string, text: string): Promise<void> {
-    if (this.live.has(sessionId)) throw new Error('agents: 该会话正在运行中')
+    if (this.isRunning(sessionId)) throw new Error('agents: 该会话正在运行中')
+    // 同步占位，之后才允许出现 await。
+    this.starting.add(sessionId)
+    try {
+      await this.runTurn(sessionId, text)
+    } finally {
+      this.starting.delete(sessionId)
+    }
+  }
 
+  private async runTurn(sessionId: string, text: string): Promise<void> {
     const { sessions, llm } = this.ctx
     const history = await sessions.events(sessionId)
     let system: string

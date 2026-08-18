@@ -1,0 +1,64 @@
+# Satuwork Gateway + PostgreSQL。
+#
+# Bot 不在这里：它是按 (账号, botId) SSH 部署到席位机器上的，不是容器编排出来的。
+#
+#   docker compose up -d          起 PG 和 Gateway
+#   docker compose up -d postgres 只起 PG（本地 pnpm dev 连它）
+#
+# 宿主机端口 5434 → 容器 5432：5432 在本机已被别的实例占着。
+#
+# **项目名必须写死**。compose 默认拿目录名当项目名，而本机
+# /Users/yuzhao/git/adix/satuwork 也叫 satuwork、也有一个 postgres 服务和一个
+# pgdata 卷——不写死的话两边会共用容器名和卷名，互相把对方的库重建掉。
+name: satuwork-gateway
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-satuwork}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-satuwork}
+      POSTGRES_DB: ${POSTGRES_DB:-satuwork}
+    ports:
+      # 只映射到回环。库不需要对外，而这里的用户名口令是开发默认值——
+      # 映射到 0.0.0.0 等于把整个库连同默认口令挂在公网上。
+      - '127.0.0.1:${POSTGRES_PORT:-5434}:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Gateway 必须等库真的能连上再起，否则第一次建表就炸。
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-satuwork} -d ${POSTGRES_DB:-satuwork}']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # 容器内连的是服务名和容器端口，不是宿主机的 5434。
+      GATEWAY_DATABASE_URL: postgres://${POSTGRES_USER:-satuwork}:${POSTGRES_PASSWORD:-satuwork}@postgres:5432/${POSTGRES_DB:-satuwork}
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: '3080'
+      GATEWAY_ACCESS_HOST: ${GATEWAY_ACCESS_HOST:-satuwork.com}
+      GATEWAY_MACHINE_TOKEN: ${GATEWAY_MACHINE_TOKEN:-}
+      GATEWAY_PLATFORM_TOKEN: ${GATEWAY_PLATFORM_TOKEN:-}
+      GATEWAY_PUBLIC_URL: ${GATEWAY_PUBLIC_URL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - '${GATEWAY_PORT:-3080}:3080'
+    volumes:
+      # JWT 密钥对和 Bot 发布包在磁盘上，不在库里——重启不能让已发出的票全失效。
+      - gwdata:/var/lib/satuwork-gateway
+
+volumes:
+  pgdata:
+  gwdata:

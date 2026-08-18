@@ -1,0 +1,262 @@
+/**
+ * 把 gateway/ui/app.js 装进一层 DOM 垫片里跑。
+ *
+ * **不是真浏览器**：它验的是「同一份 app.js 拿真 Gateway 的响应，渲染出什么 HTML」。
+ * 布局、CSS、真事件分发这些验不到；但 boot 走哪条分支、某个视图有没有把正文渲染出来
+ * 这类逻辑错，正是在这一层暴露的——那两个 bug（废票挡住初始化页、审计每条都渲染成
+ * 「（空）」）都属于这一类。
+ *
+ * app.js 是 classic script（index.html 里就是普通 <script src>），所以能直接塞进
+ * new Function 里执行；顶层那些 document.getElementById('app') 由垫片接住。
+ */
+import { readFileSync } from 'node:fs'
+
+function makeStorage() {
+  const map = new Map()
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => map.set(k, String(v)),
+    removeItem: (k) => map.delete(k),
+    clear: () => map.clear(),
+  }
+}
+
+/**
+ * app.js 的两个委托处理器都靠 `instanceof HTMLInputElement / HTMLSelectElement`
+ * 分流，node 里没有这几个构造器。这里补上最小的一套，好让 change / click
+ * 真的能派发过去——只调用内部函数的话，「分支根本没接上」这类错测不出来：
+ * 倍率输入框最早就是接在「只收 select」那道关卡后面，函数本身是好的，点了没反应。
+ */
+class Element {
+  constructor(attrs = {}, value = '') {
+    this._attrs = attrs
+    this.value = value
+    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false }
+  }
+  getAttribute(k) {
+    return k in this._attrs ? this._attrs[k] : null
+  }
+  setAttribute(k, v) {
+    this._attrs[k] = String(v)
+  }
+  /** 测里造的元素都是光杆一个，没有祖先——自己带 data-act 就算命中。 */
+  closest(sel) {
+    if (sel === '[data-act]') return this.getAttribute('data-act') == null ? null : this
+    return null
+  }
+}
+class HTMLInputElement extends Element {}
+class HTMLSelectElement extends Element {}
+class HTMLTextAreaElement extends Element {}
+class HTMLFormElement extends Element {}
+
+/** 造一个能喂给处理器的元素。kind 决定它会被哪个 instanceof 认走。 */
+export function el(kind, attrs = {}, value = '') {
+  const C = { input: HTMLInputElement, select: HTMLSelectElement, textarea: HTMLTextAreaElement, form: HTMLFormElement }[kind] || Element
+  return new C(attrs, value)
+}
+
+/**
+ * 一个能数「被重绘了几次」的元素桩。
+ *
+ * 合并重绘那类断言需要观测「innerHTML 被写了多少次」，光看最终 HTML 看不出来。
+ */
+function countingStub() {
+  return {
+    _html: '',
+    writes: 0,
+    get innerHTML() {
+      return this._html
+    },
+    set innerHTML(v) {
+      this._html = v
+      this.writes += 1
+    },
+    textContent: '',
+    scrollTop: 0,
+    scrollHeight: 0,
+    value: '',
+    classList: { add() {}, remove() {}, toggle() {} },
+    setAttribute() {},
+    getAttribute: () => null,
+    focus() {},
+    style: {},
+  }
+}
+
+/**
+ * 只够 app.js 跑起来的那点 DOM。缺什么它自己会抛，不会静默。
+ *
+ * `stubIds` 里的 id 会拿到一个持久的 countingStub。默认为空——`getElementById`
+ * 返回 null 是现有测试依赖的行为（`if (thread)` 那类分支会被跳过），不能默认改掉。
+ */
+function makeDom(stubIds = []) {
+  // app.js 给 'input' 挂了不止一个处理器，Map 存单个会把先挂的那个吞掉。
+  const listeners = new Map()
+  // 内容区那个滚动容器。app.js 重绘时会读它、再把位置贴回去。
+  const page = { scrollTop: 0 }
+  const app = {
+    _html: '',
+    get innerHTML() {
+      return this._html
+    },
+    // 换 innerHTML 等于把内容区整块换掉：真浏览器里新出来的 .gw-page 从 0 开始，
+    // 垫片也得跟着归零——不然「重绘保住滚动位置」那条断言测的是个假象。
+    set innerHTML(v) {
+      this._html = v
+      page.scrollTop = 0
+    },
+    scrollTop: 0,
+    scrollHeight: 0,
+    addEventListener: (type, fn) => {
+      if (!listeners.has(type)) listeners.set(type, [])
+      listeners.get(type).push(fn)
+    },
+  }
+  const stub = { innerHTML: '', value: '', textContent: '', classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {}, getAttribute: () => null, focus() {}, style: {} }
+  const stubs = new Map(stubIds.map((id) => [id, countingStub()]))
+  const document = {
+    getElementById: (id) => (id === 'app' ? app : (stubs.get(id) ?? null)),
+    querySelector: (sel) => (sel === '.gw-page' ? page : null),
+    querySelectorAll: () => [],
+    documentElement: { setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} }, style: {} },
+    createElement: () => ({ ...stub }),
+    body: { ...stub },
+    addEventListener() {},
+  }
+  return { document, app, page, listeners, stubs }
+}
+
+/**
+ * 载入 app.js。
+ *
+ * 末尾那句 boot() 去掉，由调用方决定什么时候起——否则一 import 就开始打网络，
+ * 断言没法安排在它前面。
+ */
+export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
+  const raw = readFileSync(appPath, 'utf8')
+  const src = raw.replace(/\nboot\(\)\s*$/, '\n')
+  const { document, app, page, listeners, stubs } = makeDom(stubIds)
+  const sessionStorage = makeStorage()
+  const localStorage = makeStorage()
+  if (token) sessionStorage.setItem(tokenKey(appPath), token)
+
+  const location = { pathname: '/', search: '', hash: '', href: base + '/' }
+  const history = {
+    replaceState: (_s, _t, url) => {
+      if (url) location.pathname = String(url).split('?')[0]
+    },
+    pushState: (_s, _t, url) => {
+      if (url) location.pathname = String(url).split('?')[0]
+    },
+  }
+  // app.js 里是相对路径，node 的 fetch 只收绝对地址。
+  // fetchImpl 给测试用来接管某几条请求（聊天 SSE 要能精确控制什么时候来帧、什么时候断）。
+  const shimFetch = (path, init) => (fetchImpl ? fetchImpl(path, init) : fetch(base + path, init))
+
+  const wrapper = new Function(
+    'document',
+    'window',
+    'location',
+    'history',
+    'sessionStorage',
+    'localStorage',
+    'matchMedia',
+    'navigator',
+    'fetch',
+    'CSS',
+    'Element',
+    'HTMLInputElement',
+    'HTMLSelectElement',
+    'HTMLTextAreaElement',
+    'HTMLFormElement',
+    `${src}\n;return { boot, render, state, api, auditTranscript, messageText, setToken, clearToken, token, onSetup, testLlm, saveSettings, savePriceMultiplier, saveCustomProvider, saveCustomModel, loadCustomProviders, runConfirm, statsWindow, loadStats, catalogBase, pathAllowed, machineHead, readOnlyItem, startChatStream, stopChatStream, paintChat, ensureChatSession, fold, threadRows, CHAT_RETRY_MAX }`,
+  )
+
+  const windowStub = { addEventListener() {}, satuUnzip: null, location, history }
+  const api = wrapper(
+    document,
+    windowStub,
+    location,
+    history,
+    sessionStorage,
+    localStorage,
+    () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+    { userAgent: 'satuwork-ui-smoke', clipboard: { writeText: async () => {} } },
+    shimFetch,
+    { escape: (s) => String(s) },
+    Element,
+    HTMLInputElement,
+    HTMLSelectElement,
+    HTMLTextAreaElement,
+    HTMLFormElement,
+  )
+
+  /** 把一个元素当事件目标派发给 app.js 挂的处理器，走的是真的分流逻辑。 */
+  const fire = async (type, target) => {
+    for (const fn of listeners.get(type) || []) {
+      await fn({ type, target, preventDefault() {}, stopPropagation() {} })
+    }
+  }
+
+  return { ...api, app, page, listeners, stubs, fire, sessionStorage, html: () => app.innerHTML }
+}
+
+/**
+ * 一条可控的假 SSE 响应。
+ *
+ * app.js 走的是 `res.body.getReader()`，所以只要给出一个能 read 的 reader 就够了。
+ * `push` 发一帧，`close` 正常收流。什么时候发、什么时候断由测试说了算——聊天流那几条
+ * 逻辑（建连失败放闩、退避档位、合并重绘）都得靠精确的时序才测得出来。
+ */
+export function fakeSse() {
+  const queue = []
+  const encoder = new TextEncoder()
+  let waiting = null
+  let ended = false
+  const pump = () => {
+    if (!waiting) return
+    if (queue.length) {
+      const value = queue.shift()
+      const resolve = waiting
+      waiting = null
+      resolve({ done: false, value })
+    } else if (ended) {
+      const resolve = waiting
+      waiting = null
+      resolve({ done: true, value: undefined })
+    }
+  }
+  return {
+    push(obj) {
+      queue.push(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`))
+      pump()
+    },
+    close() {
+      ended = true
+      pump()
+    },
+    response: {
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: () =>
+            new Promise((resolve) => {
+              waiting = resolve
+              pump()
+            }),
+        }),
+      },
+      text: async () => '',
+    },
+  }
+}
+
+/** app.js 里读 token 的那个 key，垫片要和它对上。写死会悄悄失效，所以从源码里取。 */
+export function tokenKey(appPath) {
+  const raw = readFileSync(appPath, 'utf8')
+  const m = raw.match(/const TOKEN_KEY = '([^']+)'/)
+  if (!m) throw new Error('在 app.js 里找不到 TOKEN_KEY')
+  return m[1]
+}

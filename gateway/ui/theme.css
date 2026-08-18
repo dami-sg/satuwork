@@ -72,6 +72,18 @@
   --color-accent-2-800: #423378;
   --color-accent-2-900: #302558;
 
+  /* 状态绿。整套配色是暖调的奶油 + 赭红，所以这组绿也压了饱和度往暖里走一点——
+     纯正的 #00c853 摆进来会像贴上去的，而不是这套配色里的一个颜色。
+     只用于「在线 / 正常」这一件事，不参与品牌表达，所以单独一阶，不进 accent。 */
+  --color-ok-100: #e4f0e6;
+  --color-ok-500: #2f9159;
+  --color-ok-800: #1f5637;
+
+  /* 待人工处理。琥珀而不是纯黄：纯黄在奶油底上几乎看不见，压深一档才立得住。 */
+  --color-warn-100: #f6ecd8;
+  --color-warn-500: #c98a2f;
+  --color-warn-800: #6d4714;
+
   --font-heading: Outfit, system-ui, sans-serif;
   --font-heading-weight: 600;
   --font-body: Outfit, system-ui, sans-serif;
@@ -152,6 +164,16 @@
   --color-accent-2-700: #bbb0ee;
   --color-accent-2-800: #d3ccf5;
   --color-accent-2-900: #e7e2fa;
+
+  /* 绿也跟着翻：100 仍然是「垫在底下的那层」，800 仍然是「压在它上面的字」，
+     所以组件里那两条规则一个字都不用改。 */
+  --color-ok-100: #1b3124;
+  --color-ok-500: #52bd80;
+  --color-ok-800: #bde5cb;
+
+  --color-warn-100: #38290f;
+  --color-warn-500: #e0a94e;
+  --color-warn-800: #f2dcae;
 
   /* 深底上的投影靠加深而不是加透明度，否则等于没有。 */
   --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.35);

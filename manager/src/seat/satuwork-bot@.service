@@ -1,0 +1,23 @@
+[Unit]
+# %i 是**席位 ID**，不是 Linux 用户名。见 slim-desktop@.service 的说明。
+Description=Satuwork bot for seat %i
+After=network.target slim-desktop@%i.service
+
+[Service]
+Type=simple
+# User/Group/HOME/SEAT_DIR/EnvironmentFile 由 drop-in 提供：
+#   /etc/systemd/system/satuwork-bot@%i.service.d/seat.conf
+# nobody 兜底：drop-in 缺失时失败，不以 root 跑。
+User=nobody
+Group=nogroup
+Environment=XDG_SESSION_TYPE=x11
+Environment=GDK_BACKEND=x11
+UnsetEnvironment=WAYLAND_DISPLAY DEEPSEEK_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY
+# 入口写死成一个 launcher：ExecStart 是列表型设置，drop-in 想改必须先清空再重设，
+# 而 app 路径是逐席位不同的。让 launcher 从 $SEAT_DIR 里找，单元就不用管路径。
+ExecStart=/usr/local/bin/satuwork-bot.sh %i
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

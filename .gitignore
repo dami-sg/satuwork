@@ -11,6 +11,9 @@ node_modules/
 ui/dist/
 bot/ui/dist/
 
+# bot/pack.mjs 打出来的发布包
+dist/
+
 # e2e 启动器临时改写的组合
 bot/cordis.e2e.yml
 

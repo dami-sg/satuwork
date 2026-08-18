@@ -61,6 +61,8 @@ interface Route {
   method: string
   parts: string[]
   handler: Handler
+  /** true 时不读也不解析 body，处理器自己拿 `req` 当流用（上传发布包走这条）。 */
+  raw: boolean
 }
 
 function match(parts: string[], path: string): Record<string, string> | null {
@@ -89,8 +91,8 @@ const MIME: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
 }
 
-const SPA_PATHS = new Set(['/', '/index.html', '/ui', '/ui/', '/models', '/providers', '/company', '/accounts', '/audit', '/companies', '/users', '/plans', '/stats', '/costs', '/billing', '/usage', '/catalog', '/profile', '/bots', '/skills', '/chat', '/releases'])
-const ROOT_FILES = new Set(['theme.css', 'shell.css', 'app.css', 'app.js', 'index.html', 'unzip.js'])
+const SPA_PATHS = new Set(['/', '/index.html', '/ui', '/ui/', '/models', '/providers', '/company', '/accounts', '/audit', '/companies', '/users', '/plans', '/orders', '/stats', '/costs', '/billing', '/usage', '/catalog', '/profile', '/bots', '/skills', '/chat', '/releases'])
+const ROOT_FILES = new Set(['theme.css', 'shell.css', 'app.css', 'chat.css', 'app.js', 'i18n.js', 'markdown.js', 'index.html', 'unzip.js'])
 
 /** GET / 与各管理屏、GET /ui/*、/theme.css、/assets/* 从 gateway/ui 出。路径不得逃出该目录。 */
 function serveUi(pathname: string, res: ServerResponse): boolean {
@@ -123,8 +125,8 @@ function serveUi(pathname: string, res: ServerResponse): boolean {
 export class Router {
   private routes: Route[] = []
 
-  on(method: string, path: string, handler: Handler) {
-    this.routes.push({ method, parts: path.split('/').filter(Boolean), handler })
+  on(method: string, path: string, handler: Handler, raw = false) {
+    this.routes.push({ method, parts: path.split('/').filter(Boolean), handler, raw })
   }
 
   get(path: string, handler: Handler) {
@@ -135,6 +137,10 @@ export class Router {
   }
   put(path: string, handler: Handler) {
     this.on('PUT', path, handler)
+  }
+  /** PUT 二进制体：body 不进内存、不当 JSON 解析，处理器直接消费 `req`。 */
+  putRaw(path: string, handler: Handler) {
+    this.on('PUT', path, handler, true)
   }
   patch(path: string, handler: Handler) {
     this.on('PATCH', path, handler)
@@ -155,7 +161,8 @@ export class Router {
         const req = raw as Req
         req.params = params
         req.query = url.searchParams
-        req.body = method === 'GET' || method === 'HEAD' || method === 'DELETE' ? undefined : await readBody(raw)
+        const skipBody = route.raw || method === 'GET' || method === 'HEAD' || method === 'DELETE'
+        req.body = skipBody ? undefined : await readBody(raw)
         await route.handler(req, res)
         if (!res.writableEnded) json(res, 204, null)
         return

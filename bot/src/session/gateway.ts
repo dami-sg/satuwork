@@ -6,10 +6,6 @@ import type { SessionEvent, SessionOrigin, Usage } from './types.ts'
 export const name = 'satu-session-gateway'
 export const inject = ['server', 'sessions', 'catalog', 'storage']
 
-function machineToken(): string {
-  return (process.env.GATEWAY_MACHINE_TOKEN || '').trim()
-}
-
 function pinnedBotId(): string {
   return (process.env.SATUWORK_BOT_ID || '').trim()
 }
@@ -53,11 +49,10 @@ type OutboxItem =
 export function apply(ctx: Context) {
   ctx.server.get('/internal/sessions/:sessionId', async (req, res) => {
     const token = bearer(req.headers.get('authorization'))
-    const machine = machineToken()
+    // 只认席位票。Gateway 拉全文时在 authorization 上带的就是这一把（管家那一跳认的是
+    // 另一个头 x-satuwork-machine），所以不需要再认机器票。
     const seat = gatewayToken()
-    const ok =
-      Boolean(token) &&
-      ((machine && timingSafeToken(token!, machine)) || (seat && timingSafeToken(token!, seat)))
+    const ok = Boolean(token) && Boolean(seat) && timingSafeToken(token!, seat)
     if (!ok) {
       res.status = 404
       return res.json({ error: 'not found' })
@@ -115,13 +110,15 @@ export function apply(ctx: Context) {
   }
 
   function configured(): boolean {
-    return Boolean(gatewayUrl() && gatewayToken() && machineToken())
+    return Boolean(gatewayUrl() && gatewayToken())
   }
 
   async function postInternal(path: string, body: unknown): Promise<void> {
     const base = gatewayUrl()
-    const token = machineToken()
-    if (!base || !token) throw new Error('未配置 GATEWAY_URL / GATEWAY_MACHINE_TOKEN')
+    // 用席位票上报。Gateway 侧的 requireInternalCaller 认 `sat_`，并且**只允许它报自己
+    // 这个账号**——body 里的 accountId 对席位票不作数。
+    const token = gatewayToken()
+    if (!base || !token) throw new Error('未配置 GATEWAY_URL / GATEWAY_TOKEN')
     const r = await fetch(base + path, {
       method: 'POST',
       headers: {
@@ -286,9 +283,8 @@ export function apply(ctx: Context) {
 
   async function announceReady() {
     const base = gatewayUrl()
-    const token = machineToken()
     const botId = pinnedBotId()
-    if (!base || !token || !gatewayToken() || !botId) return
+    if (!base || !gatewayToken() || !botId) return
     if (!ctx.catalog.pinSucceeded) {
       const ok = await ctx.catalog.pull()
       if (!ok || !ctx.catalog.pinSucceeded) throw new Error('目录尚未钉住 SATUWORK_BOT_ID')
@@ -302,7 +298,7 @@ export function apply(ctx: Context) {
 
   const botId = pinnedBotId()
   if (!botId) {
-    if (gatewayUrl() && machineToken() && gatewayToken()) {
+    if (gatewayUrl() && gatewayToken()) {
       ctx.logger?.warn?.('instance ready: 未设 SATUWORK_BOT_ID，不上报 ready')
     }
     return

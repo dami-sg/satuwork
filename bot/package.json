@@ -1,11 +1,12 @@
 {
   "name": "satuwork",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node --import tsx bin/satuwork.mjs",
-    "start": "node --import tsx bin/satuwork.mjs"
+    "start": "node --import tsx bin/satuwork.mjs",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@cordisjs/plugin-server": "^1.7.0",
@@ -20,6 +21,7 @@
     "preact": "^10.29.8"
   },
   "devDependencies": {
+    "@types/node": "^26.2.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

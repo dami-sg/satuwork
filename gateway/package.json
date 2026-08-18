@@ -4,13 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --import tsx src/index.ts",
-    "start": "node --import tsx src/index.ts"
+    "dev": "node --env-file-if-exists=.env --import tsx src/index.ts",
+    "start": "node --env-file-if-exists=.env --import tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.1"
+    "@earendil-works/pi-ai": "^0.84.1",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.21.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

@@ -1,0 +1,132 @@
+# 构建 Bot 发布包：建 GitHub Release + 传给 Gateway。
+#
+# Gateway 不构建 Bot，只收包：这里打，PUT 上去，席位那边再从它部署。
+# 需要两个 secret：GATEWAY_URL（如 https://gw.example.com）、GATEWAY_PLATFORM_TOKEN。
+#
+# 打 `bot-v1.2.3` 这样的 tag 触发，版本号是 `1.2.3+<短 sha>-<架构>`；手动触发时
+# 版本号取 bot/package.json 的 version 加短 sha 加架构，并且**不建** Release。
+#
+# **两个架构分别出包。** 包里带 esbuild 的原生二进制，架构不对就起不来，而且
+# `pack.mjs` 只校验「是不是 linux-」，不校验是哪个 linux。所以版本号必须带架构后缀，
+# 两份包在 Gateway 上是两条独立的发布记录。
+name: bot-release
+
+on:
+  push:
+    tags: ['bot-v*']
+  workflow_dispatch:
+    inputs:
+      note:
+        description: 这次发布的说明
+        required: false
+        default: ''
+
+jobs:
+  build:
+    strategy:
+      # 一个架构挂了不该顺手取消另一个：另一个的日志仍然有用。
+      # 但下面的 release 依赖整个 build，缺一个架构就不发——半套发布比不发更糟，
+      # 因为没 pin 的机器会跟着「最新」走。
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # pack.mjs 走 `pnpm deploy`，要先有装好的 workspace。
+      - run: pnpm install --frozen-lockfile
+
+      # 出包前先确认架构真的对上了：runner 换了标签、或者矩阵写错，
+      # 在这儿失败远好过让一台机器装上一个起不来的包。
+      - name: 校验 runner 架构
+        run: |
+          got=$(node -p 'process.arch')
+          [ "$got" = "${{ matrix.arch }}" ] || {
+            echo "runner 是 $got，矩阵却说 ${{ matrix.arch }}" >&2; exit 1; }
+
+      - id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            base="${GITHUB_REF_NAME#bot-v}"
+          else
+            base=$(node -p "require('./bot/package.json').version")
+          fi
+          echo "v=${base}+${GITHUB_SHA:0:7}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+
+      - name: 打包
+        run: node bot/pack.mjs --version "${{ steps.version.outputs.v }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bot-pack-${{ matrix.arch }}
+          path: dist/bot-*.tgz
+          retention-days: 14
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 建 Release 要写仓库内容
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bot-pack-*
+          path: dist
+          merge-multiple: true
+
+      - run: ls -l dist
+
+      # 只有 tag 触发才建 Release：手动触发没有可挂的 tag。
+      - name: 建 GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTE: ${{ inputs.note }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tgz \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "${NOTE:-Bot 发布包（x64 / arm64）。装到席位机器上时**架构必须对上**。}"
+
+      # **顺序是有意的：arm64 先、x64 后。**
+      # Gateway 的 latestBotRelease 只按 createdAt 取，不认架构。矩阵并发上传的话
+      # 「最新」是随机的；这里串行上传，让 x64 稳定地成为最新——和多架构之前的行为
+      # 一致。arm 机器在 Gateway 支持按架构选包之前，必须显式钉版本。
+      - name: 传给 Gateway
+        env:
+          TOK: ${{ secrets.GATEWAY_PLATFORM_TOKEN }}
+          GW: ${{ secrets.GATEWAY_URL }}
+          NOTE: ${{ inputs.note }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for arch in arm64 x64; do
+            # 直接用 glob，不解析 ls 的输出；顺带断言「正好一个」——多出来的陈旧
+            # artifact 会让上传传错文件，而那是查不出来的。
+            files=(dist/bot-*-"$arch".tgz)
+            [ ${#files[@]} -eq 1 ] || { echo "期望正好一个 $arch 包，实际 ${#files[@]}" >&2; exit 1; }
+            f="${files[0]}"
+            v=$(basename "$f" .tgz); v=${v#bot-}
+            sha=$(sha256sum "$f" | cut -d' ' -f1)
+            echo "PUT $arch $v"
+            code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PUT \
+              "${GW%/}/platform/bot-releases/$(jq -rn --arg v "$v" '$v|@uri')?note=$(jq -rn --arg n "${NOTE:-}" '$n|@uri')" \
+              -H "authorization: Bearer $TOK" \
+              -H 'content-type: application/gzip' \
+              -H "x-bot-sha256: $sha" \
+              --data-binary "@$f")
+            echo "  -> $code $(head -c 300 /tmp/resp.json)"
+            [ "$code" = "200" ] || [ "$code" = "201" ] || exit 1
+          done

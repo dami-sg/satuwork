@@ -86,6 +86,14 @@ a:hover { color: var(--color-accent-600); }
 .satu-logline[data-level="WARN"] .satu-loglevel { color: #f5d79c; }
 .satu-logline[data-level="ERROR"] .satu-loglevel { color: #f5a79c; }
 .satu-logline[data-level="ERROR"] .satu-logtext { color: #ffd9d3; }
+/* 二级页面的头：返回图标 + 面包屑，顶掉一级页面那一个光标题。
+   上一级不缩，当前这一级才截断——路径的前半段是拿来导航的，截了就没用了。 */
+.satu-crumbs { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.satu-crumblink { flex: none; padding: 0; border: 0; background: transparent; font-family: var(--font-body); font-size: 14px; color: var(--muted-foreground); cursor: pointer; white-space: nowrap; }
+.satu-crumblink:hover { color: var(--color-text); }
+.satu-crumblink:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: var(--radius-sm); }
+.satu-crumbsep { flex: none; font-size: 14px; color: color-mix(in srgb, var(--color-text) 35%, transparent); }
+.satu-crumbcur { min-width: 0; font-size: 14px; font-weight: 600; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .satu-back { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 5px 12px 5px 8px; border: 0; border-radius: 999px; background: transparent; font-family: var(--font-body); font-size: 13px; color: var(--muted-foreground); cursor: pointer; }
 .satu-back:hover { background: var(--secondary); color: var(--color-text); }
 /* 稿子里这条写成了 `.satu-code`，把上面那条深色代码块整个盖掉。看 `resize: vertical`
@@ -126,8 +134,8 @@ textarea.satu-code { background: var(--popover); color: var(--color-text); borde
 .satu-embedrow { display: grid; grid-template-columns: minmax(180px, 2fr) 104px 64px 88px 96px 92px; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
 .satu-embedrow:last-child { border-bottom: 0; }
 .satu-embedrow:hover { background: var(--card); }
-.satu-modelhead { display: grid; grid-template-columns: 2fr 1fr 0.9fr 0.7fr 1.1fr 96px; gap: var(--space-3); align-items: center; padding: 10px var(--space-4); background: var(--card); border-bottom: 1px solid var(--border); font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted-foreground); }
-.satu-modelrow { display: grid; grid-template-columns: 2fr 1fr 0.9fr 0.7fr 1.1fr 96px; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
+.satu-modelhead { display: grid; grid-template-columns: 2fr 1fr 0.9fr 0.7fr 1.1fr 1.1fr 96px; gap: var(--space-3); align-items: center; padding: 10px var(--space-4); background: var(--card); border-bottom: 1px solid var(--border); font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted-foreground); }
+.satu-modelrow { display: grid; grid-template-columns: 2fr 1fr 0.9fr 0.7fr 1.1fr 1.1fr 96px; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
 .satu-modelrow:last-child { border-bottom: 0; }
 .satu-modelrow:hover { background: var(--card); }
 .satu-devicerow { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
@@ -214,7 +222,8 @@ textarea.satu-code { background: var(--popover); color: var(--color-text); borde
 .satu-agentitem[aria-current="true"] { background: var(--color-accent-100); }
 .satu-dot { width: 7px; height: 7px; flex: none; border-radius: 999px; background: var(--color-neutral-400); }
 .satu-dot[data-on="true"] { background: var(--color-accent-2-600); }
-.satu-iconpick { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; flex: none; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--popover); color: var(--secondary-foreground); cursor: pointer; }
+.satu-iconpick { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; flex: none; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--popover); color: var(--secondary-foreground); cursor: pointer; }
+.satu-iconpick:disabled { cursor: default; opacity: 0.55; }
 .satu-iconpick:hover { background: var(--secondary); color: var(--color-text); }
 .satu-iconpick[aria-pressed="true"] { border-color: var(--color-accent-400); background: var(--color-accent-100); color: var(--color-accent-800); }
 .satu-themecard { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--popover); font-family: var(--font-body); color: var(--color-text); cursor: pointer; }
@@ -263,11 +272,8 @@ textarea.satu-code { background: var(--popover); color: var(--color-text); borde
 .satu-switch span { width: 16px; height: 16px; border-radius: 999px; background: #fff; box-shadow: var(--shadow-2xs); transition: transform 140ms ease; }
 .satu-switch[aria-pressed="true"] { background: var(--color-accent); }
 .satu-switch[aria-pressed="true"] span { transform: translateX(14px); }
-.satu-msg { display: flex; gap: var(--space-3); }
+/* 对话气泡搬到 chat.css 了（.sw-msg / .sw-bubble / .sw-chips）。 */
 .satu-avatar { width: 30px; height: 30px; flex: none; border-radius: 999px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; }
-.satu-bubble { font-size: 14.5px; line-height: 1.7; white-space: pre-line; }
-.satu-bubble[data-role="user"] { align-self: flex-start; background: var(--secondary); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); }
-.satu-steps { display: flex; flex-direction: column; gap: 4px; padding: var(--space-3) var(--space-4); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .satu-step { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted-foreground); }
 .satu-step svg { color: var(--color-accent-600); flex: none; }
 .satu-assignee { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px 5px 6px; border-radius: 999px; border: 1px solid var(--border); background: var(--popover); font-family: var(--font-body); font-size: 13px; color: var(--secondary-foreground); cursor: pointer; }

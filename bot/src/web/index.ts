@@ -168,6 +168,18 @@ function sse(ctx: Context, sessionId: string, after: number, res: { _res?: { on?
           return controller.close()
         }
 
+        /**
+         * 历史放完了。
+         *
+         * 这条标记**必须有**：历史和实时走的是同一个通道、同样的 `data:` 帧，客户端
+         * 收到一条 `turn/start` 时没法知道它是「几小时前那一轮开始了」还是「刚刚开始
+         * 了一轮」。于是重放一段长会话时，界面会一路挂着「正在处理」，直到重放出那个
+         * 配对的 `turn/end`——会话越长挂得越久，而那期间什么都没在跑。
+         *
+         * 有了这条，客户端就能把标记之前的一律当历史，只认之后的状态。
+         */
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'replay/done' })}\n\n`))
+
         const pending = queue
         queue = null
         for (const event of pending) if (event.seq > after) send(event)

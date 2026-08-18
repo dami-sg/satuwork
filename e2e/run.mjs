@@ -9,13 +9,23 @@
  *   node e2e/run.mjs
  */
 import { spawn } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runRuntimePath } from './runtime-path.mjs'
 import { runGatewayChat } from './gateway-chat.mjs'
 import { runMachineDeploy } from './machine-deploy.mjs'
+import { runLlmUsage } from './llm-usage.mjs'
+import { runMarkdown } from './markdown.mjs'
+import { runSessionStore } from './session-store.mjs'
+import { runSetup } from './setup.mjs'
+import { runUiSmoke } from './ui-smoke.mjs'
+import { runCustomProvider } from './custom-provider.mjs'
+import { runStats } from './stats.mjs'
+import { runGlobalCatalog } from './global-catalog.mjs'
+import { runManager } from './manager.mjs'
+import { PG_URL, requirePg } from './pg.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const gwRoot = join(root, 'gateway')
@@ -26,6 +36,9 @@ const BOT_HOME = process.env.E2E_BOT_HOME || '/tmp/satuwork-e2e-bot'
 const GW_PORT = Number(process.env.E2E_GW_PORT || 18080)
 const BOT_PORT = Number(process.env.E2E_BOT_PORT || 18082)
 const MACHINE_TOK = 'e2e-machine-token'
+// bot 的入站凭据现在**只有**席位票。机器票不再进 bot.env，也不再被 bot 接受——
+// 它是管家的 root 控制面凭据，而 bot.env 是席位那个普通 Linux 用户读得到的。
+const SEAT_TOK = 'sat_e2e-seat-token'
 const PLATFORM_TOK = 'e2e-platform-token'
 
 const children = []
@@ -113,15 +126,17 @@ async function waitHttp(url, { timeout = 30000 } = {}) {
   throw new Error(`等不到 ${url}：${last}`)
 }
 
-async function req(base, method, path, { token, cookie, body, headers: extra } = {}) {
+async function req(base, method, path, { token, cookie, body, raw, headers: extra } = {}) {
   const headers = { ...(extra || {}) }
-  if (body !== undefined) headers['content-type'] = 'application/json'
+  // raw：直接发字节（上传发布包），不套 JSON。
+  if (raw !== undefined) headers['content-type'] = headers['content-type'] || 'application/gzip'
+  else if (body !== undefined) headers['content-type'] = 'application/json'
   if (token) headers.authorization = 'Bearer ' + token
   if (cookie) headers.cookie = cookie
   const r = await fetch(base + path, {
     method,
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body),
   })
   const text = await r.text()
   let json
@@ -194,6 +209,9 @@ async function runGateway() {
     cwd: gwRoot,
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
+      GATEWAY_DATABASE_URL: PG_URL,
+      GATEWAY_PG_SCHEMA: 'e2e_main',
+      GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(GW_PORT),
       GATEWAY_MACHINE_TOKEN: MACHINE_TOK,
@@ -252,10 +270,15 @@ async function runGateway() {
     assert(before.json.plan.seats === 2, 'plan')
     assert(before.json.company.accessUrl == null, '派机器前不该有 accessUrl')
 
-    const mach = await req(base, 'POST', `/orgs/${orgId}/machine`, {
+    // 机器地址是平台的事：管理员写 host 会被挡下，否则他能把 Gateway 的服务端拉取
+    // 指到自己的服务器上，连 smt_ 一起送过去。
+    const machHost = await req(base, 'POST', `/orgs/${orgId}/machine`, {
       token,
       body: { host: '10.0.0.1' },
     })
+    assert(machHost.status === 403, `admin 写 host ${machHost.status} ${machHost.text}`)
+
+    const mach = await req(base, 'POST', `/orgs/${orgId}/machine`, { token, body: {} })
     assert(mach.status === 201, `machine ${mach.status} ${mach.text}`)
     assert(mach.json.company.accessUrl === 'https://acme.satuwork.com', 'accessUrl')
     assert(!mach.json.machine.token, 'admin assign 带了 token')
@@ -419,6 +442,28 @@ async function runGateway() {
     assert(d.status === 401, `usage ${d.status}`)
   })
 
+  await test('登记机器时 host 要是干净的 http/https 地址', async () => {
+    // host 会被 Gateway 带着 smt_ 去 fetch，路径 / 凭证 / 别的协议一律不收。
+    for (const host of [
+      'http://127.0.0.1:9/internal/sessions/x',
+      'http://user:pw@127.0.0.1:9',
+      'file:///etc/passwd',
+      'http://127.0.0.1:9?a=1',
+    ]) {
+      const bad = await req(base, 'POST', '/internal/machines', { token: MACHINE_TOK, body: { host } })
+      assert(bad.status === 400, `host ${host} 应 400，得到 ${bad.status} ${bad.text}`)
+    }
+    const ok = await req(base, 'POST', '/internal/machines', {
+      token: MACHINE_TOK,
+      body: { host: 'http://127.0.0.1:9' },
+    })
+    assert(ok.status === 201, `干净 host ${ok.status} ${ok.text}`)
+    assert(ok.json.machine.host === 'http://127.0.0.1:9', `host 归一化 ${ok.json.machine.host}`)
+    const bare = await req(base, 'POST', '/internal/machines', { token: MACHINE_TOK, body: { host: '10.0.0.7:3200' } })
+    assert(bare.status === 201, `裸 host ${bare.status} ${bare.text}`)
+    assert(bare.json.machine.host === '10.0.0.7:3200', `裸 host 应原样保留 ${bare.json.machine.host}`)
+  })
+
   await test('引导票只能登记机器；心跳/索引/ready/用量要 smt_', async () => {
     const reg = await req(base, 'POST', '/internal/machines', { token: MACHINE_TOK, body: {} })
     assert(reg.status === 201, `register ${reg.status} ${reg.text}`)
@@ -572,11 +617,68 @@ async function runGateway() {
     assert(!dumpHas(pullEv, UNIQUE), '审计里有正文')
   })
 
+  await test('会话列表翻页：不漏行不重复，同一毫秒也分得开', async () => {
+    const adminMe = await req(base, 'GET', '/me', { token })
+    const adminId = adminMe.json.account.id
+    // 三条 updatedAt 完全相同——只拿 updatedAt 当游标的话，这里要么漏要么无限循环。
+    const SAME = 1_700_000_500_000
+    const ids = ['s-page-a', 's-page-b', 's-page-c']
+    for (const sessionId of ids) {
+      const r = await req(base, 'POST', '/internal/sessions/index', {
+        token: orgMachineTok,
+        body: {
+          sessionId,
+          companyId: orgId,
+          accountId: adminId,
+          botId: 'bot-page',
+          title: sessionId,
+          messageCount: 1,
+          createdAt: SAME,
+          updatedAt: SAME,
+        },
+      })
+      assert(r.status === 200, `建 ${sessionId} ${r.status} ${r.text}`)
+    }
+
+    const seen = []
+    let cursor = ''
+    let pages = 0
+    for (; pages < 10; pages++) {
+      const qs = `?botId=bot-page&limit=1${cursor ? '&cursor=' + encodeURIComponent(cursor) : ''}`
+      const r = await req(base, 'GET', `/orgs/${orgId}/sessions${qs}`, { token })
+      assert(r.status === 200, `翻页 ${r.status} ${r.text}`)
+      assert(r.json.sessions.length <= 1, `limit=1 却回了 ${r.json.sessions.length} 条`)
+      seen.push(...r.json.sessions.map((x) => x.sessionId))
+      if (!r.json.hasMore) break
+      assert(r.json.nextCursor, 'hasMore 为真却没给 nextCursor')
+      cursor = r.json.nextCursor
+    }
+    assert(pages < 10, '翻页没有终点，游标可能没在推进')
+    assert(seen.length === ids.length, `应当正好 ${ids.length} 条，实际 ${seen.length}：${seen.join(',')}`)
+    assert(new Set(seen).size === seen.length, `翻页翻出重复行：${seen.join(',')}`)
+    for (const id of ids) assert(seen.includes(id), `翻页漏了 ${id}`)
+
+    // 不带 cursor 时一次到底，并且明确说「没有更多」。
+    const all = await req(base, 'GET', `/orgs/${orgId}/sessions?botId=bot-page`, { token })
+    assert(all.status === 200, `整页 ${all.status} ${all.text}`)
+    assert(all.json.sessions.length === ids.length, `整页应 ${ids.length} 条，实际 ${all.json.sessions.length}`)
+    assert(all.json.hasMore === false, 'hasMore 应为 false')
+    assert(all.json.nextCursor === null, 'nextCursor 应为 null')
+    assert(typeof all.json.limit === 'number' && all.json.limit > 0, 'limit 应当带回去')
+  })
+
   await test('对话审计：mock 机器在线时按需拉全文，Gateway 不落盘', async () => {
     const HELLO = 'AUDIT-OK-HELLO'
     let liveTok = ''
     const mock = await listenMock((req, res) => {
-      if (req.url && req.url.startsWith('/internal/sessions/') && req.headers.authorization === 'Bearer ' + liveTok) {
+      // 这个 mock 演的是**管家**：它认 x-satuwork-machine 上的机器票，authorization 上
+      // 那把是给 bot 的席位票，原样透传、管家不解读。两个头两把票，不再是同一把。
+      if (
+        req.url &&
+        req.url.startsWith('/internal/sessions/') &&
+        req.headers['x-satuwork-machine'] === liveTok &&
+        String(req.headers.authorization || '').startsWith('Bearer sat_')
+      ) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(
           JSON.stringify({
@@ -863,16 +965,21 @@ async function runGateway() {
     })
     assert(chat.status === 402, `chat 402 ${chat.status} ${chat.text}`)
     assert(!String(chat.json.error || '').includes('stack'), 'chat stack')
+    // /v1/responses 和 /v1/messages 是**厂商原生协议**的透传口，上游地址是写死的。
+    // 拿别家 provider 的模型调它们，必须在选密钥之前就 400 掉——否则 Gateway 会把这个
+    // provider 的 key 发到写死的那家上游去（ANTHROPIC_API_KEY 发给 api.openai.com）。
     const resp = await req(base, 'POST', '/v1/responses', {
       token,
       body: { model: 'e2e-fake/missing-key', input: 'hi' },
     })
-    assert(resp.status === 402, `responses 402 ${resp.status} ${resp.text}`)
+    assert(resp.status === 400, `responses 跨 provider 应 400，得到 ${resp.status} ${resp.text}`)
+    assert(String(resp.json.error || '').includes('openai'), `responses 文案 ${resp.text}`)
     const msg = await req(base, 'POST', '/v1/messages', {
       token,
       body: { model: 'e2e-fake/missing-key', max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] },
     })
-    assert(msg.status === 402, `messages 402 ${msg.status} ${msg.text}`)
+    assert(msg.status === 400, `messages 跨 provider 应 400，得到 ${msg.status} ${msg.text}`)
+    assert(String(msg.json.error || '').includes('anthropic'), `messages 文案 ${msg.text}`)
   })
 
   await test('POST /orgs/:id/llm/test：无票 401；成员 403；未设角色 400；无密钥 402；不泄漏 secret', async () => {
@@ -908,6 +1015,448 @@ async function runGateway() {
     const r = await req(base, 'GET', '/platform/orgs', { token: ownerTok })
     assert(r.status === 200, `orgs ${r.status} ${r.text}`)
     assert(r.json.orgs.some((c) => c.id === orgId && c.slug === 'acme'), 'missing acme')
+  })
+
+  let contosoId
+  await test('owner POST /platform/orgs：联系人必填、地址网站可选、席位不在建公司时定', async () => {
+    const miss = await req(base, 'POST', '/platform/orgs', {
+      token: ownerTok,
+      body: { name: 'NoContact', slug: 'nocontact', adminEmail: 'a@nocontact.test', adminPassword: 'correct-horse-1' },
+    })
+    assert(miss.status === 400, `缺联系人 ${miss.status} ${miss.text}`)
+
+    const badPhone = await req(base, 'POST', '/platform/orgs', {
+      token: ownerTok,
+      body: {
+        name: 'BadPhone',
+        slug: 'badphone',
+        contactName: '王五',
+        contactPhone: '打我电话',
+        contactEmail: 'c@badphone.test',
+        adminEmail: 'a@badphone.test',
+        adminPassword: 'correct-horse-1',
+      },
+    })
+    assert(badPhone.status === 400, `电话 ${badPhone.status} ${badPhone.text}`)
+
+    // 不带国家区号的号码也不收——界面上那个区号下拉不是摆设。
+    const noCode = await req(base, 'POST', '/platform/orgs', {
+      token: ownerTok,
+      body: {
+        name: 'NoCode',
+        slug: 'nocode',
+        contactName: '王五',
+        contactPhone: '13800000000',
+        contactEmail: 'c@nocode.test',
+        adminEmail: 'a@nocode.test',
+        adminPassword: 'correct-horse-1',
+      },
+    })
+    assert(noCode.status === 400, `缺区号 ${noCode.status} ${noCode.text}`)
+
+    const r = await req(base, 'POST', '/platform/orgs', {
+      token: ownerTok,
+      body: {
+        name: 'Contoso',
+        slug: 'contoso',
+        contactName: '张三',
+        contactPhone: '+86 138 0000 0000',
+        contactEmail: 'zhangsan@contoso.test',
+        // 网站不带 scheme，服务端补 https；地址留空就是留空。
+        website: 'contoso.test',
+        adminEmail: 'admin@contoso.test',
+        adminPassword: 'correct-horse-1',
+        // 建公司不收席位：给了也不算数，先开一个管理员席位。
+        seats: 9,
+      },
+    })
+    assert(r.status === 201, `create ${r.status} ${r.text}`)
+    assert(r.json.company.contactName === '张三', `contactName ${r.json.company.contactName}`)
+    assert(r.json.company.contactPhone === '+86 138 0000 0000', `contactPhone ${r.json.company.contactPhone}`)
+    assert(r.json.company.contactEmail === 'zhangsan@contoso.test', `contactEmail ${r.json.company.contactEmail}`)
+    assert(r.json.company.address === '', `address ${r.json.company.address}`)
+    assert(r.json.company.website === 'https://contoso.test', `website ${r.json.company.website}`)
+    assert(r.json.plan.seats === 1 && r.json.plan.used === 1, `plan ${JSON.stringify(r.json.plan)}`)
+
+    // 席位仍然由套餐接口调整，跟建公司分开。
+    const plan = await req(base, 'PUT', `/platform/orgs/${r.json.company.id}/plan`, { token: ownerTok, body: { seats: 4 } })
+    assert(plan.status === 200 && plan.json.seats === 4, `plan ${plan.status} ${plan.text}`)
+
+    const patched = await req(base, 'PATCH', `/orgs/${r.json.company.id}`, {
+      token: ownerTok,
+      body: { contactName: '李四', address: '新加坡 048624', website: '' },
+    })
+    assert(patched.status === 200, `patch ${patched.status} ${patched.text}`)
+    assert(patched.json.company.contactName === '李四', `patch contactName ${patched.json.company.contactName}`)
+    assert(patched.json.company.address === '新加坡 048624', `patch address ${patched.json.company.address}`)
+    assert(patched.json.company.website === '', `patch website ${patched.json.company.website}`)
+    assert(patched.json.company.status === 'active', `新建的公司应是启用态 ${patched.json.company.status}`)
+    contosoId = r.json.company.id
+  })
+
+  await test('owner 定套餐与到期时间：列表和公司详情都能看到', async () => {
+    const skus = await req(base, 'GET', '/platform/plans', { token: ownerTok })
+    assert(skus.status === 200, `plans ${skus.status} ${skus.text}`)
+    let sku = (skus.json.plans || [])[0]
+    if (!sku) {
+      const made = await req(base, 'POST', '/platform/plans', {
+        token: ownerTok,
+        body: { name: '标准版', nameEn: 'Standard', amount: 9.9, seats: 6 },
+      })
+      assert(made.status === 201, `create sku ${made.status} ${made.text}`)
+      sku = made.json.plan
+    }
+
+    const bad = await req(base, 'PUT', `/platform/orgs/${contosoId}/plan`, {
+      token: ownerTok,
+      body: { skuId: sku.id, expiresAt: '不是日期' },
+    })
+    assert(bad.status === 400, `坏日期 ${bad.status} ${bad.text}`)
+
+    // 只给套餐不给席位：席位跟着套餐走。
+    const set = await req(base, 'PUT', `/platform/orgs/${contosoId}/plan`, {
+      token: ownerTok,
+      body: { skuId: sku.id, expiresAt: '2031-06-30' },
+    })
+    assert(set.status === 200, `set plan ${set.status} ${set.text}`)
+    assert(set.json.skuId === sku.id, `skuId ${set.json.skuId}`)
+    assert(set.json.skuName === sku.name, `skuName ${set.json.skuName}`)
+    assert(set.json.seats === sku.seats, `seats 应跟着套餐 ${set.json.seats} ≠ ${sku.seats}`)
+    assert(new Date(set.json.expiresAt).toISOString().slice(0, 10) === '2031-06-30', `expiresAt ${set.json.expiresAt}`)
+
+    const listed = await req(base, 'GET', '/platform/orgs', { token: ownerTok })
+    const row = (listed.json.orgs || []).find((o) => o.id === contosoId)
+    assert(row && row.plan && row.plan.skuName === sku.name, `列表缺套餐 ${JSON.stringify(row && row.plan)}`)
+    assert(row.plan.expiresAt === set.json.expiresAt, `列表到期时间 ${row.plan.expiresAt}`)
+    assert(row.contactName === '李四' && row.contactPhone && row.contactEmail, '列表缺联系人字段')
+
+    const detail = await req(base, 'GET', `/orgs/${contosoId}`, { token: ownerTok })
+    assert(detail.json.plan.skuName === sku.name, `详情套餐 ${detail.json.plan.skuName}`)
+    assert(detail.json.plan.expiresAt === set.json.expiresAt, `详情到期 ${detail.json.plan.expiresAt}`)
+
+    // 清空：套餐传空串就是不订，到期传空就是不限期。
+    const cleared = await req(base, 'PUT', `/platform/orgs/${contosoId}/plan`, {
+      token: ownerTok,
+      body: { skuId: '', expiresAt: '', seats: 2 },
+    })
+    assert(cleared.status === 200, `clear ${cleared.status} ${cleared.text}`)
+    assert(cleared.json.skuId === null && cleared.json.expiresAt === null, `clear ${JSON.stringify(cleared.json)}`)
+    assert(cleared.json.seats === 2, `clear seats ${cleared.json.seats}`)
+  })
+
+  await test('停用公司：整家登不进来，启用回来又能进', async () => {
+    const login = await req(base, 'POST', '/auth/login', {
+      body: { email: 'admin@contoso.test', password: 'correct-horse-1' },
+    })
+    assert(login.status === 200, `login ${login.status} ${login.text}`)
+    const adminTok = login.json.token
+
+    // 公司管理员不能自己停自己。
+    const selfOff = await req(base, 'PATCH', `/orgs/${contosoId}`, { token: adminTok, body: { status: 'disabled' } })
+    assert(selfOff.status === 403, `admin 停自己 ${selfOff.status} ${selfOff.text}`)
+
+    const bad = await req(base, 'PATCH', `/orgs/${contosoId}`, { token: ownerTok, body: { status: '停' } })
+    assert(bad.status === 400, `坏状态 ${bad.status} ${bad.text}`)
+
+    const off = await req(base, 'PATCH', `/orgs/${contosoId}`, { token: ownerTok, body: { status: 'disabled' } })
+    assert(off.status === 200 && off.json.company.status === 'disabled', `disable ${off.status} ${off.text}`)
+
+    // 手上那张票也失效，不用等它过期。
+    const withToken = await req(base, 'GET', '/me', { token: adminTok })
+    assert(withToken.status === 403, `停用后旧票 ${withToken.status} ${withToken.text}`)
+    const reLogin = await req(base, 'POST', '/auth/login', {
+      body: { email: 'admin@contoso.test', password: 'correct-horse-1' },
+    })
+    assert(reLogin.status === 403, `停用后登录 ${reLogin.status} ${reLogin.text}`)
+
+    const on = await req(base, 'PATCH', `/orgs/${contosoId}`, { token: ownerTok, body: { status: 'active' } })
+    assert(on.status === 200 && on.json.company.status === 'active', `enable ${on.status} ${on.text}`)
+    const back = await req(base, 'POST', '/auth/login', {
+      body: { email: 'admin@contoso.test', password: 'correct-horse-1' },
+    })
+    assert(back.status === 200, `启用后登录 ${back.status} ${back.text}`)
+  })
+
+  await test('下单：生成公司订阅 + 一条账单，生效中的那条订单说了算', async () => {
+    const skus = await req(base, 'GET', '/platform/plans', { token: ownerTok })
+    const sku = (skus.json.plans || [])[0]
+    assert(sku, '没有套餐可下单')
+
+    const today = new Date().toISOString().slice(0, 10)
+    // 未付款：只开账单，不动公司的订阅。
+    const created = await req(base, 'POST', '/platform/orders', {
+      token: ownerTok,
+      body: { companyId: contosoId, planId: sku.id, startAt: today },
+    })
+    assert(created.status === 201, `order ${created.status} ${created.text}`)
+    const order = created.json.order
+    assert(order.payStatus === 'unpaid', `默认应是未付款 ${order.payStatus}`)
+    assert(created.json.invoice && created.json.invoice.orderId === order.id, `账单没跟着开 ${created.text}`)
+    assert(created.json.invoice.status === 'unpaid' && created.json.invoice.paidAt === null, '未付款不该记付款时间')
+
+    const unpaid = await req(base, 'GET', `/orgs/${contosoId}`, { token: ownerTok })
+    assert(unpaid.json.plan.skuId === null, `未付款不该写订阅 ${JSON.stringify(unpaid.json.plan)}`)
+    assert(unpaid.json.plan.expiresAt === null, `未付款不该写到期时间 ${unpaid.json.plan.expiresAt}`)
+    // 单子在库里，但客户那边的账单只列已付款的：没付的不算成交。
+    const unpaidBilling = await req(base, 'GET', `/orgs/${contosoId}/billing`, { token: ownerTok })
+    assert(unpaidBilling.json.invoices.length === 0, `未付款不该出现在账单里 ${JSON.stringify(unpaidBilling.json.invoices)}`)
+    assert(unpaidBilling.json.plan.status === '未订阅', `未付款订阅状态 ${unpaidBilling.json.plan.status}`)
+
+    // 改成已付款：这时才写公司的订阅。
+    const paid = await req(base, 'PUT', `/platform/orders/${order.id}`, { token: ownerTok, body: { payStatus: 'paid' } })
+    assert(paid.status === 200 && paid.json.order.payStatus === 'paid', `pay ${paid.status} ${paid.text}`)
+    assert(paid.json.invoice.id === created.json.invoice.id, '付款不该再开一张账单')
+    assert(paid.json.invoice.status === 'paid' && paid.json.invoice.paidAt, '账单没记付款')
+
+    const detail = await req(base, 'GET', `/orgs/${contosoId}`, { token: ownerTok })
+    assert(detail.json.plan.skuId === sku.id, `订阅套餐 ${detail.json.plan.skuId}`)
+    assert(detail.json.plan.expiresAt === order.endAt, `到期时间 ${detail.json.plan.expiresAt} ≠ ${order.endAt}`)
+    assert(detail.json.plan.seats === order.seats, `席位 ${detail.json.plan.seats} ≠ ${order.seats}`)
+
+    const billing = await req(base, 'GET', `/orgs/${contosoId}/billing`, { token: ownerTok })
+    assert(billing.status === 200, `billing ${billing.status} ${billing.text}`)
+    assert(billing.json.invoices.length === 1, `账单条数 ${billing.json.invoices.length}`)
+    assert(billing.json.invoices[0].status === '已付款', `账单状态 ${billing.json.invoices[0].status}`)
+    assert(billing.json.plan.name === sku.name, `账单页套餐 ${billing.json.plan.name}`)
+
+    const bad = await req(base, 'PUT', `/platform/orders/${order.id}`, { token: ownerTok, body: { payStatus: '给钱了' } })
+    assert(bad.status === 400, `坏付款状态 ${bad.status} ${bad.text}`)
+
+    // 改回未付款：订阅当场撤掉，账单还在（还是那一张）。
+    const moved = await req(base, 'PUT', `/platform/orders/${order.id}`, {
+      token: ownerTok,
+      body: { startAt: '2031-01-01', payStatus: 'unpaid' },
+    })
+    assert(moved.status === 200, `move ${moved.status} ${moved.text}`)
+    assert(moved.json.invoice.id === created.json.invoice.id, '改单不该再开一张账单')
+    assert(moved.json.invoice.status === 'unpaid' && moved.json.invoice.paidAt === null, '账单没跟着改回未付款')
+
+    const after = await req(base, 'GET', `/orgs/${contosoId}`, { token: ownerTok })
+    assert(after.json.plan.skuId === null && after.json.plan.expiresAt === null, `订阅没清 ${JSON.stringify(after.json.plan)}`)
+    assert(after.json.plan.seats >= after.json.plan.used, '席位不能少于在册人数')
+
+    // 退回未付款：账单那条记录还在库里（还是同一张），但客户端不再列出来。
+    const billing2 = await req(base, 'GET', `/orgs/${contosoId}/billing`, { token: ownerTok })
+    assert(billing2.json.invoices.length === 0, `退回未付款还列着 ${JSON.stringify(billing2.json.invoices)}`)
+  })
+
+  await test('单独充值：不过期，跟套餐赠送分开算', async () => {
+    // 起点：没有生效套餐（上一条用例把订单挪到了未来），赠送额度是 0。
+    const before = await req(base, 'GET', `/orgs/${contosoId}`, { token: ownerTok })
+    assert(before.json.balance, '公司详情缺 balance')
+    assert(before.json.balance.planBonusMils === 0, `没生效套餐时赠送应为 0，实际 ${before.json.balance.planBonusMils}`)
+    const topupBefore = before.json.balance.topupMils
+
+    const zero = await req(base, 'POST', '/platform/orders', {
+      token: ownerTok,
+      body: { kind: 'topup', companyId: contosoId, amount: 0 },
+    })
+    assert(zero.status === 400, `0 元充值 ${zero.status} ${zero.text}`)
+
+    // 未付款的充值单：只有单子，没有充值记录，余额不动。
+    const draft = await req(base, 'POST', '/platform/orders', {
+      token: ownerTok,
+      body: { kind: 'topup', companyId: contosoId, amount: 12.5, note: '线下转账' },
+    })
+    assert(draft.status === 201, `topup order ${draft.status} ${draft.text}`)
+    assert(draft.json.order.kind === 'topup' && draft.json.order.payStatus === 'unpaid', `单据 ${JSON.stringify(draft.json.order)}`)
+    assert(draft.json.topup === null, `未付款不该有充值记录 ${JSON.stringify(draft.json.topup)}`)
+    assert(draft.json.balance.topupMils === topupBefore, `未付款余额被动了 ${draft.json.balance.topupMils}`)
+    const noRecord = await req(base, 'GET', `/orgs/${contosoId}/topups`, { token: ownerTok })
+    assert(noRecord.json.topups.length === 0, `未付款不该有记录 ${JSON.stringify(noRecord.json.topups)}`)
+
+    // 改成已付款：这时才开充值记录，余额才涨。
+    const made = await req(base, 'PUT', `/platform/orders/${draft.json.order.id}`, {
+      token: ownerTok,
+      body: { payStatus: 'paid' },
+    })
+    assert(made.status === 200, `pay topup ${made.status} ${made.text}`)
+    assert(made.json.topup && made.json.topup.amountMils === 12500, `充值记录 ${JSON.stringify(made.json.topup)}`)
+    assert(made.json.balance.topupMils === topupBefore + 12500, `充值余额 ${made.json.balance.topupMils}`)
+    assert(made.json.balance.planBonusMils === 0, '充值不该混进套餐赠送')
+
+    // 充值单也在同一张订单表里，跟套餐单并排列出来。
+    const listed = await req(base, 'GET', '/platform/orders', { token: ownerTok })
+    assert(listed.status === 200, `list ${listed.status} ${listed.text}`)
+    const row = (listed.json.orders || []).find((x) => x.id === draft.json.order.id)
+    assert(row && row.kind === 'topup' && row.note === '线下转账', `订单表里的充值单 ${JSON.stringify(row)}`)
+    assert((listed.json.orders || []).some((x) => x.kind === 'plan'), '套餐单也该在同一张表里')
+
+    // 退回未付款：记录撤掉，余额掉回去；再付回来记录重新出现。
+    const back = await req(base, 'PUT', `/platform/orders/${draft.json.order.id}`, {
+      token: ownerTok,
+      body: { payStatus: 'unpaid' },
+    })
+    assert(back.status === 200 && back.json.topup === null, `退回未付款 ${back.text}`)
+    assert(back.json.balance.topupMils === topupBefore, `退回后余额 ${back.json.balance.topupMils}`)
+    const repaid = await req(base, 'PUT', `/platform/orders/${draft.json.order.id}`, {
+      token: ownerTok,
+      body: { payStatus: 'paid' },
+    })
+    assert(repaid.status === 200 && repaid.json.balance.topupMils === topupBefore + 12500, `再付款 ${repaid.text}`)
+
+    // 充值单不是订阅：它不该把公司的套餐顶掉。
+    const notPlan = await req(base, 'GET', `/orgs/${contosoId}`, { token: ownerTok })
+    assert(notPlan.json.plan.skuId === null, `充值单不该变成订阅 ${JSON.stringify(notPlan.json.plan)}`)
+
+    // 改充值单（界面就是这个形状：不带 kind），改完还得是充值单，记录跟着改。
+    const day = new Date().toISOString().slice(0, 10)
+    const amend = await req(base, 'PUT', `/platform/orders/${draft.json.order.id}`, {
+      token: ownerTok,
+      body: { companyId: contosoId, amount: 20, note: '改成 20', startAt: day, payStatus: 'paid' },
+    })
+    assert(amend.status === 200, `改充值单 ${amend.status} ${amend.text}`)
+    assert(amend.json.order.kind === 'topup', `改完变成了 ${amend.json.order.kind}`)
+    assert(amend.json.topup.amountMils === 20000 && amend.json.topup.note === '改成 20', `记录没跟着改 ${JSON.stringify(amend.json.topup)}`)
+    assert(amend.json.balance.topupMils === topupBefore + 20000, `余额 ${amend.json.balance.topupMils}`)
+
+    // 类型不给改：想换就另开一单。
+    const anySku = ((await req(base, 'GET', '/platform/plans', { token: ownerTok })).json.plans || [])[0]
+    const swap = await req(base, 'PUT', `/platform/orders/${draft.json.order.id}`, {
+      token: ownerTok,
+      body: { kind: 'plan', planId: anySku.id },
+    })
+    assert(swap.status === 400, `类型居然能改 ${swap.status} ${swap.text}`)
+    const stillTopup = await req(base, 'GET', `/platform/orders/${draft.json.order.id}`, { token: ownerTok })
+    assert(stillTopup.json.order.kind === 'topup', `被改成了 ${stillTopup.json.order.kind}`)
+
+    // 改回 12.5，后面几条断言按这个数来。
+    await req(base, 'PUT', `/platform/orders/${draft.json.order.id}`, {
+      token: ownerTok,
+      body: { companyId: contosoId, amount: 12.5, note: '线下转账', startAt: day, payStatus: 'paid' },
+    })
+
+    // 让套餐重新生效并带上赠送额度：赠送出现，充值余额不受影响。
+    const today = new Date().toISOString().slice(0, 10)
+    const orders = await req(base, 'GET', '/platform/orders', { token: ownerTok })
+    const order = (orders.json.orders || []).find((o) => o.companyId === contosoId && o.kind === 'plan')
+    assert(order, '缺这家公司的套餐单')
+    const paid = await req(base, 'PUT', `/platform/orders/${order.id}`, {
+      token: ownerTok,
+      body: { startAt: today, payStatus: 'paid', bonusTokens: 5 },
+    })
+    assert(paid.status === 200, `pay ${paid.status} ${paid.text}`)
+    assert(paid.json.order.bonusMils === 5000, `订单赠送额度 ${paid.json.order.bonusMils}`)
+
+    const after = await req(base, 'GET', `/orgs/${contosoId}`, { token: ownerTok })
+    assert(after.json.balance.planBonusMils === 5000, `赠送余额 ${after.json.balance.planBonusMils}`)
+    assert(after.json.balance.planBonusExpiresAt === paid.json.order.endAt, '赠送余额的到期时间要跟着套餐')
+    assert(after.json.balance.topupMils === topupBefore + 12500, `充值余额被套餐动了 ${after.json.balance.topupMils}`)
+
+    // 套餐再次失效：赠送清零，充值仍在。
+    const off = await req(base, 'PUT', `/platform/orders/${order.id}`, { token: ownerTok, body: { payStatus: 'unpaid' } })
+    assert(off.status === 200, `unpay ${off.status} ${off.text}`)
+    const cleared = await req(base, 'GET', `/orgs/${contosoId}`, { token: ownerTok })
+    assert(cleared.json.balance.planBonusMils === 0, `套餐失效后赠送要清零 ${cleared.json.balance.planBonusMils}`)
+    assert(cleared.json.balance.topupMils === topupBefore + 12500, `充值不该跟着清 ${cleared.json.balance.topupMils}`)
+
+    // 公司管理员看得到自己家的明细，但充值这件事只有 owner 能做。
+    const own = await req(base, 'GET', `/orgs/${contosoId}/topups`, { token: ownerTok })
+    assert(own.status === 200 && own.json.topups.length >= 1, `明细 ${own.status} ${own.text}`)
+    const login = await req(base, 'POST', '/auth/login', {
+      body: { email: 'admin@contoso.test', password: 'correct-horse-1' },
+    })
+    assert(login.status === 200, `login ${login.status} ${login.text}`)
+    const ownDetail = await req(base, 'GET', `/orgs/${contosoId}/topups`, { token: login.json.token })
+    assert(ownDetail.status === 200 && ownDetail.json.balance, `管理员看自己家 ${ownDetail.status} ${ownDetail.text}`)
+    const notOwner = await req(base, 'POST', '/platform/orders', {
+      token: login.json.token,
+      body: { kind: 'topup', companyId: contosoId, amount: 1 },
+    })
+    assert(notOwner.status === 403, `公司管理员不能下单充值 ${notOwner.status}`)
+
+    // 公司管理员的账单页：充值记录看得到，两笔余额分开列。
+    const bill = await req(base, 'GET', `/orgs/${contosoId}/billing`, { token: login.json.token })
+    assert(bill.status === 200, `billing ${bill.status} ${bill.text}`)
+    assert(bill.json.topups.length >= 1, `账单页缺充值记录 ${JSON.stringify(bill.json.topups)}`)
+    const t0 = bill.json.topups[0]
+    assert(t0.amount === '$12.50' && t0.note === '线下转账' && /^\d{4}-\d{2}-\d{2}$/.test(t0.time), `充值记录 ${JSON.stringify(t0)}`)
+    assert(bill.json.balance.topup === '$12.50', `充值余额 ${bill.json.balance.topup}`)
+    // 上面刚把订单改回未付款，赠送这时应该是 0，且两笔不混在一起。
+    assert(bill.json.balance.planBonus === '$0.00', `赠送余额 ${bill.json.balance.planBonus}`)
+    assert(bill.json.balance.amount === '$12.50', `合计 ${bill.json.balance.amount}`)
+  })
+
+  await test('激活人数不能超过席位：满了激活失败，加席位或停人之后才放行', async () => {
+    const org = await req(base, 'POST', '/platform/orgs', {
+      token: ownerTok,
+      body: {
+        name: 'SeatCap',
+        slug: 'seatcap',
+        contactName: '赵六',
+        contactPhone: '+86 13800000000',
+        contactEmail: 'c@seatcap.test',
+        adminEmail: 'admin@seatcap.test',
+        adminPassword: 'correct-horse-1',
+      },
+    })
+    assert(org.status === 201, `create org ${org.status} ${org.text}`)
+    const id = org.json.company.id
+    assert(org.json.plan.seats === 1 && org.json.plan.used === 1, `起步 ${JSON.stringify(org.json.plan)}`)
+
+    // 1 个席位已被管理员占满，再邀人应当被挡。
+    const overflow = await req(base, 'POST', `/orgs/${id}/accounts/members`, {
+      token: ownerTok,
+      body: { email: 'm1@seatcap.test', name: '甲', role: 'member' },
+    })
+    assert(overflow.status === 409, `席位满还能邀人 ${overflow.status} ${overflow.text}`)
+
+    const up = await req(base, 'PUT', `/platform/orgs/${id}/plan`, { token: ownerTok, body: { seats: 2 } })
+    assert(up.status === 200 && up.json.seats === 2, `加席位 ${up.status} ${up.text}`)
+
+    const m1 = await req(base, 'POST', `/orgs/${id}/accounts/members`, {
+      token: ownerTok,
+      body: { email: 'm1@seatcap.test', name: '甲', role: 'member' },
+    })
+    assert(m1.status === 201, `邀请 ${m1.status} ${m1.text}`)
+    const m1Id = m1.json.user.id
+
+    // 待接受也占位：第 3 个人进不来。
+    const m2 = await req(base, 'POST', `/orgs/${id}/accounts/members`, {
+      token: ownerTok,
+      body: { email: 'm2@seatcap.test', name: '乙', role: 'member' },
+    })
+    assert(m2.status === 409, `超席位还能邀 ${m2.status} ${m2.text}`)
+
+    // 停用之后腾出席位，别人进得来。
+    const off = await req(base, 'PATCH', `/orgs/${id}/accounts/${m1Id}`, { token: ownerTok, body: { status: 'disabled' } })
+    assert(off.status === 200 && off.json.account.status === 'disabled', `停用 ${off.status} ${off.text}`)
+    const m2Again = await req(base, 'POST', `/orgs/${id}/accounts/members`, {
+      token: ownerTok,
+      body: { email: 'm2@seatcap.test', name: '乙', role: 'member' },
+    })
+    assert(m2Again.status === 201, `腾了席位还邀不进来 ${m2Again.status} ${m2Again.text}`)
+
+    // 席位又满了：把停用的人激活回来要被挡住。
+    const back = await req(base, 'PATCH', `/orgs/${id}/accounts/${m1Id}`, { token: ownerTok, body: { status: 'active' } })
+    assert(back.status === 409, `席位满还能激活 ${back.status} ${back.text}`)
+    assert(String(back.text).includes('席位'), `报错该提席位 ${back.text}`)
+    const still = await req(base, 'GET', `/orgs/${id}/accounts/${m1Id}`, { token: ownerTok })
+    assert(still.json.account.status === 'disabled', `没激活成却改了状态 ${still.json.account.status}`)
+
+    // 加席位之后才放行。
+    const up3 = await req(base, 'PUT', `/platform/orgs/${id}/plan`, { token: ownerTok, body: { seats: 3 } })
+    assert(up3.status === 200, `加到 3 席 ${up3.status} ${up3.text}`)
+    const ok = await req(base, 'PATCH', `/orgs/${id}/accounts/${m1Id}`, { token: ownerTok, body: { status: 'active' } })
+    assert(ok.status === 200 && ok.json.account.status === 'active', `加了席位还激活不了 ${ok.status} ${ok.text}`)
+
+    const listed = await req(base, 'GET', `/orgs/${id}/accounts`, { token: ownerTok })
+    assert(listed.json.seats.used === 3 && listed.json.seats.total === 3, `席位统计 ${JSON.stringify(listed.json.seats)}`)
+
+    // 并发激活不能一起挤进来：先腾出一个席位，两个请求同时抢。
+    await req(base, 'PATCH', `/orgs/${id}/accounts/${m1Id}`, { token: ownerTok, body: { status: 'disabled' } })
+    const m2Id = m2Again.json.user.id
+    await req(base, 'PATCH', `/orgs/${id}/accounts/${m2Id}`, { token: ownerTok, body: { status: 'disabled' } })
+    const down = await req(base, 'PUT', `/platform/orgs/${id}/plan`, { token: ownerTok, body: { seats: 2 } })
+    assert(down.status === 200, `降到 2 席 ${down.status} ${down.text}`)
+    const both = await Promise.all([
+      req(base, 'PATCH', `/orgs/${id}/accounts/${m1Id}`, { token: ownerTok, body: { status: 'active' } }),
+      req(base, 'PATCH', `/orgs/${id}/accounts/${m2Id}`, { token: ownerTok, body: { status: 'active' } }),
+    ])
+    const okCount = both.filter((r) => r.status === 200).length
+    assert(okCount === 1, `并发激活应只成一个，实际 ${both.map((r) => r.status).join('/')}`)
+    const after = await req(base, 'GET', `/orgs/${id}/accounts`, { token: ownerTok })
+    assert(after.json.seats.used <= after.json.seats.total, `超卖了 ${JSON.stringify(after.json.seats)}`)
   })
 
   await test('owner 公司列表弹窗 + 详情 SPA；成员/订阅 API 按 path id', async () => {
@@ -1079,14 +1628,19 @@ async function runGateway() {
     const r = await req(base, 'GET', `/orgs/${inviteOrg}/billing`, { token: inviteAdminTok })
     assert(r.status === 200, `billing ${r.status} ${r.text}`)
     assert(r.json.plan && r.json.plan.name === '席位套餐', 'plan.name')
-    assert(r.json.plan.status === '生效中', 'plan.status')
+    // 这家没下过单：订阅状态就是「未订阅」，不假装生效中。
+    assert(r.json.plan.status === '未订阅', `plan.status ${r.json.plan.status}`)
     assert(r.json.plan.seats === `${plan.json.seats} 个席位`, `seats ${r.json.plan.seats}`)
     assert(r.json.plan.used === plan.json.used, `used ${r.json.plan.used}`)
     assert(r.json.plan.cycle === '—' && r.json.plan.period === '—' && r.json.plan.renew === '—' && r.json.plan.amount === '—', 'unwired plan fields')
     assert(r.json.plan.autoRenew === false, 'autoRenew')
     assert(Array.isArray(r.json.invoices) && r.json.invoices.length === 0, 'invoices empty')
     assert(Array.isArray(r.json.topups) && r.json.topups.length === 0, 'topups empty')
-    assert(r.json.balance && r.json.balance.amount === '—' && r.json.balance.spentThisMonth === '—' && r.json.balance.alertAt === '—', 'balance empty')
+    // 这家没订单也没充值，两笔额度都是真的 0；已用和预警线还没接，仍是 —。
+    assert(r.json.balance && r.json.balance.amount === '$0.00', `balance.amount ${r.json.balance && r.json.balance.amount}`)
+    assert(r.json.balance.planBonus === '$0.00' && r.json.balance.planBonusExpires === '—', `planBonus ${r.json.balance.planBonus}`)
+    assert(r.json.balance.topup === '$0.00', `topup ${r.json.balance.topup}`)
+    assert(r.json.balance.spentThisMonth === '—' && r.json.balance.alertAt === '—', 'spent/alert 未接')
     assert(r.json.mock !== true, 'mock:true')
     assert(!dumpHas(r.json, '$286'), '$286')
     assert(!dumpHas(r.json, '$1,150'), '$1,150')
@@ -1382,12 +1936,13 @@ async function runGateway() {
 
     const patched = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${id}`, {
       token: adminTok,
+      // 头像改版后键换了一套。老键仍然收，映射到新的那一个存下来。
       body: { prompt: '你是客服。', enabled: false, icon: 'chat' },
     })
     assert(patched.status === 200, `patch ${patched.status} ${patched.text}`)
     assert(patched.json.bot.prompt === '你是客服。', 'prompt')
     assert(patched.json.bot.enabled === false, 'enabled false')
-    assert(patched.json.bot.icon === 'chat', 'icon')
+    assert(patched.json.bot.icon === 'c-chat', `icon ${patched.json.bot.icon}`)
 
     const opts = await req(base, 'GET', `/orgs/${inviteOrg}/bots/options`, { token: adminTok })
     assert(opts.status === 200, `options ${opts.status} ${opts.text}`)
@@ -1423,6 +1978,92 @@ async function runGateway() {
     assert(String(gone.json.error).includes('没有这个助理'), '404 文案')
     const after = await req(base, 'GET', `/orgs/${inviteOrg}/bots`, { token: adminTok })
     assert(!after.json.bots.some((b) => b.id === id), 'list gone')
+  })
+
+  await test('行为边界与记忆：存得下、读得回、越界的收口', async () => {
+    const login = await req(base, 'POST', '/auth/login', {
+      body: { email: 'boss@invite.test', password: 'new-horse-10' },
+    })
+    const tok = login.json.token
+
+    const made = await req(base, 'POST', `/orgs/${inviteOrg}/bots`, { token: tok, body: { name: '记忆助手' } })
+    assert(made.status === 201, `create ${made.status} ${made.text}`)
+    const bot = made.json.bot
+    // 新建就带全套默认，不是 undefined——前端照着画，缺了就得各自兜底。
+    assert(bot.guards && bot.guards['high-risk'] === true && bot.guards.pii === true, `默认守卫 ${JSON.stringify(bot.guards)}`)
+    assert(bot.memory && bot.memory.on === true && bot.memory.scope === '所属分组', `默认记忆 ${JSON.stringify(bot.memory)}`)
+    assert(bot.memory.cap === 20 && bot.memory.ttl === '90 天', `默认上限/时长 ${JSON.stringify(bot.memory)}`)
+
+    const saved = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${bot.id}`, {
+      token: tok,
+      body: {
+        greeting: '你好，我是客服',
+        escalate: '连续 3 次说不清就转人工',
+        // 只传改动的那一个开关，另外两个不该被带回默认。
+        guards: { pii: false },
+        // 认不出的记录类型丢掉；注入上限按 5–50 收口。
+        memory: { scope: '全公司', kinds: ['流程', '瞎写的'], ttl: '永久保留', cap: 999, confirm: false },
+      },
+    })
+    assert(saved.status === 200, `patch ${saved.status} ${saved.text}`)
+    const g = saved.json.bot.guards
+    assert(g.pii === false && g['high-risk'] === true && g['no-external'] === true, `守卫合并 ${JSON.stringify(g)}`)
+    const m = saved.json.bot.memory
+    assert(m.scope === '全公司' && m.ttl === '永久保留', `记忆 ${JSON.stringify(m)}`)
+    assert(m.kinds.length === 1 && m.kinds[0] === '流程', `认不出的类型没丢 ${JSON.stringify(m.kinds)}`)
+    assert(m.cap === 50, `注入上限没收口：${m.cap}`)
+    assert(m.confirm === false && m.pii === true, `没传的那几项被带回默认了 ${JSON.stringify(m)}`)
+
+    // 真落库了才算数：回执对、重新拉一次也对。
+    const back = await req(base, 'GET', `/orgs/${inviteOrg}/bots/${bot.id}`, { token: tok })
+    assert(back.json.bot.greeting === '你好，我是客服', `开场问候 ${back.json.bot.greeting}`)
+    assert(back.json.bot.escalate.includes('转人工'), `升级条件 ${back.json.bot.escalate}`)
+    assert(back.json.bot.guards.pii === false, '守卫没落库')
+    assert(back.json.bot.memory.cap === 50 && back.json.bot.memory.scope === '全公司', '记忆没落库')
+
+    await req(base, 'DELETE', `/orgs/${inviteOrg}/bots/${bot.id}`, { token: tok })
+  })
+
+  await test('Bot 用平台指定的模型：自己挑不了，平台换了就跟着换', async () => {
+    const login = await req(base, 'POST', '/auth/login', {
+      body: { email: 'boss@invite.test', password: 'new-horse-10' },
+    })
+    const tok = login.json.token
+
+    // 动的是平台设置，后面的用例还要用——先抄一份，走完放回去。
+    const before = (await req(base, 'GET', '/platform/settings', { token: ownerTok })).json
+    await req(base, 'PUT', '/platform/settings', {
+      token: ownerTok,
+      body: { daily: { provider: 'e2e-fake', model: 'pinned-one' } },
+    })
+    const made = await req(base, 'POST', `/orgs/${inviteOrg}/bots`, {
+      token: tok,
+      // 建的时候就想指一个别的，不能得逞。
+      body: { name: '挑模型的', provider: 'openai', model: 'gpt-9-ultra' },
+    })
+    assert(made.status === 201, `create ${made.status} ${made.text}`)
+    assert(made.json.bot.model === 'pinned-one', `建出来是 ${made.json.bot.model}`)
+    assert(made.json.bot.provider === 'e2e-fake', `建出来的供应商是 ${made.json.bot.provider}`)
+    const botId = made.json.bot.id
+
+    const patched = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${botId}`, {
+      token: tok,
+      body: { provider: 'openai', model: 'gpt-9-ultra' },
+    })
+    assert(patched.json.bot.model === 'pinned-one', `改完变成了 ${patched.json.bot.model}`)
+
+    // 平台换一个：这个 Bot 从头到尾没再被保存过，读出来也得跟着换。
+    await req(base, 'PUT', '/platform/settings', {
+      token: ownerTok,
+      body: { daily: { provider: 'e2e-fake', model: 'pinned-two' } },
+    })
+    const back = await req(base, 'GET', `/orgs/${inviteOrg}/bots/${botId}`, { token: tok })
+    assert(back.json.bot.model === 'pinned-two', `平台换了之后还是 ${back.json.bot.model}`)
+    const listed = (await req(base, 'GET', `/orgs/${inviteOrg}/bots`, { token: tok })).json.bots.find((b) => b.id === botId)
+    assert(listed.model === 'pinned-two', `列表里还是 ${listed.model}`)
+
+    await req(base, 'DELETE', `/orgs/${inviteOrg}/bots/${botId}`, { token: tok })
+    await req(base, 'PUT', '/platform/settings', { token: ownerTok, body: { daily: before.daily, utility: before.utility } })
   })
 
   await test('公司 Skill / MCP：列表、步骤摘要、token 不回传、权限、SPA', async () => {
@@ -1622,20 +2263,23 @@ async function runGateway() {
     assert(got.status === 200, `get ${got.status}`)
     assert(got.json.bot.skills[0] === skillId && got.json.bot.mcps[0] === mcpId, 'get ids')
 
-    const rt = await req(base, 'GET', '/runtime/catalog', { token: adminTok })
-    assert(rt.status === 200, `runtime ${rt.status} ${rt.text}`)
-    const srv = (rt.json.servers || []).find((s) => s.id === mcpId)
-    assert(srv && srv.token === 'bind-secret-token', 'runtime 应带 token')
-    assert(srv.env && srv.env.API_KEY === 'mcp-env-runtime-secret', 'runtime 应带 env')
+    // /runtime/catalog 会带出 MCP 明文 token 与 env，只给席位 sat_，不给浏览器 JWT。
+    const rtJwt = await req(base, 'GET', '/runtime/catalog', { token: adminTok })
+    assert(rtJwt.status === 401, `runtime 不该收 JWT ${rtJwt.status} ${rtJwt.text}`)
+    assert(!dumpHas(rtJwt.json, 'bind-secret-token'), 'JWT 拿到了 MCP token')
+    assert(!dumpHas(rtJwt.json, 'mcp-env-runtime-secret'), 'JWT 拿到了 MCP env')
     const orgMcp = await req(base, 'GET', `/orgs/${inviteOrg}/mcp-servers/${mcpId}`, { token: adminTok })
     assert(!dumpHas(orgMcp.json, 'bind-secret-token'), 'org get 泄漏 token')
     assert(!dumpHas(orgMcp.json, 'mcp-env-runtime-secret'), 'org get 泄漏 env')
     const meAdmin = await req(base, 'GET', '/me', { token: adminTok })
     const platAcc = await req(base, 'GET', `/platform/accounts/${meAdmin.json.account.id}`, { token: ownerTok })
     const satRt = await req(base, 'GET', '/runtime/catalog', { token: platAcc.json.accessToken })
-    assert(satRt.status === 200, `sat runtime ${satRt.status}`)
+    assert(satRt.status === 200, `sat runtime ${satRt.status} ${satRt.text}`)
     const satSrv = (satRt.json.servers || []).find((x) => x.id === mcpId)
-    assert(satSrv && satSrv.token === 'bind-secret-token' && satSrv.env && satSrv.env.API_KEY === 'mcp-env-runtime-secret', 'sat runtime env')
+    assert(satSrv && satSrv.token === 'bind-secret-token', 'sat runtime 应带 token')
+    assert(satSrv.env && satSrv.env.API_KEY === 'mcp-env-runtime-secret', 'sat runtime 应带 env')
+    const rtKey = await req(base, 'GET', '/runtime/catalog', { token: platAcc.json.apiKey })
+    assert(rtKey.status === 401, `runtime 不该收 sk_sw_ ${rtKey.status}`)
 
     const patched = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${id}`, {
       token: adminTok,
@@ -1674,10 +2318,11 @@ async function runBot() {
     env: {
       SATUWORK_HOME: BOT_HOME,
       SATUWORK_PORT: String(BOT_PORT),
-      GATEWAY_MACHINE_TOKEN: MACHINE_TOK,
       // 本机套件：显式关掉 Gateway，避免继承环境里的 GATEWAY_URL 而不种 default。
+      // GATEWAY_TOKEN 要给：它是 bot 现在唯一认的入站凭据。catalog 的 configured
+      // 同时要 URL 和 token，URL 空着就仍然不去拉目录，照旧种 default。
       GATEWAY_URL: '',
-      GATEWAY_TOKEN: '',
+      GATEWAY_TOKEN: SEAT_TOK,
       GATEWAY_API_KEY: '',
       SATUWORK_BOT_ID: '',
       // 空 key 不删：套件不能因为没配模型就整组失败，但进程环境保持原样。
@@ -1702,10 +2347,22 @@ async function runBot() {
     assert(!String(r.text).toLowerCase().includes('<html'), '仍发 html')
   })
 
-  await test('机器凭证 GET /api/bots 不走 cookie', async () => {
-    const r = await req(base, 'GET', '/api/bots', { token: MACHINE_TOK })
+  await test('席位凭证 GET /api/bots 不走 cookie', async () => {
+    const r = await req(base, 'GET', '/api/bots', { token: SEAT_TOK })
     assert(r.status === 200, `machine ${r.status} ${r.text}`)
     assert(Array.isArray(r.json.bots) && r.json.bots.length >= 1, 'empty')
+  })
+
+  await test('大小写和尾斜杠都绕不过 /api 守卫', async () => {
+    // 路由是 path-to-regexp 编出来的正则，带 `i` 标志、还允许一个尾斜杠；守卫却是
+    // 按原样字符串 startsWith('/api/') 判的。两边口径不一致时 `GET /API/bots` 会两头
+    // 落空：守卫认为「不是 /api，放行」，路由照样命中——整个 /api 面未鉴权。
+    for (const path of ['/API/bots', '/Api/Bots', '/api/bots/', '/API/bots/']) {
+      const anon = await req(base, 'GET', path)
+      assert(anon.status === 401, `${path} 无票应 401，得到 ${anon.status} ${anon.text}`)
+      const ok = await req(base, 'GET', path, { token: SEAT_TOK })
+      assert(ok.status === 200, `${path} 有票应 200，得到 ${ok.status} ${ok.text}`)
+    }
   })
 
   await test('POST /api/auth/setup 拿会话 cookie', async () => {
@@ -1813,16 +2470,46 @@ async function runBot() {
     assert(ev.data.botId === botId, 'botId')
   })
 
-  await test('GET /internal/sessions/:id 机器凭证；错票 404 不暴露', async () => {
+  await test('GET /internal/sessions/:id 席位凭证；错票 404 不暴露', async () => {
     const none = await req(base, 'GET', `/internal/sessions/${sessionId}`)
     assert(none.status === 404, `no token ${none.status} ${none.text}`)
     const bad = await req(base, 'GET', `/internal/sessions/${sessionId}`, { token: 'wrong-token' })
     assert(bad.status === 404, `bad token ${bad.status}`)
-    const ok = await req(base, 'GET', `/internal/sessions/${sessionId}`, { token: MACHINE_TOK })
+    const ok = await req(base, 'GET', `/internal/sessions/${sessionId}`, { token: SEAT_TOK })
     assert(ok.status === 200, `ok ${ok.status} ${ok.text}`)
     assert(Array.isArray(ok.json.events) && ok.json.events[0]?.type === 'session', 'events')
-    const miss = await req(base, 'GET', '/internal/sessions/s-no-such', { token: MACHINE_TOK })
+    const miss = await req(base, 'GET', '/internal/sessions/s-no-such', { token: SEAT_TOK })
     assert(miss.status === 404, `missing ${miss.status}`)
+  })
+
+  // 并发/原子性在 session-store 那组用探针直接压 SessionService，这里只管真进程里读得通。
+  await test('旧格式会话经 /internal/sessions 读一次就地迁到 v3', async () => {
+    // v1 根事件：没有 botId / origin。读一次应就地迁到 v3。
+    const legacyId = 's-legacy-v1'
+    const file = join(BOT_HOME, 'sessions', `${legacyId}.jsonl`)
+    const lines = [
+      { seq: 1, time: 1, type: 'session', data: { version: 1, id: legacyId, createdAt: 1, title: '旧会话' } },
+      {
+        seq: 2,
+        time: 2,
+        type: 'user/message',
+        data: { message: { id: 'm1', role: 'user', content: [{ type: 'text', text: 'LEGACY-OK' }] }, source: { kind: 'user' } },
+      },
+    ]
+    writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+
+    const a = await req(base, 'GET', `/internal/sessions/${legacyId}`, { token: SEAT_TOK })
+    assert(a.status === 200, `legacy read ${a.status} ${a.text}`)
+    assert(a.json.events.length === 2, `事件条数 ${a.json.events.length}`)
+
+    const after = readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    assert(after.length === 2, `迁移后行数 ${after.length}`)
+    assert(after[0].data.version === 3, `迁移后 version ${after[0].data.version}`)
+    assert(after[0].data.botId === 'default', `迁移后 botId ${after[0].data.botId}`)
+    assert(after[0].data.origin === 'local', `迁移后 origin ${after[0].data.origin}`)
+    assert(JSON.stringify(after[1]) === JSON.stringify(lines[1]), '正文事件被改动')
+    const strays = readdirSync(join(BOT_HOME, 'sessions')).filter((f) => f.endsWith('.tmp'))
+    assert(strays.length === 0, `留下临时文件 ${strays.join(',')}`)
   })
 
   await test('未登录 GET /api/runtime/status → 401', async () => {
@@ -1853,6 +2540,7 @@ async function main() {
     process.exit(143)
   })
   try {
+    await requirePg()
     await runGateway()
     await runBot()
     await runRuntimePath({
@@ -1887,6 +2575,23 @@ async function main() {
       assert,
       log,
     })
+    await runLlmUsage({
+      gwRoot,
+      test,
+      req,
+      start,
+      waitHttp,
+      assert,
+      log,
+    })
+    await runSetup({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runStats({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
+    await runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log })
+    await runMarkdown({ root, test, assert, log })
+    await runSessionStore({ root, test, assert, log })
   } finally {
     killAll()
     try {
