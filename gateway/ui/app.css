@@ -108,9 +108,156 @@ body { margin: 0; background: var(--color-bg); color: var(--color-text); font-fa
 /* 消息流、气泡、输入区在 chat.css。这里只留对话页的外框。 */
 .gw-chat-empty, .gw-chat-empty-main { margin: 0; padding: var(--space-4); font-size: 14px; color: var(--muted-foreground); line-height: 1.6; }
 .gw-chat-empty-main { flex: 1; display: flex; align-items: center; justify-content: center; }
-/* 「对话」下面挂的 Bot 名册。左边一条竖线把它和上面的页面入口分开。 */
-.satu-subnav { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 2px 14px; padding-left: 10px; border-left: 1px solid var(--color-divider); }
-.satu-subnav-item { font-size: 13px; }
+/* ── 侧栏顶层的 Bot 名单 ──────────────────────────────────────────────
+   做成聊天列表的样子：头像、名字、最近回复的时间、一行摘要。它们是这个产品的主体，
+   不该藏在一个还要先点开的导航项底下。 */
+/* 名单占满剩余高度、自己滚。Bot 多的时候滚的是名单，而不是把下面的入口顶出屏幕。 */
+.satu-botlist { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+/* 页面入口沉在底部，不跟着名单滚。 */
+.satu-navfoot { flex: none; display: flex; flex-direction: column; gap: 2px; padding-top: 2px; }
+.satu-botrow {
+  display: flex;
+  /* 头像跨两行，所以竖直居中——只有一行（还没说过话的 Bot）时也一样居中，
+     行高从 34 塌到 34，看着不会跳。 */
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font-body);
+  text-align: left;
+  color: color-mix(in srgb, var(--color-text) 78%, transparent);
+}
+.satu-botrow:hover { background: color-mix(in srgb, var(--color-text) 6%, transparent); color: var(--color-text); }
+.satu-botrow[aria-current="true"] { background: var(--color-accent); color: var(--color-bg); }
+.satu-botrow[aria-current="true"]:hover { background: var(--color-accent-600); }
+.satu-botrow:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.satu-botavatar { flex: none; display: flex; align-items: center; }
+/* min-width: 0 是省略号能生效的前提——不写的话 flex 子项按内容宽度算，长名字会把
+   时间挤出侧栏。 */
+.satu-botmain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.satu-botline { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+
+/* ── 状态点 ────────────────────────────────────────────────────────
+   三态靠**形状**分，不只靠颜色：空闲是空心圈、执行中是实心并闪、待人工是实心琥珀。
+   只用颜色的话，色觉障碍的人看到的是三个一模一样的点；而且侧栏选中行会整条染成
+   品牌色，压在上面的纯色差别更难分。 */
+.satu-botdot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1.5px solid currentColor;
+  opacity: 0.4;
+  align-self: center;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.satu-botdot[data-state="busy"] {
+  background: currentColor;
+  opacity: 1;
+  animation: satu-blink 1.15s ease-in-out infinite;
+}
+.satu-botdot[data-state="review"] {
+  background: var(--color-warn-500);
+  border-color: var(--color-warn-500);
+  opacity: 1;
+  animation: none;
+}
+@keyframes satu-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.22; } }
+@media (prefers-reduced-motion: reduce) {
+  .satu-botdot[data-state="busy"] { animation: none; }
+}
+/* 收起侧栏时整行只剩头像，点跟着收掉——它挤在图标旁边只会让图标看着歪。 */
+.satu-rail .satu-botdot { display: none; }
+
+/* ── 机器通联指示灯 ──────────────────────────────────────────────────
+   和上面的 botdot 同一条规矩：**四态靠形状分，不只靠颜色**。在线是实心、迟了是实心
+   带闪、失联是空心粗环、没配对是空心虚线。色觉障碍的人只看颜色会看到四个一样的点，
+   而这盏灯的全部意义就是「一眼扫过去哪台不对」。
+
+   灯旁边永远跟着一句状态文字，那才是权威——灯只负责让人扫得快。 */
+.satu-linkdot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  border: 2px solid var(--muted-foreground);
+  align-self: center;
+}
+.satu-linkdot[data-link="online"] {
+  background: var(--color-ok-500);
+  border-color: var(--color-ok-500);
+}
+.satu-linkdot[data-link="stale"] {
+  background: var(--color-warn-500);
+  border-color: var(--color-warn-500);
+  animation: satu-blink 1.6s ease-in-out infinite;
+}
+/* 失联是**空心**：实心配深色在浅背景上反而不显眼，而空心粗环和上面两个实心点在
+   形状上一眼分得开。 */
+.satu-linkdot[data-link="offline"] {
+  background: transparent;
+  border-color: var(--destructive);
+}
+.satu-linkdot[data-link="unpaired"] {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--muted-foreground);
+}
+/* 说不上来的时候就画得说不上来：实心灰，既不像在线的绿，也不像没配对的虚线。 */
+.satu-linkdot[data-link="unknown"] {
+  background: var(--muted-foreground);
+  border-color: var(--muted-foreground);
+  opacity: 0.45;
+}
+@media (prefers-reduced-motion: reduce) {
+  .satu-linkdot[data-link="stale"] { animation: none; }
+}
+
+/* 机器卡片的头一行：灯、编号、短码、状态文字。编号和短码用等宽体——它们是用来
+   照着念和比对的，比例字体下 6a9434e2 里的 0/o、1/l 分不清。 */
+.satu-machinehead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+}
+.satu-machineno {
+  font-weight: 600;
+}
+.satu-machineid {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.satu-botname {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.satu-botrow[aria-current="true"] .satu-botname { font-weight: 600; }
+.satu-bottime { flex: none; font-size: 11px; opacity: 0.6; font-variant-numeric: tabular-nums; }
+/* 摘要只给一行。多行会让每一行的高度随内容跳，整份名单看着就散了。 */
+.satu-botsnip {
+  font-size: 12px;
+  opacity: 0.62;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.satu-botsnip[hidden] { display: none; }
+/* 收起侧栏时只剩头像，名字、时间、摘要一起收掉。 */
+.satu-rail .satu-botrow { justify-content: center; padding: 8px 0; }
+.satu-rail .satu-botmain { display: none; }
 .gw-chat-main > .gw-flash { margin: var(--space-3) var(--space-6) 0; }
 
 /* 金额输入框：$ 压在输入框左内边距里，输入内容相应右移让位。 */

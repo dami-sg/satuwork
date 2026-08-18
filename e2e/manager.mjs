@@ -8,9 +8,10 @@
  * 上游 bot 用一个 mock HTTP 顶替：反代要验的是「转过去了、头对不对、流不断」，
  * 不是 bot 本身。
  */
+import { createHash, sign } from 'node:crypto'
 import { createServer } from 'node:http'
 import { connect } from 'node:net'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 
@@ -297,6 +298,8 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
     })
 
     let deskCookie = ''
+    /** 落地页地址。下一条要从它的 query 里取 path——那正是 noVNC 建连的唯一依据。 */
+    let deskLanding = ''
 
     await test('桌面票：无票 401，有效票换 cookie 并跳转', async () => {
       const anon = await fetch(`${mgrBase}/seats/seat-1/vnc/`, { redirect: 'manual' })
@@ -309,7 +312,11 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         redirect: 'manual',
       })
       assert(r.status === 302, `换 cookie ${r.status}`)
-      assert(String(r.headers.get('location')).endsWith('/vnc.html'), 'location')
+      deskLanding = String(r.headers.get('location'))
+      assert(deskLanding.startsWith('/seats/seat-1/vnc/vnc.html'), `location=${deskLanding}`)
+      // 票里没带口令时不许凭空造一个 password 参数出来——那会让 noVNC 拿空口令去认证，
+      // 直接失败，而不是老老实实弹输入框。
+      assert(!deskLanding.includes('password='), `票里没口令却带了 password：${deskLanding}`)
       const setCookie = String(r.headers.get('set-cookie') || '')
       assert(setCookie.includes('HttpOnly'), 'cookie 要 HttpOnly')
       assert(setCookie.includes('Path=/seats/seat-1/vnc'), 'cookie 要限定到这个席位')
@@ -319,11 +326,65 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
     await test('拿着 cookie 能取 noVNC 静态资源，也能建 WebSocket', async () => {
       const page = await fetch(`${mgrBase}/seats/seat-1/vnc/vnc.html`, { headers: { cookie: deskCookie } })
       assert(page.status === 200, `静态 ${page.status}`)
-      const ws = await wsHandshake(MGR_PORT, '/seats/seat-1/vnc/websockify', deskCookie)
+      // **按 noVNC 自己的拼法去连**，不要照着「应该是什么路径」手写——它拼的是
+      // `'/' + path`（从根开始），path 只能从落地页的 query 里来。原先这条断言直接
+      // 写死了正确路径，于是「跳转没把 path 告诉 noVNC」这个 bug 一路测过去了：
+      // 反代是好的，可 noVNC 压根不会往这儿连，它去连了 /websockify。
+      const novncPath = new URLSearchParams(deskLanding.split('?')[1] || '').get('path')
+      assert(novncPath, `落地页没带 path，noVNC 会去连 /websockify：${deskLanding}`)
+      const ws = await wsHandshake(MGR_PORT, '/' + novncPath, deskCookie)
       assert(ws.includes('101'), `升级失败: ${ws.slice(0, 120)}`)
       assert(ws.includes('HELLO-WS'), '升级后字节没通')
-      const noAuth = await wsHandshake(MGR_PORT, '/seats/seat-1/vnc/websockify', '')
+      const noAuth = await wsHandshake(MGR_PORT, '/' + novncPath, '')
       assert(noAuth.includes('401'), `无 cookie 的升级应 401: ${noAuth.slice(0, 80)}`)
+    })
+
+    await test('口令随票带过来时，落地页直接免密进桌面', async () => {
+      // 「打开桌面」的意图是看桌面，不是打开一个还要人回去抄一遍口令的登录框。
+      // Gateway 把席位口令签在票里，管家验完签转成 noVNC 认的 password 参数。
+      const ticket = mintTicketWithPassword(GW_HOME, 'seat-1', 'PW-secret-9')
+      const r = await fetch(`${mgrBase}/seats/seat-1/vnc/?ticket=${encodeURIComponent(ticket)}`, {
+        redirect: 'manual',
+      })
+      assert(r.status === 302, `换 cookie ${r.status}`)
+      const loc = String(r.headers.get('location'))
+      const q = new URLSearchParams(loc.split('?')[1] || '')
+      assert(q.get('password') === 'PW-secret-9', `口令没转过去：${loc}`)
+      assert(q.get('autoconnect') === '1', `没自动连：${loc}`)
+      assert(q.get('path'), `path 丢了：${loc}`)
+    })
+
+    await test('席位诊断：给得出现场，而且不漏凭据', async () => {
+      // 这个接口是为「没有 SSH 就看不见机器」补的洞。它最该答上的几个问题，正是今天
+      // 排查里逐个靠人肉 ps/ss/journalctl 才问出来的：端口归谁、服务什么时候起的、
+      // dock 项在不在、浏览器装没装。
+      const anon = await fetch(`${mgrBase}/seats/seat-1/diag`)
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+
+      const r = await req(mgrBase, 'GET', '/seats/seat-1/diag', { token: machineTok })
+      assert(r.status === 200, `diag ${r.status} ${r.text}`)
+      const d = r.json.diag
+      assert(d.seatId === 'seat-1', `seatId=${d.seatId}`)
+      assert(d.seat && d.seat.linuxUser, '该带上名册里那条记录')
+      // 三个端口都要有一行——「没人在听」也是结论，不能因为查不到就整条不给。
+      assert(Array.isArray(d.ports) && d.ports.length === 3, `ports 应有 3 条，实际 ${JSON.stringify(d.ports)}`)
+      assert(d.units.length === 2, `units 应有桌面和 bot 两条，实际 ${d.units.length}`)
+      assert(Array.isArray(d.files) && d.files.some((f) => f.path.endsWith('vnc-passwd')), 'files 里该有 vnc-passwd')
+      assert(Array.isArray(d.notes), 'notes 要在——「哪里不对」得写成人话，不能让人自己比对字段')
+      assert('found' in d.browser, 'browser 探测结果要在')
+
+      // **口令一个字都不能出去。** vnc-passwd 只报存在与时间；报告会经 Gateway 到浏览器。
+      const blob = JSON.stringify(d)
+      assert(!blob.includes('vncPassword'), '报告里不该出现 vncPassword 字段')
+      const pw = d.files.find((f) => f.path.endsWith('vnc-passwd'))
+      assert(pw && !('content' in pw), 'vnc-passwd 只能报存在与时间，不能报内容')
+    })
+
+    await test('席位诊断：不认识的席位给结论，不是 500', async () => {
+      const r = await req(mgrBase, 'GET', '/seats/seat-nope/diag', { token: machineTok })
+      assert(r.status === 200, `未知席位也该正常回，实际 ${r.status} ${r.text}`)
+      assert(r.json.diag.seat === null, 'seat 该是 null')
+      assert(r.json.diag.notes.length > 0, '该说清楚「名册里没有这个席位」')
     })
 
     await test('拆席位：名册里没了，反代跟着 404', async () => {
@@ -348,6 +409,170 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       assert(r.json.minProtocol >= 1, 'minProtocol')
       const m = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
       assert(m.json.machine.managerVersion === 'e2e-1', '心跳应更新管家版本')
+    })
+
+    await test('机器时区：坏名字挡在 Gateway，好名字下发给机器，实际值由心跳自报', async () => {
+      // 时区和管家版本走同一条路——Gateway 没有登录这台机器的凭据，只能在心跳响应里
+      // 把期望值带下去。所以这条要盯的是三件事：认不认识的名字有没有就地回绝、期望值
+      // 有没有真的进心跳、以及**期望和实际是不是两格**。合成一格的话，「指令下了但机器
+      // 没改上」在界面上和「改好了」长得一模一样，那正是这个功能最需要看出来的状态。
+      const id = await machineIdOf(req, gwBase, ownerTok, orgId)
+      const tzUrl = `/platform/orgs/${orgId}/machines/${id}/timezone`
+
+      for (const bad of ['Asia/Shanghi', '../../etc/passwd', 'Asia/Shanghai; reboot']) {
+        const r = await req(gwBase, 'PUT', tzUrl, { token: ownerTok, body: { timezone: bad } })
+        assert(r.status === 400, `${bad} 应 400，得到 ${r.status} ${r.text}`)
+      }
+
+      // 大小写不规范的名字要归一，否则库里同一个时区会存出好几种拼法，
+      // 而「实际 == 期望」这个判断是按字符串比的。
+      const set = await req(gwBase, 'PUT', tzUrl, { token: ownerTok, body: { timezone: 'asia/shanghai' } })
+      assert(set.status === 200, `设时区 ${set.status} ${set.text}`)
+      assert(set.json.machine.timezone === 'Asia/Shanghai', `没归一：${set.json.machine.timezone}`)
+      assert(set.json.pending === true, '机器还没报回来，这一刻只能是 pending')
+
+      const body = { managerVersion: 'e2e-1', protocol: 1, node: process.versions.node, seats: [] }
+      const hb = await req(gwBase, 'POST', `/internal/machines/${id}/heartbeat`, { token: machineTok, body })
+      assert(hb.json.timezone === 'Asia/Shanghai', `心跳没下发时区：${JSON.stringify(hb.json.timezone)}`)
+
+      // 机器自报实际时区之后，pending 才落下去。
+      await req(gwBase, 'POST', `/internal/machines/${id}/heartbeat`, {
+        token: machineTok,
+        body: { ...body, timezone: 'Asia/Shanghai' },
+      })
+      const card = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machines[0]
+      assert(card.machine.currentTimezone === 'Asia/Shanghai', `实际时区 ${card.machine.currentTimezone}`)
+      assert(card.timezonePending === false, '实际和期望对上了就不该再 pending')
+
+      // 机器报一个不认识的名字：宁可当成「没报」，也不能存进去——存了的话
+      // 「改上了没有」这个判断从此就是错的。
+      await req(gwBase, 'POST', `/internal/machines/${id}/heartbeat`, {
+        token: machineTok,
+        body: { ...body, timezone: 'Mars/Olympus' },
+      })
+      const after = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machines[0]
+      assert(after.machine.currentTimezone === 'Asia/Shanghai', `坏值被当真了：${after.machine.currentTimezone}`)
+
+      // 清空 = 不再管这台机器的时区。**不是**改成 UTC——心跳里必须是 null，
+      // 否则没人指定过时区的机器会被凭空改掉。
+      const clear = await req(gwBase, 'PUT', tzUrl, { token: ownerTok, body: { timezone: '' } })
+      assert(clear.status === 200, `清空 ${clear.status} ${clear.text}`)
+      assert(clear.json.machine.timezone === null, `没清掉：${clear.json.machine.timezone}`)
+      const idle = await req(gwBase, 'POST', `/internal/machines/${id}/heartbeat`, { token: machineTok, body })
+      assert(idle.json.timezone === null, `清空后仍在下发：${JSON.stringify(idle.json.timezone)}`)
+    })
+
+    await test('通联指示灯：四态按心跳新旧分，编号按登记先后给', async () => {
+      // 这盏灯要答的是「哪台不对」，而它唯一的判据是心跳有多久没来了。四档的边界不能
+      // 只靠读代码确认——`stale` 那一档存在的理由（换版重启会断几十秒，不该闪红灯）
+      // 恰恰是最容易在后来的重构里被合并掉的。
+      //
+      // 造一台**假机器**来测，不动真管家那台：真管家每 30 秒心跳一次，改它的
+      // lastHeartbeatAt 会被下一轮覆盖，断言就成了掷骰子。
+      const { createRequire } = await import('node:module')
+      const require = createRequire(new URL('../gateway/package.json', import.meta.url))
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      const fake = '00000000-0000-4000-8000-0000000000ff'
+      const linkOf = async () => {
+        const r = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
+        return r.json.machines.find((c) => c.machine.id === fake)
+      }
+      try {
+        await client.query('set search_path to e2e_manager')
+        await client.query(
+          `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token)
+           values ($1, 'http://10.0.0.99:8443', $2, $3, $3, $3, 1, 10, 'smt_e2e-link-probe')`,
+          [fake, orgId, Date.now()],
+        )
+
+        const online = await linkOf()
+        assert(online, '假机器没出现在列表里')
+        assert(online.machine.link === 'online', `刚心跳过该是 online，得到 ${online.machine.link}`)
+        assert(online.machine.heartbeatAge != null && online.machine.heartbeatAge < 5000, `heartbeatAge=${online.machine.heartbeatAge}`)
+
+        // 3 轮心跳（90 秒）之内还算在线——换版重启就落在这个区间里，报红等于狼来了。
+        const at = async (agoMs) => {
+          await client.query('update machines set "lastHeartbeatAt" = $1 where id = $2', [Date.now() - agoMs, fake])
+          return (await linkOf()).machine.link
+        }
+        assert((await at(80_000)) === 'online', '80 秒（不到 3 轮）还该是 online')
+        assert((await at(5 * 60_000)) === 'stale', '5 分钟该是 stale')
+        assert((await at(2 * 3600_000)) === 'offline', '2 小时该是 offline')
+
+        // 没配对是**单独一档**，不能并进 offline：前者是还没装，后者是装了但出事了，
+        // 处置完全不同（一个去跑安装脚本，一个去看机器还在不在）。
+        await client.query('update machines set "pairedAt" = null where id = $1', [fake])
+        assert((await linkOf()).machine.link === 'unpaired', '没配对该是 unpaired')
+
+        // 编号按登记先后：真管家那台先配对，是 1 号；假机器后插，是 2 号。
+        const all = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machines
+        assert(all.length === 2, `该有两台，实际 ${all.length}`)
+        assert(all[0].no === 1 && all[1].no === 2, `编号不对：${all.map((c) => c.no).join(',')}`)
+        assert(all[1].machine.id === fake, '2 号该是后插的那台')
+      } finally {
+        await client.query('delete from machines where id = $1', [fake]).catch(() => {})
+        await client.end().catch(() => {})
+      }
+    })
+
+    await test('管家自报机器时区，答得上「现在是什么时区」', async () => {
+      const r = await req(mgrBase, 'GET', '/health', { token: machineTok })
+      assert(r.status === 200, `health ${r.status}`)
+      assert('timezone' in r.json, '/health 要报机器时区')
+      assert('timezoneError' in r.json, '改时区失败要报得出来，不能只写日志')
+    })
+
+
+    await test('平台钉住的管家版本要存得住，并且真的下发给机器', async () => {
+      // 这一条曾经是**假通过**的：路由层收下 managerVersion、拼进 next、返回 200，
+      // 而 db.putPlatformSettings 拼 payload 时根本没写这个字段，读端也没解析它。
+      // 于是「全机队钉版本」这一级完全是死的——传个包上去，所有没有逐台钉过的机器
+      // 都会自己升，唯一能拦住的开关看着能设、其实存不进去。
+      // 钉住的版本必须真有对应的包：desiredManagerRelease 查不到就会静悄悄回落到
+      // 「最新」，那样这条用例即使在坏代码下也可能碰巧过。先传一个真包上去。
+      const { tarGz, sha256Of } = await import('./release.mjs')
+      const pinnedPkg = tarGz([
+        { name: './bin/satuwork-manager.mjs', data: '#!/usr/bin/env node\n' },
+        { name: './VERSION', data: 'pinned-9.9.9\n' },
+      ])
+      const up = await req(gwBase, 'PUT', '/platform/manager-releases/pinned-9.9.9', {
+        token: ownerTok,
+        raw: pinnedPkg,
+        headers: { 'content-type': 'application/gzip', 'x-bot-sha256': sha256Of(pinnedPkg) },
+      })
+      assert(up.status === 200, `传包 ${up.status} ${up.text}`)
+
+      const before = (await req(gwBase, 'GET', '/platform/settings', { token: ownerTok })).json
+      try {
+        const put = await req(gwBase, 'PUT', '/platform/settings', {
+          token: ownerTok,
+          body: { managerVersion: 'pinned-9.9.9' },
+        })
+        assert(put.status === 200, `PUT ${put.status} ${put.text}`)
+        assert(put.json.managerVersion === 'pinned-9.9.9', `回显 ${JSON.stringify(put.json.managerVersion)}`)
+
+        // 关键：**重新读一次**。回显对不代表落库了——原来的 bug 里回显走的是
+        // 重新读库的结果，所以连回显都是空的；但换个实现回显很容易假对。
+        const back = await req(gwBase, 'GET', '/platform/settings', { token: ownerTok })
+        assert(back.json.managerVersion === 'pinned-9.9.9', `重读 ${JSON.stringify(back.json.managerVersion)}`)
+
+        // 存住还不够，得真的下发到心跳里去——那才是机器唯一的依据。
+        const id = await machineIdOf(req, gwBase, ownerTok, orgId)
+        const hb = await req(gwBase, 'POST', `/internal/machines/${id}/heartbeat`, {
+          token: machineTok,
+          body: { managerVersion: 'e2e-1', protocol: 1, node: process.versions.node, seats: [] },
+        })
+        assert(hb.json.desiredManagerVersion === 'pinned-9.9.9', `心跳下发的是 ${JSON.stringify(hb.json.desiredManagerVersion)}`)
+
+        // 清掉 = 回到「跟最新发布走」。
+        await req(gwBase, 'PUT', '/platform/settings', { token: ownerTok, body: { managerVersion: '' } })
+        const cleared = await req(gwBase, 'GET', '/platform/settings', { token: ownerTok })
+        assert(!cleared.json.managerVersion, `清不掉：${JSON.stringify(cleared.json.managerVersion)}`)
+      } finally {
+        await req(gwBase, 'PUT', '/platform/settings', { token: ownerTok, body: before })
+      }
     })
 
     await test('登记远端包：验证过才入库，size/sha256 对不上就拒', async () => {
@@ -428,4 +653,25 @@ async function mintTicket(gwBase, ownerTok) {
   })
   if (!r.ok) throw new Error(`签票失败 ${r.status} ${await r.text()}`)
   return (await r.json()).ticket
+}
+
+/**
+ * 自己签一张**带 VNC 口令**的桌面票。
+ *
+ * 为什么不走 /platform/desktop-ticket：那个接口只按 seatId 签，拿不到口令——真正带口令
+ * 的是「打开桌面」那条路（desktopTicketFor），而它要求 Gateway 库里有这个席位的
+ * seat_runtimes 行。本套件的 seat-1 是管家侧登记的假席位，Gateway 那边没有。
+ *
+ * 所以直接用 Gateway 落盘的私钥签一张，形状和 signDesktopTicket 完全一致。验的是管家
+ * 那半边：**票里带了口令，落地页就该把它交给 noVNC**。
+ */
+function mintTicketWithPassword(gwHome, seatId, vnc) {
+  const priv = readFileSync(join(gwHome, 'keys', 'jwt-private.pem'), 'utf8')
+  const pub = readFileSync(join(gwHome, 'keys', 'jwt-public.pem'), 'utf8')
+  const kid = createHash('sha256').update(pub).digest('hex').slice(0, 16)
+  const now = Math.floor(Date.now() / 1000)
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+  const h = b64({ alg: 'RS256', typ: 'JWT', kid })
+  const p = b64({ typ: 'satu-desktop', seatId, iat: now, exp: now + 300, vnc })
+  return `${h}.${p}.${sign('sha256', Buffer.from(`${h}.${p}`), priv).toString('base64url')}`
 }

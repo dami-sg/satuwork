@@ -55,7 +55,8 @@ if ! id "$LINUX_USER" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "" "$LINUX_USER"
 fi
 
-PKGS="xorg xvfb dbus-x11 x11-xserver-utils xfwm4 thunar xfce4-terminal plank picom hsetroot x11vnc novnc python3-websockify"
+# procps/iproute2：slim-desktop.sh 靠 pkill 和 ss 清上一轮的残留，少了它们那段会静默失效。
+PKGS="xorg xvfb dbus-x11 x11-xserver-utils xfwm4 thunar xfce4-terminal plank picom hsetroot x11vnc novnc python3-websockify procps iproute2"
 NEED=""
 for p in $PKGS; do
   if ! dpkg -s "$p" >/dev/null 2>&1; then NEED="$NEED $p"; fi
@@ -64,9 +65,72 @@ if [ -n "$NEED" ]; then
   apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y $NEED
 fi
-if ! command -v google-chrome-stable >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
-  DEBIAN_FRONTEND=noninteractive apt-get install -y chromium 2>/dev/null || true
-fi
+# ── 浏览器 ────────────────────────────────────────────────────────────
+# bot 干活主要靠它（开网页、填表单、截图），dock 上第一格也是它。所以这是部署的一
+# 部分，不是「顺手装装看」：每次部署都确认在位，不在就装，装完再确认一次。
+#
+# 原来这里是一句 `apt-get install -y chromium 2>/dev/null || true`——**失败完全静默**。
+# 源里没有、网络不通、包名不对，结果都一样：部署照常成功，桌面起来了，dock 上少一
+# 格，没有任何地方说得出为什么。
+#
+# **按架构分。** Google 官方只为 linux/amd64 发 Chrome，arm64 上没有这个包；在 arm 机
+# 器上去配 Google 的 apt 源，`apt update` 会 404，还会把整条 apt 链路弄脏。所以只有
+# amd64 才走官方源，arm64 一律用 Debian 自己的 Chromium——对 bot 来说两者等价。
+chrome_bin() {
+  for c in google-chrome-stable google-chrome chromium chromium-browser; do
+    if command -v "$c" >/dev/null 2>&1; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+
+install_google_chrome() {
+  local key=/usr/share/keyrings/google-chrome.gpg
+  local need=""
+  for p in curl gnupg ca-certificates; do
+    dpkg -s "$p" >/dev/null 2>&1 || need="$need $p"
+  done
+  if [ -n "$need" ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y $need >/dev/null 2>&1 || return 1
+  fi
+  curl -fsSL --max-time 60 https://dl.google.com/linux/linux_signing_key.pub \
+    | gpg --dearmor -o "$key" 2>/dev/null || return 1
+  echo "deb [arch=amd64 signed-by=$key] https://dl.google.com/linux/chrome/deb/ stable main" \
+    > /etc/apt/sources.list.d/google-chrome.list
+  # 只刷 Google 这一个源。整库 update 在慢网上要好几分钟，而这里只关心一个包。
+  apt-get update \
+    -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/google-chrome.list \
+    -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >/dev/null 2>&1 || return 1
+  DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable >/dev/null 2>&1
+}
+
+ensure_chrome() {
+  local have
+  if have=$(chrome_bin); then
+    echo "chrome: 已在位（$have）"
+    return 0
+  fi
+  local arch
+  arch=$(dpkg --print-architecture 2>/dev/null || echo unknown)
+  echo "chrome: 没找到浏览器，开始安装（arch=$arch）"
+  if [ "$arch" = "amd64" ]; then
+    install_google_chrome || echo "chrome: 官方源装不上，回落到 Chromium" >&2
+  fi
+  if ! chrome_bin >/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y chromium >/dev/null 2>&1 || true
+  fi
+  if ! chrome_bin >/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y chromium-browser >/dev/null 2>&1 || true
+  fi
+  if have=$(chrome_bin); then
+    echo "chrome: 装好了（$have）"
+    return 0
+  fi
+  # **不让部署失败。** 没有浏览器，桌面、终端、文件管理器和 bot 的其它能力都还在；
+  # 而部署失败会让整个席位起不来，代价大得多。但必须吼出来——静默正是上一版的毛病。
+  echo "chrome: 装不上（源里没有或网络不通），这个席位没有浏览器可用" >&2
+  return 0
+}
+ensure_chrome
 
 mkdir -p /usr/local/bin /etc/systemd/system
 # 账号级：共享工作区。已存在就别动，里面是员工和 bot 的资料。
@@ -109,8 +173,12 @@ DISPLAY=$DISPLAY_VAR
 RFB=$RFB
 HTTP=$HTTP
 CDP=$CDP
+WORK_DIR=$WORK_DIR
 EOF_ENV
-runuser -u "$LINUX_USER" -- x11vnc -storepasswd "$VNC_PASSWORD" "$SEAT_DIR/vnc-passwd" >/dev/null
+# stderr 也要吞：x11vnc 把「stored passwd in file: …」这句**正常输出**打在 stderr 上，
+# 不吞的话它会混进部署失败时收集的错误里，还恰好排在最前面——真正的原因被挤到后面，
+# 而错误信息在界面上是截断显示的，于是看到的第一句永远是这句无关的话。
+runuser -u "$LINUX_USER" -- x11vnc -storepasswd "$VNC_PASSWORD" "$SEAT_DIR/vnc-passwd" >/dev/null 2>&1
 printf 'backend = "xrender";\nvsync = false;\nuse-damage = false;\n' > "$SEAT_DIR/config/picom/picom.conf"
 
 if [ ! -f "$BOT_EXTRACT/bin/satuwork.mjs" ]; then
@@ -156,6 +224,51 @@ chown -R "$LINUX_USER:$LINUX_USER" "$SEAT_DIR"
 chmod 600 "$SEAT_DIR/desktop.env" "$SEAT_DIR/vnc-passwd" "$SEAT_DIR/bot.env"
 
 systemctl daemon-reload
-systemctl enable --now "slim-desktop@$SEAT_ID.service"
-systemctl enable "satuwork-bot@$SEAT_ID.service"
-systemctl restart "satuwork-bot@$SEAT_ID.service"
+# **两个都要 restart，不能用 `enable --now`。**
+# `--now` 的语义是「没在跑就起来」——已经在跑就什么都不做。桌面这条以前正是
+# `enable --now`，于是重新部署时：新的 VNC 口令写进了 vnc-passwd，而 x11vnc 是启动
+# 那一刻用 -rfbauth 读的文件，进程没重启，内存里还是**上一次部署**的旧口令。
+# 表现是界面上明明写着口令、照着输却一直 password check failed，而且怎么重新部署
+# 都不会好——因为每次都不重启。
+enable_and_restart() {
+  systemctl enable "$1" >/dev/null 2>&1 || true
+  systemctl restart "$1"
+}
+enable_and_restart "slim-desktop@$SEAT_ID.service"
+enable_and_restart "satuwork-bot@$SEAT_ID.service"
+
+# ── 部署完自证：那两个端口上蹲着的得是**这个席位的**进程 ────────────────
+# 「起完就算成功」在这里是不够的。机器上完全可能有另一套 VNC 占着 6081——这台就
+# 撞过：一个 Aug 16 起的 x11vnc :3 + websockify 0.0.0.0:6081 → localhost:5902，口令在
+# /home/slim/.vnc/passwd。它把席位的 websockify 挤得起不来，而管家照样上报 ready。
+#
+# 结果是界面上「部署成功」，点开桌面也**真的能连上**——连的是那一套，于是照着界面
+# 输口令永远 password check failed，重新部署多少次都一样。这种失败不会自己浮出来，
+# 只能靠人去 ps 里翻。所以在这里就断掉，把原因写进部署错误里报回 Gateway。
+verify_seat_listener() {
+  local port="$1" what="$2" pid owner
+  # 等 30 秒。**新建席位第一次起屏比想象的慢**：adduser、daemon-reload、Xvfb 就绪、
+  # 上一轮残留的端口释放，叠起来轻松过十秒——等太短会把「慢」判成「坏」。
+  for _ in $(seq 1 120); do
+    pid=$(ss -ltnp 2>/dev/null | grep -E ":${port}\b" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+    if [ -n "${pid:-}" ]; then
+      owner=$(ps -o user:32= -p "$pid" 2>/dev/null | tr -d ' ')
+      [ "$owner" = "$LINUX_USER" ] && return 0
+      # 端口被**别人**占着：这是确定的错误，而且没人去动它就永远不会自己好。
+      # 这一条必须让部署失败——否则又变成「部署成功但连进去是另一套 VNC」。
+      echo "端口 $port（$what）被 ${owner:-?} 的进程 $pid 占着，不是这个席位的：" >&2
+      ps -o pid,user:32,cmd -p "$pid" >&2 || true
+      echo "这台机器上有别的 VNC/桌面在跑。确认无用后停掉它再重新部署——" >&2
+      echo "不停的话「打开桌面」进的是那一套，口令永远对不上。" >&2
+      exit 43
+    fi
+    sleep 0.25
+  done
+  # **超时不算部署失败。** 端口空着只说明「还没起来」，说不清是坏了还是慢；而
+  # systemd 的 Restart=on-failure 本来就会继续拉。部署失败会让整个席位不可用，
+  # 把一次「起得慢」升级成「用不了」，比漏报贵得多。吼一声，让它继续。
+  echo "$what 还没在端口 $port 上起来（等了 30 秒）；systemd 会继续拉起。" >&2
+  echo "若一直不好：journalctl -u slim-desktop@$SEAT_ID" >&2
+}
+verify_seat_listener "$RFB" x11vnc
+verify_seat_listener "$HTTP" websockify

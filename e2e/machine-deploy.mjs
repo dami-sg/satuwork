@@ -240,6 +240,28 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(!JSON.stringify(r.json).includes('sshSecret'), 'deploy 含 sshSecret')
     })
 
+    await test('已经 ready 就跳过；但 force 必须真的重铺一遍', async () => {
+      // 「已经是这个版本、而且好着 → 不重装」是对的，可它把「重新部署」这个自助手段
+      // 也一起挡掉了：接口回 200 和 ready，deployedAt 一秒没动，什么都没发生。
+      // 而人按那个按钮的时候，要的恰恰是「版本没错、状态也 ready，但机器上就是不对，
+      // 重新铺一遍」——VNC 口令没同步、dock 少一格、桌面服务还是老进程，全长这样。
+      const before = await req(gwBase, 'GET', '/runtime/desktop?botId=' + botA, { token: memberTok })
+      assert(before.status === 200, `desktop ${before.status}`)
+      const at0 = before.json.deployedAt
+
+      const skipped = await req(gwBase, 'POST', '/runtime/deploy', { token: memberTok, body: { botId: botA } })
+      assert(skipped.status === 200, `再部署 ${skipped.status}`)
+      assert(skipped.json.deployedAt === at0, '没带 force 时该跳过，deployedAt 不该动')
+
+      const forced = await req(gwBase, 'POST', '/runtime/deploy', { token: memberTok, body: { botId: botA, force: true } })
+      assert(forced.status === 200, `force 部署 ${forced.status} ${forced.text}`)
+      assert(forced.json.status === 'ready', `force 之后 ${forced.json.status}`)
+      assert(forced.json.deployedAt !== at0, `force 没真的重铺：deployedAt 仍是 ${at0}`)
+      // 口令不能因为重铺就换掉——换了的话，界面上显示的和机器上的又对不上了。
+      assert(forced.json.vncPassword === before.json.vncPassword, 'force 不该换 VNC 口令')
+      assert(forced.json.seatId === before.json.seatId, 'force 不该换席位')
+    })
+
     // 同一员工的第二个 bot：**账号相同**（共享文件靠这个），席位不同（屏、目录、单元靠这个）。
     await test('同一成员部署 botB → 同一 linuxUser、不同 seatId、下一槽', async () => {
       const r = await req(gwBase, 'POST', '/runtime/deploy', { token: memberTok, body: { botId: botB } })

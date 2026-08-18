@@ -17,6 +17,8 @@ export interface Ticket {
   typ: string
   seatId: string
   exp: number
+  /** 席位的 VNC 口令。Gateway 签在票里，管家原样转给 noVNC 自动填。 */
+  vnc?: string
 }
 
 function b64urlJson(part: string): unknown {

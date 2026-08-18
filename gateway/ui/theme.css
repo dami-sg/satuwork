@@ -79,6 +79,11 @@
   --color-ok-500: #2f9159;
   --color-ok-800: #1f5637;
 
+  /* 待人工处理。琥珀而不是纯黄：纯黄在奶油底上几乎看不见，压深一档才立得住。 */
+  --color-warn-100: #f6ecd8;
+  --color-warn-500: #c98a2f;
+  --color-warn-800: #6d4714;
+
   --font-heading: Outfit, system-ui, sans-serif;
   --font-heading-weight: 600;
   --font-body: Outfit, system-ui, sans-serif;
@@ -165,6 +170,10 @@
   --color-ok-100: #1b3124;
   --color-ok-500: #52bd80;
   --color-ok-800: #bde5cb;
+
+  --color-warn-100: #38290f;
+  --color-warn-500: #e0a94e;
+  --color-warn-800: #f2dcae;
 
   /* 深底上的投影靠加深而不是加透明度，否则等于没有。 */
   --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.35);

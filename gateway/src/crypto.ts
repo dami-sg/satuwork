@@ -131,6 +131,8 @@ export interface DesktopTicket {
   seatId: string
   iat: number
   exp: number
+  /** 席位的 VNC 口令，交给 noVNC 自动填。没有就让人自己输。 */
+  vnc?: string
 }
 
 /**
@@ -145,9 +147,14 @@ export interface DesktopTicket {
  * 五分钟：够点开桌面，不够被人捡去慢慢用。管家会把它换成一张 path 限定的 cookie，
  * 所以票短不影响会话长度。
  */
-export function signDesktopTicket(keys: JwtKeys, seatId: string, ttlSec = 300): string {
+export function signDesktopTicket(keys: JwtKeys, seatId: string, vnc = '', ttlSec = 300): string {
   const now = Math.floor(Date.now() / 1000)
-  const payload: DesktopTicket = { typ: 'satu-desktop', seatId, iat: now, exp: now + ttlSec }
+  // `vnc`：席位的 VNC 口令。带上它，管家就能把它交给 noVNC 自动填，人点开就看见桌面。
+  //
+  // 放在票里而不是拼在最初那个链接上：那个链接会渲染进页面、可能被复制转发，而票是
+  // 签名的、五分钟就废。**但要认清代价**——JWT 的载荷只是 base64，不是加密，谁拿到
+  // 这张票谁就能读出口令。这不算新增泄露面：拿到票本来就能直接进这块屏。
+  const payload: DesktopTicket = { typ: 'satu-desktop', seatId, iat: now, exp: now + ttlSec, ...(vnc ? { vnc } : {}) }
   const h = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: keys.kid }))
   const p = b64url(JSON.stringify(payload))
   return `${h}.${p}.${sign('sha256', Buffer.from(`${h}.${p}`), keys.privatePem).toString('base64url')}`

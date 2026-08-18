@@ -112,7 +112,40 @@ export function randomVncPassword(): string {
   return out
 }
 
+/**
+ * 管家的心跳周期。**和 manager/src/index.ts 的 `HEARTBEAT_MS` 是同一个数**，改一边
+ * 要改另一边——下面「多久算失联」全是按它的倍数定的，两边分叉的话灯会在机器好好的
+ * 时候变黄。
+ */
+export const MANAGER_HEARTBEAT_MS = 30_000
+
+/** 通联状态。界面上那盏灯只认这四个值。 */
+export type MachineLink = 'unpaired' | 'online' | 'stale' | 'offline'
+
+/**
+ * 这台机器现在通不通。
+ *
+ * 判据只有一个：**最近一次心跳有多久了**。不看 `lastError`——那是「机器说它自己哪儿
+ * 不对」，能报错恰恰说明线是通的；把两件事混进一盏灯，管理员就分不出「机器失联」和
+ * 「机器在线但升级失败」，而这两种的处置完全不同。
+ *
+ * 三级而不是两级，是因为**换版重启本身就会断一下**：`systemd-run --on-active=2s` 加
+ * 上进程起来、跑完第一轮心跳，几十秒很正常。一超时就报「失联」会让每次自升级都闪一
+ * 次红灯，几次之后没人再信这盏灯。所以中间留一档 `stale`：过了 3 轮心跳还没消息，
+ * 值得看一眼，但还不到「这台机器没了」。
+ */
+export function machineLink(m: Machine, now = Date.now()): MachineLink {
+  // 没配对就没有心跳可言——这一档要和「配对过但失联」分开：前者是还没装，后者是出事了。
+  if (!machinePaired(m)) return 'unpaired'
+  if (!m.lastHeartbeatAt) return 'offline'
+  const age = now - m.lastHeartbeatAt
+  if (age <= MANAGER_HEARTBEAT_MS * 3) return 'online'
+  if (age <= MANAGER_HEARTBEAT_MS * 20) return 'stale'
+  return 'offline'
+}
+
 export function publicMachine(m: Machine) {
+  const now = Date.now()
   return {
     id: m.id,
     host: m.host,
@@ -123,6 +156,51 @@ export function publicMachine(m: Machine) {
     protocolTooOld: Boolean(m.pairedAt) && m.protocol < MIN_MANAGER_PROTOCOL,
     lastError: m.lastError,
     lastHeartbeatAt: m.lastHeartbeatAt,
+    link: machineLink(m, now),
+    /**
+     * 距最近一次心跳多少毫秒。没心跳过就是 null。
+     *
+     * 界面**不能**拿 `lastHeartbeatAt` 自己减本地时钟：管理员的机器和 Gateway 差几分钟
+     * 是常事，那样会显示出「-3 分钟前」这种东西，而这盏灯要答的恰恰是时间问题。
+     * 算好了给它。
+     */
+    heartbeatAge: m.lastHeartbeatAt ? Math.max(0, now - m.lastHeartbeatAt) : null,
+    // 期望时区和机器自报的实际时区都给出去：只给一个的话，界面分不出「已经改上了」
+    // 和「指令下了、机器还没心跳回来」。
+    timezone: m.timezone,
+    currentTimezone: m.currentTimezone,
+  }
+}
+
+/**
+ * IANA 时区名的校验与归一。空串 = 清掉，表示「不管这台机器的时区」。
+ *
+ * 两道关，缺一不可：
+ *
+ * - **形状**。这个值会一路传到管家、变成 `timedatectl set-timezone` 的参数，还会被
+ *   当成 `/usr/share/zoneinfo` 底下的路径去查。所以先卡死字符集，并挡掉 `..`。
+ * - **认不认识**。形状对但不存在的名字（`Asia/Shanghi`）过了 Gateway 这关，就只能
+ *   在机器上失败——而那里的错误要等一轮心跳才看得见。用 Intl 当权威表，就地回绝。
+ *
+ * 返回 `undefined` = 不合法，调用方去报 400。
+ */
+export function normalizeTimezone(raw: string): string | null | undefined {
+  const tz = raw.trim()
+  if (!tz) return null
+  if (tz.length > 64 || !/^[A-Za-z0-9+_-]+(\/[A-Za-z0-9+_-]+)*$/.test(tz) || tz.includes('..')) return undefined
+  try {
+    // 认识的名字才留下，并且**一律归一到 Intl 的规范拼写**：`asia/shanghai` →
+    // `Asia/Shanghai`、`Asia/Calcutta` → `Asia/Kolkata`。这一步不是为了好看——期望
+    // 时区和管家自报的实际时区是按字符串比的（`timezonePending` 靠它），两边不走
+    // 同一套拼法，「改上了没有」就永远判错。管家自报的值在心跳里过的也是这个函数。
+    //
+    // 代价是别名会被换成规范名，而规范名有的是 tzdata 的 backward 链接。Debian 的
+    // tzdata 是全的；真裁过的机器上，管家会先查 /usr/share/zoneinfo 并把「这台机器上
+    // 没有这个时区」报回心跳，不会静默改不上。
+    const resolved = new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone
+    return resolved || tz
+  } catch {
+    return undefined
   }
 }
 
@@ -178,7 +256,8 @@ export function listSeatRuntime(row: SeatRuntime, managerHost: string | null) {
 /** 给某个席位现签一张桌面票，拼成能直接点开的地址。 */
 export function desktopUrlOf(keys: JwtKeys, machine: Machine | undefined, row: SeatRuntime): string {
   if (!machinePaired(machine)) return ''
-  return novncUrlOf(machine.host, row.seatId, signDesktopTicket(keys, row.seatId))
+  // 口令随票走，人点开就进桌面，不用再去右栏抄一遍。
+  return novncUrlOf(machine.host, row.seatId, signDesktopTicket(keys, row.seatId, row.vncPassword))
 }
 
 function gatewayPublicUrl(): string {
@@ -293,7 +372,7 @@ export async function deploySeat(
   db: Db,
   keys: JwtKeys,
   account: Account,
-  opts: { botId: string; version?: string; update?: boolean },
+  opts: { botId: string; version?: string; update?: boolean; force?: boolean },
 ): Promise<
   | { ok: true; result: DeployResult }
   | { ok: false; status: number; error: string; runtime: SeatRuntime | undefined }
@@ -342,7 +421,14 @@ export async function deploySeat(
   const linuxUser = linuxUserOf(account.id)
   const seatId = seatIdOf(account.id, botId)
   const existing = await db.seatRuntime(account.id, botId)
-  if (existing?.status === 'ready' && existing.botVersion === version && !opts.update) {
+  // 已经是这个版本、而且好着 → 不重装。**但 force 必须能穿过这道门。**
+  //
+  // 界面上「重新部署」按钮发的就是不带 force 的请求，于是它一直什么都没做：确认框写
+  // 着「会把席位重装一遍并重启」，接口返回 200 和 ready，deployedAt 一秒都没动。
+  // 而人按这个按钮的时候，要的恰恰是「现在这台机器上的东西不对，重新铺一遍」——
+  // 席位状态 ready、版本没变，正是那种情况最典型的样子（VNC 口令没同步、dock 少一格、
+  // 桌面服务还是老进程）。这道门把唯一的自助修复手段变成了一个安慰剂。
+  if (existing?.status === 'ready' && existing.botVersion === version && !opts.update && !opts.force) {
     return { ok: true, result: { runtime: existing, machine } }
   }
 

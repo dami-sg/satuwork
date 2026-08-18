@@ -93,6 +93,47 @@ Gateway **不跑** 一轮对话，不当聊天的工作副本。浏览器聊天�
 
 所有机器都满时部署返回 409，并报出总容量。
 
+### 3.1 机器时区
+
+每台机器可以指定时区（`machines.timezone`，IANA 名，如 `Asia/Shanghai`）。部署机器一律
+是 Debian，改的是 `timedatectl set-timezone`——但**改它的是机器上的管家，不是 Gateway**：
+Gateway 没有任何能登录这台机器的凭据，只能在心跳响应里把期望时区带下去，机器自己去收敛。
+和钉管家版本同一条路。
+
+所以库里是两列：`timezone` 是**期望值**（人在公司详情的「运行机器」里填），
+`currentTimezone` 是管家心跳自报的**实际值**。界面比这两个值来判断「指令下了」还是
+「已经改上了」——只存一列的话，改失败和改成功在界面上长得一模一样。
+
+留空 = 不管这台机器的时区，**不是**改成 UTC。
+
+已经在跑的席位不会被重启：桌面和 bot 是在旧时区下起来的，libc 把时区缓存在进程里。
+要让某个席位跟上，重新部署它。
+
+### 3.2 通联状态
+
+每台机器算一个 `link`（`publicMachine` 带出去，界面上是一盏灯）。**判据只有一个：最近
+一次心跳有多久了**，阈值按管家的心跳周期（`MANAGER_HEARTBEAT_MS`，30 秒）取倍数：
+
+| link | 条件 | 含义 |
+| --- | --- | --- |
+| `unpaired` | 没 `pairedAt` 或没 `host` | 还没装管家 |
+| `online` | ≤ 3 轮（90 秒） | 通 |
+| `stale` | ≤ 20 轮（10 分钟） | 该看一眼，但还不到「没了」 |
+| `offline` | 更久，或配对过但从没心跳 | 失联 |
+
+两个刻意的取舍：
+
+- **不看 `lastError`。** 能报错说明线是通的。把两件事混进一盏灯，「机器失联」和「机器
+  在线但升级失败」就长成一个样子，而这两种的处置完全不同。
+- **中间那档 `stale` 不能省。** 换版重启本身就会断几十秒（`systemd-run --on-active=2s`
+  加进程起来再跑完一轮心跳），一超时就报失联会让每次自升级都闪一次红灯。
+
+`MANAGER_HEARTBEAT_MS` 和 `manager/src/index.ts` 里的 `HEARTBEAT_MS` 是同一个数，改一边
+要改另一边——分叉的话灯会在机器好好的时候变黄。
+
+机器还带一个 `no`：这家公司里的第几台，按登记先后。**给人指代用的短号**，中间删掉一台
+后面的会往前挪；要唯一地指一台用 `machine.id`。
+
 **槽位按机器唯一，不是按公司**（`unique(machineId, slot)`）。端口是从槽位算出来的
 （`3200+N` 等），两台机器上各自的 slot 0 互不冲突；按公司唯一会白白吃掉第二台的端口
 段，还会在满 N 席之后拒绝部署。
@@ -470,7 +511,7 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 | GET | `/internal/manager-releases/:version` | 管家自升级拉包 |
 | GET | `/platform/desktop-ticket?seatId=` | owner 支持入口：替某个席位签一张桌面票。走审计 |
 | POST | `/internal/machines` | 引导票登记机器（无 UI 版，e2e/smoke 用）。响应带一次 `token`（`smt_`） |
-| POST | `/internal/machines/:id/heartbeat` | 该机器的 `smt_`；票必须对应 `:id`。**也是自升级的下发通道**：body 带 `managerVersion`/`protocol`/`seats`，响应带 `desiredManagerVersion`/`url`/`sha256`/`minNode`/`minProtocol` |
+| POST | `/internal/machines/:id/heartbeat` | 该机器的 `smt_`；票必须对应 `:id`。**也是自升级和时区的下发通道**：body 带 `managerVersion`/`protocol`/`arch`/`timezone`（实际时区）/`seats`，响应带 `desiredManagerVersion`/`url`/`sha256`/`timezone`（期望时区）/`minNode`/`minProtocol` |
 | POST | `/internal/instances/:accountId/ready` | 该机器的 `smt_`。body `{ host, botId }`，`botId` 必填；pair 必须已部署；机器必须属于该账号的公司 |
 | POST | `/internal/sessions/index` | 该机器的 `smt_`。公司从机器派生，不能替别的公司报索引 |
 | POST | `/internal/usage` | 该机器的 `smt_`。上报真实 token，不编费用 |

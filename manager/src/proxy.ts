@@ -108,9 +108,28 @@ export function proxyIntercept(deps: ProxyDeps) {
       }
       const base = `/seats/${encodeURIComponent(seatId)}/vnc`
       const maxAge = Math.max(60, ok.exp - Math.floor(Date.now() / 1000))
+      // **必须把 path 告诉 noVNC。** 它拼 WebSocket 地址的写法是 `'/' + path`，从
+      // **根**开始，而 path 默认就是 `websockify`——也就是说，不传的话它会去连
+      // ws://<管家>/websockify。那个路径不属于任何席位，反代认不出来直接 404，
+      // 浏览器上的表现就是页面打得开、一按 Connect 弹「Failed to connect to server」。
+      //
+      // 席位的静态资源是相对路径，所以页面本身一直是好的——坏的只有这一条连接，
+      // 而它恰好是唯一真正要紧的那条。
+      //
+      // autoconnect：这个入口是从 Gateway 上点「打开桌面」进来的，意图就是看桌面，
+      // 不是打开一个还要再按一次 Connect 的页面。VNC 口令仍然要人自己输。
+      const wsPath = `${base.slice(1)}/websockify`
+      // 口令由 Gateway 签在票里带过来（票已经验过签了），这里转成 noVNC 认的
+      // `password=` 参数——它只从 URL 或输入框读凭据，没有别的入口。
+      //
+      // **代价说清楚**：这一跳之后浏览器地址栏里会有明文口令，也会进历史记录。
+      // 换来的是「点开就是桌面」。没带口令时照旧弹输入框，不会更差。
+      const query =
+        `path=${encodeURIComponent(wsPath)}&autoconnect=1` +
+        (ok.vnc ? `&password=${encodeURIComponent(ok.vnc)}` : '')
       res.writeHead(302, {
         'set-cookie': `${cookieName(seatId)}=${encodeURIComponent(ticket)}; Path=${base}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax`,
-        location: `${base}/vnc.html`,
+        location: `${base}/vnc.html?${query}`,
         'cache-control': 'no-store',
       })
       res.end()

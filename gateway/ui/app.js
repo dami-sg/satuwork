@@ -243,15 +243,17 @@ const OWNER_NAV = [
   { href: '/plans', label: '套餐', icon: 'plans' },
   { href: '/orders', label: '购买与充值', icon: 'billing' },
   { href: '/stats', label: '统计', icon: 'stats' },
-  // 全局 Bot / Skill / MCP：所有公司都看得见。跟公司侧共用同一套页面，
-  // 差别只在 catalogBase() 给出的接口前缀。
-  { href: '/bots', label: '全局 Bot', icon: 'bots' },
+  // 全局 Skill / MCP：所有公司都看得见。跟公司侧共用同一套页面，差别只在
+  // catalogBase() 给出的接口前缀。
+  //
+  // **「全局 Bot」不在这份菜单里。** 平台这一侧管的是公司、机器、模型和钱，Bot 名录
+  // 是公司侧的东西；把它摆在平台菜单里，每次进来都要先分辨「这是全局的还是某家公司
+  // 的」。页面本身没有撤——全局 Bot 目录还得有人维护，而 owner 是唯一改得动它的人，
+  // 所以 allowedHrefs 里单独补了 /bots，直接输地址仍然进得去。
   { href: '/skills', label: '全局 Skill 与 MCP', icon: 'skills' },
 ]
 
 const ADMIN_NAV = [
-  { href: '/chat', label: '对话', icon: 'chat' },
-  { href: '/', label: '概览', icon: 'overview' },
   { href: '/company', label: '公司/席位', icon: 'company' },
   { href: '/accounts', label: '员工', icon: 'accounts' },
   { href: '/audit', label: '审计', icon: 'audit' },
@@ -261,7 +263,8 @@ const ADMIN_NAV = [
   { href: '/skills', label: 'Skill 与 MCP', icon: 'skills' },
 ]
 
-const MEMBER_NAV = [{ href: '/', label: '对话', icon: 'chat' }]
+/** 员工侧栏只有 Bot 名单（它由 chatRosterNav 单独画），所以这里是空的。 */
+const MEMBER_NAV = []
 
 const state = {
   me: null,
@@ -424,6 +427,10 @@ const state = {
   chatDraft: '',
   chatStatus: '',
   chatFiles: [],
+  /** botId → 没发出去的草稿。切走再切回来，打了一半的话还在。 */
+  chatDrafts: {},
+  /** 正在重放历史。期间只收不画，见 startChatStream。 */
+  chatReplaying: false,
 }
 
 
@@ -536,7 +543,13 @@ function navForRole() {
 }
 
 function allowedHrefs() {
-  return new Set([...navForRole().map((n) => n.href), '/profile'])
+  // '/' 不在导航里也必须可达：公司侧它就是对话页，是这些人的落点。
+  const set = new Set([...navForRole().map((n) => n.href), '/profile', '/'])
+  // 全局 Bot 从 owner 的菜单里撤了（见 OWNER_NAV），但**页面没撤**：撤的是入口，
+  // 不是功能。少了这一行，owner 直接输 /bots 会被 pathAllowed 踢回首页，全局 Bot
+  // 目录就此没人改得动了——而他是唯一改得动的人。
+  if (isOwner()) set.add('/bots')
+  return set
 }
 
 function isChatPath(p) {
@@ -548,8 +561,15 @@ function chatBotIdOf(p) {
   return decodeURIComponent(p.slice('/a/'.length).split('/')[0] || '')
 }
 
+/**
+ * 「/ 就是对话页」的角色。
+ *
+ * 公司侧不再有概览页——那一屏说的都是别处已经说过的话，而人进来是为了看 Bot。
+ * 去掉它之后，管理员和员工的落点是一样的：首页直接是对话。只有 owner 例外，
+ * 他管的是平台，没有席位也进不了对话。
+ */
 function memberChatHome() {
-  return !isOwner() && !isAdmin()
+  return !isOwner()
 }
 
 function pathAllowed(p) {
@@ -1147,6 +1167,14 @@ async function loadPage() {
     state.path = '/'
     history.replaceState({}, '', '/')
   }
+  // **Bot 名单在每一页都要有。** 它现在是侧栏的顶层，不再是「对话」页的附属——
+  // 而 loadRuntimeBots 一直只在 loadChatPage 里跑，于是管理员一进概览页，名单就空了。
+  // owner 没有席位，/runtime/bots 会 403，跳过它。
+  if (!isOwner()) {
+    await loadRuntimeBots().catch(() => {})
+    // 状态点和摘要也不该只在对话页才有：人切到账单页等 Bot 干完活，正是要看着它。
+    void warmBotStreams()
+  }
   try {
     if (state.path === '/') {
       if (isOwner()) {
@@ -1157,10 +1185,10 @@ async function loadPage() {
           loadCreds().catch(() => { state.creds = [] }),
           loadSettings().catch(() => {}),
         ])
-      } else if (isAdmin()) {
-        await Promise.all([loadMe(), loadOrg().catch(() => {}), loadSettings().catch(() => {})])
       } else {
+        // 管理员和员工的 / 都是对话页。管理员还要 loadOrg——右栏的运行环境要用。
         await loadMe()
+        if (isAdmin()) await Promise.all([loadOrg().catch(() => {}), loadSettings().catch(() => {})])
         await loadChatPage()
       }
     } else if (state.path === '/models') {
@@ -1337,23 +1365,15 @@ function loginView() {
 }
 
 function navItem(item) {
-  // 名册挂在「对话」那一项下面。**它的 href 因角色而异**：admin/owner 是 /chat，
-  // 成员的首页就是对话，href 是 /。只认 /chat 会把成员整个漏掉，而成员正是唯一
-  // 天天用对话的人。
-  const isChatEntry = item.href === '/chat' || (item.href === '/' && memberChatHome())
-  const roster = isChatEntry ? chatRosterNav() : ''
   const current =
-    // 名册展开时「对话」自己不高亮：选中状态由下面那一条 Bot 表示，两处都染色只会
-    // 让人分不清「我在哪个 Bot 上」。名册为空时还是要亮，否则整页没有任何位置指示。
-    !roster &&
-    (state.path === item.href ||
-      (item.href !== '/' && state.path.startsWith(item.href + '/')) ||
-      (item.href === '/chat' && state.path.startsWith('/a/')) ||
-      (item.href === '/' && memberChatHome() && state.path.startsWith('/a/')))
+    state.path === item.href ||
+    (item.href !== '/' && state.path.startsWith(item.href + '/')) ||
+    (item.href === '/chat' && state.path.startsWith('/a/')) ||
+    (item.href === '/' && memberChatHome() && state.path.startsWith('/a/'))
   return `<button type="button" class="satu-nav" data-act="go" data-href="${esc(item.href)}" aria-current="${current}">
     ${svg(ICONS[item.icon])}
     <span class="satu-label">${esc(t(item.label))}</span>
-  </button>${roster}`
+  </button>`
 }
 
 /**
@@ -1364,20 +1384,84 @@ function navItem(item) {
  *
  * 只在对话相关的页面上展开：别的页面挂一串 Bot 是噪音。
  */
+/**
+ * 侧栏顶层的 Bot 名单。
+ *
+ * **不再挂在「对话」下面。** 这些 Bot 就是这个产品的主体——一个人管着几个 AI 员工，
+ * 天天要看的是「谁在干活、谁刚回了话」。把它们藏在一个还要先点开的导航项里，等于
+ * 把主角放进抽屉。所以提到顶层，做成聊天列表的样子：头像、名字、最近回复的时间、
+ * 一行摘要，正在跑的转圈。
+ *
+ * 时间和摘要留空位不留内容：它们来自各自的事件流，每帧都在变（见 paintRoster），
+ * 靠重绘整页去更新的话，一边打字一边就把侧栏刷没了。
+ */
 function chatRosterNav() {
-  const onChat = state.path === '/chat' || state.path.startsWith('/a/') || (memberChatHome() && state.path === '/')
-  if (!onChat) return ''
   const bots = state.runtimeBots || []
   if (!bots.length) return ''
   const selected = chatBotIdOf(state.path) || state.chatBotId
-  return `<div class="satu-subnav">${bots
-    .map(
-      (b) => `<button type="button" class="satu-nav satu-subnav-item" data-act="chat-open" data-id="${esc(b.id)}" aria-current="${b.id === selected}">
-        ${botAvatar(b.icon, 18, b.origin)}
-        <span class="satu-label">${esc(b.name || b.id)}</span>
-      </button>`,
-    )
-    .join('')}</div>`
+  return bots
+    .map((b) => {
+      const sum = (botStreams.get(b.id) || {}).sum || { state: 'idle', lastAt: 0, lastText: '' }
+      return `<button type="button" class="satu-botrow" data-act="chat-open" data-id="${esc(b.id)}" data-bot-row="${esc(b.id)}" aria-current="${b.id === selected}">
+        ${/* 头像占满两行：名字和摘要并排在它右边，整行才像一条会话，而不是一个
+             带小图标的菜单项。34 是 botAvatar 的默认尺寸，也正好等于两行的高度。 */ ''}
+        <span class="satu-botavatar">${botAvatar(b.icon, 34, b.origin)}</span>
+        <span class="satu-botmain">
+          <span class="satu-botline">
+            ${/* 状态点在名字**前面**：一列对齐的点，扫一眼就知道哪几个在动，
+                 不用把视线甩到行尾去找。 */ ''}
+            <span class="satu-botdot" data-state="${sum.state}" title="${esc(botStateLabel(sum.state))}" aria-label="${esc(botStateLabel(sum.state))}"></span>
+            <span class="satu-botname">${esc(b.name || b.id)}</span>
+            <time class="satu-bottime">${esc(sum.lastAt ? chatClock(sum.lastAt) : '')}</time>
+          </span>
+          ${/* 没有消息就不留这一行——空着一道灰边比少一行更碍眼。 */ ''}
+          <span class="satu-botsnip"${sum.lastText ? '' : ' hidden'}>${esc(sum.lastText)}</span>
+        </span>
+      </button>`
+    })
+    .join('')
+}
+
+let rosterPaintQueued = false
+
+/** 名单每帧都可能变（时间、摘要、转圈），跟正文一样合并到一帧里画。 */
+function scheduleRosterPaint() {
+  if (rosterPaintQueued) return
+  rosterPaintQueued = true
+  const run = () => {
+    rosterPaintQueued = false
+    paintRoster()
+  }
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run)
+  else setTimeout(run, 16)
+}
+
+function botStateLabel(state) {
+  if (state === 'busy') return t('正在执行')
+  if (state === 'review') return t('待人工处理')
+  return t('空闲')
+}
+
+/** 就地更新名单的状态点/时间/摘要。不重绘整页——那会把正在打字的输入框一起换掉。 */
+function paintRoster() {
+  for (const row of document.querySelectorAll('[data-bot-row]')) {
+    const id = row.getAttribute('data-bot-row')
+    const sum = (botStreams.get(id) || {}).sum
+    if (!sum) continue
+    const dot = row.querySelector('.satu-botdot')
+    if (dot && dot.getAttribute('data-state') !== sum.state) {
+      dot.setAttribute('data-state', sum.state)
+      dot.title = botStateLabel(sum.state)
+      dot.setAttribute('aria-label', botStateLabel(sum.state))
+    }
+    const time = row.querySelector('.satu-bottime')
+    if (time) time.textContent = sum.lastAt ? chatClock(sum.lastAt) : ''
+    const snip = row.querySelector('.satu-botsnip')
+    if (snip) {
+      snip.textContent = sum.lastText
+      snip.hidden = !sum.lastText
+    }
+  }
 }
 
 function flashes() {
@@ -1399,8 +1483,8 @@ function placeholderPage(title, body) {
 }
 
 function overviewPage() {
+  // 公司侧（管理员和员工）的 / 就是对话页；概览那一屏已经去掉了。
   if (isOwner()) return ownerOverviewPage()
-  if (isAdmin()) return adminOverviewPage()
   return chatPage()
 }
 
@@ -1449,41 +1533,6 @@ function ownerOverviewPage() {
     </div>`
 }
 
-function adminOverviewPage() {
-  const company = state.me?.company || state.org || {}
-  const plan = state.me?.plan || state.plan || { seats: 0, used: 0 }
-  const pct = plan.seats ? Math.min(100, Math.round((plan.used / plan.seats) * 100)) : 0
-  return `
-    <div class="gw-page">
-      <div class="gw-page-inner">
-        <div>
-          <h1 style="font-size: 24px; margin: 0 0 4px;">${t('概览')}</h1>
-          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('公司、席位，以及平台日常 / utility 模型（只读）。')}</p>
-        </div>
-        ${flashes()}
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-3);">
-          <div class="satu-stat">
-            <span style="font-size: 12px; color: var(--muted-foreground);">${t('公司')}</span>
-            <span style="font-family: var(--font-heading); font-size: 26px; line-height: 1;">${esc(company.name || '—')}</span>
-            <span style="font-size: 11.5px; color: var(--muted-foreground);">${esc(company.slug || '')}</span>
-          </div>
-          <div class="satu-stat">
-            <span style="font-size: 12px; color: var(--muted-foreground);">${t('席位')}</span>
-            <span style="font-family: var(--font-heading); font-size: 26px; line-height: 1;">${esc(plan.used)} / ${esc(plan.seats)}</span>
-            <div class="satu-meter" style="margin-top: 4px;"><div class="satu-meterfill" style="width: ${pct}%;"></div></div>
-          </div>
-          <div class="satu-stat">
-            <span style="font-size: 12px; color: var(--muted-foreground);">${t('日常任务模型')}</span>
-            <span style="font-family: var(--font-heading); font-size: 18px; line-height: 1.2;">${esc(roleLabel('daily'))}</span>
-          </div>
-          <div class="satu-stat">
-            <span style="font-size: 12px; color: var(--muted-foreground);">${t('Utility 模型')}</span>
-            <span style="font-family: var(--font-heading); font-size: 18px; line-height: 1.2;">${esc(roleLabel('utility'))}</span>
-          </div>
-        </div>
-      </div>
-    </div>`
-}
 
 function configuredProviders() {
   const configured = configuredSet()
@@ -3325,8 +3374,72 @@ function machinePanel(orgId) {
     <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('装上机器管家并配对之后，建账号、装包、起桌面全归它——Gateway 不保存任何登录这台机器的凭据。')}</p>
     <div class="satu-kv"><span>${t('账号位')}</span><span>${cap.accounts} / ${cap.max}${cap.max && cap.accounts >= cap.max ? ' · ' + t('已满，新员工无法部署') : ''}</span></div>
     ${cards}
+    ${list.length ? timezoneOptions() : ''}
     ${codeBox}
     <div><button type="button" class="btn btn-primary" data-act="pairing-code" data-id="${esc(orgId)}" ${state.busy ? 'disabled' : ''}>${list.length ? t('新增 / 重配机器') : t('生成配对码')}</button></div>
+  </div>`
+}
+
+/**
+ * 通联状态 → 一盏灯 + 一句话。
+ *
+ * **判据是心跳的新旧，不是 `lastError`。** 能报错说明线是通的；把两件事塞进同一盏灯，
+ * 「机器失联」和「机器在线但升级失败」就长成一个样子，而这两种的处置完全不同。错误
+ * 另有一行 lastError 管。
+ *
+ * 中间那档 `stale` 不是凑数：换版重启本身就会断几十秒，一超时就报红会让每次自升级都
+ * 闪一次红灯，几次之后没人再信这盏灯。
+ */
+const LINK_TEXT = {
+  online: () => t('在线'),
+  stale: () => t('心跳迟了'),
+  offline: () => t('失联'),
+  unpaired: () => t('还没有配对'),
+  unknown: () => t('状态未知'),
+}
+
+/** 「多久之前」。秒级起步——心跳 30 秒一轮，只报到分钟就看不出刚刚断没断。 */
+function sinceMs(ms) {
+  if (ms == null) return ''
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return t(`${sec} 秒前`, `${sec}s ago`)
+  const min = Math.floor(sec / 60)
+  if (min < 60) return t(`${min} 分钟前`, `${min} min ago`)
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return t(`${hr} 小时前`, `${hr} h ago`)
+  return t(`${Math.floor(hr / 24)} 天前`, `${Math.floor(hr / 24)} d ago`)
+}
+
+/**
+ * 卡片的头一行：灯、编号、短码、状态。
+ *
+ * **编号和短码是两样东西。** 「1 号机」是给人照着念的，中间删掉一台后面就会往前挪；
+ * 要唯一地指一台得用 id，所以短码那颗按钮复制的是**完整 id**，显示的只是前 8 位——
+ * 完整 UUID 摆在卡片头上，占一行，还没人读得下来。
+ */
+function machineHead(card, m) {
+  // **「后端没给这个字段」不等于「机器没配对」。** 这两件事差得最远，而合成一个兜底
+  // 值的代价是：一台心跳正常、版本刚升完的机器，界面上写着「还没有配对」。开发时
+  // 前端比后端新一步就会撞上（浏览器读的是磁盘上的 app.js，Gateway 要重启才换代码）。
+  //
+  // `paired` 是老响应里就有的，可信；`link` 缺了就老实说不知道，不替它猜一个。
+  const link = m.link || (m.paired === false ? 'unpaired' : 'unknown')
+  const label = (LINK_TEXT[link] || LINK_TEXT.unknown)()
+  // 「还没有配对」本身就说完了，再缀一个「从未」是废话；配对过却没心跳过才要点出来。
+  // 状态未知时也不缀——那个数字同样来自缺席的那批字段。
+  const when =
+    link === 'unpaired' || link === 'unknown'
+      ? ''
+      : m.heartbeatAge == null
+        ? ' · ' + t('从未心跳')
+        : ' · ' + sinceMs(m.heartbeatAge)
+  const short = String(m.id || '').slice(0, 8)
+  return `<div class="satu-machinehead">
+    <span class="satu-linkdot" data-link="${esc(link)}" title="${esc(label)}"></span>
+    ${/* 编号缺席时整个略过，不画「机器 ?」——一个问号既指代不了机器，也说不清是哪儿出了问题。 */ ''}
+    ${card.no ? `<span class="satu-machineno">${t('机器')} ${esc(card.no)}</span>` : ''}
+    ${short ? `<button type="button" class="satu-linkbtn satu-machineid" data-act="copy-machine-id" data-machine="${esc(m.id)}" title="${t('复制完整编号')}">${esc(short)}</button>` : ''}
+    <span style="font-size: 13px; color: var(--muted-foreground);">${esc(label)}${esc(when)}</span>
   </div>`
 }
 
@@ -3340,8 +3453,9 @@ function machineCard(orgId, card) {
   const m = card.machine || {}
   const full = card.full
   return `<div class="satu-panel" style="margin: 0; background: var(--muted);">
+    ${machineHead(card, m)}
     <div class="satu-kv"><span>${t('地址')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; word-break: break-all;">
-      ${esc(m.host || '—')}${m.paired ? '' : ` <span class="tag">${t('还没有配对')}</span>`}
+      ${esc(m.host || '—')}
       ${card.seats ? '' : `<button type="button" class="satu-linkbtn" data-act="machine-remove" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('移除')}</button>`}
     </span></div>
     <div class="satu-kv"><span>${t('账号位')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
@@ -3352,6 +3466,7 @@ function machineCard(orgId, card) {
       </form>
     </span></div>
     <div class="satu-kv"><span>${t('最近心跳')}</span><span>${m.lastHeartbeatAt ? esc(new Date(m.lastHeartbeatAt).toLocaleString()) : t('还没有')}</span></div>
+    ${timezoneRow(orgId, m, card)}
     ${managerVersionRow(orgId, m, card)}
     ${botVersionRow(orgId, card)}
     ${m.lastError ? `<div class="satu-kv"><span>lastError</span><span>${esc(m.lastError)}</span></div>` : ''}
@@ -3363,6 +3478,52 @@ function machineCard(orgId, card) {
       <button type="submit" class="btn" ${state.busy ? 'disabled' : ''}>${t('保存')}</button>
     </form>
   </div>`
+}
+
+/**
+ * 机器时区行。
+ *
+ * 和「升级」是同一条路：Gateway 没有登录这台机器的凭据，填进去只是**把期望时区钉在
+ * 这台机器上**，真正 `timedatectl set-timezone` 的是机器上的管家，下一轮心跳才知道
+ * 成没成。所以这里显示的是**机器自报的实际时区**，指令还没落地时另标一句，不写成
+ * 「已生效」。
+ *
+ * 留空 = 不再管这台机器的时区（不会把机器改回去）。
+ */
+function timezoneRow(orgId, m, card) {
+  const cur = m.currentTimezone || (m.paired ? t('机器没报') : '—')
+  const note = card.timezonePending
+    ? ` · ${t('已下指令，等机器改')} → ${esc(m.timezone || '')}`
+    : m.timezone
+      ? ` · ${t('已生效')}`
+      : ` · ${t('没有指定，跟机器现状')}`
+  return `<div class="satu-kv"><span>${t('时区')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
+    ${esc(cur)}${note}
+    <form data-form="machine-timezone" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" style="display: inline-flex; gap: 6px; align-items: center;">
+      <input class="input" name="timezone" list="satu-timezones" value="${esc(m.timezone || '')}" placeholder="Asia/Shanghai" autocomplete="off" spellcheck="false" style="width: 200px;">
+      <button type="submit" class="satu-linkbtn" ${state.busy ? 'disabled' : ''}>${t('改时区')}</button>
+    </form>
+  </span></div>`
+}
+
+/**
+ * 时区候选。浏览器自己就有全套 IANA 表（`Intl.supportedValuesOf`），不必在前端塞一份
+ * 会过期的清单。取不到就退回几个常用的——datalist 只是补全，手打任何合法名字都收，
+ * 真正认不认由 Gateway 判。
+ *
+ * **整个面板只出一份**（不是每台机器一份）：id 要唯一，而且这张表有四百多项，
+ * 多机公司逐台复制一遍纯属白搭 DOM。
+ */
+let timezoneList = null
+function timezoneOptions() {
+  if (!timezoneList) {
+    try {
+      timezoneList = Intl.supportedValuesOf('timeZone')
+    } catch {
+      timezoneList = ['Asia/Shanghai', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Kolkata', 'Europe/London', 'UTC']
+    }
+  }
+  return `<datalist id="satu-timezones">${timezoneList.map((z) => `<option value="${esc(z)}"></option>`).join('')}</datalist>`
 }
 
 /**
@@ -5175,6 +5336,89 @@ function usagePage() {
 let chatAbort = null
 let chatStreamId = ''
 
+/**
+ * 每个 Bot 一条事件流。
+ *
+ * 侧栏那份名单要显示「最近一条回复的时间 + 摘要 + 在不在跑」，这三样只能从会话事件里
+ * 拿。**只盯当前这条会话是不够的**：人在 A 上派了活、切到 B 去看别的，最想知道的恰恰
+ * 是 A 什么时候干完——而以前一切走就把 A 的流掐了，从此两眼一抹黑。
+ *
+ * 摘要为什么不让 Gateway 给：db.ts 那边写着「会话索引只存指针，不存 user/message 或
+ * assistant/message 正文」——正文留在席位机器上，Gateway 只有 sessionId 和计数。为了
+ * 名单上一行灰字去破这条边界不划算，而流里本来就有全文。
+ *
+ * botId -> { sessionId, ac, events, sum }
+ * sum = { busy, lastAt, lastText }，**增量维护**：每次渲染名单都去 fold 一遍全部事件，
+ * 几个 Bot 各七百多条，光滚个侧栏就能把 CPU 吃满。
+ */
+const botStreams = new Map()
+
+/** 同时开着的流的上限。名单通常只有两三个 Bot，这道闸是防意外，不是常态。 */
+const BOT_STREAM_MAX = 8
+
+function botStreamOf(botId) {
+  let row = botStreams.get(botId)
+  if (!row) {
+    row = { sessionId: '', ac: null, events: [], sum: { state: 'idle', lastAt: 0, lastText: '' } }
+    botStreams.set(botId, row)
+  }
+  return row
+}
+
+/** 事件到了就地更新摘要。O(1)，不 fold。 */
+function noteBotEvent(botId, ev) {
+  const row = botStreams.get(botId)
+  if (!row) return
+  const sum = row.sum
+  const before = sum.state + '|' + sum.lastAt + '|' + sum.lastText
+  if (ev.type === 'turn/start') sum.state = 'busy'
+  else if (ev.type === 'turn/end') sum.state = 'idle'
+  // **「待人工处理」还没有数据源。** 系统里的「需审批」目前只是 MCP 的配置项
+  // （routes.ts 的 MCP_PERMS），运行时并没有「停下来等人点头」这件事——bot 要么在跑，
+  // 要么跑完了。等哪天 bot 会为此发一条事件（比如 turn 挂起等审批），在这里加一行
+  // `sum.state = 'review'` 就接上了，点的样式和三态判断都已经在位。
+  else if (ev.type === 'user/message' || ev.type === 'assistant/message') {
+    const text = messageText((ev.data || {}).message) || (ev.data || {}).text || ''
+    if (text) {
+      sum.lastText = text.replace(/\s+/g, ' ').trim().slice(0, 120)
+      sum.lastAt = Number(ev.time) || sum.lastAt
+    }
+  } else if (ev.type === 'assistant/chunk') {
+    // 流式期间也把时间往前推，否则「最近回复」会停在上一轮，看着像卡住了。
+    sum.lastAt = Number(ev.time) || sum.lastAt
+  }
+  if (before !== sum.state + '|' + sum.lastAt + '|' + sum.lastText) scheduleRosterPaint()
+}
+
+/** 关掉一个 Bot 的流。事件留着——切回去时就不用再重放一遍历史。 */
+function closeBotStream(botId) {
+  const row = botStreams.get(botId)
+  if (!row) return
+  if (row.ac) {
+    try {
+      row.ac.abort()
+    } catch {}
+  }
+  row.ac = null
+}
+
+function closeAllBotStreams() {
+  for (const id of botStreams.keys()) closeBotStream(id)
+  botStreams.clear()
+}
+
+/** 超出上限就先关最久没动静的那条，事件也一并丢掉。 */
+function trimBotStreams(keepId) {
+  if (botStreams.size <= BOT_STREAM_MAX) return
+  const rows = [...botStreams.entries()].filter(([id, r]) => id !== keepId && r.sum.state === 'idle')
+  rows.sort((a, b) => a[1].sum.lastAt - b[1].sum.lastAt)
+  while (botStreams.size > BOT_STREAM_MAX && rows.length) {
+    const [id] = rows.shift()
+    closeBotStream(id)
+    botStreams.delete(id)
+  }
+}
+
 function messageText(msg) {
   if (!msg) return ''
   if (typeof msg === 'string') return msg
@@ -5310,20 +5554,70 @@ async function loadDesktopRuntime(botId) {
   }
 }
 
+/**
+ * 把当前会话换成这个 Bot 的。
+ *
+ * **换 Bot 的第一件事是清场，不是去拿新会话。** 原先是等新会话拿回来、比对出
+ * sessionId 变了才清 state.chatEvents——于是只要那一步没走到，屏幕上就还挂着上一个
+ * Bot 的对话。而它非常容易走不到：新 Bot 的席位没起来时，`/runtime/bots/:id/session`
+ * 直接 503「实例还没上线」，catch 里记一笔就返回了。结果是切过去之后，你看着的是**另
+ * 一个 Bot 的聊天记录**，旧的那条流还连着，还在往里追新消息。
+ *
+ * 所以顺序反过来：Bot 一变，立刻停掉旧流、把正文和状态清空。拿不到新会话就是一片空
+ * 白加一句「实例还没上线」——空白是诚实的，别人的对话不是。
+ */
 async function ensureChatSession(botId) {
   if (!botId) return
   if (state.chatBotId === botId && state.chatSessionId && chatStreamId === state.chatSessionId) return
-  state.chatBotId = botId
+  // 这个 Bot 的流一直开着（切走时没掐）——把正文接回去就行，不用重新拉一遍会话。
+  const warm = botStreams.get(botId)
+  if (warm && warm.ac && warm.sessionId && state.chatBotId !== botId) {
+    if (state.chatBotId) state.chatDrafts[state.chatBotId] = { text: state.chatDraft, files: state.chatFiles }
+    const kept = state.chatDrafts[botId] || { text: '', files: [] }
+    state.chatBotId = botId
+    state.chatSessionId = warm.sessionId
+    state.chatEvents = warm.events
+    state.chatReplaying = false
+    state.chatDraft = kept.text
+    state.chatFiles = kept.files
+    chatAbort = warm.ac
+    chatStreamId = warm.sessionId
+    paintChat()
+    return
+  }
+  if (state.chatBotId !== botId) {
+    // **不掐上一个 Bot 的流。** 它可能正在干活，而名单上的转圈和「最近回复」就靠它。
+    // 只把「当前会话」这把闩放开——正文渲染换到新 Bot 那边去。
+    chatAbort = null
+    chatStreamId = ''
+    // 没发出去的草稿和附件是写给上一个 Bot 的，跟着它一起收起来；切回去还在。
+    if (state.chatBotId) state.chatDrafts[state.chatBotId] = { text: state.chatDraft, files: state.chatFiles }
+    const kept = state.chatDrafts[botId] || { text: '', files: [] }
+    state.chatBotId = botId
+    state.chatSessionId = ''
+    // 正文直接指向这个 Bot 自己的事件桶：切回去时历史还在，不用再重放一遍。
+    state.chatEvents = botStreamOf(botId).events
+    state.chatStatus = ''
+    state.chatReplaying = false
+    state.chatDraft = kept.text
+    state.chatFiles = kept.files
+  }
   try {
     const data = await api('GET', '/runtime/bots/' + encodeURIComponent(botId) + '/session')
     const sessionId = data.sessionId
     if (!sessionId) throw new Error('没有会话')
-    if (state.chatSessionId !== sessionId) {
-      state.chatEvents = []
-      state.chatStatus = ''
+    // 期间人又切走了：这次的结果已经不作数，认领了就会把新会话顶掉。
+    if (state.chatBotId !== botId) return
+    const row = botStreamOf(botId)
+    if (row.sessionId && row.sessionId !== sessionId) {
+      // 换了一条会话（席位重建过）——旧事件作废。
+      row.events.length = 0
+      row.sum = { state: 'idle', lastAt: 0, lastText: '' }
     }
+    state.chatEvents = row.events
     state.chatSessionId = sessionId
-    void startChatStream(sessionId)
+    state.chatStatus = ''
+    void startChatStream(sessionId, 0, botId)
   } catch (err) {
     const msg = String(err.message || '')
     if (msg.includes('实例还没上线')) state.runtimeError = '实例还没上线'
@@ -5332,13 +5626,41 @@ async function ensureChatSession(botId) {
 }
 
 async function loadChatPage() {
-  await Promise.all([loadRuntimeBots(), loadRuntimeMachine()])
+  // loadRuntimeBots 由 loadPage 统一拉（名单是全局侧栏，不只这一页要）。
+  await loadRuntimeMachine()
   const botId = chatBotIdOf(state.path)
   await loadDesktopRuntime(botId)
   if (botId) await ensureChatSession(botId)
-  else if (!memberChatHome() || state.path === '/chat') {
-    /* 名单页，不断流也可以，但换页时停掉以免后台烧连接 */
-    if (!botId) stopChatStream()
+  // 名单上每个 Bot 都挂一条流。刷新页面之后也能立刻看出谁在干活、谁最近说了什么——
+  // 只连当前这一个的话，那两列信息要等人挨个点进去才出得来。
+  void warmBotStreams()
+}
+
+/**
+ * 给名单上的每个 Bot 都开一条流（当前这个除外，它自己会开）。
+ *
+ * 串着来、不并发：每条流一上来都要重放整段历史，几个 Bot 同时灌会把主线程压住，
+ * 而这些数据只是侧栏上的一行字，不该跟正文抢。
+ */
+async function warmBotStreams() {
+  for (const b of state.runtimeBots || []) {
+    if (!b || !b.id) continue
+    // 当前这个由 ensureChatSession 开（它还要接正文），这里只管别的。
+    if (b.id === state.chatBotId && botStreams.get(b.id)?.ac) continue
+    const row = botStreams.get(b.id)
+    if (row && row.ac) continue
+    try {
+      const data = await api('GET', '/runtime/bots/' + encodeURIComponent(b.id) + '/session')
+      if (!data.sessionId) continue
+      const r = botStreamOf(b.id)
+      if (r.sessionId && r.sessionId !== data.sessionId) {
+        r.events.length = 0
+        r.sum = { state: 'idle', lastAt: 0, lastText: '' }
+      }
+      void startChatStream(data.sessionId, 0, b.id)
+    } catch {
+      // 席位没上线之类——名单上这一行就没有时间和摘要，不该让整页跟着出错。
+    }
   }
 }
 
@@ -5348,12 +5670,19 @@ async function loadChatPage() {
  * 事件里的 `seq` 是会话日志的行号，天然单调，所以「续传」就是把最后见到的那个数
  * 回传过去——不需要去重，也不会重放已经画出来的内容。
  */
-function chatCursor() {
-  for (let i = state.chatEvents.length - 1; i >= 0; i--) {
-    const n = Number(state.chatEvents[i] && state.chatEvents[i].seq)
+function chatCursor(botId) {
+  const list = botId ? botStreamOf(botId).events : state.chatEvents
+  for (let i = list.length - 1; i >= 0; i--) {
+    const n = Number(list[i] && list[i].seq)
     if (Number.isFinite(n)) return n
   }
   return null
+}
+
+/** 这条会话归哪个 Bot。事件回来时要知道记到谁头上。 */
+function botIdOfSession(sessionId) {
+  for (const [id, row] of botStreams) if (row.sessionId === sessionId) return id
+  return ''
 }
 
 /**
@@ -5367,16 +5696,33 @@ const CHAT_RETRY_MAX = 6
 /** 连接活够这么久，就算「真的连上过」，退避档位归零。 */
 const CHAT_ALIVE_MS = 10_000
 
-async function startChatStream(sessionId, attempt = 0) {
+async function startChatStream(sessionId, attempt = 0, botId = '') {
+  const owner = botId || botIdOfSession(sessionId)
+  const isActive = () => state.chatSessionId === sessionId
   if (attempt === 0) {
-    if (chatStreamId === sessionId && chatAbort) return
-    stopChatStream()
+    const row = owner ? botStreamOf(owner) : null
+    // 这条流已经在跑就别再开一条。**换 Bot 不再掐流**：名单要靠它继续报「跑完没有」。
+    if (row && row.sessionId === sessionId && row.ac) return
+    if (isActive()) stopChatStream()
   }
   const ac = new AbortController()
-  chatAbort = ac
-  chatStreamId = sessionId
+  if (owner) {
+    const row = botStreamOf(owner)
+    row.sessionId = sessionId
+    row.ac = ac
+    trimBotStreams(owner)
+  }
+  // `|| !owner`：没归到哪个 Bot 名下的流（低层直接调用、测试）按老规矩走单流那一套，
+  // 否则它既不在 botStreams 里、又不是当前会话，就成了没人认领的孤儿——断了不重连，
+  // 也没人把「连接断开」摆到界面上。
+  if (isActive() || !owner) {
+    chatAbort = ac
+    chatStreamId = sessionId
+    // 断线重连（带 after）也可能补一大段，同样先拉闸。
+    beginReplay()
+  }
   const t = token()
-  const after = chatCursor()
+  const after = chatCursor(owner)
   const q = after != null ? '?after=' + encodeURIComponent(after) : ''
   let res
   try {
@@ -5389,6 +5735,7 @@ async function startChatStream(sessionId, attempt = 0) {
     })
   } catch (err) {
     releaseChatStream(ac)
+    endReplay()
     if (ac.signal.aborted) return
     state.runtimeError = '实例还没上线'
     paintChat()
@@ -5396,12 +5743,14 @@ async function startChatStream(sessionId, attempt = 0) {
   }
   if (res.status === 503) {
     releaseChatStream(ac)
+    endReplay()
     state.runtimeError = '实例还没上线'
     paintChat()
     return
   }
   if (!res.ok || !res.body) {
     releaseChatStream(ac)
+    endReplay()
     state.runtimeError = (await res.text().catch(() => '')) || '实例还没上线'
     paintChat()
     return
@@ -5427,6 +5776,17 @@ async function startChatStream(sessionId, attempt = 0) {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      // 这条流已经不是「当前那条」了就收摊。切 Bot 的一瞬间，旧流手上可能还攥着一段
+      // 已经收到、还没解析的数据；不在这里拦住，它会落进新会话的事件数组里，画出来
+      // 就是两个 Bot 的消息串在一起。
+      //
+      // 判据以 chatStreamId 为准（换 Bot 必经 stopChatStream，它就是那把闩）。
+      // chatSessionId 只在**已经认定了某条会话**时才参与——低层直接调 startChatStream
+      // 的路径（重连、测试）还没来得及认领，不该被当成「串台」拦掉。
+      if (ac.signal.aborted) break
+      // **不再因为「不是当前会话」就收摊**：后台那几条流正是名单上时间、摘要和转圈的
+      // 唯一来源。只有当前这条要盯 chatStreamId（重连时它会被换掉）。
+      if (isActive() && chatStreamId !== sessionId) break
       buf += decoder.decode(value, { stream: true })
       buf = buf.replace(/\r\n/g, '\n')
       let idx
@@ -5442,21 +5802,40 @@ async function startChatStream(sessionId, attempt = 0) {
             continue
           }
           if (!ev || typeof ev !== 'object') continue
-          state.chatEvents.push(ev)
-          schedulePaintChat()
+          if (ev.type === 'replay/done') {
+            // bot 明说历史放完了。它不是会话事件，不进事件桶。
+            if (isActive()) endReplay()
+            continue
+          }
+          if (owner) {
+            botStreamOf(owner).events.push(ev)
+            noteBotEvent(owner, ev)
+          } else if (isActive()) {
+            // 没有归属又不是当前会话的流，事件无处可放——**绝不能倒进 chatEvents**，
+            // 那正是「切走了，旧流剩下的半截落进新会话」的老毛病。
+            state.chatEvents.push(ev)
+          }
+          if (!isActive()) continue
+          if (state.chatReplaying) bumpReplayQuiet()
+          else schedulePaintChat()
         }
       }
     }
   } catch (err) {
+    endReplay()
     if (!ac.signal.aborted) return retryChatStream(sessionId, ac, nextAttempt())
     return
   }
+  endReplay()
   // 正常读到 done 也要重连：SSE 被中间那一跳掐掉时看起来就是干净的流结束。
   if (!ac.signal.aborted) return retryChatStream(sessionId, ac, nextAttempt())
 }
 
 function retryChatStream(sessionId, ac, attempt) {
-  if (chatAbort !== ac || chatStreamId !== sessionId) return
+  const owner = botIdOfSession(sessionId)
+  const row = owner ? botStreams.get(owner) : null
+  // 后台流也要重连——名单上的「跑完没有」全指望它。
+  if (row ? row.ac !== ac : chatAbort !== ac || chatStreamId !== sessionId) return
   if (attempt >= CHAT_RETRY_MAX) {
     state.runtimeError = '连接断开，刷新页面重试'
     paintChat()
@@ -5467,6 +5846,50 @@ function retryChatStream(sessionId, ac, attempt) {
     if (chatAbort !== ac || chatStreamId !== sessionId) return
     void startChatStream(sessionId, attempt + 1)
   }, delay)
+}
+
+/**
+ * 重放闸。
+ *
+ * 打开一条会话时，SSE 会把**全部历史**从头推一遍，和后续的实时事件走同一个通道。
+ * 一条 8 轮的对话就是 789 条事件（其中 706 条是流式 chunk）。以前每收到一条就重绘一
+ * 次：每次都要 fold 全量事件、比对整棵 DOM、把最后那段 Markdown 重渲染一遍——O(n²)，
+ * 而且屏幕上能看见消息一条条往外冒。
+ *
+ * 更糟的是**状态是错的**：重放到某轮的 `turn/start` 就显示「正在处理」，要等重放出
+ * 配对的 `turn/end` 才消失。实测 789 帧里有 772 帧（98%）挂着「正在处理」，而那期间
+ * 什么都没在跑——它说的是几小时前那一轮。
+ *
+ * 所以重放期间只收不画，历史放完再画一次。两个判据：
+ *   1. bot 发的 `replay/done`（准确，但要 bot 也升级）
+ *   2. 静默 120ms（兜底：重放是连续灌的，一停就是灌完了）
+ * 外加 4 秒硬上限，免得某条流一直断续把闸卡死。
+ */
+const REPLAY_QUIET_MS = 120
+const REPLAY_MAX_MS = 4000
+let replayQuietTimer = null
+let replayCapTimer = null
+
+function beginReplay() {
+  state.chatReplaying = true
+  clearTimeout(replayCapTimer)
+  replayCapTimer = setTimeout(() => endReplay(), REPLAY_MAX_MS)
+  bumpReplayQuiet()
+}
+
+/** 又来一条：重放还在继续，把「静默」判定往后推。 */
+function bumpReplayQuiet() {
+  if (!state.chatReplaying) return
+  clearTimeout(replayQuietTimer)
+  replayQuietTimer = setTimeout(() => endReplay(), REPLAY_QUIET_MS)
+}
+
+function endReplay() {
+  clearTimeout(replayQuietTimer)
+  clearTimeout(replayCapTimer)
+  if (!state.chatReplaying) return
+  state.chatReplaying = false
+  paintChat()
 }
 
 let chatPaintQueued = false
@@ -5653,10 +6076,12 @@ function threadRows(folded) {
 
 function syncThread(thread, folded) {
   const rows = threadRows(folded)
+  // 空会话就留空。以前这里摆一句「继续这段对话…」——它只在**刚开一条新对话**时出现
+  // 一瞬间，而输入框的 placeholder 已经说了该干什么。多一句灰字只是让空屏更吵。
   if (!rows.length) {
     if (thread.getAttribute('data-empty') !== '1') {
       thread.setAttribute('data-empty', '1')
-      thread.innerHTML = `<p class="gw-chat-empty">${t('继续这段对话…')}</p>`
+      thread.innerHTML = ''
     }
     return
   }
@@ -5734,6 +6159,9 @@ function paintChatChrome(folded) {
     if (busy) send.setAttribute('data-act', 'chat-abort')
     else send.removeAttribute('data-act')
   }
+  // 名单上的时间/摘要/转圈由 paintRoster 管——它认每个 Bot 自己那条流，
+  // 不再只看当前这一条。
+  paintRoster()
   const jump = document.getElementById('chat-jump')
   const thread = document.getElementById('chat-thread')
   if (jump && thread) jump.hidden = nearBottom(thread)
@@ -6055,7 +6483,12 @@ async function deployMyRuntime(botId, opts = {}) {
   try {
     // `update` 不能省：席位已经是 ready 且版本没变时，服务端会直接把现状还回来，
     // 什么都不做——那样「重新部署」这个按钮就成了摆设。
-    await api('POST', '/runtime/deploy', opts.update ? { botId: id, update: true } : { botId: id })
+    // force：见 gateway/src/deploy.ts 里那道「已经 ready 就跳过」的门。不带它的话，
+    // 「重新部署」在最需要它的时候（版本对、状态 ready、但机器上不对）什么都不会做。
+    const body = { botId: id }
+    if (opts.update) body.update = true
+    if (opts.force) body.force = true
+    await api('POST', '/runtime/deploy', body)
     const startAt = Date.now()
     while (Date.now() - startAt < 15000) {
       try {
@@ -6196,8 +6629,9 @@ function appView() {
   const nav = navForRole()
   const home = nav[0]
   const rest = nav.slice(1)
+  const roster = chatRosterNav()
   const groupLabel = isOwner() ? t('平台') : isAdmin() ? t('公司') : ''
-  const mainNav = navItem(home)
+  const mainNav = home ? navItem(home) : ''
   const restNav = rest.map(navItem).join('')
   // 右栏和 header 同高：把 main 做成两行两列的 grid，侧栏跨两行占右列。做成 header
   // 下面的兄弟节点就顶不上去了。
@@ -6212,14 +6646,20 @@ function appView() {
         <img src="/assets/satuwork-logo.png" alt="Satuwork" style="width: 32px; height: 32px; min-width: 32px; flex: none; object-fit: contain; border-radius: var(--radius-sm);">
         <span class="satu-brandtext" style="font-family: var(--font-heading); font-size: 19px;">Satuwork</span>
       </button>
-      <div style="flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;">
-        ${mainNav}
+      ${/* 名单吃掉剩下的全部高度并自己滚；下面那组导航沉到底，不跟着一起滚走。
+            Bot 是这一屏的主体，页面入口是配角，位置上就该这么分。
+
+            **但没有名单时不能留那个占位。** 平台管理员这一侧永远没有 Bot（他没有席位，
+            /runtime/bots 对他 403），于是占位每次都撑满，把整组菜单压到屏幕底部，上面
+            空一大片——沉底的理由是「给名单让位」，名单不在，理由也就不在了。 */ ''}
+      <div style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
+        ${roster ? `<div class="satu-botlist">${roster}</div>` : ''}
         ${
-          rest.length
-            ? `<div class="satu-navgroup">
+          mainNav || restNav
+            ? `<div class="satu-navfoot">
           <div class="satu-sep"></div>
           ${groupLabel ? `<p class="satu-group">${esc(groupLabel)}</p>` : ''}
-          ${restNav}
+          ${mainNav}${restNav}
         </div>`
             : ''
         }
@@ -6790,6 +7230,31 @@ async function saveCapacity(e) {
   }
 }
 
+async function saveTimezone(e) {
+  e.preventDefault()
+  const form = e.target
+  const id = form.getAttribute('data-id')
+  const machineId = form.getAttribute('data-machine')
+  const timezone = String(new FormData(form).get('timezone') || '').trim()
+  state.busy = true
+  render()
+  try {
+    const data = await api(
+      'PUT',
+      `/platform/orgs/${encodeURIComponent(id)}/machines/${encodeURIComponent(machineId)}/timezone`,
+      { timezone },
+    )
+    await loadCompanyDetail(id)
+    // 「已下指令」而不是「已改好」：真正改的是机器，下一轮心跳才知道成没成。
+    flash('ok', !timezone ? '不再管这台机器的时区' : data.pending ? `已下指令：${timezone}，等机器改` : `时区改为 ${timezone}`)
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
 async function upgradeManager(id, machineId) {
   if (!id || !machineId) return
   state.busy = true
@@ -7284,7 +7749,11 @@ async function runConfirm() {
       return
     } else if (c.kind === 'redeploy-bot') {
       render()
-      await deployMyRuntime(c.id, { update: true })
+      // force 而不是 update：这个按钮的意思是「把席位重铺一遍」，不是「升到新版本」。
+      // 两者眼下都能穿过 deploy.ts 里那道「已经 ready 就跳过」的门，但借 update 的名义
+      // 是在赌它将来不会变成「只在有新版本时才做」——真那样，重新部署会静悄悄失效，
+      // 而它恰恰是机器上出了问题时唯一的自助手段。
+      await deployMyRuntime(c.id, { force: true })
       return
     } else if (c.kind === 'delete-bot') {
       const base = catalogBase()
@@ -7376,6 +7845,7 @@ document.getElementById('app').addEventListener('submit', (e) => {
   if (form.getAttribute('data-form') === 'manager-version') return saveManagerVersion(e)
   if (form.getAttribute('data-form') === 'add-release') return addRelease(e)
   if (form.getAttribute('data-form') === 'machine-capacity') return saveCapacity(e)
+  if (form.getAttribute('data-form') === 'machine-timezone') return saveTimezone(e)
   if (form.getAttribute('data-form') === 'cred') {
     e.preventDefault()
     const provider = form.getAttribute('data-provider')
@@ -7557,6 +8027,18 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'pairing-code') return makePairingCode(btn.getAttribute('data-id'))
+  if (act === 'copy-machine-id') {
+    const id = btn.getAttribute('data-machine')
+    if (id) {
+      // 和 copy-install 同一个理由：剪贴板 API 在非 https 的内网页面上会被拒，
+      // 失败必须说话——静默复制失败之后人会照着屏幕上那 8 位去用，那不是完整 id。
+      navigator.clipboard?.writeText(id).then(
+        () => flash('ok', '已复制机器编号'),
+        () => flash('err', '复制失败，请手动选中'),
+      )
+    }
+    return
+  }
   if (act === 'copy-install') {
     const cmd = state.pairingCode && state.pairingCode.installCommand
     if (cmd) {

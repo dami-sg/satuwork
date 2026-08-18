@@ -170,7 +170,7 @@ export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
     'HTMLSelectElement',
     'HTMLTextAreaElement',
     'HTMLFormElement',
-    `${src}\n;return { boot, render, state, api, auditTranscript, messageText, setToken, clearToken, token, onSetup, testLlm, saveSettings, savePriceMultiplier, saveCustomProvider, saveCustomModel, loadCustomProviders, runConfirm, statsWindow, loadStats, catalogBase, readOnlyItem, startChatStream, stopChatStream, paintChat, CHAT_RETRY_MAX }`,
+    `${src}\n;return { boot, render, state, api, auditTranscript, messageText, setToken, clearToken, token, onSetup, testLlm, saveSettings, savePriceMultiplier, saveCustomProvider, saveCustomModel, loadCustomProviders, runConfirm, statsWindow, loadStats, catalogBase, pathAllowed, machineHead, readOnlyItem, startChatStream, stopChatStream, paintChat, ensureChatSession, fold, threadRows, CHAT_RETRY_MAX }`,
   )
 
   const windowStub = { addEventListener() {}, satuUnzip: null, location, history }

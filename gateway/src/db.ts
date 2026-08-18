@@ -216,6 +216,15 @@ export interface Machine {
    */
   maxAccounts: number
   /**
+   * 这台机器要用的时区（IANA 名，如 `Asia/Shanghai`）。空 = 不管，跟机器现状走。
+   *
+   * 和 `desiredManagerVersion` 一样是**期望值**：写在这里只是下指令，真正改的是
+   * 管家（`timedatectl set-timezone`）。改完了没有由 `currentTimezone` 说了算。
+   */
+  timezone: string | null
+  /** 管家心跳自报的机器**实际**时区。期望和实际分开，界面才说得清「改上了没有」。 */
+  currentTimezone: string | null
+  /**
    * 这台机器要追的管家版本。空 = 跟平台的全局期望版本走。
    *
    * 存在的理由是灰度：先把一台机器钉到新版本看几天，再改全局。没有它，「升级这台
@@ -447,7 +456,7 @@ export function emptySettings(): CompanySettings {
 }
 
 export function emptyPlatformSettings(): PlatformSettings {
-  return { daily: { provider: '', model: '' }, utility: { provider: '', model: '' }, enabledModels: [], priceMultiplier: 1 }
+  return { daily: { provider: '', model: '' }, utility: { provider: '', model: '' }, enabledModels: [], priceMultiplier: 1, managerVersion: '' }
 }
 
 type Row = Record<string, unknown>
@@ -557,6 +566,8 @@ function parsePlatformPayload(raw: unknown): PlatformSettings {
     enabledModels: enabled,
     // 老库里没有这个字段，回落成 1——按原价，等于没开倍率。
     priceMultiplier: parsePriceMultiplier(o.priceMultiplier),
+    // 空字符串 = 没钉，跟最新发布走。写端和这里必须成对，少一边这个开关就是死的。
+    managerVersion: typeof o.managerVersion === 'string' ? o.managerVersion.trim() : '',
   }
 }
 function planOf(r: Row): Plan {
@@ -679,6 +690,8 @@ function machineOf(r: Row): Machine {
     lastError: strOrNull(r.lastError),
     arch: strOrNull(r.arch),
     maxAccounts: r.maxAccounts == null ? DEFAULT_MAX_ACCOUNTS : num(r.maxAccounts),
+    timezone: strOrNull(r.timezone),
+    currentTimezone: strOrNull(r.currentTimezone),
     desiredManagerVersion: strOrNull(r.desiredManagerVersion),
     token: str(r.token || ''),
   }
@@ -1064,6 +1077,10 @@ export class Db {
       alter table machines add column if not exists "desiredManagerVersion" text;
       -- 一家公司可以有多台机器，每台限一个激活账号上限。
       alter table machines add column if not exists "maxAccounts" integer not null default 10;
+      -- 机器时区。期望值由人在界面上定，实际值由管家心跳自报——两列分开存，
+      -- 只有一列的话「已经改上了」和「还没改上」在界面上是一个样子。
+      alter table machines add column if not exists timezone text;
+      alter table machines add column if not exists "currentTimezone" text;
       -- 老库里 host 存的是 bot 直连地址，现在这一列的语义是管家基址；ssh 那套已经
       -- 没有对应物了。整行留着但清空 host，逼这台机器重新配对——留着旧值会让
       -- Gateway 一直往一个打不通的地方发部署。
@@ -2327,12 +2344,15 @@ export class Db {
       arch: null as string | null,
       desiredManagerVersion: null as string | null,
       maxAccounts: input.maxAccounts ?? DEFAULT_MAX_ACCOUNTS,
+      // 时区默认不管：没人指定之前，机器装成什么样就是什么样。
+      timezone: null as string | null,
+      currentTimezone: null as string | null,
     }
     for (let i = 0; i < 8; i++) {
       const row: Machine = { ...base, token: randomMachineToken() }
       try {
         await this.run(
-          'insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", "managerVersion", protocol, "lastError", arch, "desiredManagerVersion", "maxAccounts", token) values (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          'insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", "managerVersion", protocol, "lastError", arch, "desiredManagerVersion", "maxAccounts", timezone, "currentTimezone", token) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
           [
             row.id,
             row.host,
@@ -2346,6 +2366,8 @@ export class Db {
             row.arch,
             row.desiredManagerVersion,
             row.maxAccounts,
+            row.timezone,
+            row.currentTimezone,
             row.token,
           ],
         )
@@ -2422,6 +2444,8 @@ export class Db {
         | 'arch'
         | 'desiredManagerVersion'
         | 'maxAccounts'
+        | 'timezone'
+        | 'currentTimezone'
       >
     >,
   ): Promise<Machine> {
@@ -2440,9 +2464,11 @@ export class Db {
       desiredManagerVersion:
         patch.desiredManagerVersion === undefined ? cur.desiredManagerVersion : patch.desiredManagerVersion,
       maxAccounts: patch.maxAccounts === undefined ? cur.maxAccounts : patch.maxAccounts,
+      timezone: patch.timezone === undefined ? cur.timezone : patch.timezone,
+      currentTimezone: patch.currentTimezone === undefined ? cur.currentTimezone : patch.currentTimezone,
     }
     await this.run(
-      'update machines set host=?, "companyId"=?, "lastHeartbeatAt"=?, "pairedAt"=?, "managerVersion"=?, protocol=?, "lastError"=?, arch=?, "desiredManagerVersion"=?, "maxAccounts"=? where id=?',
+      'update machines set host=?, "companyId"=?, "lastHeartbeatAt"=?, "pairedAt"=?, "managerVersion"=?, protocol=?, "lastError"=?, arch=?, "desiredManagerVersion"=?, "maxAccounts"=?, timezone=?, "currentTimezone"=? where id=?',
       [
         next.host,
         next.companyId,
@@ -2454,6 +2480,8 @@ export class Db {
         next.arch,
         next.desiredManagerVersion,
         next.maxAccounts,
+        next.timezone,
+        next.currentTimezone,
         id,
       ],
     )
@@ -2981,6 +3009,11 @@ export class Db {
       utility: { provider: next.utility.provider, model: next.utility.model },
       enabledModels: enabled,
       priceMultiplier: parsePriceMultiplier(next.priceMultiplier),
+      // **不能漏。** 这一行漏了整整一版：类型上有、路由层收得好好的、界面也能填，
+      // 只有这里拼 payload 时把它丢了——于是 PUT 回 200、读出来永远是空。
+      // 后果是「全机队钉版本」这一级完全失效：传一个包上去，所有没有逐台钉过的机器
+      // 都会在下一次心跳自己升上去，而唯一能拦住它的开关，看起来能设、其实存不进去。
+      managerVersion: String(next.managerVersion ?? '').trim(),
     })
     await this.run(
       "insert into platform_settings (id, payload, \"updatedAt\") values ('platform', ?, ?) on conflict (id) do update set payload=excluded.payload, \"updatedAt\"=excluded.\"updatedAt\"",

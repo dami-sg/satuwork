@@ -46,6 +46,7 @@ import {
   managerHealth,
   MIN_MANAGER_PROTOCOL,
   managerRemoveSeat,
+  normalizeTimezone,
   ownerMachine,
   publicMachine,
   publicSeatRuntime,
@@ -94,11 +95,13 @@ function bodyOf(req: Req): Record<string, unknown> {
   return req.body as Record<string, unknown>
 }
 
-function deployOptsOf(req: Req): { botId: string; version?: string; update?: boolean } {
+function deployOptsOf(req: Req): { botId: string; version?: string; update?: boolean; force?: boolean } {
   const body = bodyOf(req)
   const botId = strField(body, 'botId')
   const version = strField(body, 'version', false)
-  return { botId, version: version || undefined, update: body.update === true }
+  // force 和 update 是两件事：update 是「换到最新版本」，force 是「版本不变也重铺一遍」。
+  // 「重新部署」要的是后者——它想修的正是那些版本对、状态也 ready，但机器上就是不对的情况。
+  return { botId, version: version || undefined, update: body.update === true, force: body.force === true }
 }
 
 function strField(body: Record<string, unknown>, key: string, required = true): string {
@@ -729,10 +732,19 @@ function installCommandFor(req: Req, code: string): string {
   return `curl -fsSL ${gatewayBaseFor(req)}/install-manager.sh | sudo bash -s -- --code ${code}`
 }
 
-/** 只有配对好的机器才签得出桌面票；没配对时返回 undefined，URL 里就不带 ticket。 */
-function desktopTicketFor(keys: JwtKeys, machine: Machine | undefined, row: { seatId: string }): string | undefined {
+/**
+ * 只有配对好的机器才签得出桌面票；没配对时返回 undefined，URL 里就不带 ticket。
+ *
+ * 口令跟着票走（见 signDesktopTicket），所以「打开桌面」点开就是桌面本身，不再是
+ * 一个还要人回去抄一遍口令的登录框。
+ */
+function desktopTicketFor(
+  keys: JwtKeys,
+  machine: Machine | undefined,
+  row: { seatId: string; vncPassword?: string },
+): string | undefined {
   if (!machinePaired(machine)) return undefined
-  return signDesktopTicket(keys, row.seatId)
+  return signDesktopTicket(keys, row.seatId, row.vncPassword ?? '')
 }
 
 /**
@@ -819,6 +831,11 @@ async function machineCard(
   db: Db,
   load: MachineLoad,
   latest: { botLatest: string | null; managerLatest: string | null },
+  /**
+   * 这家公司的第几台，1 起。**给人指代用的短号**（「2 号机上不去了」），不是标识符
+   * ——中间删掉一台，后面的号会往前挪。要唯一地指一台，用 `machine.id`。
+   */
+  no: number,
 ) {
   const { machine, accounts, seats, full } = load
   const seatRows = await db.seatRuntimesOfMachine(machine.id)
@@ -832,6 +849,7 @@ async function machineCard(
     .sort((a, b) => b.seats - a.seats)
   const desired = (await desiredManagerRelease(db, machine))?.version ?? null
   return {
+    no,
     machine: ownerMachine(machine),
     accounts,
     maxAccounts: machine.maxAccounts,
@@ -843,6 +861,8 @@ async function machineCard(
     managerOutdated:
       Boolean(latest.managerLatest) && Boolean(machine.managerVersion) && machine.managerVersion !== latest.managerLatest,
     managerPending: Boolean(desired) && Boolean(machine.managerVersion) && machine.managerVersion !== desired,
+    // 时区和管家版本一样是「下指令 → 机器自己去改 → 下一轮心跳才知道成没成」。
+    timezonePending: Boolean(machine.timezone) && machine.currentTimezone !== machine.timezone,
   }
 }
 
@@ -2770,7 +2790,10 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     const loads = await machineLoads(db, company.id)
     const botLatest = (await db.latestBotRelease('bot'))?.version ?? null
     const managerLatest = (await db.latestBotRelease('manager'))?.version ?? null
-    const machines = await Promise.all(loads.map((l) => machineCard(db, l, { botLatest, managerLatest })))
+    // 编号按登记先后给，和 machinesOfCompany 的排序是同一个（order by createdAt）。
+    const machines = await Promise.all(
+      loads.map((l, i) => machineCard(db, l, { botLatest, managerLatest }, i + 1)),
+    )
     send(res, 200, {
       machines,
       botLatest,
@@ -2835,6 +2858,36 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
       detail: { machineId: machine.id, maxAccounts },
     })
     send(res, 200, { machine: ownerMachine(next) })
+  })
+
+  /**
+   * 设这台机器的时区。
+   *
+   * **只是把期望值钉在这里**，真正 `timedatectl set-timezone` 的是机器上的管家——
+   * 和钉管家版本一条路：Gateway 没有登录这台机器的凭据，能做的只有在心跳响应里
+   * 把期望值带下去，机器自己去收敛。所以按下之后 `pending` 为真，直到下一轮心跳
+   * 自报的实际时区和它对上。
+   *
+   * 传空串 = 不再管这台机器的时区（不会把机器改回去，只是不再下发）。
+   */
+  router.put('/platform/orgs/:id/machines/:machineId/timezone', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOfOrg(db, req.params.id, req.params.machineId)
+    const timezone = normalizeTimezone(strField(bodyOf(req), 'timezone', false))
+    if (timezone === undefined) throw new HttpError(400, '不认识这个时区，要填 IANA 名，例如 Asia/Shanghai')
+    const next = await db.updateMachine(machine.id, { timezone })
+    await db.audit({
+      companyId: req.params.id,
+      accountId: account.id,
+      action: 'machine.timezone',
+      detail: { machineId: machine.id, timezone },
+    })
+    send(res, 200, {
+      machine: ownerMachine(next),
+      // 说清楚这一步只是下了指令：机器还没心跳回来之前，界面别显示成「已生效」。
+      pending: Boolean(timezone) && next.currentTimezone !== timezone,
+    })
   })
 
   /**
@@ -3875,6 +3928,33 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     }))
   })
 
+  /**
+   * 席位现场诊断。转发管家的 `/seats/:id/diag`。
+   *
+   * **给「席位本人」用，不是只给平台管理员。** 出问题的是他那块屏，而管理员未必在场；
+   * 报告里也没有凭据（管家那侧只报文件的存在与时间，日志过了脱敏）。要它下沉到这一层，
+   * 才算真的补上「没有 SSH 就看不见机器」这个洞。
+   */
+  router.get('/runtime/diag', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireSeat(account)
+    const botId = (req.query.get('botId') || '').trim()
+    if (!botId) throw new HttpError(400, 'botId 不能为空')
+    const runtime = await db.seatRuntime(account.id, botId)
+    if (!runtime) throw new HttpError(404, '还没有部署')
+    const target = await seatTargetFor(db, account, botId)
+    const lines = Number(req.query.get('lines') || 40)
+    const q = Number.isFinite(lines) ? `?lines=${Math.min(200, Math.max(1, Math.trunc(lines)))}` : ''
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/seats/${encodeURIComponent(runtime.seatId)}/diag${q}`,
+      undefined,
+      undefined,
+      target.machineToken,
+    )
+  })
+
   router.post('/runtime/deploy', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireSeat(account)
@@ -4786,11 +4866,16 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     // 收一个乱七八糟的字符串只会让选包静默退回「按未知处理」。
     const rawArch = typeof body.arch === 'string' ? body.arch.trim() : ''
     const arch = rawArch === 'x64' || rawArch === 'arm64' ? rawArch : undefined
+    // 管家自报的机器实际时区。**过一遍同一个校验器**——它来自网络，最后会显示在
+    // 界面上；不认识的名字宁可当成「没报」，也不要存一个假的实际值进去，那会让
+    // 「改上了没有」这个判断永远错。老管家不报，那时保持原样。
+    const reportedTz = typeof body.timezone === 'string' ? normalizeTimezone(body.timezone) : undefined
     const next = await db.updateMachine(machine.id, {
       lastHeartbeatAt: Date.now(),
       ...(managerVersion ? { managerVersion } : {}),
       ...(Number.isInteger(protocol) ? { protocol } : {}),
       ...(arch ? { arch } : {}),
+      ...(reportedTz === undefined ? {} : { currentTimezone: reportedTz }),
       lastError: upgradeError,
     })
     const desired = await desiredManagerRelease(db, next)
@@ -4799,6 +4884,8 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
       desiredManagerVersion: desired?.version ?? null,
       url: desired ? `${gatewayBaseFor(req)}/internal/manager-releases/${encodeURIComponent(desired.version)}` : null,
       sha256: desired?.sha256 ?? null,
+      // 期望时区。空 = 没人指定过，管家什么都不做——**不是**「改成 UTC」。
+      timezone: next.timezone,
       minNode: MIN_MANAGER_NODE,
       minProtocol: MIN_MANAGER_PROTOCOL,
     })

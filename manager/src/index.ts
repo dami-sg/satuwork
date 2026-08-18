@@ -3,8 +3,10 @@ import { bootConfig, managerVersion, PROTOCOL, readState, type ManagerState } fr
 import { HttpError, json, listen, Router, type Req } from './http.ts'
 import { attachUpgrade, proxyIntercept } from './proxy.ts'
 import { bootChallenge, pairIfNeeded } from './pair.ts'
+import { diagnose } from './diag.ts'
 import { deploySeat, removeSeat, seat, seatsWithLiveness, type SeatSpec } from './seats.ts'
 import { confirmVersion, maybeUpgrade, upgradeError } from './upgrade.ts'
+import { currentTimezone, maybeSetTimezone, timezoneError } from './timezone.ts'
 
 /**
  * 机器管家。一台席位机器一个，root systemd 服务。
@@ -143,6 +145,10 @@ router.get('/health', async (req, res) => {
     paired: Boolean(state),
     dryRun: boot.dryRun,
     upgradeError: upgradeError() || null,
+    // 时区分两件事报：机器现在是什么时区、上一次改时区为什么没改上。合成一个字段
+    // 的话，「没指定过」和「指定了但改失败」在外面看着一样。
+    timezone: currentTimezone() || null,
+    timezoneError: timezoneError() || null,
     seats: await seatsWithLiveness(),
   })
 })
@@ -150,6 +156,19 @@ router.get('/health', async (req, res) => {
 router.get('/seats', async (req, res) => {
   requireMachine(req)
   json(res, 200, { seats: await seatsWithLiveness() })
+})
+
+/**
+ * 一个席位的现场快照。**只读**，见 diag.ts 开头。
+ *
+ * 没有 SSH 的代价就是「机器上到底怎么了」谁也看不见，而这一层最贵的故障恰恰都不报错
+ * （端口被别人占、服务没真重启、dock 少一格）。这条路让那些只能靠 ps/ss/journal 看出
+ * 来的东西，隔着 Gateway 也能拿到。
+ */
+router.get('/seats/:seatId/diag', async (req, res) => {
+  requireMachine(req)
+  const lines = Number(req.query.get('lines') || 40)
+  json(res, 200, { diag: await diagnose(req.params.seatId, Number.isFinite(lines) ? lines : 40) })
 })
 
 router.put('/seats/:seatId', async (req, res) => {
@@ -213,7 +232,12 @@ async function heartbeat(): Promise<void> {
         node: process.versions.node,
         // Gateway 按它挑发布包。包里带 esbuild 的原生二进制，架构不对就起不来。
         arch: process.arch,
-        upgradeError: upgradeError() || null,
+        // 自报**实际**时区。Gateway 拿它和期望时区比，界面上才分得出「已经改上了」
+        // 和「指令下了、还没改上」。
+        timezone: currentTimezone() || null,
+        // 升级和改时区都可能失败，而 Gateway 只有一格 lastError。升级失败更要命
+        // （机器版本会卡住），所以它优先；两者都好的时候这里是 null。
+        upgradeError: upgradeError() || timezoneError() || null,
         seats: await seatsWithLiveness(),
       }),
       signal: AbortSignal.timeout(15_000),
@@ -221,7 +245,11 @@ async function heartbeat(): Promise<void> {
     if (!res.ok) return
     // 心跳通了才算「这个版本活过来了」。confirm timer 看的就是这个标记。
     confirmVersion()
-    await maybeUpgrade((await res.json()) as Record<string, never>, state.token)
+    const reply = (await res.json()) as { timezone?: string | null }
+    // 时区在前：它便宜、不重启进程，而 maybeUpgrade 成功那一支会把自己重启掉，
+    // 排在它后面的活儿这一轮就不一定跑得到了。
+    await maybeSetTimezone(reply.timezone)
+    await maybeUpgrade(reply as Record<string, never>, state.token)
   } catch {
     /* 网络抖动不值得刷屏；下一轮再试。 */
   }
