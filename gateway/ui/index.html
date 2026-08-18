@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="/theme.css">
 <link rel="stylesheet" href="/shell.css">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/chat.css">
 </head>
 <body>
 <div id="app"></div>
@@ -16,6 +17,10 @@
 import { unzip, stripTopDir, toPayload } from '/unzip.js';
 window.satuUnzip = { unzip, stripTopDir, toPayload };
 </script>
+<!-- 译表必须在 app.js 之前：app.js 里的 t() 直接查它。 -->
+<script src="/i18n.js"></script>
+<!-- markdown.js 也要在 app.js 之前：paintChat 直接调 window.satuMd。 -->
+<script src="/markdown.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

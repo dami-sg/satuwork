@@ -1,0 +1,27 @@
+[Unit]
+# %i 是**席位 ID**，不是 Linux 用户名——一个员工现在有多块屏，用户名不唯一了。
+Description=Satuwork slim desktop for seat %i
+After=network.target
+Conflicts=gdm.service
+
+[Service]
+Type=simple
+# User/Group/HOME/SEAT_DIR 全部由部署时写的 drop-in 提供：
+#   /etc/systemd/system/slim-desktop@%i.service.d/seat.conf
+# 这里的 nobody 是兜底——drop-in 缺失时单元起不来，而不是以 root 跑起来。
+User=nobody
+Group=nogroup
+PAMName=login
+Environment=XDG_SESSION_TYPE=x11
+Environment=GDK_BACKEND=x11
+UnsetEnvironment=WAYLAND_DISPLAY
+ExecStart=/usr/local/bin/slim-desktop.sh %i
+Restart=on-failure
+RestartSec=3
+# 同一个员工的多块屏 = 同一个 uid 的多个 logind 会话，这是正常的。若发行版开了
+# logind 的 KillUserProcesses=yes，停一块屏会连坐其它屏，必须关掉。
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

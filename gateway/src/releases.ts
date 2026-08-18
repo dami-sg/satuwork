@@ -1,7 +1,18 @@
-import { createHash } from 'node:crypto'
+/**
+ * Bot 发布包。
+ *
+ * 生产路径是**上传**：CI 构建产物 → `PUT /platform/bot-releases/:version` → Gateway
+ * 只负责校验、落盘、登记，自己不构建。版本号由 CI 给（建议带 git sha），这样一个
+ * 版本号永远对应同一份字节。
+ *
+ * 本地开发还留着**源码打包**：Gateway 磁盘上有 bot 源码时才启用（生产镜像里没有
+ * 那份源码，所以自动是关的），省得改一行 bot 代码就得推一趟 CI。
+ */
+import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   createReadStream,
+  createWriteStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -13,13 +24,33 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
-import type { BotRelease, Db } from './db.ts'
+import { createGunzip } from 'node:zlib'
+import type { BotRelease, Db, ReleaseKind } from './db.ts'
 import { gatewayHome } from './home.ts'
 import { HttpError } from './http.ts'
 
 const VERSION_RE = /^[A-Za-z0-9._+-]+$/
+const SHA256_RE = /^[0-9a-f]{64}$/
 const gatewayRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+/**
+ * 每种包里必须有的入口。systemd 单元直接跑它，缺了就是个跑不起来的包。
+ *
+ * 校验只看这一个文件在不在。不解包、不看内容——包是我们自己的 CI 打的，这里挡的
+ * 是「传错文件」和「传到一半断了」，不是恶意构造。
+ */
+const ENTRY: Record<ReleaseKind, string> = {
+  bot: 'bin/satuwork.mjs',
+  manager: 'bin/satuwork-manager.mjs',
+}
+
+function uploadLimit(): number {
+  const raw = Number(process.env.GATEWAY_RELEASE_MAX_BYTES ?? 0)
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 256 * 1024 * 1024
+}
 
 export function parseBotVersion(raw: string): string {
   const version = String(raw || '').trim()
@@ -29,48 +60,34 @@ export function parseBotVersion(raw: string): string {
   return version
 }
 
-export function botSrcPath(): string {
-  const env = (process.env.SATUWORK_BOT_SRC || '').trim()
-  if (env) return resolve(env)
-  return resolve(join(gatewayRoot, '..', 'bot'))
-}
-
 export function botReleaseDir(): string {
   return gatewayHome('releases')
 }
 
-export function botReleaseFile(version: string): string {
-  return join(botReleaseDir(), `bot-${version}.tgz`)
+export function botReleaseFile(version: string, kind: ReleaseKind = 'bot'): string {
+  return join(botReleaseDir(), `${kind}-${version}.tgz`)
 }
 
-export function publicBotRelease(row: BotRelease) {
+/**
+ * 一条发布记录对外的样子。
+ *
+ * `downloadUrl` 是**机器真正去拉的那条地址**，字节就在 Gateway 磁盘上时也照给：
+ * 那台 Debian 上没有别的地方能看到它，界面上只写一句「本机存储」等于没给。
+ * `url` 仍然只表示「登记的外部来源」，可以为空。
+ */
+export function publicBotRelease(row: BotRelease, base = '') {
   return {
+    kind: row.kind,
+    url: row.url,
+    /** 机器拉包的地址。远端登记的包也走这条——Gateway 会替它回源。 */
+    downloadUrl: `${base.replace(/\/$/, '')}/internal/${row.kind}-releases/${encodeURIComponent(row.version)}`,
+    /** 字节在哪儿：本机磁盘，还是只登记了一个外部地址。界面上要分得清。 */
+    storage: row.url ? ('remote' as const) : ('local' as const),
     version: row.version,
     sha256: row.sha256,
     size: row.size,
     createdAt: row.createdAt,
     note: row.note,
-  }
-}
-
-export function botSrcVersion(): { version?: string } {
-  const src = botSrcPath()
-  const pkg = join(src, 'package.json')
-  if (!existsSync(pkg)) return {}
-  try {
-    const raw = JSON.parse(readFileSync(pkg, 'utf8')) as { version?: unknown }
-    const version = typeof raw.version === 'string' ? raw.version.trim() : ''
-    return version ? { version } : {}
-  } catch {
-    return {}
-  }
-}
-
-function srcMissing(src: string): boolean {
-  try {
-    return !existsSync(src) || !statSync(src).isDirectory()
-  } catch {
-    return true
   }
 }
 
@@ -84,97 +101,143 @@ function sha256File(path: string): Promise<string> {
   })
 }
 
-function tarFail(r: ReturnType<typeof spawnSync>): never {
-  const msg = String(r.stderr || r.stdout || '打包失败')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 400)
-  throw new HttpError(500, msg || '打包失败')
+function oneLine(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  return raw.replace(/\s+/g, ' ').trim().slice(0, 200)
 }
 
-function packTree(src: string, dest: string, version: string) {
-  if (!existsSync(join(src, 'bin', 'satuwork.mjs'))) {
-    throw new HttpError(400, 'Bot 源码缺少 bin/satuwork.mjs')
-  }
-  const tmp = mkdtempSync(join(tmpdir(), 'satuwork-bot-ver-'))
+function discard(path: string) {
   try {
-    writeFileSync(join(tmp, 'VERSION'), version + '\n')
-    const r = spawnSync(
-      'tar',
-      [
-        '-czf',
-        dest,
-        '--exclude=node_modules/.cache',
-        '--exclude=.data',
-        '--exclude=*.log',
-        '--exclude=cordis.e2e.yml',
-        '--exclude=VERSION',
-        '-C',
-        src,
-        '.',
-        '-C',
-        tmp,
-        'VERSION',
-      ],
-      { encoding: 'utf8' },
-    )
-    if (r.status !== 0) tarFail(r)
-  } finally {
-    try {
-      rmSync(tmp, { recursive: true, force: true })
-    } catch {}
-  }
+    unlinkSync(path)
+  } catch {}
 }
 
-function packStub(dest: string, version: string) {
-  const tmp = mkdtempSync(join(tmpdir(), 'satuwork-bot-stub-'))
+// ── 上传（生产路径）──────────────────────────────────────────────────────
+
+function tarEntryName(header: Buffer): string {
+  const cut = (buf: Buffer) => {
+    const end = buf.indexOf(0)
+    return buf.toString('utf8', 0, end === -1 ? buf.length : end)
+  }
+  const name = cut(header.subarray(0, 100))
+  // ustar 的长路径拆成 prefix + name 两段存。
+  const magic = header.toString('utf8', 257, 262)
+  const prefix = magic === 'ustar' ? cut(header.subarray(345, 500)) : ''
+  const full = prefix ? `${prefix}/${name}` : name
+  return full.replace(/^\.?\//, '')
+}
+
+function tarEntrySize(header: Buffer): number {
+  const raw = header.toString('utf8', 124, 136).replace(/\0.*$/, '').trim()
+  const n = parseInt(raw, 8)
+  return Number.isFinite(n) && n >= 0 ? n : 0
+}
+
+/**
+ * 流式走一遍 tar.gz 的头块，找某个成员。
+ *
+ * 不解压到磁盘、不把整包读进内存：读 512 字节头 → 按 size 跳过数据 → 下一个头。
+ * GNU 长文件名（'L'）和 pax 扩展头（'x'/'g'）不管——我们要找的名字很短，永远
+ * 不会被拆成长名记录。
+ */
+async function tarHasEntry(path: string, wanted: string): Promise<boolean> {
+  const src = createReadStream(path)
+  const gunzip = createGunzip()
+  src.pipe(gunzip)
+  let pending: Buffer = Buffer.alloc(0)
+  let skip = 0
+  let found = false
   try {
-    mkdirSync(join(tmp, 'bin'), { recursive: true })
-    writeFileSync(
-      join(tmp, 'package.json'),
-      JSON.stringify({ name: 'satuwork', version, private: true, type: 'module' }) + '\n',
-    )
-    writeFileSync(join(tmp, 'bin', 'satuwork.mjs'), '#!/usr/bin/env node\nconsole.log("satuwork-bot stub")\n')
-    writeFileSync(join(tmp, 'VERSION'), version + '\n')
-    const r = spawnSync('tar', ['-czf', dest, '-C', tmp, '.'], { encoding: 'utf8' })
-    if (r.status !== 0) tarFail(r)
+    for await (const chunk of gunzip as AsyncIterable<Buffer>) {
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk
+      while (!found) {
+        if (skip > 0) {
+          const n = Math.min(skip, pending.length)
+          pending = pending.subarray(n)
+          skip -= n
+          if (skip > 0) break
+        }
+        if (pending.length < 512) break
+        const header = pending.subarray(0, 512)
+        pending = pending.subarray(512)
+        if (header.every((b) => b === 0)) continue
+        const size = tarEntrySize(header)
+        skip = size + ((512 - (size % 512)) % 512)
+        if (tarEntryName(header) === wanted) found = true
+      }
+      if (found) break
+    }
   } finally {
-    try {
-      rmSync(tmp, { recursive: true, force: true })
-    } catch {}
+    src.destroy()
+    gunzip.destroy()
   }
+  return found
 }
 
-export async function publishBotRelease(db: Db, input: { version: string; note?: string }): Promise<BotRelease> {
+async function assertBotArchive(path: string, kind: ReleaseKind): Promise<void> {
+  let ok: boolean
+  try {
+    ok = await tarHasEntry(path, ENTRY[kind])
+  } catch (e) {
+    throw new HttpError(400, '发布包不是 .tar.gz：' + oneLine(e))
+  }
+  if (!ok) throw new HttpError(400, `发布包缺少 ${ENTRY[kind]}`)
+}
+
+/**
+ * 收下 CI 传来的发布包。
+ *
+ * 直接写到最终文件名上，用 `wx` 开——文件本身就是这个版本的锁，同一个版本并发上传
+ * 只有一个能建出来，另一个拿 EEXIST。写坏了就把文件删掉，不留半个包。
+ */
+export async function storeUploadedRelease(
+  db: Db,
+  input: { version: string; note?: string; body: Readable; sha256?: string; kind?: ReleaseKind },
+): Promise<BotRelease> {
+  const kind: ReleaseKind = input.kind ?? 'bot'
   const version = parseBotVersion(input.version)
   const note = String(input.note ?? '').trim()
-  if (db.botRelease(version)) throw new HttpError(409, '这个版本已经发布过')
+  const expected = String(input.sha256 ?? '')
+    .trim()
+    .toLowerCase()
+  if (expected && !SHA256_RE.test(expected)) throw new HttpError(400, 'sha256 须为 64 位十六进制')
+  if (await db.botRelease(version, kind)) throw new HttpError(409, '这个版本已经发布过')
+
   mkdirSync(botReleaseDir(), { recursive: true })
-  const dest = botReleaseFile(version)
-  if (existsSync(dest)) {
-    try {
-      unlinkSync(dest)
-    } catch {}
-  }
-  const src = botSrcPath()
-  if (srcMissing(src)) {
-    if (process.env.SATUWORK_DEPLOY_STUB === '1') packStub(dest, version)
-    else throw new HttpError(400, 'Bot 源码不存在')
-  } else {
-    packTree(src, dest, version)
-  }
+  const dest = botReleaseFile(version, kind)
+  const limit = uploadLimit()
+  const hash = createHash('sha256')
+  let size = 0
   try {
-    const st = statSync(dest)
-    const sha256 = await sha256File(dest)
-    const row: BotRelease = {
-      version,
-      sha256,
-      size: st.size,
-      createdAt: Date.now(),
-      note,
+    await pipeline(
+      input.body,
+      async function* (source: AsyncIterable<Buffer>) {
+        for await (const chunk of source) {
+          size += chunk.length
+          if (size > limit) throw new HttpError(413, `发布包超过 ${limit} 字节上限`)
+          hash.update(chunk)
+          yield chunk
+        }
+      },
+      createWriteStream(dest, { flags: 'wx', mode: 0o600 }),
+    )
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'EEXIST') {
+      // 库里没有行、文件却在，多半是上一次传到一半进程没了。说清楚，别报成「已发布」。
+      throw new HttpError(409, `${dest} 已存在但没有入库，删掉它再传`)
     }
+    discard(dest)
+    throw e instanceof HttpError ? e : new HttpError(400, '上传中断：' + oneLine(e))
+  }
+
+  try {
+    if (size === 0) throw new HttpError(400, '发布包是空的')
+    const sha256 = hash.digest('hex')
+    if (expected && expected !== sha256) throw new HttpError(400, 'sha256 对不上，包在路上坏了')
+    await assertBotArchive(dest, kind)
+    const row: BotRelease = { kind, version, sha256, size, createdAt: Date.now(), note, url: '' }
     try {
-      db.insertBotRelease(row)
+      await db.insertBotRelease(row)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       if (/UNIQUE|constraint/i.test(msg)) throw new HttpError(409, '这个版本已经发布过')
@@ -182,11 +245,129 @@ export async function publishBotRelease(db: Db, input: { version: string; note?:
     }
     return row
   } catch (e) {
-    if (!(e instanceof HttpError && e.status === 409)) {
-      try {
-        unlinkSync(dest)
-      } catch {}
-    }
+    discard(dest)
     throw e
   }
+}
+
+/**
+ * 登记一个**放在别处**的发布包。
+ *
+ * 和上传的区别只有「字节存不存在 Gateway 上」。校验一点没少：整包拉一遍、比对
+ * 大小和 sha256、确认入口文件在——「点验证」验的就是这些。验不过不入库，因为
+ * 一条指向坏包的记录会一路传染到席位机器上，而那时已经没人能上去看了。
+ *
+ * 拉下来的字节**不落盘**：它的意义就是不占 Gateway 的存储。下发时再取一次。
+ */
+export async function registerRemoteRelease(
+  db: Db,
+  input: { kind?: ReleaseKind; version: string; url: string; size: number; sha256: string; note?: string },
+): Promise<BotRelease> {
+  const kind: ReleaseKind = input.kind ?? 'bot'
+  const version = parseBotVersion(input.version)
+  const note = String(input.note ?? '').trim()
+  const url = parseReleaseUrl(input.url)
+  const wantSha = String(input.sha256 ?? '').trim().toLowerCase()
+  if (!SHA256_RE.test(wantSha)) throw new HttpError(400, 'sha256 须为 64 位十六进制')
+  const wantSize = Math.trunc(Number(input.size))
+  if (!Number.isFinite(wantSize) || wantSize <= 0) throw new HttpError(400, 'size 须为正整数')
+  if (await db.botRelease(version, kind)) throw new HttpError(409, '这个版本已经发布过')
+
+  const probe = await verifyRemote(url, kind, uploadLimit())
+  if (probe.size !== wantSize) throw new HttpError(400, `实际大小 ${probe.size} 字节，和填的 ${wantSize} 对不上`)
+  if (probe.sha256 !== wantSha) throw new HttpError(400, `实际 sha256 ${probe.sha256.slice(0, 16)}… 和填的对不上`)
+
+  const row: BotRelease = { kind, version, sha256: probe.sha256, size: probe.size, createdAt: Date.now(), note, url }
+  try {
+    await db.insertBotRelease(row)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/UNIQUE|constraint/i.test(msg)) throw new HttpError(409, '这个版本已经发布过')
+    throw e
+  }
+  return row
+}
+
+/** 只收 http/https，且不许带凭据——这个地址会被存下来、传给机器、显示在界面上。 */
+function parseReleaseUrl(raw: string): string {
+  const text = String(raw ?? '').trim()
+  if (!text) throw new HttpError(400, '下载地址不能为空')
+  let u: URL
+  try {
+    u = new URL(text)
+  } catch {
+    throw new HttpError(400, '下载地址必须是完整的 http/https 地址')
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new HttpError(400, '下载地址必须是 http/https')
+  if (u.username || u.password) throw new HttpError(400, '下载地址不能带用户名或口令')
+  return u.toString()
+}
+
+async function verifyRemote(
+  url: string,
+  kind: ReleaseKind,
+  limit: number,
+): Promise<{ size: number; sha256: string }> {
+  let res: Response
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(300_000) })
+  } catch (e) {
+    throw new HttpError(502, '取不到这个地址：' + oneLine(e))
+  }
+  if (!res.ok || !res.body) throw new HttpError(502, `取这个地址返回 ${res.status}`)
+
+  // 边下边算，同时把字节喂给 tar 头扫描——只为确认入口文件在，不解包、不落盘。
+  const hash = createHash('sha256')
+  let size = 0
+  const chunks: Buffer[] = []
+  let kept = 0
+  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+    const buf = Buffer.from(chunk)
+    size += buf.length
+    if (size > limit) throw new HttpError(413, `发布包超过 ${limit} 字节上限`)
+    hash.update(buf)
+    // tar 的入口都在头部，留前 2 MiB 足够扫到。全留会把大包整个吃进内存。
+    if (kept < 2 * 1024 * 1024) {
+      chunks.push(buf)
+      kept += buf.length
+    }
+  }
+  if (size === 0) throw new HttpError(400, '这个地址返回的是空文件')
+
+  const dest = join(tmpdir(), `satuwork-verify-${randomUUID()}.tgz`)
+  try {
+    writeFileSync(dest, Buffer.concat(chunks))
+    // 只写了前 2 MiB，gunzip 中途会断——tarHasEntry 找到入口就返回，找不到才走到断流。
+    let ok = false
+    try {
+      ok = await tarHasEntry(dest, ENTRY[kind])
+    } catch {
+      ok = false
+    }
+    if (!ok) throw new HttpError(400, `发布包缺少 ${ENTRY[kind]}（或者不是 .tar.gz）`)
+  } finally {
+    discard(dest)
+  }
+  return { size, sha256: hash.digest('hex') }
+}
+
+/**
+ * 取一个发布包的字节流。本机有文件就读文件，只登记了地址就现去取。
+ *
+ * 两种情况对调用方是一样的，所以下发路由不用关心包存在哪儿。
+ */
+export async function openRelease(row: BotRelease): Promise<Readable> {
+  if (!row.url) {
+    const file = botReleaseFile(row.version, row.kind)
+    if (!existsSync(file)) throw new HttpError(404, '发布包文件不存在')
+    return createReadStream(file)
+  }
+  let res: Response
+  try {
+    res = await fetch(row.url, { signal: AbortSignal.timeout(300_000) })
+  } catch (e) {
+    throw new HttpError(502, '取不到发布包：' + oneLine(e))
+  }
+  if (!res.ok || !res.body) throw new HttpError(502, `取发布包返回 ${res.status}`)
+  return Readable.fromWeb(res.body as never)
 }

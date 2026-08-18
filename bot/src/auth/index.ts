@@ -486,12 +486,33 @@ function setCookie(res: { headers: Headers }, token: string | null, secure: bool
 }
 
 
-function machineToken(): string {
-  return (process.env.GATEWAY_MACHINE_TOKEN || '').trim()
-}
-
+/**
+ * 席位票（`sat_`）。**这是 bot 认的唯一一把入站凭据。**
+ *
+ * 以前还认机器票（`smt_`）。那把票同时是管家 `PUT /seats/:id` 的鉴权凭据，也就是整台
+ * 机器的 root 控制面；它被写进 `$SEAT_DIR/bot.env`，而那个文件属于席位那个普通 Linux
+ * 用户——员工在 noVNC 桌面里 `cat` 一下就拿到了，还能直接拿它读同机其他同事的会话。
+ * 席位票是按账号发的，作用域就到这个席位为止。
+ */
 function seatToken(): string {
   return (process.env.GATEWAY_TOKEN || '').trim()
+}
+
+/**
+ * 守卫用的路径归一。
+ *
+ * 路由匹配是 path-to-regexp 生成的正则，**带 `i` 标志、且允许一个尾斜杠**
+ * （`/api/sessions` 编译出来是 `/^(?:\/api\/sessions)(?:\/$)?$/i`）。守卫按原样
+ * 字符串比就会和路由错位：`GET /API/sessions` 的 `startsWith('/api/')` 不成立 →
+ * 守卫直接放行，而路由照样命中 → 整个 /api 面未鉴权。这里先按路由的口径归一，
+ * 两边才是同一套判断。
+ *
+ * 只用于守卫的前缀判断，**不能拿去做路由**：sessionId / botId 在路径里是大小写
+ * 敏感的。
+ */
+function guardPath(raw: string): string {
+  const lower = raw.toLowerCase()
+  return lower.length > 1 && lower.endsWith('/') ? lower.slice(0, -1) : lower
 }
 
 function runtimeApiPath(path: string) {
@@ -513,8 +534,7 @@ function bearerMatches(header: string | null, expected: string): boolean {
 }
 
 function runtimeTokenOk(req: { headers: Headers }) {
-  const header = req.headers.get('authorization')
-  return bearerMatches(header, machineToken()) || bearerMatches(header, seatToken())
+  return bearerMatches(req.headers.get('authorization'), seatToken())
 }
 
 export function apply(ctx: Context) {
@@ -534,9 +554,10 @@ export function apply(ctx: Context) {
      * `/api/auth/state` 问，然后画登录页。真正的门在这一层，不在前端那次跳转。
      */
     ctx.server.use(async (req, res, next) => {
-      if (req.path.startsWith(INTERNAL_SESSIONS)) return next()
-      if (!req.path.startsWith('/api/') || PUBLIC.has(req.path) || req.path.startsWith(PUBLIC_PREFIX)) return next()
-      if (runtimeTokenOk(req) && runtimeApiPath(req.path)) return next()
+      const path = guardPath(req.path)
+      if (path.startsWith(INTERNAL_SESSIONS)) return next()
+      if (!path.startsWith('/api/') || PUBLIC.has(path) || path.startsWith(PUBLIC_PREFIX)) return next()
+      if (runtimeTokenOk(req) && runtimeApiPath(path)) return next()
       if (ctx.auth.userOfToken(tokenOf(req))) return next()
       res.status = 401
       res.json({ error: '需要登录', code: 'unauthenticated' })

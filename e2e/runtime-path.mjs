@@ -5,6 +5,9 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { startMockMcp } from './mock-mcp.mjs'
+import { PG_URL } from './pg.mjs'
+import { publishRelease } from './release.mjs'
+import { pairMachine } from './pair.mjs'
 
 const LIVE_GW_DB = '/workspace/satuwork/.data/gateway/gateway.db'
 
@@ -48,6 +51,9 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
     cwd: gwRoot,
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
+      GATEWAY_DATABASE_URL: PG_URL,
+      GATEWAY_PG_SCHEMA: 'e2e_runtime',
+      GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(GW_PORT),
       GATEWAY_MACHINE_TOKEN: MACHINE_TOK,
@@ -57,7 +63,6 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
       GATEWAY_OWNER_EMAIL: 'owner@runtime.test',
       GATEWAY_OWNER_PASSWORD: 'test-owner-runtime',
       SATUWORK_DEPLOY_STUB: '1',
-      SATUWORK_BOT_SRC: '/tmp/satuwork-e2e-missing-bot-src',
     },
   })
   await waitHttp(gwBase + '/health')
@@ -91,13 +96,7 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
       const seatApiKey = seat.json.apiKey
       assert(typeof seatAccess === 'string' && seatAccess.startsWith('sat_'), 'access token')
       assert(typeof seatApiKey === 'string' && seatApiKey.startsWith('sk_sw_'), 'api key')
-      const putMach = await req(gwBase, 'PUT', `/platform/orgs/${orgId}/machine`, {
-        token: ownerTok,
-        body: { sshHost: '127.0.0.1', sshPort: 22, sshUser: 'debian', sshAuth: 'password', sshSecret: 'e2e-ssh' },
-      })
-      assert(putMach.status === 200, `put machine ${putMach.status} ${putMach.text}`)
-      const platMach = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
-      const machineTok = platMach.json.machine.token
+      const machineTok = (await pairMachine({ req, gwBase, ownerTok, orgId })).token
       assert(typeof machineTok === 'string' && machineTok.startsWith('smt_'), 'smt_')
       const creds = await readLiveCreds()
       for (const c of creds) {
@@ -160,7 +159,8 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
       assert(created.json.bot.skillCount === 1 && created.json.bot.mcpCount === 1, 'counts')
       const remoteBotId = created.json.bot.id
 
-      const rt = await req(gwBase, 'GET', '/runtime/catalog', { token: adminTok })
+      // 席位 sat_ 才拿得到这份目录——它带 MCP 明文 token。
+      const rt = await req(gwBase, 'GET', '/runtime/catalog', { token: seatAccess })
       assert(rt.status === 200, `runtime catalog ${rt.status} ${rt.text}`)
       assert(rt.json.bots.some((b) => b.id === remoteBotId), 'runtime bots')
       assert(rt.json.skills.some((s) => s.id === skillId && String(s.body).includes('SKILL-OK-9C2E')), 'runtime skills')
@@ -168,19 +168,59 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
       assert(srv, 'runtime server')
       assert(typeof srv.token === 'string', 'runtime token field')
 
+      const rtJwt = await req(gwBase, 'GET', '/runtime/catalog', { token: adminTok })
+      assert(rtJwt.status === 401, `runtime 不该收 JWT ${rtJwt.status}`)
+
       const unauth = await req(gwBase, 'GET', '/runtime/catalog')
       assert(unauth.status === 401, `runtime unauth ${unauth.status}`)
 
-      const pub = await req(gwBase, 'POST', '/platform/bot-releases', {
-        token: ownerTok,
-        body: { version: '0.1.0', note: 'e2e-runtime' },
-      })
-      assert(pub.status === 200, `publish ${pub.status} ${pub.text}`)
+await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2e-runtime' })
       const dep = await req(gwBase, 'POST', '/runtime/deploy', {
         token: adminTok,
         body: { botId: remoteBotId },
       })
       assert(dep.status === 200, `stub deploy ${dep.status} ${dep.text}`)
+
+      await test('席位票上报会话索引：不带 botId 也要落到席位所在的机器上', async () => {
+        // 回归防护。machineId 一度只在 body 带 botId 时才推导，不带就落 null——而会话
+        // 根事件的 botId 本来就可能缺（bot 那边是 `data.botId || null`）。落 null 之后
+        // 拉全文会回落到「公司默认机器」，多机公司必然拿错票，管家 401；现象只是
+        // 「拉不到全文」，从这里一点也看不出来。账号粘住机器，所以按账号查一定查得到。
+        const now = Date.now()
+        const r = await req(gwBase, 'POST', '/internal/sessions/index', {
+          token: seatAccess,
+          body: {
+            sessionId: 's-seat-no-botid',
+            // 故意不带 botId；也不带 accountId——席位票只能报自己，body 里给了也不算
+            title: '无 botId 的会话',
+            createdAt: now,
+            updatedAt: now,
+            messageCount: 1,
+          },
+        })
+        assert(r.status === 200, `席位票上报 ${r.status} ${r.text}`)
+        assert(
+          typeof r.json.session.machineId === 'string' && r.json.session.machineId,
+          `machineId 该由服务端按席位算出来，实际 ${JSON.stringify(r.json.session.machineId)}`,
+        )
+        assert(r.json.session.accountId === adminId, `席位票只能报自己，实际 ${r.json.session.accountId}`)
+      })
+
+      await test('席位票替别人上报会被拒', async () => {
+        const now = Date.now()
+        const r = await req(gwBase, 'POST', '/internal/sessions/index', {
+          token: seatAccess,
+          body: {
+            sessionId: 's-seat-impersonate',
+            accountId: 'some-other-account',
+            createdAt: now,
+            updatedAt: now,
+            messageCount: 1,
+          },
+        })
+        // body 里的 accountId 对席位票不作数：要么被忽略（记成自己），要么直接拒。
+        assert(r.status !== 200 || r.json.session.accountId === adminId, `冒名上报 ${r.status} ${r.text}`)
+      })
 
       botChild = start('runtime-bot', ['--import', 'tsx', join(botRoot, 'e2e-boot.mjs')], {
         cwd: botRoot,
@@ -191,7 +231,6 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
           GATEWAY_URL: gwBase,
           GATEWAY_TOKEN: seatAccess,
           GATEWAY_API_KEY: seatApiKey,
-          GATEWAY_MACHINE_TOKEN: machineTok,
           ...(stubLlm ? { E2E_STUB_LLM: '1' } : {}),
         },
       })
@@ -205,7 +244,7 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
       let status
       let last
       while (Date.now() < deadline) {
-        const r = await req(botBase, 'GET', '/api/runtime/status', { token: machineTok })
+        const r = await req(botBase, 'GET', '/api/runtime/status', { token: seatAccess })
         last = r
         if (r.status === 200) {
           status = r.json

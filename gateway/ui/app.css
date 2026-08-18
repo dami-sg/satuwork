@@ -13,16 +13,18 @@ body { margin: 0; background: var(--color-bg); color: var(--color-text); font-fa
 .satu-provrow[aria-selected="true"]:hover { background: var(--color-accent-100); }
 
 .gw-roles { position: sticky; top: 0; z-index: 3; display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); padding: var(--space-2) 0 var(--space-4); background: var(--color-neutral-100); }
-.satu-modelhead, .satu-modelrow { grid-template-columns: 2fr 1fr 1.1fr 0.9fr 1.1fr 168px; }
+.satu-modelhead, .satu-modelrow { grid-template-columns: 2fr 1fr 1.1fr 0.9fr 1.1fr 1.1fr 168px; }
 .gw-caps { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .satu-modelrow .satu-rowactions { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 
 .gw-credlist .satu-provhead,
-.gw-credlist .satu-provrow { grid-template-columns: minmax(160px, 2fr) 72px 96px minmax(160px, 1.6fr) minmax(168px, auto); }
+.gw-credlist .satu-provrow { grid-template-columns: minmax(160px, 2fr) 72px 96px minmax(140px, 1.4fr) minmax(300px, auto); }
 .gw-credlist .satu-provrow { cursor: default; }
 .gw-secret { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .gw-secret .input { border-radius: var(--radius-md); padding: 8px 12px; }
 .gw-provactions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+/* 测试结论独占一行。跟按钮抢横向空间的话，一出结果整排按钮就会换行错位。 */
+.gw-provactions .gw-testline { flex-basis: 100%; text-align: right; }
 
 .gw-page { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-6); }
 .gw-page-inner { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--space-6); }
@@ -73,14 +75,57 @@ body { margin: 0; background: var(--color-bg); color: var(--color-text); font-fa
   .gw-page-inner > div[style*="repeat(4, 1fr)"] { grid-template-columns: 1fr 1fr !important; }
 }
 
-.gw-chat { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px 1fr; overflow: hidden; }
-.gw-chat-roster { min-width: 0; overflow-y: auto; padding: var(--space-3) var(--space-2); border-right: 1px solid var(--color-divider); display: flex; flex-direction: column; gap: 2px; }
-.gw-chat-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.gw-chat-thread { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-4) var(--space-6); display: flex; flex-direction: column; gap: var(--space-3); }
-.gw-chat-composer { flex: none; padding: var(--space-3) var(--space-6) var(--space-4); border-top: 1px solid var(--color-divider); }
-.gw-chat-form { display: flex; flex-direction: column; gap: var(--space-2); background: var(--color-surface); border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: var(--space-3); }
-.gw-chat-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
-.gw-chat-status { min-height: 1.2em; font-size: 12px; color: var(--muted-foreground); padding: 0 2px 6px; }
+/* main：两行（header / 正文）两列（内容 / 右栏）。右栏跨两行，所以能顶到 header
+   那一行去——做成 header 下面的兄弟节点就顶不上去。列宽由 appView 内联给出。 */
+.gw-main { min-width: 0; height: 100%; min-height: 0; box-sizing: border-box; overflow: hidden;
+  background: var(--color-neutral-100); border: 1px solid var(--color-divider); border-radius: var(--radius-md);
+  display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.gw-head { grid-row: 1; grid-column: 1; display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-6); border-bottom: 1px solid var(--color-divider); }
+.gw-body { grid-row: 2; grid-column: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.gw-aside { grid-row: 1 / span 2; grid-column: 2; position: relative; min-width: 0; overflow: hidden;
+  border-left: 1px solid var(--color-divider); display: flex; flex-direction: column; }
+/* 右栏没有自己的 header：开关在对话 header 上，所以这里不会有一条和左边对不齐的
+   横线。整栏从顶上直接开始，顶部内边距和 .gw-head 一致，标题看起来就在同一行。 */
+.gw-aside-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-3) var(--space-4) var(--space-4);
+  display: flex; flex-direction: column; gap: var(--space-3); }
+.gw-aside-body > h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted-foreground); line-height: 30px; }
+/* 抓手压在左边框上：可视只有 1px 的边框，但有 7px 的命中区，不然很难抓准。 */
+.gw-aside-grip { position: absolute; left: -3px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 2; }
+.gw-aside-grip:hover { background: color-mix(in srgb, var(--color-accent-500) 35%, transparent); }
+.gw-aside .satu-kv { display: block; padding: 0; border: 0; }
+.gw-aside .satu-kv > span:first-child { display: block; font-size: 11px; color: var(--muted-foreground); }
+/* 这些值是机器生成的长串（uid、路径、版本号），必须能断行，否则会把整栏撑开。 */
+.gw-aside .satu-kv > span:last-child { display: block; font-size: 12px; word-break: break-all; line-height: 1.5; }
+
+.gw-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 窄屏收掉右边那栏：环境信息是辅助的，对话本身不能被挤扁。 */
+/* 这些值是机器生成的长串（uid、路径、版本号），必须能断行，否则会把整栏撑开。 */
+/* flex: 1 不能少。.gw-chat 从 grid 改成 flex 列之后，没有它主区就只有内容高度，
+   输入框会被顶到对话正文底下而不是贴着页面底部。 */
+.gw-chat-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+/* 消息流、气泡、输入区在 chat.css。这里只留对话页的外框。 */
 .gw-chat-empty, .gw-chat-empty-main { margin: 0; padding: var(--space-4); font-size: 14px; color: var(--muted-foreground); line-height: 1.6; }
 .gw-chat-empty-main { flex: 1; display: flex; align-items: center; justify-content: center; }
-.gw-chat-roster .gw-flash { margin-bottom: var(--space-2); }
+/* 「对话」下面挂的 Bot 名册。左边一条竖线把它和上面的页面入口分开。 */
+.satu-subnav { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 2px 14px; padding-left: 10px; border-left: 1px solid var(--color-divider); }
+.satu-subnav-item { font-size: 13px; }
+.gw-chat-main > .gw-flash { margin: var(--space-3) var(--space-6) 0; }
+
+/* 金额输入框：$ 压在输入框左内边距里，输入内容相应右移让位。 */
+.satu-money { position: relative; display: block; }
+.satu-money > span {
+  position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+  font-size: 14px; color: var(--muted-foreground); pointer-events: none;
+}
+.satu-money .input { padding-left: 30px; }
+
+/* 统计表。列比供应商表多，单独一套。 */
+.satu-stathead, .satu-statrow { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr 1fr 1fr; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); }
+.satu-stathead { padding: 10px var(--space-4); background: var(--card); border-bottom: 1px solid var(--border); font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted-foreground); }
+.satu-stathead > *:not(:first-child), .satu-statrow > *:not(:first-child) { text-align: right; }
+.satu-statrow { border-bottom: 1px solid var(--border); min-width: 0; }
+.satu-statrow:last-child { border-bottom: 0; }
+.satu-statrow:hover { background: var(--card); }
+.satu-stathead:first-child { border-top-left-radius: var(--radius-lg); border-top-right-radius: var(--radius-lg); }

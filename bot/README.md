@@ -14,7 +14,7 @@ package.json 里有一条别名把 cordis 指向同一个物理包，避免加�
 
 ## 跑起来
 
-部署实例由 Gateway 拉起（satuwork-bot@{linuxUser}），环境里必有 SATUWORK_BOT_ID。
+部署实例由 Gateway 拉起（satuwork-bot@{seatId}），环境里必有 SATUWORK_BOT_ID。
 未接 Gateway 的本地进程可以不设该变量，此时才种 default。
 
 ## 配置模型
@@ -33,7 +33,9 @@ package.json 里有一条别名把 cordis 指向同一个物理包，避免加�
 
 ## 数据存在哪
 
-默认 ~/.satuwork，可用 SATUWORK_HOME 覆盖。不用启动目录——否则在哪儿敲的命令会决定看到谁的历史。部署时是 /home/{linuxUser}/.satuwork，pair 之间不共用。
+默认 ~/.satuwork，可用 SATUWORK_HOME 覆盖。不用启动目录——否则在哪儿敲的命令会决定看到谁的历史。部署时是 /home/{linuxUser}/.satuwork/{seatId}，席位之间不共用。
+
+同一个员工的多个 bot 跑在**同一个 Linux 账号**下，共享 /home/{linuxUser}/work（部署时注入 SATUWORK_WORK_DIR）。除了这个目录，别的都按席位隔离。
 
 $SATUWORK_HOME/sessions/<id>.jsonl  会话日志：追加式，一行一条事件
 $SATUWORK_HOME/satuwork.db          运行时配置与非会话数据（SQLite）

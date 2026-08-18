@@ -1,5 +1,5 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -53,6 +53,11 @@ interface SessionState {
  */
 export class SessionService extends Service {
   private cache = new Map<string, SessionState>()
+  /**
+   * 正在读盘的会话。两个请求同时碰一条还没缓存的会话时，必须共用同一次 load——
+   * 否则两份 SessionState 各自记 seq，各自往同一个文件写，事件会互相盖掉。
+   */
+  private loading = new Map<string, Promise<SessionState>>()
   private root: string
   /**
    * 旧会话没有 botId 时挂到这个 Bot。
@@ -155,11 +160,18 @@ export class SessionService extends Service {
     }
   }
 
-  /** 惰性从磁盘恢复。进程重启后第一次访问某会话会走这里。 */
+  /** 惰性从磁盘恢复。进程重启后第一次访问某会话会走这里。并发进来的共用同一次。 */
   private async load(sessionId: string): Promise<SessionState> {
     const cached = this.cache.get(sessionId)
     if (cached) return cached
+    const inflight = this.loading.get(sessionId)
+    if (inflight) return inflight
+    const run = this.read(sessionId).finally(() => this.loading.delete(sessionId))
+    this.loading.set(sessionId, run)
+    return run
+  }
 
+  private async read(sessionId: string): Promise<SessionState> {
     const file = join(this.root, `${sessionId}.jsonl`)
     if (!existsSync(file)) throw new Error(`sessions: 未知会话 ${sessionId}`)
 
@@ -190,18 +202,59 @@ export class SessionService extends Service {
       events.push(event)
     }
 
+    // 迁移要改的只有根事件，但 JSONL 只能整份重写。**先写临时文件再 rename**：
+    // rename 在同一个目录里是原子的，写到一半断电也只会留下一个 .tmp，原文件仍然完整。
     if (rewritten) {
-      await writeFile(file, events.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8')
+      const tmp = `${file}.${randomUUID()}.tmp`
+      await writeFile(tmp, events.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8')
+      await rename(tmp, file)
     }
 
     const state: SessionState = {
       id: sessionId,
       events,
-      seq: events.at(-1)?.seq ?? 0,
+      // 取**最大**的 seq，不是最后一行的。并发追加会让物理行序和 seq 序不一致（两个
+      // writer 各自拿号、写入顺序由文件锁决定），迁移重写也可能改变行序。按最后一行
+      // 恢复会把游标退回到一个已经用过的号上，下一条事件的 seq 就和历史撞号——SSE 的
+      // ?after=N 游标从此认不出新事件。
+      seq: events.reduce((max, e) => {
+        const n = Number((e as { seq?: unknown }).seq)
+        return Number.isFinite(n) && n > max ? n : max
+      }, 0),
       file,
     }
     this.cache.set(sessionId, state)
+    await this.healDanglingTurn(state)
     return state
+  }
+
+  /**
+   * 把上一个进程没写完的 turn 收口。
+   *
+   * `turn/end` 是在 `finally` 里写的，所以正常路径（成功、模型报错、用户中止）都收得
+   * 住。收不住的只有一种：进程本身没了——崩溃、机器重启，以及**每一次「重新部署」**。
+   * 那条 `turn/start` 于是永远悬在日志末尾，谁也不会再去关它。
+   *
+   * 后果不只是难看：界面拿「最后一条 turn/start 之后有没有 turn/end」判断这轮还在不在
+   * 跑，一条悬着的记录会让会话永远显示「正在处理」——而那边其实什么都没在跑，等多久
+   * 都不会变。用量归集也按 turn/end 触发，同样会漏掉这一轮。
+   *
+   * 从磁盘恢复的这一刻正是唯一能确定「那个进程已经死了」的时机：它写的东西我们读到
+   * 了，而它自己不在了。所以在这里补一条 reason: 'error' 的 turn/end。
+   */
+  private async healDanglingTurn(state: SessionState): Promise<void> {
+    let lastStart = -1
+    let lastEnd = -1
+    for (let i = state.events.length - 1; i >= 0; i--) {
+      const type = state.events[i].type
+      if (lastStart < 0 && type === 'turn/start') lastStart = i
+      if (lastEnd < 0 && type === 'turn/end') lastEnd = i
+      if (lastStart >= 0 && lastEnd >= 0) break
+    }
+    if (lastStart < 0 || lastStart < lastEnd) return
+    const turn = Number((state.events[lastStart].data as { turn?: unknown }).turn) || 0
+    this.ctx.logger?.warn?.(`sessions: ${state.id} 第 ${turn} 轮没有收口（上个进程没能写完），补一条 turn/end`)
+    await this.append(state.id, 'turn/end', { turn, reason: 'error' })
   }
 }
 

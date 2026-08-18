@@ -44,9 +44,13 @@
                                                     │
                                                     ▼
                                           公司运行机器（Debian，v1 一台）
-                                          ├─ pair (账号A, botX)  linuxUser / slim-desktop@ / satuwork-bot@
-                                          ├─ pair (账号A, botY)
-                                          └─ pair (账号B, botX)
+                                          ├─ 机器管家 :8443（唯一入站口，root）
+                                          ├─ Linux 账号 A（一个员工一个）
+                                          │   ├─ ~/work                共享工作区
+                                          │   ├─ 席位 (A, botX)  seatId / slim-desktop@ / satuwork-bot@
+                                          │   └─ 席位 (A, botY)  同一个 uid，另一块屏
+                                          └─ Linux 账号 B
+                                              └─ 席位 (B, botX)
                                                 │
                                                 ├─ 拉目录 / ready / 报用量 / 报索引 ──► Gateway
                                                 └─ 模型 /v1/*（sk_sw_）──────────────► Gateway（pi-ai / 透传）
@@ -65,9 +69,9 @@ Gateway **不跑** 一轮对话，不当聊天的工作副本。浏览器聊天�
 | 套餐 | Gateway | 先管席位数和模型额度 |
 | 席位 | Gateway | 可开通的**账号**名额。多开 Bot **不**多占席位 |
 | 账号 | Gateway | 一个人。`owner` 是平台账号，不占席位、不属于公司。`admin` / `member` 属于一家公司，占一席 |
-| 运行机器 | Gateway 登记，现场部署 | v1：一家公司一台 Debian |
+| 运行机器 | Gateway 登记，配对接入 | 一家公司**可以有多台**。每台有一个「最多几个激活账号」的容量 |
 | 访问地址 | Gateway 分配 | 公司记录里的 `accessUrl`（派机器时写入）。**聊天 Host 是 Gateway**，不是这个地址 |
-| pair 实例 | 运行机器 | 一个 (account, botId) 一个 Bot 进程 + 一份 `$SATUWORK_HOME` + 一套瘦桌面。无头 |
+| pair 实例 | 运行机器 | 一个 (account, botId) 一个 Bot 进程 + 一份 `$SATUWORK_HOME` + 一套瘦桌面。无头。同一账号的多个 pair **共用一个 Linux 用户**，因而共用 `~/work` |
 | Bot | 定义在 Gateway（全局/公司） | 侧栏里的一个人。有自己的长会话。部署实例只钉 `SATUWORK_BOT_ID` 那一颗 |
 | 会话 | 只在实例上 | JSONL。根事件带 `botId` |
 | 会话索引 | Gateway | 能找到会话的指针，没有正文 |
@@ -75,19 +79,46 @@ Gateway **不跑** 一轮对话，不当聊天的工作副本。浏览器聊天�
 
 席位按**账号**计，不按 Bot 实例。`owner` 不占席位。用全局 Bot 或公司 Bot、同一账号再部署几个 pair，**都不多占席位**。3 席 × N 个 Bot = 最多 3N 个进程。
 
+### 3.0 多机调度
+
+一家公司可以配对多台机器，每台设一个**激活账号上限**（`machines.maxAccounts`，激活 =
+当前有已部署席位）。派发规则两条：
+
+1. **账号粘住机器。** 一个员工的所有 bot 必须落在同一台机器上——它们共用一个 uid 和
+   `~/work`，拆到两台上「共享文件」就不成立了。所以调度单位是账号，不是席位；账号
+   名下再加 bot 不多占容量。已经在某台机器上的账号**不会被驱逐**，那台就算被调小到
+   超容量也一样：把人从机器上赶走会丢掉他的 `~/work`。
+2. **填满一台再用下一台。** 新账号落在「没满的机器里已用最多」的那台（并列按登记先
+   后）。不是最闲优先——摊平会让每台都半满，反而没法把空机器腾出来下线或转给别的公司。
+
+所有机器都满时部署返回 409，并报出总容量。
+
+**槽位按机器唯一，不是按公司**（`unique(machineId, slot)`）。端口是从槽位算出来的
+（`3200+N` 等），两台机器上各自的 slot 0 互不冲突；按公司唯一会白白吃掉第二台的端口
+段，还会在满 N 席之后拒绝部署。
+
+配对时**同一个地址算同一台**：重跑装机脚本是修复手段，不该凭空多出一台机器；地址不同
+才是新增。重配会换一把新票，旧管家立刻失效。
+
 ### 3.1 部署与桌面
 
-部署单位是 **(accountId, botId)**，不是账号。
+部署单位是 **(accountId, botId)**（一个「席位」），但 **Linux 账号按员工分**：同一员工名下的多个 bot 共用一个 uid，因而天然共享文件。
 
-- `linuxUser` = `'bot-' + sha256(accountId + '\n' + botId).hex.slice(0, 12)`
+- `linuxUser` = `'sw-' + sha256(accountId).hex.slice(0, 12)`——**只由 accountId 派生**
+- `seatId` = `{linuxUser}-{sha256(botId).hex.slice(0, 12)}`——systemd 实例名与席位私有目录名
 - 槽 N（公司内从 0 起）：`DISPLAY=10+N`，RFB=`5910+N`，noVNC HTTP=`6081+N`，CDP=`9222+N`（`127.0.0.1`），Bot HTTP=`3200+N`
-- 每个 pair：一个 linux 用户、一套瘦桌面（Xvfb `1280x800x24` + x11vnc `localhost`+密码 + noVNC 内网）、一个 Bot HTTP
-- systemd：`slim-desktop@{linuxUser}`、`satuwork-bot@{linuxUser}`
-- 管理 SSH 是 `debian`（sudo）。席位用户无 sudo
-- 员工能看见：noVNC URL、VNC 密码、linuxUser、botVersion。看不见 CDP、sudo、LLM 密钥
+- 每个席位：一块屏（Xvfb `1280x800x24` + x11vnc `localhost`+密码 + noVNC 内网）、一个 Bot HTTP、一份私有目录
+- systemd：`slim-desktop@{seatId}`、`satuwork-bot@{seatId}`。**实例名不再是用户名**——一个员工有多个席位，用户名不唯一了。`User=` 由部署时写的 drop-in 提供：`/etc/systemd/system/{unit}@{seatId}.service.d/seat.conf`
+- 机器上常驻 **机器管家**（`satuwork-manager`，root systemd 服务），Gateway 通过它下发部署；**Gateway 不持有任何能登录这台机器的凭据**
+- 席位用户无 sudo
+- 员工能看见：noVNC URL、VNC 密码、linuxUser、seatId、共享目录、botVersion。看不见 CDP、sudo、LLM 密钥
 - Bot 环境必有 `SATUWORK_BOT_ID`。目录 `GET /runtime/catalog?botId=`，只钉那一颗，不种本地 `default`
 - Bot 运行包在 Gateway 按版本发布；部署指定版本。公司可批量更新已部署的 pair：`POST /platform/orgs/:id/runtime/update`
-- `$SATUWORK_HOME` 是 `/home/{linuxUser}/.satuwork`，pair 之间不共用
+- `$SATUWORK_HOME` 是 `/home/{linuxUser}/.satuwork/{seatId}`，席位之间不共用
+
+**共享的只有 `/home/{linuxUser}/work`。** 这是同一员工的多个 bot 看见同一批资料的唯一入口，靠 uid 相同实现，没有任何代码。其余一切按席位隔离——Chrome profile（同一个 `--user-data-dir` 起第二个 Chrome 会把网页开到别的席位屏上）、`XDG_RUNTIME_DIR`（logind 给的 `/run/user/{uid}` 是按 uid 的，会撞）、`XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME`（plank、dconf、picom、`.desktop` 跟着一起隔离）、`satuwork.db` 与 `sessions/`（`settings/change` 事件只在进程内广播，共用一份库会让另一个进程一直读到内存里的旧值）。
+
+跨 bot 的「互相 @」**不走文件系统**：文件系统没有通知，叫不醒对方的 agent 循环，而且同一员工的席位未必在同一台机器上。那条路走 Gateway。
 
 ### 账号与角色
 
@@ -114,7 +145,7 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 - 注册、登录、JWT（JWKS 对外）。聊天 UI 在这里
 - 公司、账号、角色（`owner` / `admin` / `member`）、套餐、席位
 - 机器池：派机器、收回、记录该公司的访问地址
-- 按 pair 部署：SSH 以 `debian` 建 linux 用户、起 `slim-desktop@` 与 `satuwork-bot@`
+- 按 pair 部署：`PUT {machine.host}/seats/{seatId}` 交给机器管家，由它在本机建 linux 用户、起 `slim-desktop@` 与 `satuwork-bot@`
 - 目录：模型、Skill、MCP、Bot，每条带 `scope: global | company` 和 `companyId?`
 - 平台密钥（模型 / 需鉴权的 MCP），由 `owner` 配置。**不**下发到浏览器，**也不下发到 Bot 磁盘/环境**。公司不再各自贴 key
 - 模型代理：`GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages`。鉴权是席位 API Key（`sk_sw_`）或登录 JWT；`sat_` 不行。上游 key 由 Gateway 按 provider 选取（平台密钥 > 环境变量）
@@ -137,7 +168,7 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 - 提供「按 sessionId 出全文」的内网接口，只接受 Gateway 的服务凭证
 - 环境：`GATEWAY_URL`、`GATEWAY_TOKEN`（`sat_`）、`GATEWAY_API_KEY`（`sk_sw_`）、`GATEWAY_MACHINE_TOKEN`、`SATUWORK_BOT_ID`。没有 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`
 
-开通 / 停用由 Gateway 经 `debian` SSH 做，不是机器上另跑一个监督进程。
+开通 / 停用由 Gateway 下发给**机器管家**，机器上确实另跑着这个监督进程（这条取代了原来「不另跑监督进程」的结论）。换掉 SSH 的理由有三条：Gateway 不必再明文保存 root 级凭据；对外端口从「每席位两个」收成一个；管家能自己升级，否则删掉 SSH 之后每次更新都要有人跑到每台机器前面。
 
 ---
 
@@ -171,7 +202,7 @@ Skill / MCP：**定义**在 Gateway，**进程**跑在实例旁边。实例按�
 4. 开通最多 3 个账号。每个账号占用一席
 5. 用户登录 Gateway。聊天 UI 留在 Gateway，不跳到公司访问地址
 6. `POST /runtime/deploy` `{ botId }`（必填）；管理员可 `POST /orgs/:id/accounts/:accountId/deploy` `{ botId }`
-7. Gateway 以 `debian` SSH 到该公司机器：建 `linuxUser`、写 `$SATUWORK_HOME`、起 `slim-desktop@` 与 `satuwork-bot@`，注入 `SATUWORK_BOT_ID` 与三把票（`sat_` / `sk_sw_` / machine token）
+7. Gateway `PUT {machine.host}/seats/{seatId}` 给机器管家：由管家在本机建 `linuxUser`、写 `$SATUWORK_HOME`、起 `slim-desktop@` 与 `satuwork-bot@`，注入 `SATUWORK_BOT_ID` 与三把票（`sat_` / `sk_sw_` / machine token）
 8. 实例 `POST /internal/instances/:accountId/ready` `{ host, botId }`
 
 v1 约束：一家公司一台机器；机器先按 **pair 进程** 隔离，不上容器套容器。
@@ -182,7 +213,7 @@ v1 约束：一家公司一台机器；机器先按 **pair 进程** 隔离，不
 
 - 每家公司**一个** `accessUrl`，由 Gateway 在派机器时发出，写在公司记录里。这是机器/DNS 登记，不是聊天入口
 - 浏览器：管理页和聊天都打 Gateway。SSE / 发消息由 Gateway 反代到该 pair 的 Bot HTTP（`3200+N`）
-- 桌面：员工拿该 pair 的 noVNC URL（`http://{sshHost}:{6081+N}/vnc.html`）和 VNC 密码。x11vnc 只听 localhost；CDP 只听 `127.0.0.1`
+- 桌面：员工拿该 pair 的 noVNC URL（`{machine.host}/seats/{seatId}/vnc/?ticket=…`，票由 Gateway 用 JWT 私钥签、五分钟有效，管家验完换成 path 限定的 HttpOnly cookie）和 VNC 密码。x11vnc、websockify、CDP 全部只听 `127.0.0.1`
 
 ---
 
@@ -294,15 +325,84 @@ messageCount?
 
 ---
 
+## 12b. Gateway 的存储
+
+业务数据在 **PostgreSQL**（`GATEWAY_DATABASE_URL`）。同一个库里可以按
+`GATEWAY_PG_SCHEMA` 分开多套环境；默认 `public`。
+
+磁盘上只剩两样重启不能变的东西：
+
+```
+$SATUWORK_GATEWAY_HOME/  # 默认 ~/.satuwork-gateway
+  keys/jwt-*.pem         JWT 密钥对——换了它已发出的票会全部失效
+  releases/bot-*.tgz     Bot 运行包
+```
+
+聊天正文不进 Gateway，任何时候都只在实例的 JSONL 里；库里只有会话**指针**。
+
+部署：`docker compose up -d`（Gateway + PostgreSQL）。Bot 不在 compose 里，它按 pair
+宿主机 PG 端口用 5434。
+
+### 发布包从哪来
+
+**生产：CI 构建，Gateway 只收。** Gateway 镜像里没有 bot 源码，也不构建：
+
+```bash
+GATEWAY_PLATFORM_TOKEN=… node bot/pack.mjs --upload https://gw.example.com --note nightly
+```
+
+`bot/pack.mjs` 干两件事。一是**把依赖变成真文件**：`pnpm deploy --legacy` 生成自包含
+目录，里面的软链只指向包内部的 `.pnpm`，解到席位机器上不会断——仓库里的
+`bot/node_modules` 是指向 workspace 根的软链，直接打包出去就是一堆断链，而机器上
+既没有 pnpm 也没有 install 这一步。devDependencies 也一起进包：systemd 跑的是
+`node --import tsx bin/satuwork.mjs`，src/ 是 TypeScript，tsx 是**运行时**依赖。
+二是 PUT 上来（等价于手工 curl）：
+
+```bash
+curl -sf -X PUT "$GATEWAY_URL/platform/bot-releases/$VERSION?note=$NOTE" \
+  -H "Authorization: Bearer $GATEWAY_PLATFORM_TOKEN" \
+  -H "X-Bot-Sha256: $(shasum -a 256 bot.tgz | cut -d' ' -f1)" \
+  --data-binary @bot.tgz
+```
+
+GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` tag 触发，
+要 `GATEWAY_URL` 和 `GATEWAY_PLATFORM_TOKEN` 两个 secret。
+
+收下的包要过三关：sha256 跟 `X-Bot-Sha256` 对得上（不带这个头就跳过这关）、是 gzip
+的 tar、里面有 `bin/satuwork.mjs`。任何一关不过就删文件、不入库。上限
+`GATEWAY_RELEASE_MAX_BYTES`（默认 256 MiB）。包直接流式写到最终文件名上，用 `wx`
+开——文件本身就是这个版本的锁，同一个版本传两次第二次拿 409。
+
+版本号由 CI 给，建议 `<pkg version>+<git sha>`（`+` 是合法字符），这样一个版本号永远
+对应同一份字节，回滚时找得回来。
+
+**只有上传这一条路。** 源码打包（原 `POST /platform/bot-releases`）已经拆掉：它只有
+本地开发的 Gateway 能走，而且打出来的包带的是**那台机器**的 esbuild 原生二进制，
+传到席位机器上 tsx 加载不了它，进程起不来。包必须在和席位机器同架构的 Linux 上打，
+`pack.mjs` 会拦住不合规的包。
+
+发布包只在 Gateway 本机磁盘上（`$SATUWORK_GATEWAY_HOME/releases/`），部署时要 scp
+给席位机器——**Gateway 因此是单实例**。要多副本就得先把这个目录换成对象存储。
+
+---
+
 ## 13. 实例进程
 
-每个 pair：
+每个员工一个 Linux 账号，账号下每个 pair 一个席位：
 
 ```
-$SATUWORK_HOME/          # /home/{linuxUser}/.satuwork，pair 之间不共用
-  satuwork.db            设置、本机钉住的 Bot、队列（待上报的索引/用量）
-  sessions/<id>.jsonl    工作副本，唯一全文
+/home/{linuxUser}/
+  work/                        共享工作区。同一员工的所有席位都看得见
+  .satuwork/{seatId}/          = $SATUWORK_HOME，席位之间不共用
+    satuwork.db                设置、本机钉住的 Bot、队列（待上报的索引/用量）
+    sessions/<id>.jsonl        工作副本，唯一全文
+    app/                       该席位的 Bot 代码（cordis.yml 的监听口逐席位 sed）
+    chrome/                    Chrome --user-data-dir
+    config/ share/ cache/      XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_CACHE_HOME
+    bot.env  desktop.env  vnc-passwd
 ```
+
+发布包解到 `/opt/satuwork/releases/{version}/`，**全机共享**：同一版本的第二个席位不再重解一遍。
 
 上报失败必须落本地队列，下次重试。聊天不因 Gateway 短暂不可用而失败（已建连的 turn）；未部署的 pair 在 Gateway 上 503。
 
@@ -338,8 +438,8 @@ $SATUWORK_HOME/          # /home/{linuxUser}/.satuwork，pair 之间不共用
 | GET | `/runtime/desktop?botId=` | 该 pair 的桌面（noVNC / 密码 / linuxUser / botVersion）。`botId` 必填 |
 | POST | `/runtime/deploy` | `{ botId }` 必填。给当前席位部署该 Bot |
 | POST | `/orgs/:id/accounts/:accountId/deploy` | admin：给该账号部署 `{ botId }` |
-| GET | `/runtime/catalog?botId=` | 实例拉目录。有 `botId` 时只返回那一颗 |
-| POST | `/platform/bot-releases` | `owner` 发布版本化 Bot 运行包 |
+| GET | `/runtime/catalog?botId=` | 实例拉目录。有 `botId` 时只返回那一颗。**只认席位 `sat_`**：这条会带出 MCP 明文 token 与 env，登录 JWT → 401 |
+| PUT | `/platform/bot-releases/:version` | **上传**发布包（body 就是 tgz）。CI 用 `GATEWAY_PLATFORM_TOKEN`，人用 `owner` 登录态 |
 | POST | `/platform/orgs/:id/runtime/update` | 公司批量把已部署 pair 更新到某版本 |
 
 ### Gateway（模型代理；API Key `sk_sw_` 或登录 JWT。`sat_` → 401。`x-api-key` 若出现也只当席位 API Key / JWT，不是上游密钥）
@@ -361,8 +461,16 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| POST | `/internal/machines` | 引导票登记机器。响应带一次 `token`（`smt_`） |
-| POST | `/internal/machines/:id/heartbeat` | 该机器的 `smt_`；票必须对应 `:id` |
+| POST | `/platform/orgs/:id/pairing-code` | owner 生成一次性配对码（30 分钟）。响应带可直接粘贴的安装命令 |
+| POST | `/machines/pair` | **无登录态**，配对码本身是凭据。签 `smt_`、把地址记成请求来源 IP、立刻回拨 `/health` 验可达 |
+| GET | `/install-manager.sh` | 公开。按请求 Host 填好 Gateway 地址的装机脚本 |
+| GET | `/manager/release?code=` | 装机脚本下载管家包，凭配对码（不消费它） |
+| PUT | `/platform/manager-releases/:version` | 上传管家发布包。和 bot 发布同一套凭证 |
+| GET | `/internal/bot-releases/:version` | 管家按版本拉 bot 包。取代了逐席位 scp |
+| GET | `/internal/manager-releases/:version` | 管家自升级拉包 |
+| GET | `/platform/desktop-ticket?seatId=` | owner 支持入口：替某个席位签一张桌面票。走审计 |
+| POST | `/internal/machines` | 引导票登记机器（无 UI 版，e2e/smoke 用）。响应带一次 `token`（`smt_`） |
+| POST | `/internal/machines/:id/heartbeat` | 该机器的 `smt_`；票必须对应 `:id`。**也是自升级的下发通道**：body 带 `managerVersion`/`protocol`/`seats`，响应带 `desiredManagerVersion`/`url`/`sha256`/`minNode`/`minProtocol` |
 | POST | `/internal/instances/:accountId/ready` | 该机器的 `smt_`。body `{ host, botId }`，`botId` 必填；pair 必须已部署；机器必须属于该账号的公司 |
 | POST | `/internal/sessions/index` | 该机器的 `smt_`。公司从机器派生，不能替别的公司报索引 |
 | POST | `/internal/usage` | 该机器的 `smt_`。上报真实 token，不编费用 |
@@ -402,7 +510,7 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 12. 上报失败不得丢本地 JSONL，也不得阻断发消息
 13. 每个 Bot 有自己的 `provider` + `model`；发消息用这一对
 14. 席位按账号计；多部署几个 Bot 不多占席位
-15. `linuxUser` 由 `accountId` **和** `botId` 一起哈希，不是只由 `accountId`
+15. `linuxUser` 只由 `accountId` 派生；席位靠 `seatId` 区分。同一员工的多个 bot 共用 uid 与 `~/work`，其余（`$SATUWORK_HOME`、Chrome profile、XDG 各目录、`XDG_RUNTIME_DIR`）一律按 `seatId` 隔离
 
 ---
 
@@ -454,8 +562,8 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 
 **M3**
 
-- ~~3 席公司在一台机器上正好 3 个进程、3 份数据目录~~ **已取代**：3 席 × N 个已部署 Bot = 3N 个进程、3N 份 `$SATUWORK_HOME`（linuxUser 含 botId）
-- 账号 A 看不到账号 B 的会话文件；同一账号的不同 Bot 也不共用 HOME
+- ~~3 席公司在一台机器上正好 3 个进程、3 份数据目录~~ **已取代**：3 席 × N 个已部署 Bot = 3N 个进程、3N 份 `$SATUWORK_HOME`，但只有 **3 个 Linux 账号**（一员工一个）
+- 账号 A 看不到账号 B 的会话文件；同一账号的不同 Bot 不共用 `$SATUWORK_HOME`，但**共用 `~/work`**——这是有意的
 - 未派到本 pair 的票被实例拒绝
 
 **M5**
@@ -479,4 +587,8 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 | 一家公司一个 admin 后台，兼管供应商和日常/utility | 拆成 owner 控制台与公司后台。供应商、可用模型、日常/utility、套餐 SKU、系统级目录只在 owner；公司 admin 管席位/员工/审计/费用/公司目录；员工只看自己的统计 |
 | 用户自建 Bot 同步到 Gateway | 不同步；部署实例不自建。要共用就做成公司 Bot |
 | `/v1` 只收用户 JWT；`x-api-key` 也当 JWT | `/v1` 收 API Key（`sk_sw_`）或登录 JWT。`sat_` 不行。用量记在该用户 |
-| `linuxUser` 只由 accountId 派生 | `linuxUser` = `bot-` + sha256(`accountId` + `\n` + `botId`) 前 12 hex |
+| ~~`linuxUser` = `bot-` + sha256(`accountId` + `\n` + `botId`) 前 12 hex~~ | **已回退**：`linuxUser` = `sw-` + sha256(`accountId`) 前 12 hex，一员工一个账号；席位改由 `seatId` 区分。老机器上残留的 `bot-*` 账号与单元需人工清理（换前缀就是为了让新旧不互相覆盖） |
+| Gateway 用 SSH 部署席位，`machines.sshSecret` 明文存 root 凭据 | **已取代**：机器上常驻 `satuwork-manager`，Gateway 只有可吊销的 `smt_`。ssh* 五列已从库里删除 |
+| 每个席位对外开 bot 口 `3200+N` 和 noVNC 口 `6081+N` | 两者都只听 `127.0.0.1`，对外只有管家一个端口；noVNC 走 Gateway 签的短期票 |
+| 实例 `ready` 上报的 `host` 决定 Gateway 打哪儿 | **不再采信**（stub 除外）。bot 只听 loopback，自报会把 Gateway 写好的地址覆盖成打不通的 `127.0.0.1` |
+| systemd 实例名就是 Linux 用户名（`User=%i`） | 实例名是 `seatId`；`User=` 由部署写的 drop-in 提供。正是 `User=%i` 这条约束当初逼出了「一个 bot 一个账号」 |

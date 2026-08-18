@@ -1,0 +1,537 @@
+/* ──────────────────────────────────────────────────────────────────────
+   对话页。
+   分两层，中间那条线要清楚：
+
+   - 上半段（.sw-convo / .sw-msg / .sw-composer）是**这个应用的对话界面**：会话抬头、
+     日期分隔、左右气泡、工具痕迹、输入区。
+   - 下半段（.sw-md 及以下）是**气泡里那段 Markdown**，照着 vercel/ai-chatbot 现在用的
+     Streamdown 那套排：代码块带语言条和复制/下载、表格自己横向滚、mermaid 出图、
+     公式走 KaTeX。它跟「聊天」无关，抽出去照样能用在别处。
+
+   颜色一律走 theme.css 的令牌，深浅两套自动跟着翻。
+   ────────────────────────────────────────────────────────────────────── */
+
+/* ── 会话身份行（长在 .gw-head 里，见 app.js 的 chatHeadInline） ────────
+   外壳、内边距、下边框都由 .gw-head 给，这里只管里面那几件东西怎么排。 */
+.sw-convo-avatar {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+/* flex: 1 把中间这段撑开，右边的操作按钮才会被顶到最右；min-width: 0 是省略号
+   能生效的前提——不写的话 flex 子项按内容宽度算，长名字会把按钮挤出顶栏。 */
+.sw-convo-id { min-width: 0; flex: 1; }
+.sw-convo-title { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.sw-convo-name {
+  font-family: var(--font-heading);
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 在线灯。三态各占一个色相，扫一眼就能分开：
+     离线 = 中性灰、在线 = 绿（theme.css 的 --color-ok-*）、正在处理 = 品牌赭红 + 呼吸。
+   绿是「一切正常」的通用约定，用别的颜色表达它，等于要求每个人先学一遍图例。 */
+.sw-convo-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 2px 9px 2px 7px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.sw-convo-live i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-neutral-500);
+}
+.sw-convo-live[data-live='1'] { background: var(--color-ok-100); color: var(--color-ok-800); }
+.sw-convo-live[data-live='1'] i { background: var(--color-ok-500); }
+/* 正在处理：留在品牌赭红上，跟「在线」区分开——它是个短暂状态，不是「正常」。 */
+.sw-convo-live[data-live='busy'] { background: var(--color-accent-100); color: var(--color-accent-800); }
+.sw-convo-live[data-live='busy'] i { background: var(--color-accent-500); animation: sw-pulse 1.4s ease-in-out infinite; }
+@keyframes sw-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  .sw-convo-live[data-live='busy'] i { animation: none; }
+}
+.sw-convo-meta {
+  margin: 1px 0 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-convo-actions { position: relative; display: flex; align-items: center; gap: var(--space-2); flex: none; }
+.sw-convo-actions .btn { padding: 7px 14px; font-size: 13px; }
+.sw-convo-actions .btn-icon { padding: 7px; }
+
+/* 消息流外壳。只为「回到底部」提供定位上下文——按钮要浮在消息流底边上方，钉在
+   .gw-chat-main 上的话会落到输入区后面去。 */
+.sw-threadwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+/* ── 消息流 ────────────────────────────────────────────────────────── */
+.sw-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-4) var(--space-6) var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+/* 日期分隔。只有一行居中的淡字，不画线——消息流里已经有气泡的边界在分组了，
+   再加一条横贯全宽的线，视觉重量比它要传达的信息（换了一天）重得多。 */
+.sw-daydiv {
+  display: flex;
+  justify-content: center;
+  margin: var(--space-1) 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.sw-msg { display: flex; gap: var(--space-3); align-items: flex-start; }
+.sw-msg[data-role='user'] { flex-direction: row-reverse; }
+.sw-msg-avatar {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+/* 气泡列最宽 72%：再宽长段落一行装太多字，眼睛回行会丢；再窄代码块和表格就挤了。 */
+.sw-msg-col { min-width: 0; max-width: 72%; display: flex; flex-direction: column; gap: 6px; }
+.sw-msg[data-role='user'] .sw-msg-col { align-items: flex-end; }
+
+.sw-bubble {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 11px var(--space-4) 9px;
+  border-radius: 16px;
+  font-size: 14.5px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.sw-bubble[data-role='user'] {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-bottom-right-radius: 6px;
+}
+.sw-bubble[data-role='assistant'] {
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 6px;
+}
+/* 用户气泡里的链接和行内代码要在赭红底上还看得清——继承色 + 半透明底，
+   照搬浅色底那一套的话是深红字压深红底。 */
+.sw-bubble[data-role='user'] a { color: inherit; text-decoration: underline; }
+.sw-bubble[data-role='user'] code[data-md='inline-code'] {
+  background: color-mix(in srgb, var(--primary-foreground) 20%, transparent);
+  color: inherit;
+  border-color: transparent;
+}
+
+/* 时间戳。两侧一样，都在气泡**外面**——压进气泡里的话，同一条消息里就有了两种
+   字号两种颜色，而时间只是旁注。列的对齐方向（sw-msg-col）自然把它推到各自那一边。 */
+.sw-time { font-size: 11px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+
+/* 工具痕迹 / 引用来源。靠间距和药丸本身的底色跟正文分开，不画分割线——
+   气泡本来就是一个视觉容器，里面再切一刀是双重分组。 */
+.sw-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.sw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.sw-chip svg { flex: none; opacity: 0.75; }
+.sw-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 还在跑的工具：文字降一档，点一下呼吸灯，跑完了自己变回来。 */
+.sw-chip[data-state='running'] { color: var(--muted-foreground); }
+.sw-chip[data-state='running'] svg { animation: sw-pulse 1.4s ease-in-out infinite; }
+.sw-chip[data-state='error'] { background: var(--color-accent-100); color: var(--color-accent-800); }
+@media (prefers-reduced-motion: reduce) {
+  .sw-chip[data-state='running'] svg { animation: none; }
+}
+
+/* 正在思考：三个点。这是**空气泡**，不是状态栏文字——回答一开始吐字它就地变成正文，
+   位置不跳。 */
+.sw-typing { display: inline-flex; align-items: center; gap: 4px; padding: 3px 0; }
+.sw-typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted-foreground);
+  animation: sw-bounce 1.2s ease-in-out infinite;
+}
+.sw-typing i:nth-child(2) { animation-delay: 0.15s; }
+.sw-typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes sw-bounce { 0%, 60%, 100% { opacity: 0.28; } 30% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .sw-typing i { animation: none; opacity: 0.6; }
+}
+
+/* 回到底部。人往上翻看历史时才出现——见 app.js 的 stickToBottom。 */
+.sw-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--popover);
+  color: var(--secondary-foreground);
+  box-shadow: var(--shadow-md);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.sw-jump:hover { background: var(--secondary); }
+.sw-jump[hidden] { display: none; }
+
+/* ── 输入区 ────────────────────────────────────────────────────────── */
+.sw-composer { flex: none; padding: var(--space-2) var(--space-6) var(--space-4); }
+.sw-composer-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  background: var(--popover);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-md);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+/* 焦点环画在盒子上而不是 textarea 上：视觉上「输入框」是整个盒子，
+   光标在里面时高亮的也该是整个盒子。 */
+.sw-composer-box:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 22%, transparent);
+}
+.sw-composer-row { display: flex; align-items: center; gap: var(--space-2); }
+.sw-composer-row .sw-spacer { flex: 1; }
+/* 输入区左边那排图标按钮（目前只有附件）。圆形、无底色，跟右边实心的主操作分开：
+   它们是「顺手加点东西」，不是「把这条发出去」。 */
+.sw-iconbtn {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.sw-iconbtn:hover { background: var(--secondary); color: var(--secondary-foreground); }
+.sw-iconbtn svg { display: block; }
+
+/* 待发送的附件。排在输入框上面而不是下面——它们是这条消息的一部分，视线从附件
+   往下走到正文再走到发送，顺序跟消息最终的样子一致。 */
+.sw-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.sw-files[hidden] { display: none; }
+.sw-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 4px 3px 10px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 12px;
+}
+.sw-file > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-file-x {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.sw-file-x:hover { background: var(--color-neutral-400); color: var(--color-neutral-800); }
+
+/* 发送 / 停止。圆形图标按钮——它是这一屏唯一的主操作，圆形加实心底色让它在一堆
+   方角的输入框和文字按钮里一眼可辨，也不用为「发送」两个字留一块随语言变宽的位置。 */
+.sw-send {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: var(--shadow-2xs);
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.sw-send:hover { background: var(--color-accent-600); }
+.sw-send:active { background: var(--color-accent-700); }
+.sw-send svg { display: block; }
+/* 停止态换成中性的深色：它不是「往前走一步」，不该继续顶着主操作的品牌色。 */
+.sw-send[data-state='stop'] { background: var(--color-neutral-800); color: var(--color-neutral-100); }
+.sw-send[data-state='stop']:hover { background: var(--color-neutral-900); }
+.sw-composer-tip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: 7px;
+  padding: 0 2px;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+}
+.sw-composer-tip .sw-spacer { flex: 1; }
+.sw-composer-tip kbd {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--card);
+}
+
+@media (max-width: 760px) {
+  .sw-thread { padding: var(--space-3) var(--space-4) var(--space-2); }
+  .sw-composer { padding: var(--space-2) var(--space-4) var(--space-3); }
+  .sw-convo { padding: var(--space-3) var(--space-4); }
+  .sw-msg-col { max-width: 86%; }
+  .sw-composer-tip > span:first-child { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   气泡里的 Markdown。这一段以下跟「聊天」无关。
+   ══════════════════════════════════════════════════════════════════════ */
+.sw-md { min-width: 0; }
+/* 首尾元素不要外边距，否则气泡上下会各多出一截空白。 */
+/* syncMd 把正文切成一块一块，每块套一层 .sw-mdblock（见 app.js）。它只是记忆的
+   载体，不该带任何自己的间距——间距全由里面的元素给。 */
+.sw-mdblock { display: contents; }
+
+.sw-md > :first-child, .sw-mdblock:first-child > :first-child { margin-top: 0; }
+.sw-md > :last-child, .sw-mdblock:last-child > :last-child { margin-bottom: 0; }
+
+.sw-md p[data-md='paragraph'] { margin: 0 0 var(--space-3); }
+.sw-md h1, .sw-md h2, .sw-md h3, .sw-md h4, .sw-md h5, .sw-md h6 {
+  margin: var(--space-4) 0 var(--space-2);
+  font-weight: 600;
+  line-height: 1.4;
+}
+.sw-md h1 { font-size: 20px; }
+.sw-md h2 { font-size: 18px; }
+.sw-md h3 { font-size: 16px; }
+.sw-md h4, .sw-md h5, .sw-md h6 { font-size: 14.5px; }
+
+/* 记号放在文字块外面（不是 Streamdown 的 list-inside）。中文段落一行常常要折行，
+   记号在里面的话第二行会顶到记号底下，读起来像另起了一条。 */
+.sw-md ul, .sw-md ol { margin: 0 0 var(--space-3); padding-left: 1.5em; }
+.sw-md ul { list-style: disc; }
+.sw-md ol { list-style: decimal; }
+.sw-md li { margin: 3px 0; }
+.sw-md li > ul, .sw-md li > ol { margin: 3px 0 0; }
+.sw-md li > p { margin: 0 0 var(--space-2); }
+.sw-md li.sw-task { list-style: none; margin-left: -1.3em; }
+.sw-md li.sw-task > input { margin-right: 7px; vertical-align: -1px; accent-color: var(--primary); }
+
+.sw-md blockquote {
+  margin: 0 0 var(--space-3);
+  padding: 2px 0 2px var(--space-3);
+  border-left: 3px solid var(--border);
+  color: var(--muted-foreground);
+}
+.sw-md hr { margin: var(--space-4) 0; border: 0; border-top: 1px solid var(--border); }
+.sw-md a { color: var(--color-accent-700); font-weight: 500; text-decoration: underline; text-underline-offset: 2px; }
+.sw-md a:hover { color: var(--color-accent-600); }
+.sw-md img { margin: var(--space-2) 0; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.sw-md strong { font-weight: 600; }
+
+.sw-md code[data-md='inline-code'] {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  padding: 1.5px 5px;
+  border-radius: 5px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  overflow-wrap: anywhere;
+}
+
+/* ── 代码块 ────────────────────────────────────────────────────────── */
+.sw-code, .sw-mermaid {
+  margin: var(--space-3) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--popover);
+  overflow: hidden;
+}
+.sw-code-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 6px 0 var(--space-3);
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+}
+.sw-code-lang {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  text-transform: lowercase;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-code-tools { display: flex; align-items: center; gap: 2px; flex: none; }
+.sw-tool {
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sw-tool:hover { background: var(--secondary); color: var(--secondary-foreground); }
+.sw-tool[data-ok] { color: var(--color-accent-700); }
+
+.sw-code-body {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+  tab-size: 2;
+}
+.sw-code-body code { font: inherit; white-space: pre; }
+
+/* highlight.js 的记号色。不引它自带的主题：那些主题写死了背景和前景，
+   在我们这套深浅令牌里会撞。只映射颜色，底色继续用 --popover。 */
+.hljs-comment, .hljs-quote { color: var(--muted-foreground); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-doctag, .hljs-name { color: var(--color-accent-2-500); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute, .hljs-meta .hljs-string { color: var(--color-accent-600); }
+.hljs-number, .hljs-symbol, .hljs-bullet, .hljs-variable, .hljs-template-variable, .hljs-link { color: var(--chart-1); }
+.hljs-title, .hljs-section, .hljs-title.class_, .hljs-title.function_ { color: var(--color-accent-700); font-weight: 600; }
+.hljs-type, .hljs-built_in, .hljs-class .hljs-title { color: var(--color-accent-2-600); }
+.hljs-attr, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id { color: var(--color-accent-2-600); }
+.hljs-meta, .hljs-deletion { color: var(--muted-foreground); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* ── 表格 ──────────────────────────────────────────────────────────── */
+.sw-table { position: relative; margin: var(--space-3) 0; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+/* 横向滚动关在自己这一格里。不关的话一张宽表会把整条气泡撑出容器。 */
+.sw-table-scroll { overflow-x: auto; border-radius: var(--radius-sm); }
+.sw-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sw-table th, .sw-table td { padding: 7px var(--space-3); text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.sw-table thead th { background: var(--card); font-weight: 600; color: var(--secondary-foreground); }
+.sw-table tbody tr:last-child td { border-bottom: 0; }
+/* 复制按钮浮在右上角，鼠标进来才出现——常驻会挡住表头第一格。 */
+.sw-table-tools { position: absolute; top: 4px; right: 4px; z-index: 2; opacity: 0; transition: opacity 120ms ease; }
+.sw-table:hover .sw-table-tools, .sw-table-tools:focus-within { opacity: 1; }
+.sw-table-tools .sw-tool { background: var(--popover); border: 1px solid var(--border); }
+
+/* ── Mermaid ───────────────────────────────────────────────────────── */
+.sw-mermaid-canvas { padding: var(--space-4); overflow-x: auto; text-align: center; }
+.sw-mermaid-canvas svg { max-width: 100%; height: auto; margin: 0 auto; }
+.sw-mermaid-canvas[data-state='pending'] { color: var(--muted-foreground); font-size: 12.5px; text-align: left; }
+.sw-mermaid-canvas[data-state='err'] { color: var(--muted-foreground); font-size: 12.5px; text-align: left; }
+.sw-mermaid-src {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+/* 图和源码同时只露一个，靠 figure 上的 data-view 切。 */
+.sw-mermaid[data-view='diagram'] .sw-mermaid-src { display: none; }
+.sw-mermaid[data-view='source'] .sw-mermaid-canvas { display: none; }
+.sw-mermaid[data-view='source'] .sw-mermaid-src { border-top: 0; }
+
+/* ── 公式 ──────────────────────────────────────────────────────────── */
+.sw-math { font-size: 1em; }
+/* KaTeX 没加载出来（离线、CDN 被挡）时留在屏幕上的是 TeX 原文。给它一个
+   等宽 + 淡底，让人一眼看出「这是段没渲染的公式」，而不是正文写坏了。 */
+.sw-math:not([data-done='1']) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  color: var(--muted-foreground);
+}
+.sw-math-block { margin: var(--space-3) 0; overflow-x: auto; overflow-y: hidden; text-align: center; }
+.sw-math-block:not([data-done='1']) { text-align: left; }
+.sw-md .katex { font-size: 1.05em; }
+.sw-md .katex-display { margin: 0; }
+
+/* 用户气泡（赭红底）里的这些块要换一套底色，不然全是深色压深色。 */
+.sw-bubble[data-role='user'] .sw-code,
+.sw-bubble[data-role='user'] .sw-mermaid,
+.sw-bubble[data-role='user'] .sw-table {
+  border-color: color-mix(in srgb, var(--primary-foreground) 28%, transparent);
+}
+.sw-bubble[data-role='user'] .sw-code,
+.sw-bubble[data-role='user'] .sw-mermaid { background: color-mix(in srgb, var(--primary-foreground) 10%, transparent); }
+.sw-bubble[data-role='user'] .sw-code-head,
+.sw-bubble[data-role='user'] .sw-table thead th { background: color-mix(in srgb, var(--primary-foreground) 12%, transparent); }
+.sw-bubble[data-role='user'] .sw-code-lang,
+.sw-bubble[data-role='user'] .sw-tool { color: color-mix(in srgb, var(--primary-foreground) 78%, transparent); }
+.sw-bubble[data-role='user'] .sw-code-head,
+.sw-bubble[data-role='user'] .sw-table th,
+.sw-bubble[data-role='user'] .sw-table td,
+.sw-bubble[data-role='user'] blockquote { border-color: color-mix(in srgb, var(--primary-foreground) 28%, transparent); }
+.sw-bubble[data-role='user'] blockquote { color: color-mix(in srgb, var(--primary-foreground) 82%, transparent); }

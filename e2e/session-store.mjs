@@ -1,0 +1,76 @@
+/**
+ * 会话日志的并发读写。探针直接调 SessionService，不走 HTTP——
+ * 「同一条会话还没进缓存时被并发碰到」这件事在 HTTP 层复现不稳。
+ *
+ * 探针要 tsx 才能 import .ts，所以另起一个进程跑。
+ */
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+
+function runProbe(root) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-session-store.mjs')], {
+      cwd: join(root, 'bot'),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (err += d))
+    child.on('error', reject)
+    child.on('close', (code) => {
+      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
+      if (code !== 0 || !line) {
+        reject(new Error(`探针退出 ${code}\n${err || out}`))
+        return
+      }
+      try {
+        resolve(JSON.parse(line.slice('__RESULT__'.length)))
+      } catch (e) {
+        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
+      }
+    })
+  })
+}
+
+export async function runSessionStore({ root, test, assert, log }) {
+  log('\n# session-store')
+  const r = await runProbe(root)
+
+  await test('并发追加同一条未缓存会话：seq 不重复、事件不丢', async () => {
+    const a = r.concurrentAppend
+    // seq 撞了就意味着两份 SessionState 各记各的：SSE 的 after=seq 增量拉取会整段漏掉。
+    assert(a.uniqueSeqs === a.expectedSeqs, `seq 去重后 ${a.uniqueSeqs}，应为 ${a.expectedSeqs}`)
+    assert(a.fileLines === a.expectedEvents, `落盘行数 ${a.fileLines}，应为 ${a.expectedEvents}`)
+    assert(a.reloadedEvents === a.expectedEvents, `重读事件数 ${a.reloadedEvents}，应为 ${a.expectedEvents}`)
+    assert(a.distinctTexts === a.expectedSeqs, `正文条数 ${a.distinctTexts}，应为 ${a.expectedSeqs}`)
+  })
+
+  await test('旧格式迁移与并发追加同时发生：不丢事件、不留半个文件', async () => {
+    const b = r.migrateUnderLoad
+    assert(b.uniqueSeqs === b.expectedSeqs, `seq 去重后 ${b.uniqueSeqs}，应为 ${b.expectedSeqs}`)
+    assert(b.rootVersion === 3, `迁移后 version ${b.rootVersion}`)
+    assert(b.rootBotId === 'default', `迁移后 botId ${b.rootBotId}`)
+    assert(b.keptLegacyBody, '迁移把旧正文弄丢了')
+    assert(b.fileLines === b.expectedEvents, `落盘行数 ${b.fileLines}，应为 ${b.expectedEvents}`)
+    assert(b.reloadedEvents === b.expectedEvents, `重读事件数 ${b.reloadedEvents}，应为 ${b.expectedEvents}`)
+    // 重写走 .tmp + rename，正常结束不该留下临时文件。
+    assert(b.strays.length === 0, `留下非 .jsonl 文件 ${b.strays.join(',')}`)
+  })
+
+  await test('上个进程死在一轮中间：重新载入时把 turn 收口', async () => {
+    const d = r.danglingTurn
+    // 不补的话界面永远停在「正在处理」，而那边什么都没在跑——等多久都不会变。
+    assert(d.healedType === 'turn/end', `末条应是 turn/end，实际 ${d.healedType}`)
+    assert(d.healedTurn === 7, `轮次号应沿用 7，实际 ${d.healedTurn}`)
+    assert(d.healedReason === 'error', `收口原因应为 error，实际 ${d.healedReason}`)
+    assert(d.healedSeq === 4, `seq 应接着发到 4，实际 ${d.healedSeq}`)
+    assert(d.persisted === 4, `补的那条要落盘，文件应有 4 行，实际 ${d.persisted}`)
+  })
+
+  await test('收口只做一次，正常结束的会话不动', async () => {
+    const d = r.danglingTurn
+    assert(d.stableOnReload === 1, `重载后 turn/end 应仍只有 1 条，实际 ${d.stableOnReload}`)
+    assert(d.untouchedDone === 3, `已收口的会话不该被加东西，实际 ${d.untouchedDone} 条`)
+  })
+}

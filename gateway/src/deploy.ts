@@ -1,12 +1,11 @@
-import { spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { isUniqueViolation, type Account, type Db, type Machine, type SeatRuntime } from './db.ts'
-import type { JwtKeys } from './crypto.ts'
+import { existsSync } from 'node:fs'
+import { isUniqueViolation, releaseArch, type Account, type BotRelease, type Db, type Machine, type SeatRuntime } from './db.ts'
+import { signDesktopTicket, type JwtKeys } from './crypto.ts'
 import { botReleaseFile } from './releases.ts'
+
+/** 管家握手协议。低于这个数的机器不给下发部署——字段对不上会失败得很难看。 */
+export const MIN_MANAGER_PROTOCOL = 1
 
 export interface SeatPorts {
   display: number
@@ -16,13 +15,61 @@ export interface SeatPorts {
   cdpPort: number
 }
 
-/** `bot-` + first 12 hex of sha256(`${accountId}\n${botId}`). Unique per (account, bot) pair. */
-export function linuxUserOf(accountId: string, botId: string): string {
-  const hex = createHash('sha256').update(`${accountId}\n${botId}`).digest('hex')
-  return 'bot-' + hex.slice(0, 12)
+/**
+ * `sw-` + first 12 hex of sha256(accountId). **一个员工一个 Linux 账号**，他名下的
+ * 所有 bot 共用这个账号——这正是「同一个人的多个 bot 能看见同一批文件」的实现方式：
+ * 共享靠 uid 相同，不靠任何代码。
+ *
+ * 前缀从 `bot-` 换成 `sw-` 是故意的：老机器上残留的 `bot-xxxxxxxx` 账号是按
+ * (account, bot) 建的，两套命名不会互相覆盖，也一眼看得出哪些是待清理的旧账号。
+ */
+export function linuxUserOf(accountId: string): string {
+  return 'sw-' + createHash('sha256').update(accountId).digest('hex').slice(0, 12)
 }
 
-/** Slot N=0,1,2… DISPLAY=10+N RFB=5910+N HTTP=6081+N CDP=9222+N Bot=3200+N */
+/**
+ * 席位标识 `<linuxUser>-<botId 前 12 hex>`：systemd 实例名、席位私有目录、
+ * `XDG_RUNTIME_DIR` 都用它。
+ *
+ * **不能再拿 Linux 用户名当实例名**——同一个员工现在有多个席位，用户名不唯一了。
+ * 单元模板里原来的 `User=%i` 改成由 drop-in 提供 `User=`，实例名和账号就此解耦。
+ */
+export function seatIdOf(accountId: string, botId: string): string {
+  return linuxUserOf(accountId) + '-' + createHash('sha256').update(botId).digest('hex').slice(0, 12)
+}
+
+export function homeDirOf(linuxUser: string): string {
+  return '/home/' + linuxUser
+}
+
+/** 共享工作区。同一员工的所有席位都挂着它——放共享资料的地方。 */
+export function workDirOf(linuxUser: string): string {
+  return homeDirOf(linuxUser) + '/work'
+}
+
+/** 席位私有目录。`$SATUWORK_HOME`、Chrome profile、XDG 各目录全在这底下。 */
+export function seatDirOf(linuxUser: string, seatId: string): string {
+  return homeDirOf(linuxUser) + '/.satuwork/' + seatId
+}
+
+/**
+ * 每台机器的槽位上限（0..MAX_SLOT）。
+ *
+ * 端口全是从槽位算出来的，四段基址里挨得最近的两段只差 171——RFB 5910+N 和
+ * noVNC 6081+N。于是 slot 171 的 vncPort 正好等于 slot 0 的 novncPort：两个席位抢同
+ * 一个口，先起的赢，后起的那个桌面连不上，而两边的记录看着都正常。槽位必须卡在这
+ * 个差值之内，并且要在**分配的时候**就报错，不能等到机器上端口冲突了才发现。
+ */
+export const MAX_SLOT = 170
+
+/** 槽位用尽。deploySeat 把它翻成 409，不让它变成一个 500。 */
+export class SlotsExhausted extends Error {
+  constructor() {
+    super(`这台机器的席位槽位已用满（每台上限 ${MAX_SLOT + 1} 个）`)
+  }
+}
+
+/** Slot N=0..MAX_SLOT DISPLAY=10+N RFB=5910+N HTTP=6081+N CDP=9222+N Bot=3200+N */
 export function portsOf(slot: number): SeatPorts {
   const n = Math.max(0, Math.trunc(slot))
   return {
@@ -34,10 +81,27 @@ export function portsOf(slot: number): SeatPorts {
   }
 }
 
-export function novncUrlOf(sshHost: string, novncPort: number): string {
-  const host = sshHost.trim()
-  if (!host) return ''
-  return `http://${host}:${novncPort}/vnc.html`
+/**
+ * 桌面地址。**走机器管家，不再直连席位端口。**
+ *
+ * 以前是 `http://<sshHost>:<6081+N>/vnc.html`——每个席位一个对外端口，明文，
+ * 只有一个 VNC 口令挡着。现在 noVNC 收回 127.0.0.1，浏览器打管家这一个口，
+ * 凭一张五分钟的票进去（管家验完换成 path 限定的 cookie）。
+ *
+ * 没有票就只返回入口路径：给 owner 在后台看一眼用，点不进去。
+ */
+export function novncUrlOf(managerHost: string | null, seatId: string, ticket?: string): string {
+  const base = (managerHost || '').trim().replace(/\/$/, '')
+  if (!base || !seatId) return ''
+  const url = `${base}/seats/${encodeURIComponent(seatId)}/vnc/`
+  return ticket ? `${url}?ticket=${encodeURIComponent(ticket)}` : url
+}
+
+/** Gateway 反代聊天时打的地址。管家按 seatId 转到本机的 bot 口。 */
+export function botBaseOf(managerHost: string | null, seatId: string): string {
+  const base = (managerHost || '').trim().replace(/\/$/, '')
+  if (!base || !seatId) return ''
+  return `${base}/seats/${encodeURIComponent(seatId)}/bot`
 }
 
 export function randomVncPassword(): string {
@@ -52,11 +116,12 @@ export function publicMachine(m: Machine) {
   return {
     id: m.id,
     host: m.host,
-    sshHost: m.sshHost,
-    sshPort: m.sshPort,
-    sshUser: m.sshUser,
-    sshAuth: m.sshAuth,
-    hasSshAuth: Boolean(m.sshSecret),
+    paired: Boolean(m.pairedAt && m.host),
+    pairedAt: m.pairedAt,
+    managerVersion: m.managerVersion,
+    protocol: m.protocol,
+    protocolTooOld: Boolean(m.pairedAt) && m.protocol < MIN_MANAGER_PROTOCOL,
+    lastError: m.lastError,
     lastHeartbeatAt: m.lastHeartbeatAt,
   }
 }
@@ -66,17 +131,24 @@ export function ownerMachine(m: Machine) {
   return { ...publicMachine(m), token: m.token || null }
 }
 
-export function publicSeatRuntime(row: SeatRuntime, sshHost: string, opts: { includePassword: boolean }) {
+export function publicSeatRuntime(
+  row: SeatRuntime,
+  managerHost: string | null,
+  opts: { includePassword: boolean; ticket?: string },
+) {
   const ports = portsOf(row.slot)
   return {
     accountId: row.accountId,
     botId: row.botId,
     companyId: row.companyId,
     linuxUser: row.linuxUser,
+    seatId: row.seatId,
+    // 员工要知道往哪儿放共享文件：同一个账号下的所有 bot 都看得见这个目录。
+    sharedDir: workDirOf(row.linuxUser),
     display: row.display,
     vncPort: row.vncPort,
     novncPort: row.novncPort,
-    novncUrl: novncUrlOf(sshHost, row.novncPort),
+    novncUrl: novncUrlOf(managerHost, row.seatId, opts.ticket),
     status: row.status,
     lastError: row.lastError,
     deployedAt: row.deployedAt,
@@ -91,18 +163,22 @@ export function publicSeatRuntime(row: SeatRuntime, sshHost: string, opts: { inc
   }
 }
 
-export function listSeatRuntime(row: SeatRuntime, sshHost: string) {
+export function listSeatRuntime(row: SeatRuntime, managerHost: string | null) {
   return {
     botId: row.botId,
     status: row.status,
     linuxUser: row.linuxUser,
-    novncUrl: novncUrlOf(sshHost, row.novncPort) || null,
+    seatId: row.seatId,
+    // 列表里不签票：这是给管理员看的引用，点进去要走 /runtime/desktop 现签一张。
+    novncUrl: novncUrlOf(managerHost, row.seatId) || null,
     botVersion: row.botVersion ?? null,
   }
 }
 
-function shQuote(s: string): string {
-  return `'` + String(s).replace(/'/g, `'\\''`) + `'`
+/** 给某个席位现签一张桌面票，拼成能直接点开的地址。 */
+export function desktopUrlOf(keys: JwtKeys, machine: Machine | undefined, row: SeatRuntime): string {
+  if (!machinePaired(machine)) return ''
+  return novncUrlOf(machine.host, row.seatId, signDesktopTicket(keys, row.seatId))
 }
 
 function gatewayPublicUrl(): string {
@@ -113,30 +189,93 @@ function gatewayPublicUrl(): string {
   return `http://${host}:${port}`
 }
 
-function allocateSlot(db: Db, companyId: string, keep?: number): number {
+/** 槽位**按机器**分配，不是按公司：端口从槽位算出来，两台机器上的 slot 0 互不冲突。 */
+async function allocateSlot(db: Db, machineId: string, keep?: number): Promise<number> {
   if (keep != null && keep >= 0) return keep
-  const used = new Set(db.seatRuntimesOf(companyId).map((r) => r.slot))
+  const used = new Set((await db.seatRuntimesOfMachine(machineId)).map((r) => r.slot))
   let i = 0
   while (used.has(i)) i += 1
+  if (i > MAX_SLOT) throw new SlotsExhausted()
   return i
 }
 
-export function companyMachineOf(db: Db, companyId: string): Machine | undefined {
-  const company = db.company(companyId)
+/** 一台机器上「激活账号」的数量：有已部署席位的不同账号。 */
+export function activeAccountsOf(seats: SeatRuntime[]): Set<string> {
+  return new Set(seats.filter((r) => r.status !== 'none').map((r) => r.accountId))
+}
+
+export interface MachineLoad {
+  machine: Machine
+  accounts: number
+  seats: number
+  full: boolean
+}
+
+export async function machineLoads(db: Db, companyId: string): Promise<MachineLoad[]> {
+  const machines = await db.machinesOfCompany(companyId)
+  return Promise.all(
+    machines.map(async (machine) => {
+      const seats = await db.seatRuntimesOfMachine(machine.id)
+      const accounts = activeAccountsOf(seats).size
+      return { machine, accounts, seats: seats.length, full: accounts >= machine.maxAccounts }
+    }),
+  )
+}
+
+/**
+ * 这个账号该落在哪台机器上。
+ *
+ * 两条规则：
+ *
+ * 1. **粘住。** 账号已经有席位了就还用那台机器——同一个员工的所有 bot 共用一个 uid
+ *    和 `~/work`，拆到两台机器上「共享文件」就不成立了。
+ * 2. **填满一台再用下一台。** 在没满的机器里挑**已用最多**的那台（并列按登记先后）。
+ *    不是最闲优先——那样会把账号摊平到所有机器上，谁也没满，反而没法把空机器腾出来
+ *    下线或者转给别的公司。
+ */
+export async function machineForAccount(
+  db: Db,
+  companyId: string,
+  accountId: string,
+): Promise<{ ok: true; machine: Machine } | { ok: false; status: number; error: string }> {
+  const loads = await machineLoads(db, companyId)
+  const paired = loads.filter((l) => machinePaired(l.machine))
+  if (!paired.length) return { ok: false, status: 409, error: '公司还没有配对任何运行机器' }
+
+  const mine = (await db.seatRuntimesOfAccount(accountId)).find((r) => r.machineId)
+  if (mine) {
+    const hit = paired.find((l) => l.machine.id === mine.machineId)
+    // 粘住的机器就算已经满了也继续用：它的容量早就把这个账号算进去了。
+    if (hit) return { ok: true, machine: hit.machine }
+  }
+
+  const open = paired.filter((l) => !l.full).sort((a, b) => b.accounts - a.accounts || a.machine.createdAt - b.machine.createdAt)
+  if (!open.length) {
+    const total = paired.reduce((n, l) => n + l.machine.maxAccounts, 0)
+    return { ok: false, status: 409, error: `所有运行机器都满了（${paired.length} 台，共 ${total} 个账号位）` }
+  }
+  return { ok: true, machine: open[0].machine }
+}
+
+export async function companyMachineOf(db: Db, companyId: string): Promise<Machine | undefined> {
+  const company = await db.company(companyId)
   if (!company) return
   if (company.machineId) {
-    const m = db.machine(company.machineId)
+    const m = await db.machine(company.machineId)
     if (m) return m
   }
   return db.machineOfCompany(companyId)
 }
 
-export function machineBound(m: Machine | undefined): m is Machine {
-  return Boolean(m && (m.sshHost || '').trim())
-}
-
-export function machineHasSshAuth(m: Machine | undefined): m is Machine {
-  return Boolean(machineBound(m) && m.sshSecret)
+/**
+ * 这台机器装好管家并配对过了吗。
+ *
+ * 取代了原来的 `machineBound` + `machineHasSshAuth` 两级判断。以前「有地址」和
+ * 「有登录凭据」是分开的两件事，现在配对是一次原子的事：要么两样都有，要么这台
+ * 机器根本不存在。
+ */
+export function machinePaired(m: Machine | undefined): m is Machine {
+  return Boolean(m && m.pairedAt && (m.host || '').trim() && m.token)
 }
 
 export interface DeployResult {
@@ -145,9 +284,10 @@ export interface DeployResult {
 }
 
 /**
- * Allocate (or reuse) a slot and deploy this seat.
- * Stub: SATUWORK_DEPLOY_STUB=1 writes ready + instances.host, no SSH.
- * Live: SSH as debian (sudo) and start slim-desktop@ + satuwork-bot@.
+ * 分配（或复用）一个槽，把这个席位部署出去。
+ *
+ * Stub：`SATUWORK_DEPLOY_STUB=1` 直接写 ready，不联系管家。
+ * Live：`PUT {machine.host}/seats/{seatId}`，机器上的活儿全由管家做。
  */
 export async function deploySeat(
   db: Db,
@@ -162,71 +302,93 @@ export async function deploySeat(
   if (!companyId) return { ok: false, status: 403, error: '没有公司席位', runtime: undefined }
   const botId = (opts.botId || '').trim()
   if (!botId) return { ok: false, status: 400, error: 'botId 不能为空', runtime: undefined }
-  const visible = db.visibleCatalog('bot', companyId)
+  const visible = await db.visibleCatalog('bot', companyId)
   if (!visible.some((b) => b.id === botId)) {
     return { ok: false, status: 404, error: '没有这个 Bot', runtime: undefined }
   }
-  const machine = companyMachineOf(db, companyId)
-  if (!machineBound(machine)) {
-    return { ok: false, status: 409, error: '公司还没有绑定运行机器', runtime: undefined }
-  }
-  if (!machineHasSshAuth(machine)) {
-    return { ok: false, status: 409, error: '运行机器还没有配置 SSH 登录', runtime: undefined }
+  const picked = await machineForAccount(db, companyId, account.id)
+  if (!picked.ok) return { ok: false, status: picked.status, error: picked.error, runtime: undefined }
+  const machine = picked.machine
+  if (machine.protocol < MIN_MANAGER_PROTOCOL) {
+    return { ok: false, status: 409, error: '这台机器的管家版本过旧，等它自己升级或重跑安装脚本', runtime: undefined }
   }
 
   const requested = (opts.version || '').trim()
-  let version: string
+  let release: BotRelease
   if (requested) {
-    const rel = db.botRelease(requested)
-    if (!rel) return { ok: false, status: 404, error: '没有这个 Bot 版本', runtime: db.seatRuntime(account.id, botId) }
-    version = rel.version
+    const rel = await db.botRelease(requested)
+    if (!rel) return { ok: false, status: 404, error: '没有这个 Bot 版本', runtime: await db.seatRuntime(account.id, botId) }
+    // 显式指定也要挡：包里带 esbuild 的原生二进制，装错架构的后果是席位「部署成功」
+    // 但 bot 起不来，表现是聊天 503——从部署结果上完全看不出来。两边架构都认得出来
+    // 且不一样才拦，认不出来的（老版本号没后缀）放行。
+    const want = machine.arch?.trim()
+    const got = releaseArch(rel.version)
+    if (want && got && got !== want) {
+      return {
+        ok: false,
+        status: 409,
+        error: `这台机器是 ${want}，而 ${rel.version} 是 ${got} 的包`,
+        runtime: await db.seatRuntime(account.id, botId),
+      }
+    }
+    release = rel
   } else {
-    const latest = db.latestBotRelease()
-    if (!latest) return { ok: false, status: 409, error: '还没有发布 Bot 版本', runtime: db.seatRuntime(account.id, botId) }
-    version = latest.version
+    const latest = await db.latestBotRelease('bot', machine.arch)
+    if (!latest) return { ok: false, status: 409, error: '还没有发布 Bot 版本', runtime: await db.seatRuntime(account.id, botId) }
+    release = latest
   }
+  const version = release.version
 
-  const linuxUser = linuxUserOf(account.id, botId)
-  const existing = db.seatRuntime(account.id, botId)
+  const linuxUser = linuxUserOf(account.id)
+  const seatId = seatIdOf(account.id, botId)
+  const existing = await db.seatRuntime(account.id, botId)
   if (existing?.status === 'ready' && existing.botVersion === version && !opts.update) {
     return { ok: true, result: { runtime: existing, machine } }
   }
 
   const vncPassword = existing?.vncPassword || randomVncPassword()
   let row: SeatRuntime | undefined
-  for (let i = 0; i < 8; i++) {
-    try {
-      row = db.tx(() => {
-        const slot = allocateSlot(db, companyId, i === 0 ? existing?.slot : undefined)
-        const ports = portsOf(slot)
-        const now = Date.now()
-        return db.upsertSeatRuntime({
-          accountId: account.id,
-          botId,
-          companyId,
-          linuxUser,
-          slot,
-          display: ports.display,
-          vncPort: ports.vncPort,
-          novncPort: ports.novncPort,
-          botPort: ports.botPort,
-          vncPassword,
-          status: 'deploying',
-          lastError: null,
-          deployedAt: existing?.deployedAt ?? null,
-          updatedAt: now,
-          botVersion: existing?.botVersion ?? null,
+  try {
+    for (let i = 0; i < 8; i++) {
+      try {
+        row = await db.tx(async () => {
+          const slot = await allocateSlot(db, machine.id, i === 0 ? existing?.slot : undefined)
+          const ports = portsOf(slot)
+          const now = Date.now()
+          return await db.upsertSeatRuntime({
+            accountId: account.id,
+            botId,
+            companyId,
+            linuxUser,
+            seatId,
+            machineId: machine.id,
+            slot,
+            display: ports.display,
+            vncPort: ports.vncPort,
+            novncPort: ports.novncPort,
+            botPort: ports.botPort,
+            vncPassword,
+            status: 'deploying',
+            lastError: null,
+            deployedAt: existing?.deployedAt ?? null,
+            updatedAt: now,
+            botVersion: existing?.botVersion ?? null,
+          })
         })
-      })
-      break
-    } catch (e) {
-      if (i === 7 || !isUniqueViolation(e)) throw e
+        break
+      } catch (e) {
+        // 槽位是 unique(machineId, slot)：并发部署撞号了就重扫一遍再试。
+        if (i === 7 || !isUniqueViolation(e)) throw e
+      }
     }
+  } catch (e) {
+    if (e instanceof SlotsExhausted) return { ok: false, status: 409, error: e.message, runtime: existing }
+    throw e
   }
   if (!row) return { ok: false, status: 500, error: '无法分配席位槽', runtime: existing }
 
   if (process.env.SATUWORK_DEPLOY_STUB === '1') {
-    const ready = db.upsertSeatRuntime({
+    const ready = await db.upsertSeatRuntime({
       ...row,
       status: 'ready',
       lastError: null,
@@ -234,7 +396,7 @@ export async function deploySeat(
       updatedAt: Date.now(),
       botVersion: version,
     })
-    db.upsertInstance({
+    await db.upsertInstance({
       accountId: account.id,
       botId,
       companyId,
@@ -243,9 +405,11 @@ export async function deploySeat(
     return { ok: true, result: { runtime: ready, machine } }
   }
 
-  const tgz = botReleaseFile(version)
-  if (!existsSync(tgz)) {
-    const failed = db.upsertSeatRuntime({
+  // `url` 非空 = 只登记了地址、字节不在本机（registerRemoteRelease 那种）。这种包由
+  // openRelease 在下发时现取，本机**本来就没有** .tgz。以前这里无条件 existsSync，
+  // 于是一旦最新版本是远程登记的，所有席位的部署都会卡在「发布包文件不存在」。
+  if (!release.url && !existsSync(botReleaseFile(version))) {
+    const failed = await db.upsertSeatRuntime({
       ...row,
       status: 'error',
       lastError: '发布包文件不存在',
@@ -254,9 +418,9 @@ export async function deploySeat(
     return { ok: false, status: 502, error: '发布包文件不存在', runtime: failed }
   }
 
-  const secrets = db.ensureAccountSecrets(account.id)
+  const secrets = await db.ensureAccountSecrets(account.id)
   if (!secrets) {
-    const failed = db.upsertSeatRuntime({
+    const failed = await db.upsertSeatRuntime({
       ...row,
       status: 'error',
       lastError: '没有席位密钥',
@@ -264,23 +428,26 @@ export async function deploySeat(
     })
     return { ok: false, status: 500, error: '没有席位密钥', runtime: failed }
   }
-  const deployTarget: SshTarget = {
+
+  const spec: SeatSpec = {
+    seatId,
     linuxUser,
-    ports: portsOf(row.slot),
+    homeDir: homeDirOf(linuxUser),
+    workDir: workDirOf(linuxUser),
+    seatDir: seatDirOf(linuxUser, seatId),
+    botId,
+    botVersion: version,
     vncPassword,
     gatewayUrl: gatewayPublicUrl(),
     gatewayToken: secrets.accessToken,
     gatewayApiKey: secrets.apiKey,
-    machineToken: machine.token || '',
-    botId,
-    botVersion: version,
-    botTgz: tgz,
+    ports: portsOf(row.slot),
   }
   try {
-    await sshDeploy(machine, deployTarget)
+    await managerDeploy(machine, spec)
   } catch (e) {
-    const message = sanitizeError(e, deploySecrets(machine, deployTarget))
-    const failed = db.upsertSeatRuntime({
+    const message = sanitizeError(e, [machine.token, secrets.accessToken, secrets.apiKey, vncPassword])
+    const failed = await db.upsertSeatRuntime({
       ...row,
       status: 'error',
       lastError: message,
@@ -289,7 +456,7 @@ export async function deploySeat(
     return { ok: false, status: 502, error: message, runtime: failed }
   }
 
-  const ready = db.upsertSeatRuntime({
+  const ready = await db.upsertSeatRuntime({
     ...row,
     status: 'ready',
     lastError: null,
@@ -297,138 +464,105 @@ export async function deploySeat(
     updatedAt: Date.now(),
     botVersion: version,
   })
-  db.upsertInstance({
+  await db.upsertInstance({
     accountId: account.id,
     botId,
     companyId,
-    host: `http://${machine.sshHost!.trim()}:${row.botPort}`,
+    // 反代地址，不是 bot 的直连地址。席位端口只听 127.0.0.1，只有管家够得着。
+    host: botBaseOf(machine.host, seatId),
   })
   return { ok: true, result: { runtime: ready, machine } }
 }
 
-function sanitizeError(e: unknown, secrets: string[] = []): string {
-  const raw = e instanceof Error ? e.message : String(e)
-  return stripSecrets(raw.replace(/\s+/g, ' ').trim(), secrets).slice(0, 500) || '部署失败'
-}
-const seatDir = join(dirname(fileURLToPath(import.meta.url)), 'seat')
-
-interface SshTarget {
+/** Gateway 下发给管家的席位规格。字段和 manager/src/seats.ts 的 SeatSpec 一一对应。 */
+export interface SeatSpec {
+  seatId: string
   linuxUser: string
-  ports: SeatPorts
+  homeDir: string
+  workDir: string
+  seatDir: string
+  botId: string
+  botVersion: string
   vncPassword: string
   gatewayUrl: string
   gatewayToken: string
   gatewayApiKey: string
-  machineToken: string
-  botId: string
-  botVersion: string
-  botTgz: string
+  ports: SeatPorts
 }
 
-function b64File(name: string): string {
-  return readFileSync(join(seatDir, name)).toString('base64')
-}
-
-async function sshDeploy(machine: Machine, target: SshTarget): Promise<void> {
-  const host = machine.sshHost!.trim()
-  const port = machine.sshPort || 22
-  const user = (machine.sshUser || 'debian').trim() || 'debian'
-  const secret = machine.sshSecret || ''
-  const script = remoteScript(target)
-  const tmp = mkdtempSync(join(tmpdir(), 'satuwork-deploy-'))
-  const remoteTgz = `/tmp/satuwork-bot-${target.botVersion}.tgz`
+/**
+ * 把一个席位交给管家去建。
+ *
+ * 这一整个函数取代了原来的 scp + ssh：发布包不再逐席位推过去，管家自己按版本从
+ * Gateway 拉一次、全机共享；`smt_` 走 `x-satuwork-machine` 头，和管家转发给 bot 的
+ * `authorization` 分开——两层鉴权互不干扰。
+ *
+ * 15 分钟超时：第一次部署要 apt 装一整套桌面栈，慢是正常的。
+ */
+async function managerDeploy(machine: Machine, spec: SeatSpec): Promise<void> {
+  const url = `${machine.host!.replace(/\/$/, '')}/seats/${encodeURIComponent(spec.seatId)}`
+  let res: Response
   try {
-    const common = ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=20']
-    const env: NodeJS.ProcessEnv = { ...process.env }
-    delete env.SSHPASS
-    if (machine.sshAuth === 'key') {
-      const keyPath = join(tmp, 'id_deploy')
-      writeFileSync(keyPath, secret.endsWith('\n') ? secret : secret + '\n', { mode: 0o600 })
-      common.push('-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', keyPath)
-    } else {
-      env.SSHPASS = secret
-      common.push(
-        '-o',
-        'PreferredAuthentications=password',
-        '-o',
-        'PubkeyAuthentication=no',
-        '-o',
-        'NumberOfPasswordPrompts=1',
-      )
-    }
-    const dest = `${user}@${host}`
-    const scpBin = machine.sshAuth === 'key' ? 'scp' : 'sshpass'
-    const scpArgs =
-      machine.sshAuth === 'key'
-        ? [...common, '-P', String(port), target.botTgz, `${dest}:${remoteTgz}`]
-        : ['-e', 'scp', ...common, '-P', String(port), target.botTgz, `${dest}:${remoteTgz}`]
-    try {
-      await run(scpBin, scpArgs, { env, timeout: 300_000, input: '', cwd: tmp, secrets: deploySecrets(machine, target) })
-    } catch (e) {
-      const msg = sanitizeError(e, deploySecrets(machine, target))
-      throw new Error(msg.startsWith('scp') ? msg : 'scp 失败: ' + msg)
-    }
-    const sshArgs = [...common, '-p', String(port), dest, 'bash -s']
-    const file = machine.sshAuth === 'key' ? 'ssh' : 'sshpass'
-    const args = machine.sshAuth === 'key' ? sshArgs : ['-e', 'ssh', ...sshArgs]
-    await run(file, args, { env, timeout: 180_000, input: script, cwd: tmp, secrets: deploySecrets(machine, target) })
-  } finally {
-    try {
-      rmSync(tmp, { recursive: true, force: true })
-    } catch {}
+    res = await fetch(url, {
+      method: 'PUT',
+      // 两个头都带：`x-satuwork-machine` 是反代那条路径上用来和 bot 的 `authorization`
+      // 区分开的；控制类调用没有这个冲突，带上 `authorization` 让 curl 和旧版管家也认。
+      headers: {
+        'content-type': 'application/json',
+        'x-satuwork-machine': machine.token,
+        authorization: 'Bearer ' + machine.token,
+      },
+      body: JSON.stringify(spec),
+      signal: AbortSignal.timeout(900_000),
+    })
+  } catch (e) {
+    throw new Error('联系不上机器管家: ' + (e instanceof Error ? e.message : String(e)))
+  }
+  if (res.ok) return
+  const text = (await res.text()).slice(0, 400)
+  let message = text
+  try {
+    const body = JSON.parse(text) as { error?: string; seat?: { lastError?: string } }
+    message = body.seat?.lastError || body.error || text
+  } catch {}
+  throw new Error(`管家部署失败 ${res.status}: ${message}`)
+}
+
+/** 拆席位：停单元、删 drop-in、删席位目录。账号和 ~/work 留着，别的席位还在用。 */
+export async function managerRemoveSeat(machine: Machine, seatId: string): Promise<void> {
+  if (!machinePaired(machine)) return
+  const url = `${machine.host!.replace(/\/$/, '')}/seats/${encodeURIComponent(seatId)}`
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: { 'x-satuwork-machine': machine.token, authorization: 'Bearer ' + machine.token },
+    signal: AbortSignal.timeout(120_000),
+  })
+  if (!res.ok && res.status !== 404) throw new Error(`管家拆席位失败 ${res.status}`)
+}
+
+/** 问管家还活着吗。配对回拨和界面上的「检查连通」都走它。 */
+export async function managerHealth(
+  host: string,
+  opts: { token?: string; challenge?: string; timeoutMs?: number },
+): Promise<{ ok: boolean; body?: Record<string, unknown>; error?: string }> {
+  const base = host.replace(/\/$/, '')
+  const q = opts.challenge ? `?challenge=${encodeURIComponent(opts.challenge)}` : ''
+  try {
+    const res = await fetch(`${base}/health${q}`, {
+      headers: opts.token ? { authorization: 'Bearer ' + opts.token } : {},
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 8000),
+    })
+    if (!res.ok) return { ok: false, error: `管家返回 ${res.status}` }
+    return { ok: true, body: (await res.json()) as Record<string, unknown> }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
 }
 
-function run(
-  file: string,
-  args: string[],
-  opts: { env: NodeJS.ProcessEnv; timeout: number; input: string; cwd: string; secrets: string[] },
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { env: opts.env, cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'] })
-    const timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL')
-      } catch {}
-      reject(new Error(file === 'scp' || args.includes('scp') ? 'scp 超时' : 'ssh 超时'))
-    }, opts.timeout)
-    let stderr = ''
-    let stdout = ''
-    child.stdout.on('data', (d) => {
-      stdout += String(d)
-    })
-    child.stderr.on('data', (d) => {
-      stderr += String(d)
-    })
-    child.on('error', (e) => {
-      clearTimeout(timer)
-      const msg = e instanceof Error ? e.message : String(e)
-      if (file === 'sshpass' && /ENOENT/.test(msg)) reject(new Error('本机没有 sshpass，无法用密码登录'))
-      else reject(new Error(stripSecrets(msg, opts.secrets)))
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) {
-        resolve()
-        return
-      }
-      if (code === 42) {
-        reject(new Error(stripSecrets((stderr || stdout || '机器上还没有 Bot 运行时').trim(), opts.secrets)))
-        return
-      }
-      reject(new Error(stripSecrets((stderr || stdout || 'ssh 退出 ' + code).trim(), opts.secrets)))
-    })
-    try {
-      if (opts.input) child.stdin.write(opts.input)
-      child.stdin.end()
-    } catch {}
-  })
+export function sanitizeError(e: unknown, secrets: string[] = []): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  return stripSecrets(raw.replace(/\s+/g, ' ').trim(), secrets).slice(0, 500) || '部署失败'
 }
-
-function deploySecrets(machine: Machine, t: SshTarget): string[] {
-  return [machine.sshSecret || '', t.gatewayToken, t.gatewayApiKey, t.machineToken, t.vncPassword].filter(Boolean)
-}
-
 function stripSecrets(text: string, secrets: string | string[] = []): string {
   let s = text
   const list = typeof secrets === 'string' ? (secrets ? [secrets] : []) : secrets
@@ -444,35 +578,4 @@ function stripSecrets(text: string, secrets: string | string[] = []): string {
   s = s.replace(/\bsk_sw_[A-Za-z0-9_-]+/g, 'sk_sw_***')
   s = s.replace(/\bsmt_[A-Za-z0-9_-]+/g, 'smt_***')
   return s
-}
-
-function remoteScript(t: SshTarget): string {
-  let tpl = readFileSync(join(seatDir, 'remote-deploy.sh'), 'utf8')
-  const picom = Buffer.from('backend = "xrender";\nvsync = false;\nuse-damage = false;\n', 'utf8').toString('base64')
-  const vars: Record<string, string> = {
-    __LINUX_USER__: t.linuxUser,
-    __HOME_DIR__: '/home/' + t.linuxUser,
-    __SW_HOME__: '/home/' + t.linuxUser + '/.satuwork',
-    __DISPLAY_NUM__: String(t.ports.display),
-    __RFB__: String(t.ports.vncPort),
-    __HTTP__: String(t.ports.novncPort),
-    __BOT_PORT__: String(t.ports.botPort),
-    __CDP__: String(t.ports.cdpPort),
-    __DISPLAY_VAR__: ':' + t.ports.display,
-    __BOT_VERSION__: t.botVersion,
-    __BOT_TGZ_Q__: shQuote(`/tmp/satuwork-bot-${t.botVersion}.tgz`),
-    __BOT_EXTRACT_Q__: shQuote(`/opt/satuwork/releases/${t.botVersion}`),
-    __VNC_PASSWORD_Q__: shQuote(t.vncPassword),
-    __GATEWAY_URL_Q__: shQuote(t.gatewayUrl),
-    __GATEWAY_TOKEN_Q__: shQuote(t.gatewayToken),
-    __GATEWAY_API_KEY_Q__: shQuote(t.gatewayApiKey),
-    __MACHINE_TOKEN_Q__: shQuote(t.machineToken),
-    __BOT_ID_Q__: shQuote(t.botId),
-    __DESK_B64_Q__: shQuote(b64File('slim-desktop.sh')),
-    __DESK_UNIT_B64_Q__: shQuote(b64File('slim-desktop@.service')),
-    __BOT_UNIT_B64_Q__: shQuote(b64File('satuwork-bot@.service')),
-    __PICOM_B64_Q__: shQuote(picom),
-  }
-  for (const [k, v] of Object.entries(vars)) tpl = tpl.split(k).join(v)
-  return tpl
 }

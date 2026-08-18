@@ -126,6 +126,33 @@ export function verifyJwt(keys: JwtKeys, token: string): JwtPayload {
   return payload
 }
 
+export interface DesktopTicket {
+  typ: 'satu-desktop'
+  seatId: string
+  iat: number
+  exp: number
+}
+
+/**
+ * 桌面票。浏览器拿它直连机器管家看 noVNC。
+ *
+ * 为什么不复用登录 JWT：那张票带着 accountId 和 role，能调 Gateway 的写接口，而这
+ * 一张要交给一个**不在我们控制下的进程**（管家）去验，还会以 cookie 的形式在机器
+ * 上落一会儿。所以另起一种，只说明「谁可以看哪一块屏、看到什么时候」，别的什么
+ * 都不说。`typ` 是显式的，管家验签之后还要再对一次——同一把密钥签出来的两种票不
+ * 能互相冒充。
+ *
+ * 五分钟：够点开桌面，不够被人捡去慢慢用。管家会把它换成一张 path 限定的 cookie，
+ * 所以票短不影响会话长度。
+ */
+export function signDesktopTicket(keys: JwtKeys, seatId: string, ttlSec = 300): string {
+  const now = Math.floor(Date.now() / 1000)
+  const payload: DesktopTicket = { typ: 'satu-desktop', seatId, iat: now, exp: now + ttlSec }
+  const h = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: keys.kid }))
+  const p = b64url(JSON.stringify(payload))
+  return `${h}.${p}.${sign('sha256', Buffer.from(`${h}.${p}`), keys.privatePem).toString('base64url')}`
+}
+
 /** JWKS。实例拿它验 Gateway 签的票。 */
 export function jwks(keys: JwtKeys): { keys: Record<string, unknown>[] } {
   const jwk = createPublicKey(keys.publicPem).export({ format: 'jwk' }) as Record<string, unknown>
@@ -148,7 +175,13 @@ export function randomAccessToken(): string {
   return 'sat_' + randomBytes(32).toString('base64url')
 }
 
-/** 每台机器一把。注入 bot.env 的 GATEWAY_MACHINE_TOKEN，不再用集群共用票。 */
+/**
+ * 每台机器一把，**只给管家**。
+ *
+ * 它是管家控制面（`PUT /seats/:id` 等）的凭据，等同于那台机器的 root。所以它只活在
+ * `/etc/satuwork/manager.json`（0600），不再注入 bot.env——那个文件属于席位那个普通
+ * Linux 用户，员工在 noVNC 桌面里 cat 一下就拿到了。bot 上报用的是席位票（sat_）。
+ */
 export function randomMachineToken(): string {
   return 'smt_' + randomBytes(32).toString('base64url')
 }

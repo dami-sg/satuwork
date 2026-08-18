@@ -1,0 +1,187 @@
+/**
+ * 自定义供应商：建 → 配密钥 → 真的能调 → 删。
+ *
+ * 关键不是「列表里出现了」，而是**调得通**。之前 catalog 里那种自定义模型只在
+ * 列表里露脸，pi-ai 的注册表里根本没有，probe 和 /v1/* 一律「模型不在可见目录里」。
+ * 所以这里挂一个假的 OpenAI 兼容上游，断言请求真的打到了它身上、带着对的密钥。
+ */
+import { createServer } from 'node:http'
+import { rmSync } from 'node:fs'
+import { PG_URL } from './pg.mjs'
+
+export async function runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log }) {
+  const GW_HOME = '/tmp/satuwork-e2e-custom'
+  const GW_PORT = 18780
+  const UP_PORT = 18781
+  const base = `http://127.0.0.1:${GW_PORT}`
+
+  rmSync(GW_HOME, { recursive: true, force: true })
+  log('\n# custom-provider')
+
+  let seen = { auth: null, path: null, body: null }
+  const upstream = createServer((r, res) => {
+    seen.auth = r.headers.authorization
+    seen.path = r.url
+    let buf = ''
+    r.on('data', (d) => (buf += d))
+    r.on('end', () => {
+      seen.body = buf
+      // openai-completions 是流式的，必须发 SSE，不能发整包 JSON。
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+      const chunk = (choices, usage) =>
+        `data: ${JSON.stringify({ id: 'c', object: 'chat.completion.chunk', created: 1, model: 'm', choices, ...(usage ? { usage } : {}) })}\n\n`
+      res.write(chunk([{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]))
+      res.write(chunk([{ index: 0, delta: { content: 'ok' }, finish_reason: null }]))
+      res.write(chunk([{ index: 0, delta: {}, finish_reason: 'stop' }], { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 }))
+      res.write('data: [DONE]\n\n')
+      res.end()
+    })
+  })
+  await new Promise((r) => upstream.listen(UP_PORT, '127.0.0.1', r))
+  const baseUrl = `http://127.0.0.1:${UP_PORT}/v1`
+
+  const gw = start('custom-gw', ['--import', 'tsx', `${gwRoot}/src/index.ts`], {
+    cwd: gwRoot,
+    env: {
+      SATUWORK_GATEWAY_HOME: GW_HOME,
+      GATEWAY_DATABASE_URL: PG_URL,
+      GATEWAY_PG_SCHEMA: 'e2e_custom',
+      GATEWAY_PG_RESET: '1',
+      GATEWAY_HOST: '127.0.0.1',
+      GATEWAY_PORT: String(GW_PORT),
+      GATEWAY_ACCESS_HOST: 'satuwork.com',
+      GATEWAY_SEED_OWNER: '0',
+    },
+  })
+  await waitHttp(`${base}/health`, gw, 'custom gateway')
+
+  const model = {
+    id: 'my-model', name: 'My Model', contextWindow: 65536, maxTokens: 4096,
+    reasoning: false, input: ['text'], cost: { input: 1.5, output: 3, cacheRead: 0, cacheWrite: 0 },
+  }
+
+  try {
+    let token = ''
+    await test('建自定义供应商：形状就是 pi-ai createProvider 的入参', async () => {
+      const setup = await req(base, 'POST', '/auth/setup', {
+        body: { email: 'o@custom.test', name: 'o', password: 'correct-horse-1' },
+      })
+      assert(setup.status === 201, `setup ${setup.status} ${setup.text}`)
+      token = setup.json.token
+      const r = await req(base, 'POST', '/platform/providers', {
+        token,
+        body: { id: 'my-llm', name: 'My LLM', baseUrl, api: 'openai-completions', models: [model] },
+      })
+      assert(r.status === 201, `create ${r.status} ${r.text}`)
+      assert(r.json.provider.api === 'openai-completions', 'api 没存下')
+    })
+
+    await test('内置 id 顶不掉；坏 id / 坏 baseUrl 是 400 不是 500', async () => {
+      const clash = await req(base, 'POST', '/platform/providers', { token, body: { id: 'openai', baseUrl } })
+      assert(clash.status === 409, `内置 id ${clash.status} ${clash.text}`)
+      const badUrl = await req(base, 'POST', '/platform/providers', { token, body: { id: 'bad-a', baseUrl: 'not-a-url' } })
+      assert(badUrl.status === 400, `坏 baseUrl ${badUrl.status}`)
+      const badId = await req(base, 'POST', '/platform/providers', { token, body: { id: 'Bad Id!', baseUrl } })
+      assert(badId.status === 400, `坏 id ${badId.status}`)
+      const badApi = await req(base, 'POST', '/platform/providers', { token, body: { id: 'bad-b', baseUrl, api: 'made-up' } })
+      assert(badApi.status === 400, `坏 api ${badApi.status}`)
+    })
+
+    await test('自定义模型进 /v1/models，带着单价和窗口', async () => {
+      const r = await req(base, 'GET', '/v1/models', { token })
+      const m = (r.json.data || []).find((x) => x.id === 'my-llm/my-model')
+      assert(m, '自定义模型没出现在 /v1/models')
+      assert(m.cost?.input === 1.5, `单价 ${JSON.stringify(m.cost)}`)
+      assert(m.context_window === 65536, `窗口 ${m.context_window}`)
+    })
+
+    await test('没密钥 402；配上之后 probe 真的打到上游', async () => {
+      const noKey = await req(base, 'POST', '/platform/llm/test', { token, body: { provider: 'my-llm', model: 'my-model' } })
+      assert(noKey.status === 402, `没密钥 ${noKey.status} ${noKey.text}`)
+
+      await req(base, 'POST', '/platform/credentials', { token, body: { provider: 'my-llm', secret: 'sk-custom-123' } })
+      seen = { auth: null, path: null, body: null }
+      const probe = await req(base, 'POST', '/platform/llm/test', { token, body: { provider: 'my-llm', model: 'my-model' } })
+      assert(probe.status === 200 && probe.json.ok === true, `probe ${probe.status} ${probe.text}`)
+      assert(seen.auth === 'Bearer sk-custom-123', `上游收到的密钥是 ${seen.auth}`)
+      assert(String(seen.path).includes('/v1/chat/completions'), `打的路径是 ${seen.path}`)
+      assert(!probe.text.includes('sk-custom-123'), 'probe 响应里漏了密钥')
+    })
+
+    await test('/v1/chat/completions 能用这个模型——这才叫「模型可用」', async () => {
+      const r = await req(base, 'POST', '/v1/chat/completions', {
+        token,
+        body: { model: 'my-llm/my-model', messages: [{ role: 'user', content: 'hi' }] },
+      })
+      assert(r.status === 200, `chat ${r.status} ${r.text}`)
+    })
+
+    await test('改定义后注册表跟着变：新模型立刻能用，删掉的立刻不能用', async () => {
+      const upd = await req(base, 'PUT', '/platform/providers/my-llm', {
+        token,
+        body: {
+          name: 'My LLM', baseUrl, api: 'openai-completions',
+          models: [model, { id: 'second', name: 'Second', contextWindow: 8192, maxTokens: 1024, cost: { input: 9, output: 9 } }],
+        },
+      })
+      assert(upd.status === 200, `update ${upd.status} ${upd.text}`)
+      const two = await req(base, 'GET', '/v1/models', { token })
+      assert((two.json.data || []).some((m) => m.id === 'my-llm/second'), '新模型没生效')
+
+      await req(base, 'PUT', '/platform/providers/my-llm', {
+        token,
+        body: { name: 'My LLM', baseUrl, api: 'openai-completions', models: [model] },
+      })
+      const gone = await req(base, 'POST', '/platform/llm/test', { token, body: { provider: 'my-llm', model: 'second' } })
+      assert(gone.status === 404, `删掉的模型还能测：${gone.status} ${gone.text}`)
+    })
+
+    await test('模型 id 重复要拦下来', async () => {
+      const dup = await req(base, 'PUT', '/platform/providers/my-llm', {
+        token,
+        body: { name: 'My LLM', baseUrl, api: 'openai-completions', models: [model, model] },
+      })
+      assert(dup.status === 400, `重复 id ${dup.status} ${dup.text}`)
+    })
+
+    await test('在用时删要 409；force 之后密钥和角色一起清掉', async () => {
+      await req(base, 'PUT', '/platform/settings', { token, body: { daily: { provider: 'my-llm', model: 'my-model' } } })
+      const blocked = await req(base, 'DELETE', '/platform/providers/my-llm', { token })
+      assert(blocked.status === 409, `在用时删 ${blocked.status} ${blocked.text}`)
+
+      const forced = await req(base, 'DELETE', '/platform/providers/my-llm?force=1', { token })
+      assert(forced.status === 200, `force 删 ${forced.status} ${forced.text}`)
+
+      const models = await req(base, 'GET', '/v1/models', { token })
+      assert(!(models.json.data || []).some((m) => String(m.id).startsWith('my-llm/')), '删完模型还在')
+      const creds = await req(base, 'GET', '/platform/credentials', { token })
+      assert(!(creds.json.credentials || []).some((c) => c.provider === 'my-llm'), '密钥没跟着删')
+      const st = await req(base, 'GET', '/platform/settings', { token })
+      assert(st.json.daily.provider === '', `日常角色没清空：${JSON.stringify(st.json.daily)}`)
+    })
+
+    await test('非 owner 碰不到自定义供应商', async () => {
+      // 建公司时连管理员一起开，省得再单独建账号。
+      const org = await req(base, 'POST', '/platform/orgs', {
+        token,
+        body: {
+          name: 'C', slug: 'c-custom',
+          contactName: '张三', contactPhone: '+86 138 0000 0000', contactEmail: 'z@custom.test',
+          adminEmail: 'a@custom.test', adminPassword: 'correct-horse-1',
+        },
+      })
+      assert(org.status === 201, `org ${org.status} ${org.text}`)
+      const login = await req(base, 'POST', '/auth/login', { body: { email: 'a@custom.test', password: 'correct-horse-1' } })
+      const at = login.json.token
+      const list = await req(base, 'GET', '/platform/providers', { token: at })
+      assert(list.status === 403, `admin 读到了 ${list.status}`)
+      const create = await req(base, 'POST', '/platform/providers', { token: at, body: { id: 'sneaky', baseUrl } })
+      assert(create.status === 403, `admin 建成了 ${create.status}`)
+    })
+  } finally {
+    upstream.close()
+    try {
+      rmSync(GW_HOME, { recursive: true, force: true })
+    } catch {}
+  }
+}

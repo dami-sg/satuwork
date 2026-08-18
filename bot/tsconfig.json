@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "strictNullChecks": true,
+    "jsx": "react-jsx",
+    "types": ["node"],
+    // package.json 把 `cordis` 别名到了 `@deepseek-ai/cordis`。插件（plugin-server 等）
+    // 用 `declare module 'cordis'` 往 Context 上挂 `server` / `timer` 这些字段，而源码
+    // 从 `@deepseek-ai/cordis` 导入 Context——不映射的话 TS 认为这是两个模块，扩展全部
+    // 落空，满屏 "Property 'server' does not exist on type 'Context'"。
+    "baseUrl": ".",
+    "paths": {
+      "cordis": ["./node_modules/@deepseek-ai/cordis"],
+      "@deepseek-ai/cordis": ["./node_modules/@deepseek-ai/cordis"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

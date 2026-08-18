@@ -10,6 +10,8 @@ const port = 3099
 const base = `http://127.0.0.1:${port}`
 const machineTok = 'test-machine'
 const platformTok = 'test-platform'
+const ownerEmail = 'owner@satuwork.test'
+const ownerPassword = 'test-owner-smoke'
 
 const child = spawn(
   process.execPath,
@@ -19,11 +21,18 @@ const child = spawn(
     env: {
       ...process.env,
       SATUWORK_GATEWAY_HOME: home,
+      GATEWAY_DATABASE_URL: process.env.GATEWAY_DATABASE_URL || 'postgres://satuwork:satuwork@127.0.0.1:5434/satuwork',
+      GATEWAY_PG_SCHEMA: 'smoke',
+      GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(port),
       GATEWAY_MACHINE_TOKEN: machineTok,
       GATEWAY_PLATFORM_TOKEN: platformTok,
       GATEWAY_ACCESS_HOST: 'satuwork.com',
+      // 席位、供应商、机器地址都归 owner，冒烟得有这个人才走得通。
+      GATEWAY_SEED_OWNER: '1',
+      GATEWAY_OWNER_EMAIL: ownerEmail,
+      GATEWAY_OWNER_PASSWORD: ownerPassword,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   },
@@ -158,8 +167,24 @@ async function run() {
   assert(full.json.error === '席位已满', 'seat full')
   assert(full.json.seats === 2 && full.json.used === 2, 'seat numbers')
 
-  const planUp = await req('PUT', `/orgs/${orgId}/plan`, { token, body: { seats: 3 }, expect: 200 })
+  // 席位由 owner 分配：公司管理员那条路是明着 403 的。
+  await req('PUT', `/orgs/${orgId}/plan`, { token, body: { seats: 3 }, expect: 403 })
+
+  const ownerLogin = await req('POST', '/auth/login', {
+    body: { email: ownerEmail, password: ownerPassword },
+    expect: 200,
+  })
+  const ownerTok = ownerLogin.json.token
+  assert(ownerLogin.json.account.role === 'owner', 'owner role')
+  assert(ownerLogin.json.company === null, 'owner 不属于公司')
+
+  const planUp = await req('PUT', `/platform/orgs/${orgId}/plan`, {
+    token: ownerTok,
+    body: { seats: 3 },
+    expect: 200,
+  })
   assert(planUp.json.seats === 3, 'plan 3')
+  await req('PUT', `/platform/orgs/${orgId}/plan`, { token, body: { seats: 4 }, expect: 403 })
 
   const acc3 = await req('POST', `/orgs/${orgId}/accounts`, {
     token,
@@ -179,14 +204,39 @@ async function run() {
     expect: 403,
   })
 
-  const mach = await req('POST', `/orgs/${orgId}/machine`, {
+  // host 是平台的事，管理员写不了——写了要被 403 挡下。
+  await req('POST', `/orgs/${orgId}/machine`, {
     token,
     body: { host: '10.0.0.1' },
+    expect: 403,
+  })
+  // 带路径的地址谁都不收：这个值 Gateway 会带着 smt_ 去 fetch。
+  await req('POST', '/internal/machines', {
+    token: machineTok,
+    body: { host: 'http://10.0.0.1/internal/sessions/x' },
+    expect: 400,
+  })
+
+  // 机器自己用引导票登记，拿到只属于它的 smt_；管理员只负责认领。
+  const machReg = await req('POST', '/internal/machines', {
+    token: machineTok,
+    body: { host: '10.0.0.1:3200' },
+    expect: 201,
+  })
+  const machineId = machReg.json.machine.id
+  const smt = machReg.json.machine.token
+  assert(typeof smt === 'string' && smt.startsWith('smt_'), 'smt_')
+  assert(machReg.json.machine.host === '10.0.0.1:3200', `host 原样保留 ${machReg.json.machine.host}`)
+
+  const mach = await req('POST', `/orgs/${orgId}/machine`, {
+    token,
+    body: { id: machineId },
     expect: 201,
   })
   assert(mach.json.company.accessUrl === 'https://acme.satuwork.com', 'access url')
-  assert(mach.json.machine.companyId === orgId, 'machine assigned')
-  const machineId = mach.json.machine.id
+  // publicMachine 不带 companyId，绑定关系从公司这边看。
+  assert(mach.json.company.machineId === machineId, 'machine assigned')
+  assert(!JSON.stringify(mach.json).includes('smt_'), '认领响应泄漏 smt_')
 
   const me2 = await req('GET', '/me', { token, expect: 200 })
   assert(me2.json.company.accessUrl === 'https://acme.satuwork.com', 'me access url')
@@ -221,8 +271,15 @@ async function run() {
   const catModels = await req('GET', '/catalog/models', { token: memberTok, expect: 200 })
   assert(catModels.json.items.some((i) => i.scope === 'global'), 'member sees global')
 
-  const cred = await req('POST', `/orgs/${orgId}/credentials`, {
+  // 供应商密钥归 owner：公司那条路只读，写一律 403。
+  await req('POST', `/orgs/${orgId}/credentials`, {
     token,
+    body: { provider: 'deepseek', secret: 'sk-should-never-leak' },
+    expect: 403,
+  })
+
+  const cred = await req('POST', '/platform/credentials', {
+    token: ownerTok,
     body: { provider: 'deepseek', secret: 'sk-should-never-leak' },
     expect: 201,
   })
@@ -236,6 +293,9 @@ async function run() {
   assert(!credsDump.includes('sk-should-never-leak'), 'no secret in list')
   assert(creds.json.credentials[0].configured === true, 'list configured')
 
+  const platCreds = await req('GET', '/platform/credentials', { token: ownerTok, expect: 200 })
+  assert(!JSON.stringify(platCreds.json).includes('sk-should-never-leak'), 'no secret in platform list')
+
   const jwtPayload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString())
   assert(jwtPayload.accountId === adminId && jwtPayload.companyId === orgId, 'jwt claims')
   assert(jwtPayload.role === 'admin', 'jwt role')
@@ -244,8 +304,8 @@ async function run() {
 
   const sess = await req('GET', `/orgs/${orgId}/sessions`, { token, expect: 200 })
   assert(Array.isArray(sess.json.sessions) && sess.json.sessions.length === 0, 'empty sessions')
-  const pull = await req('GET', `/orgs/${orgId}/sessions/abc`, { token, expect: 501 })
-  assert(String(pull.json.error).includes('machine pull not implemented'), '501 pull')
+  const pull = await req('GET', `/orgs/${orgId}/sessions/abc`, { token, expect: 404 })
+  assert(String(pull.json.error) === '会话不存在', `pull 404 文案 ${pull.json.error}`)
 
   const audit = await req('GET', `/orgs/${orgId}/audit`, { token, expect: 200 })
   assert(audit.json.events.some((e) => e.action === 'auth.register'), 'audit register')
@@ -253,15 +313,49 @@ async function run() {
   assert(audit.json.events.some((e) => e.action === 'machine.assign'), 'audit machine')
 
   await req('POST', `/internal/machines/${machineId}/heartbeat`, { expect: 401 })
-  const hb = await req('POST', `/internal/machines/${machineId}/heartbeat`, {
-    token: machineTok,
-    expect: 200,
-  })
+  const hb = await req('POST', `/internal/machines/${machineId}/heartbeat`, { token: smt, expect: 200 })
   assert(hb.json.machine.lastHeartbeatAt > 0, 'heartbeat')
 
-  await req('POST', `/internal/instances/${adminId}/ready`, { token: machineTok, expect: 501 })
-  await req('POST', '/internal/sessions/index', { token: machineTok, expect: 501 })
-  await req('POST', '/internal/usage', { token: machineTok, expect: 501 })
+  // 引导票只够登记机器；心跳、索引、用量、ready 都要每台机器自己的 smt_。
+  await req('POST', `/internal/machines/${machineId}/heartbeat`, { token: machineTok, expect: 401 })
+  await req('POST', `/internal/instances/${adminId}/ready`, {
+    token: machineTok,
+    body: { host: 'http://127.0.0.1:9', botId: 'b' },
+    expect: 401,
+  })
+  await req('POST', '/internal/sessions/index', { token: machineTok, body: {}, expect: 401 })
+  await req('POST', '/internal/usage', { token: machineTok, body: {}, expect: 401 })
+
+  const idx = await req('POST', '/internal/sessions/index', {
+    token: smt,
+    body: {
+      sessionId: 's-smoke',
+      companyId: orgId,
+      accountId: adminId,
+      title: '冒烟会话',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    },
+    expect: 200,
+  })
+  assert(idx.json.session.sessionId === 's-smoke', 'session index')
+
+  await req('POST', '/internal/usage', {
+    token: smt,
+    body: { accountId: adminId, provider: 'deepseek', model: 'demo', promptTokens: 3, completionTokens: 4 },
+    expect: 200,
+  })
+  const usage = await req('GET', `/orgs/${orgId}/usage`, { token, expect: 200 })
+  const tokenStat = (label) => Number(usage.json.stats.find((s) => s.label === label).value)
+  assert(tokenStat('输入 Tokens') === 3, `输入 tokens ${tokenStat('输入 Tokens')}`)
+  assert(tokenStat('输出 Tokens') === 4, `输出 tokens ${tokenStat('输出 Tokens')}`)
+
+  // 没部署过的席位报 ready 是 404，不是默默收下。
+  await req('POST', `/internal/instances/${adminId}/ready`, {
+    token: smt,
+    body: { host: 'http://127.0.0.1:9', botId: 'b' },
+    expect: 404,
+  })
 
   await req('GET', `/orgs/${orgId}/accounts`, { token, expect: 200 })
   await req('DELETE', `/orgs/${orgId}/accounts/${acc3.json.account.id}`, { token, expect: 200 })

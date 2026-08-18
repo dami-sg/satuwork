@@ -21,14 +21,14 @@ function callerToken(req: Req): string | undefined {
   if (Array.isArray(arr) && arr[0]?.trim()) return arr[0].trim()
 }
 
-function requireUser(req: Req, db: Db, keys: JwtKeys): Account {
+async function requireUser(req: Req, db: Db, keys: JwtKeys): Promise<Account> {
   const token = callerToken(req)
   if (!token) throw new HttpError(401, '需要登录')
   // access token 是席位运行时票，不能拿来调 /v1。
   if (token.startsWith('sat_')) throw new HttpError(401, '需要登录')
   let account: Account | undefined
   if (token.startsWith('sk_sw_')) {
-    account = db.accountByApiKey(token)
+    account = await db.accountByApiKey(token)
     if (!account) throw new HttpError(401, '需要登录')
   } else {
     let payload
@@ -37,7 +37,7 @@ function requireUser(req: Req, db: Db, keys: JwtKeys): Account {
     } catch (e) {
       throw new HttpError(401, (e as Error).message)
     }
-    account = db.account(payload.accountId)
+    account = await db.account(payload.accountId)
     if (!account) throw new HttpError(401, '账号不存在')
     // iat 只有秒精度：同一秒内新签发的票不能被刚写下的 tokenRevokedAt 误杀。
     if (account.tokenRevokedAt && payload.iat < Math.floor(account.tokenRevokedAt / 1000)) {
@@ -46,20 +46,26 @@ function requireUser(req: Req, db: Db, keys: JwtKeys): Account {
   }
   if (account.status === 'disabled') throw new HttpError(401, '这个账号已被停用，请联系管理员')
   if (account.status === 'invited') throw new HttpError(401, '请先用邀请链接设置口令')
+  // 公司停用了，这家的密钥一律不认——控制台那边是同一条规矩。
+  if (account.companyId) {
+    const company = await db.company(account.companyId)
+    if (company && company.status === 'disabled') throw new HttpError(403, '这家公司已被停用，请联系平台管理员')
+  }
   return account
 }
 
-function recordLlmCall(
+async function recordLlmCall(
   db: Db,
   account: Account,
   found: { provider: string; id: string },
-): string {
-  return db.insertLlmCall({
+): Promise<string> {
+  const row = await db.insertLlmCall({
     accountId: account.id,
     companyId: account.companyId,
     provider: found.provider,
     model: found.id,
-  }).id
+  })
+  return row.id
 }
 
 function bodyOf(req: Req): Record<string, unknown> {
@@ -68,8 +74,8 @@ function bodyOf(req: Req): Record<string, unknown> {
   return req.body as Record<string, unknown>
 }
 
-function publicModels(llm: Llm, companyId: string | null) {
-  return llm.catalog(companyId).map((m) => ({
+async function publicModels(llm: Llm, companyId: string | null) {
+  return (await llm.catalog(companyId)).map((m) => ({
     id: openaiModelId(m),
     object: 'model' as const,
     owned_by: m.provider,
@@ -85,16 +91,32 @@ function publicModels(llm: Llm, companyId: string | null) {
   }))
 }
 
-function resolveOr404(llm: Llm, companyId: string | null, raw: string, hint?: string) {
-  const found = llm.find(companyId, raw, hint)
+async function resolveOr404(llm: Llm, companyId: string | null, raw: string, hint?: string) {
+  const found = await llm.find(companyId, raw, hint)
   if (!found) throw new HttpError(404, '模型不在可见目录里', { model: raw })
   return found
 }
 
-function secretOr402(llm: Llm, companyId: string | null, provider: string): string {
-  const secret = llm.secret(companyId, provider)
+async function secretOr402(llm: Llm, companyId: string | null, provider: string): Promise<string> {
+  const secret = await llm.secret(companyId, provider)
   if (!secret) throw new HttpError(402, `没有 ${provider} 的密钥`, { provider })
   return secret
+}
+
+/**
+ * 这两条路由是**厂商原生协议**的透传口，上游地址写死：`/v1/responses` 是 OpenAI 的
+ * Responses API，`/v1/messages` 是 Anthropic 的 Messages API。而凭据是按解析出来的
+ * `found.provider` 取的——两者不对齐就会错配：`{"model":"anthropic/claude-…"}` 打到
+ * `/v1/responses`，Gateway 就把 ANTHROPIC_API_KEY 以 `Authorization: Bearer` 发给
+ * api.openai.com。密钥不回显给调用方（proxyUpstream 有 redact），但已经落进了另一家
+ * 厂商的请求日志，只能轮换。
+ *
+ * `/v1/chat/completions` 没这个问题：它走 `llm.piModel(...)`，凭据和目的地必然同源。
+ */
+function requireProvider(provider: string, want: string, route: string): void {
+  if (provider !== want) {
+    throw new HttpError(400, `${route} 只接受 ${want} 的模型，收到的是 ${provider || '未知'}`)
+  }
 }
 
 function openaiBase(): string {
@@ -227,27 +249,67 @@ function openaiUsage(u: any) {
 
 type TokenUsage = { prompt_tokens: number; completion_tokens: number }
 
+/** 一帧只报了一半是常事，所以缺的字段是 undefined，不是 0——0 会把上一帧盖掉。 */
+type PartialUsage = { prompt_tokens?: number; completion_tokens?: number }
+
 function tokensOf(u: { prompt_tokens: number; completion_tokens: number } | undefined): TokenUsage | undefined {
   if (!u) return undefined
   return { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens }
 }
 
-function usageFromPayload(obj: unknown): TokenUsage | undefined {
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return undefined
+function objectAt(o: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const v = o[key]
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined
+}
+
+/**
+ * usage 可能在顶层，也可能裹一层：OpenAI Responses 是 `response.usage`，
+ * Anthropic 的 message_start 是 `message.usage`。只看顶层就会把输入 token 丢光。
+ */
+function usageCandidates(obj: unknown): Record<string, unknown>[] {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return []
   const o = obj as Record<string, unknown>
-  const raw = o.usage && typeof o.usage === 'object' && !Array.isArray(o.usage) ? (o.usage as Record<string, unknown>) : o
-  const prompt = raw.prompt_tokens ?? raw.input_tokens ?? raw.input
-  const completion = raw.completion_tokens ?? raw.output_tokens ?? raw.output
-  if (prompt == null && completion == null) return undefined
-  const pt = Number(prompt)
-  const ct = Number(completion)
+  const out: Record<string, unknown>[] = []
+  const push = (v: Record<string, unknown> | undefined) => {
+    if (v) out.push(v)
+  }
+  push(objectAt(o, 'usage'))
+  for (const key of ['response', 'message']) {
+    const inner = objectAt(o, key)
+    if (inner) push(objectAt(inner, 'usage'))
+  }
+  out.push(o)
+  return out
+}
+
+function usageFromPayload(obj: unknown): PartialUsage | undefined {
+  for (const raw of usageCandidates(obj)) {
+    const prompt = raw.prompt_tokens ?? raw.input_tokens ?? raw.input
+    const completion = raw.completion_tokens ?? raw.output_tokens ?? raw.output
+    if (prompt == null && completion == null) continue
+    const out: PartialUsage = {}
+    const pt = Number(prompt)
+    const ct = Number(completion)
+    if (prompt != null && Number.isFinite(pt)) out.prompt_tokens = pt
+    if (completion != null && Number.isFinite(ct)) out.completion_tokens = ct
+    if (out.prompt_tokens != null || out.completion_tokens != null) return out
+  }
+  return undefined
+}
+
+/**
+ * 逐帧累积，不整块替换。Anthropic 把输入 token 放在 message_start、输出 token 放在
+ * message_delta——整块替换的话最后一帧会把输入抹成 0。
+ */
+function mergeUsage(cur: TokenUsage | undefined, next: PartialUsage): TokenUsage {
   return {
-    prompt_tokens: Number.isFinite(pt) ? pt : 0,
-    completion_tokens: Number.isFinite(ct) ? ct : 0,
+    prompt_tokens: next.prompt_tokens ?? cur?.prompt_tokens ?? 0,
+    completion_tokens: next.completion_tokens ?? cur?.completion_tokens ?? 0,
   }
 }
 
 async function streamChatCompletions(
+  req: Req,
   res: ServerResponse,
   llm: Llm,
   found: { provider: string; id: string },
@@ -272,8 +334,17 @@ async function streamChatCompletions(
     maxTokens: typeof body.max_tokens === 'number' ? body.max_tokens : typeof body.max_completion_tokens === 'number' ? body.max_completion_tokens : undefined,
   })
   let usage: TokenUsage | undefined
+  // 客户端一走就得停下来。以前没有这一条：浏览器关了标签页，Gateway 还在把上游的
+  // token 一个个拉完——写进一个没人读的 socket，钱照付。break 会调 for-await 的
+  // .return()，取消一路传到底层流。
+  let gone = false
+  const onClose = () => {
+    gone = true
+  }
+  req.on('close', onClose)
   try {
     for await (const event of stream) {
+      if (gone) break
       switch (event.type) {
         case 'start':
           writeSse(res, chunk(id, modelId, { role: 'assistant' }))
@@ -326,10 +397,16 @@ async function streamChatCompletions(
     }
   } catch (e) {
     const msg = redact((e as Error).message || 'upstream error', secret)
-    writeSse(res, { error: { message: msg, type: 'upstream_error' } })
+    if (!gone) writeSse(res, { error: { message: msg, type: 'upstream_error' } })
+  } finally {
+    req.off('close', onClose)
   }
-  res.write('data: [DONE]\n\n')
-  res.end()
+  // 客户端已经走了就别再往 socket 里写；但 usage 要照常返回——已经问上游要过的
+  // token 是花掉了的，不记账等于白送。
+  if (!gone) {
+    res.write('data: [DONE]\n\n')
+    res.end()
+  }
   return usage
 }
 
@@ -397,15 +474,21 @@ async function proxyUpstream(
   res: ServerResponse,
   opts: { url: string; headers: Record<string, string>; body: unknown; secret: string },
 ): Promise<TokenUsage | undefined> {
+  // 客户端断了就别再拉上游：那边是按 token 计费的，没人读的字节一样要付钱。
+  // 和 120s 超时合成一个信号——两个条件里先到的那个生效。
+  const ac = new AbortController()
+  const onClose = () => ac.abort()
+  req.on('close', onClose)
   let upstream: Response
   try {
     upstream = await fetch(opts.url, {
       method: 'POST',
       headers: opts.headers,
       body: JSON.stringify(opts.body),
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.any([ac.signal, AbortSignal.timeout(120_000)]),
     })
   } catch (e) {
+    req.off('close', onClose)
     throw new HttpError(503, redact((e as Error).message || 'upstream unreachable', opts.secret))
   }
   const ctype = upstream.headers.get('content-type') || 'application/json; charset=utf-8'
@@ -418,10 +501,13 @@ async function proxyUpstream(
     })
     let usage: TokenUsage | undefined
     let buf = ''
+    // 一个解码器从头用到尾：多字节字符会被切在两个 chunk 之间，每次新建解码器会把
+    // 它解成替换字符，那一帧的 JSON 就 parse 不动，用量记录跟着丢。
+    const decoder = new TextDecoder()
     const take = (piece: string | Buffer) => {
       const bytes = typeof piece === 'string' ? piece : Buffer.from(piece)
       res.write(bytes)
-      buf += typeof piece === 'string' ? piece : new TextDecoder().decode(piece)
+      buf += typeof piece === 'string' ? piece : decoder.decode(piece, { stream: true })
       let idx
       while ((idx = buf.indexOf('\n\n')) >= 0) {
         const frame = buf.slice(0, idx)
@@ -432,36 +518,50 @@ async function proxyUpstream(
           if (!payload || payload === '[DONE]') continue
           try {
             const u = usageFromPayload(JSON.parse(payload))
-            if (u) usage = u
+            if (u) usage = mergeUsage(usage, u)
           } catch {}
         }
       }
     }
+    // 读流放在 try 里：以前它在外面，任何中途失败（120s 超时会连响应体一起中止）都会
+    // 一路抛出去，`res.end()` 和外层的 updateLlmCallTokens 都不执行——**这一次调用已经
+    // 累计到的 token 全部丢掉**。断流是断流，账还是要记。
     if (upstream.body) {
-      const reader = (upstream.body as any).getReader?.()
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          take(typeof value === 'string' ? value : Buffer.from(value))
+      try {
+        const reader = (upstream.body as any).getReader?.()
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            take(typeof value === 'string' ? value : Buffer.from(value))
+          }
+        } else {
+          for await (const chunk of upstream.body as any) {
+            take(typeof chunk === 'string' ? chunk : Buffer.from(chunk))
+          }
         }
-      } else {
-        for await (const chunk of upstream.body as any) {
-          take(typeof chunk === 'string' ? chunk : Buffer.from(chunk))
-        }
+      } catch {
+        /* 中途断了：保留已经累计的 usage，下面照常收尾。 */
       }
     }
-    res.end()
+    req.off('close', onClose)
+    if (!res.writableEnded) res.end()
     return usage
   }
-  const text = redact(await upstream.text(), opts.secret)
+  let text: string
+  try {
+    text = redact(await upstream.text(), opts.secret)
+  } finally {
+    req.off('close', onClose)
+  }
   res.writeHead(upstream.status, {
     'content-type': ctype.includes('json') ? 'application/json; charset=utf-8' : ctype,
     'cache-control': 'no-store',
   })
   res.end(text)
   try {
-    return usageFromPayload(JSON.parse(text))
+    const u = usageFromPayload(JSON.parse(text))
+    return u ? mergeUsage(undefined, u) : undefined
   } catch {
     return undefined
   }
@@ -472,38 +572,39 @@ async function proxyUpstream(
  * 上游供应商密钥只在 Gateway 里，响应永不回显。
  */
 export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
-  router.get('/v1/models', (req, res) => {
-    const account = requireUser(req, db, keys)
-    json(res, 200, { object: 'list', data: publicModels(llm, account.companyId) })
+  router.get('/v1/models', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    json(res, 200, { object: 'list', data: await publicModels(llm, account.companyId) })
   })
 
   router.post('/v1/chat/completions', async (req, res) => {
-    const account = requireUser(req, db, keys)
+    const account = await requireUser(req, db, keys)
     const body = bodyOf(req)
     const modelRaw = str(body.model)
     if (!modelRaw) throw new HttpError(400, 'model 不能为空')
     const hint = str(body.provider) || undefined
-    const found = resolveOr404(llm, account.companyId, modelRaw, hint)
-    const secret = secretOr402(llm, account.companyId, found.provider)
-    const callId = recordLlmCall(db, account, found)
+    const found = await resolveOr404(llm, account.companyId, modelRaw, hint)
+    const secret = await secretOr402(llm, account.companyId, found.provider)
+    const callId = await recordLlmCall(db, account, found)
     const stream = body.stream === true
     if (stream) {
-      const usage = await streamChatCompletions(res, llm, found, secret, body)
-      if (usage) db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
+      const usage = await streamChatCompletions(req, res, llm, found, secret, body)
+      if (usage) await db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
       return
     }
     const usage = await completeChatCompletions(res, llm, found, secret, body)
-    if (usage) db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
+    if (usage) await db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
   })
 
   router.post('/v1/responses', async (req, res) => {
-    const account = requireUser(req, db, keys)
+    const account = await requireUser(req, db, keys)
     const body = { ...bodyOf(req) }
     const modelRaw = str(body.model)
     if (!modelRaw) throw new HttpError(400, 'model 不能为空')
-    const found = resolveOr404(llm, account.companyId, modelRaw, str(body.provider) || 'openai')
-    const secret = secretOr402(llm, account.companyId, found.provider)
-    const callId = recordLlmCall(db, account, found)
+    const found = await resolveOr404(llm, account.companyId, modelRaw, str(body.provider) || 'openai')
+    requireProvider(found.provider, 'openai', '/v1/responses')
+    const secret = await secretOr402(llm, account.companyId, found.provider)
+    const callId = await recordLlmCall(db, account, found)
     body.model = found.id
     const headers: Record<string, string> = {
       authorization: `Bearer ${secret}`,
@@ -517,17 +618,18 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
       body,
       secret,
     })
-    if (usage) db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
+    if (usage) await db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
   })
 
   router.post('/v1/messages', async (req, res) => {
-    const account = requireUser(req, db, keys)
+    const account = await requireUser(req, db, keys)
     const body = { ...bodyOf(req) }
     const modelRaw = str(body.model)
     if (!modelRaw) throw new HttpError(400, 'model 不能为空')
-    const found = resolveOr404(llm, account.companyId, modelRaw, str(body.provider) || 'anthropic')
-    const secret = secretOr402(llm, account.companyId, found.provider)
-    const callId = recordLlmCall(db, account, found)
+    const found = await resolveOr404(llm, account.companyId, modelRaw, str(body.provider) || 'anthropic')
+    requireProvider(found.provider, 'anthropic', '/v1/messages')
+    const secret = await secretOr402(llm, account.companyId, found.provider)
+    const callId = await recordLlmCall(db, account, found)
     body.model = found.id
     const versionHeader = req.headers['anthropic-version']
     const version = typeof versionHeader === 'string' && versionHeader ? versionHeader : ANTHROPIC_VERSION
@@ -541,6 +643,6 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
       body,
       secret,
     })
-    if (usage) db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
+    if (usage) await db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
   })
 }

@@ -4,6 +4,9 @@
  */
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { PG_URL } from './pg.mjs'
+import { publishRelease } from './release.mjs'
+import { pairMachine } from './pair.mjs'
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -85,6 +88,9 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       cwd: gwRoot,
       env: {
         SATUWORK_GATEWAY_HOME: GW_HOME,
+        GATEWAY_DATABASE_URL: PG_URL,
+        GATEWAY_PG_SCHEMA: 'e2e_chat',
+        GATEWAY_PG_RESET: '1',
         GATEWAY_HOST: '127.0.0.1',
         GATEWAY_PORT: String(GW_PORT),
         GATEWAY_MACHINE_TOKEN: MACHINE_TOK,
@@ -94,7 +100,6 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
         GATEWAY_OWNER_EMAIL: 'owner@chat.test',
         GATEWAY_OWNER_PASSWORD: 'test-owner-chat',
         SATUWORK_DEPLOY_STUB: '1',
-        SATUWORK_BOT_SRC: '/tmp/satuwork-e2e-missing-bot-src',
       },
     })
     await waitHttp(gwBase + '/health')
@@ -170,13 +175,8 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(String(r.json.error || r.text).includes('实例还没上线'), '503 文案')
     })
 
-    const putMach = await req(gwBase, 'PUT', `/platform/orgs/${orgId}/machine`, {
-      token: ownerTok,
-      body: { sshHost: '127.0.0.1', sshPort: 22, sshUser: 'debian', sshAuth: 'password', sshSecret: 'e2e-ssh' },
-    })
-    assert(putMach.status === 200, `put machine ${putMach.status} ${putMach.text}`)
-    const platMach = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
-    machineTok = platMach.json.machine.token
+    const paired = await pairMachine({ req, gwBase, ownerTok, orgId })
+    machineTok = paired.token
     assert(typeof machineTok === 'string' && machineTok.startsWith('smt_'), 'smt_')
 
     await test('POST /internal/instances/:id/ready 校验 host / 账号 / botId', async () => {
@@ -218,11 +218,7 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(String(never.json.error || never.text).includes('还没有部署'), '404 文案')
     })
 
-    const pub = await req(gwBase, 'POST', '/platform/bot-releases', {
-      token: ownerTok,
-      body: { version: '0.1.0', note: 'e2e-chat' },
-    })
-    assert(pub.status === 200, `publish ${pub.status} ${pub.text}`)
+    await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2e-chat' })
     const dep = await req(gwBase, 'POST', '/runtime/deploy', {
       token: adminTok,
       body: { botId: catalogBotId },
@@ -239,7 +235,6 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
         GATEWAY_URL: gwBase,
         GATEWAY_TOKEN: seatAccess,
         GATEWAY_API_KEY: seatApiKey,
-        GATEWAY_MACHINE_TOKEN: machineTok,
         E2E_STUB_LLM: '1',
       },
     })
@@ -322,14 +317,14 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(!treeHas(GW_HOME, MARKER), 'Gateway home 含聊天正文')
     })
 
-    await test('机器凭证可直连 Bot JSON API', async () => {
-      const r = await req(botBase, 'GET', '/api/bots', { token: machineTok })
+    await test('席位凭证可直连 Bot JSON API', async () => {
+      const r = await req(botBase, 'GET', '/api/bots', { token: seatAccess })
       assert(r.status === 200, `machine bots ${r.status} ${r.text}`)
       assert(Array.isArray(r.json.bots) && r.json.bots.length >= 1, 'empty')
     })
 
     await test('Gateway 钉住的实例名册只有 SATUWORK_BOT_ID，没有 default', async () => {
-      const r = await req(botBase, 'GET', '/api/bots', { token: machineTok })
+      const r = await req(botBase, 'GET', '/api/bots', { token: seatAccess })
       assert(r.status === 200, `machine bots ${r.status} ${r.text}`)
       const bots = r.json.bots || []
       assert(bots.length === 1, `bots.length ${bots.length} ${JSON.stringify(bots)}`)
@@ -342,8 +337,8 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(r.status === 401, `unauth status ${r.status} ${r.text}`)
     })
 
-    await test('机器凭证 GET /api/runtime/status → 200 且只钉一颗', async () => {
-      const r = await req(botBase, 'GET', '/api/runtime/status', { token: machineTok })
+    await test('席位凭证 GET /api/runtime/status → 200 且只钉一颗', async () => {
+      const r = await req(botBase, 'GET', '/api/runtime/status', { token: seatAccess })
       assert(r.status === 200, `status ${r.status} ${r.text}`)
       const bots = r.json.bots || []
       assert(bots.length === 1, `status bots ${bots.length}`)

@@ -2,6 +2,13 @@
   "name": "satuwork-workspace",
   "private": true,
   "scripts": {
-    "e2e": "node e2e/run.mjs"
+    "dev:gateway": "pnpm --filter satuwork-gateway dev",
+    "dev:bot": "pnpm --filter satuwork dev",
+    "pack:bot": "node bot/pack.mjs",
+    "pack:manager": "node manager/pack.mjs",
+    "e2e": "node e2e/run.mjs",
+    "typecheck": "pnpm --filter satuwork-gateway typecheck && pnpm --filter satuwork-manager typecheck",
+    "//typecheck:bot": "bot/ 刚补上 tsconfig，还剩一批历史类型债（plugin-server 的 Response 和全局 Response 撞名，35 处路由注册），清完再并进上面那条",
+    "typecheck:bot": "pnpm --filter satuwork typecheck"
   }
 }
