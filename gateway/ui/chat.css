@@ -801,3 +801,19 @@
 }
 .sw-deskb.is-on { opacity: 1; pointer-events: auto; }
 
+
+/* 席位没上线时，正文中间那块「去部署」。右栏可以收起，正文中间不会——最需要指路的
+   那一刻，话得说在人正看着的地方。 */
+.sw-nodeploy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: 42ch;
+  text-align: center;
+}
+.sw-nodeploy-icon { color: var(--muted-foreground); opacity: 0.55; }
+.sw-nodeploy h2 { margin: 0; font-size: 16px; font-weight: 600; color: var(--color-text); }
+.sw-nodeploy p { margin: 0; font-size: 13px; line-height: 1.7; color: var(--muted-foreground); }
+.sw-nodeploy .btn { margin-top: var(--space-2); }
+.sw-nodeploy-hint { font-size: 12px !important; }

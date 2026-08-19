@@ -1463,27 +1463,79 @@ function deployBotButton(botId, label) {
  * **桌面地址做成按钮,不打印 URL。** 那条 URL 里带着一整段 JWT 票（五分钟有效），
  * 渲染成文本会占掉半屏，而且没人会去手抄它——它唯一的用法就是点开。
  */
+/**
+ * 这个 Bot 的席位走到哪一步了：`unbound` / `none` / `deploying` / `error` / `ready`。
+ *
+ * 抽出来是因为有两处要看它——对话正文中间那块「去部署」，和右栏。两处各判一次的话，
+ * 迟早出现「中间说没部署、右栏说在线」这种自相矛盾的画面。
+ */
+function seatStage() {
+  if (!(state.runtimeMachine && state.runtimeMachine.paired)) return 'unbound'
+  const mine = state.desktopRuntime
+  if (!mine || mine.status === 'none') return 'none'
+  if (mine.status === 'error' || mine.status === 'deploying') return mine.status
+  return mine.status === 'ready' ? 'ready' : 'none'
+}
+
+/**
+ * 席位没上线时，**把话说在正文中间**，而不是只摆在右栏里。
+ *
+ * 原先这套提示只有右栏一份：而右栏可以收起（默认也常常是收起的），于是人看到的是一
+ * 片空白的对话，外加一个能打字、发出去却没有任何反应的输入框——最需要指路的那一刻，
+ * 屏幕正中什么也没说。
+ *
+ * 输入框在这个状态下整个不渲染。留着它就是留一个「看着能用、按了没用」的东西，比没有
+ * 更糟。
+ */
+function chatDeployPrompt(botId) {
+  const stage = seatStage()
+  if (stage === 'ready') return ''
+  const name = (chatBotOf() || {}).name || t('这个 Bot')
+  let title = ''
+  let body = ''
+  let action = ''
+  if (stage === 'unbound') {
+    title = t('公司的运行机器还没配好')
+    body = t('公司的运行机器还没有配对机器管家，请系统管理员在公司详情里生成配对码。')
+  } else if (stage === 'deploying') {
+    title = t('正在部署…')
+    body = t('机器那边正在装这个席位，通常一两分钟。装好之后这里会自己变成对话。')
+  } else if (stage === 'error') {
+    title = t('上一次部署没成功')
+    body = (state.desktopRuntime && state.desktopRuntime.lastError) || t('部署失败')
+    action = deployBotButton(botId, t('重新部署'))
+  } else {
+    title = t('%s 还没有部署').replace('%s', name)
+    body = t('部署之后它才有自己的机器和桌面，也才收得到消息。这一步要几分钟。')
+    action = deployBotButton(botId)
+  }
+  const hint = state.deployHint ? `<p class="sw-nodeploy-hint">${esc(state.deployHint)}</p>` : ''
+  return `<div class="gw-chat-empty-main"><div class="sw-nodeploy">
+    <span class="sw-nodeploy-icon">${svg(MONITOR, 26)}</span>
+    <h2>${esc(title)}</h2>
+    <p>${esc(body)}</p>
+    ${action}${hint}
+  </div></div>`
+}
+
 function chatMachinePanel() {
   const selected = chatBotIdOf(state.path) || state.chatBotId
   if (!selected) return ''
   const mine = state.desktopRuntime
-  const bound = !!(state.runtimeMachine && state.runtimeMachine.paired)
+  const stage = seatStage()
   const rows = []
 
-  if (!bound) {
+  // 没上线时右栏只报状态，**不再摆第二颗部署按钮**——那句话和那颗按钮现在在正文
+  // 中间，同一块屏幕上放两个一模一样的主操作，只会让人先分辨该点哪一个。
+  if (stage === 'unbound') {
     rows.push(
       `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground); line-height: 1.6;">${t('公司的运行机器还没有配对机器管家，请系统管理员在公司详情里生成配对码。')}</p>`,
     )
-  } else if (!mine || mine.status === 'none') {
+  } else if (stage === 'none') {
     rows.push(`<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('实例还没上线')}</p>`)
-    rows.push(deployBotButton(selected))
-    if (state.deployHint) {
-      rows.push(`<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${esc(state.deployHint)}</p>`)
-    }
-  } else if (mine.status === 'error') {
+  } else if (stage === 'error') {
     rows.push(`<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(mine.lastError || t('部署失败'))}</div>`)
-    rows.push(deployBotButton(selected))
-  } else if (mine.status === 'deploying') {
+  } else if (stage === 'deploying') {
     rows.push(`<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('部署中…')}</p>`)
   }
 
@@ -2153,6 +2205,11 @@ function chatPage() {
     return `<div class="gw-chat"><section class="gw-chat-main">${banner}
       <div class="gw-chat-empty-main"><p>${bots.length ? t('从左边选一个 Bot 开始对话。') : t('还没有 Bot。公司后台配置并上线后会出现在这里。')}</p></div>
     </section></div>`
+  }
+  // 席位没上线：正文换成一块「去部署」，连输入框一起不渲染（见 chatDeployPrompt）。
+  const nodeploy = chatDeployPrompt(selected)
+  if (nodeploy) {
+    return `<div class="gw-chat"><section class="gw-chat-main">${banner}${nodeploy}</section></div>`
   }
   /* 正文一律留空：消息、在线灯、提示行全部由 paintChat 增量填。在这里先渲染一遍
      再让 paintChat 覆盖，等于每次换页把同一份内容画两遍，还会把已经渲染好的图冲掉。 */

@@ -282,6 +282,14 @@ window.SATU_I18N = {
   拖动调整宽度: 'Drag to resize',
   打开桌面: 'Open desktop',
   桌面: 'Desktop',
+  '公司的运行机器还没配好': 'The company machine is not set up yet',
+  '正在部署…': 'Deploying…',
+  '机器那边正在装这个席位，通常一两分钟。装好之后这里会自己变成对话。':
+    'The seat is being installed on the machine — usually a minute or two. This turns into the conversation on its own once it is done.',
+  上一次部署没成功: 'The last deploy did not go through',
+  '%s 还没有部署': '%s is not deployed yet',
+  '部署之后它才有自己的机器和桌面，也才收得到消息。这一步要几分钟。':
+    'Once deployed it gets its own machine and desktop, and can start receiving messages. This takes a few minutes.',
   收起桌面: 'Collapse desktop',
   重连: 'Reconnect',
   '正在连桌面…': 'Connecting to desktop…',
