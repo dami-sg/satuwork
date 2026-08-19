@@ -7,7 +7,7 @@
  */
 
 /** 落盘格式版本。任何破坏性结构变更都要 +1，并同时给出迁移。 */
-export const SESSION_FORMAT_VERSION = 3
+export const SESSION_FORMAT_VERSION = 4
 
 /** 会话根上的 Bot 来源。M1 只有 local；company / global 是物化预留。 */
 export type SessionOrigin = 'local' | 'company' | 'global'
@@ -22,12 +22,20 @@ export interface EventEnvelope<T extends keyof SessionEventMap = keyof SessionEv
   data: SessionEventMap[T]
 }
 
-/** 消息内容块。先只做文本与工具调用，够跑通链路。 */
+/** 消息内容块。 */
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool-call'; callId: string; name: string; arguments: string }
   | { type: 'tool-result'; callId: string; text: string; failed?: boolean }
+  /**
+   * 一张给模型看的图（v4 起）。
+   *
+   * **存路径，不存 base64。** 一张 2 MB 的图 base64 之后是 2.7 MB，直接落进 JSONL 会让
+   * 单行大到没法 grep、没法 tail，整条会话的重放也要把它搬一遍。图片本体就在工作区里，
+   * 组模型请求的时候现读现转就行。
+   */
+  | { type: 'image'; path: string; mime: string }
 
 export interface Message {
   id: string
@@ -82,6 +90,36 @@ export interface SessionEventMap {
     remoteId?: string
   }
   'session/title': { title: string }
+
+  /**
+   * 上下文压缩点。
+   *
+   * 一个 Bot 一条长会话，会话只增不减，而每一轮都把全量历史重建成 messages 发出去——
+   * 这条路走到底必然撞上下文窗口。所以到了阈值就把**旧的那一段**换成一段摘要。
+   *
+   * **换的只是送进模型的那一份。** JSONL 一条不删，界面、审计、`/internal/sessions/:id`
+   * 看到的仍然是全量原文；模型想看原文也调得到（history_read / history_search）。
+   * 这正是这件事敢做的前提：压缩不是丢弃，是把远处的东西挪到伸手可及的地方。
+   *
+   * **throughSeq 必须落在 turn/end 上。** 边界切在一轮中间的话，带 tool_calls 的助手
+   * 消息会被摘要吃掉、而它的 tool/result 留在后面——provider 直接拒收
+   * 「role 'tool' 必须紧跟在带 tool_calls 的消息之后」。
+   *
+   * 加这一种事件不算破坏性变更：老版本读到不认识的 type 会跳过，退化成发全量历史，
+   * 也就是加它之前的行为。所以不动 SESSION_FORMAT_VERSION。
+   */
+  'session/compact': {
+    /** 摘要覆盖到这一条（含）为止。之后的事件照旧逐条进上下文。 */
+    throughSeq: number
+    /** 覆盖区间的首尾时间。摘要正文里要写出来，否则「昨天」在压缩之后就断了。 */
+    from: number
+    to: number
+    summary: string
+    /** 诊断用：压掉了多少条消息、前后各值多少 token（估算）。 */
+    droppedMessages: number
+    tokensBefore: number
+    tokensAfter: number
+  }
 
   'turn/start': { turn: number }
   'turn/end': { turn: number; reason: 'completed' | 'error' | 'aborted' }

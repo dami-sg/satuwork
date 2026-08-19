@@ -50,6 +50,10 @@
 # 工作区里的手：read / write / edit / ls / find / grep / bash。
 - name: './src/tools/workspace.ts'
 
+# 翻自己的历史：history_read / history_search。只读，走 sessions 服务不碰文件系统。
+# 它是上下文压缩的前提——压掉的那一段还调得回来，压缩才不是有损的。
+- name: './src/tools/history.ts'
+
 # Gateway 目录：拉 Skill / MCP / Bot，钉到名册，连 HTTP MCP。
 - name: './src/catalog/index.ts'
 

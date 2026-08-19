@@ -150,7 +150,39 @@ function safeParse(s: unknown): unknown {
   }
 }
 
-function toPiContext(body: Record<string, unknown>, provider: string, modelId: string) {
+/**
+ * 用户消息 → pi 的 content。
+ *
+ * **这一层最容易被漏掉**：Bot 那边把图片发对了，到这儿再被 contentText() 拍成字符串，
+ * 图就没了——而且没有任何报错，模型只是看不见它。
+ *
+ * 进来的是 OpenAI 口径的 content 数组（`image_url.url` 里是 data URI），出去的是 pi 的
+ * `{type:'image', data, mimeType}`。没有图就还给字符串，跟以前一样。
+ */
+export function userContent(content: unknown): any {
+  if (!Array.isArray(content)) return contentText(content)
+  if (!content.some((c: any) => c?.type === 'image_url' || c?.type === 'image')) return contentText(content)
+  const out: any[] = []
+  for (const c of content as any[]) {
+    if (c?.type === 'image_url') {
+      const url = String(c.image_url?.url ?? '')
+      const m = /^data:([^;,]+);base64,(.*)$/s.exec(url)
+      // 只收内联的 base64。远程 URL 得由这一层去取，那是一个可以被指使去打内网的
+      // 出站请求（SSRF），不做。
+      if (m) out.push({ type: 'image', mimeType: m[1], data: m[2] })
+      continue
+    }
+    if (c?.type === 'image' && typeof c.data === 'string') {
+      out.push({ type: 'image', mimeType: c.mimeType || 'image/png', data: c.data })
+      continue
+    }
+    const t = typeof c === 'string' ? c : (c?.text ?? '')
+    if (t) out.push({ type: 'text', text: t })
+  }
+  return out.length ? out : contentText(content)
+}
+
+export function toPiContext(body: Record<string, unknown>, provider: string, modelId: string) {
   const messagesIn = Array.isArray(body.messages) ? body.messages : []
   let systemPrompt: string | undefined
   const messages: any[] = []
@@ -163,7 +195,7 @@ function toPiContext(body: Record<string, unknown>, provider: string, modelId: s
       continue
     }
     if (role === 'user') {
-      messages.push({ role: 'user', content: contentText(m.content), timestamp: Date.now() })
+      messages.push({ role: 'user', content: userContent(m.content), timestamp: Date.now() })
       continue
     }
     if (role === 'assistant') {
@@ -231,30 +263,52 @@ function writeSse(res: ServerResponse, payload: unknown) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`)
 }
 
+const nonNegInt = (v: unknown): number => {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+/**
+ * pi 的 usage → OpenAI 线上格式。
+ *
+ * **`prompt_tokens` 报整个提示词，命中缓存的那部分也算在内。** pi 的 `input` 是
+ * 未命中的那一截，上游一开前缀缓存它就只剩零头——实测一次约 2600 token 的提示词
+ * 记成了 308，而 llm_calls 记的就是这个数，用量和账单跟着一起矮下去。
+ *
+ * 细分放 `prompt_tokens_details.cached_tokens`，跟 OpenAI 的约定一致。缓存读单价
+ * 更低，但**不在这里折价**：目录里有单价，折算是计价那一层的事。
+ */
 function openaiUsage(u: any) {
   if (!u) return undefined
-  const prompt = u.input ?? u.prompt_tokens
-  const completion = u.output ?? u.completion_tokens
+  // pi 的形状（有 input/output）和已经是 OpenAI 形状的载荷（有 prompt_tokens）
+  // 对「含不含缓存」的约定相反，必须分开处理，否则要么漏掉、要么加两遍。
+  const isPi = u.input != null || u.output != null
+  const cached_tokens = nonNegInt(isPi ? u.cacheRead : u.prompt_tokens_details?.cached_tokens)
+  const prompt = isPi ? u.input : u.prompt_tokens
+  const completion = isPi ? u.output : u.completion_tokens
   if (prompt == null && completion == null) return undefined
-  const pt = Number(prompt)
-  const ct = Number(completion)
-  const prompt_tokens = Number.isFinite(pt) ? pt : 0
-  const completion_tokens = Number.isFinite(ct) ? ct : 0
+  const prompt_tokens = nonNegInt(prompt) + (isPi ? cached_tokens : 0)
+  const completion_tokens = nonNegInt(completion)
   return {
     prompt_tokens,
     completion_tokens,
-    total_tokens: u.totalTokens ?? prompt_tokens + completion_tokens,
+    total_tokens: prompt_tokens + completion_tokens,
+    ...(cached_tokens ? { prompt_tokens_details: { cached_tokens } } : {}),
   }
 }
 
-type TokenUsage = { prompt_tokens: number; completion_tokens: number }
+type TokenUsage = { prompt_tokens: number; completion_tokens: number; cached_tokens: number }
 
 /** 一帧只报了一半是常事，所以缺的字段是 undefined，不是 0——0 会把上一帧盖掉。 */
-type PartialUsage = { prompt_tokens?: number; completion_tokens?: number }
+type PartialUsage = { prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number }
 
-function tokensOf(u: { prompt_tokens: number; completion_tokens: number } | undefined): TokenUsage | undefined {
+function tokensOf(u: ReturnType<typeof openaiUsage>): TokenUsage | undefined {
   if (!u) return undefined
-  return { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens }
+  return {
+    prompt_tokens: u.prompt_tokens,
+    completion_tokens: u.completion_tokens,
+    cached_tokens: u.prompt_tokens_details?.cached_tokens ?? 0,
+  }
 }
 
 function objectAt(o: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
@@ -282,15 +336,39 @@ function usageCandidates(obj: unknown): Record<string, unknown>[] {
   return out
 }
 
+/**
+ * 从原样透传的上游响应里捞 usage。
+ *
+ * **缓存那几项要单独加回去。** Anthropic 的 `input_tokens` 不含
+ * `cache_read_input_tokens` / `cache_creation_input_tokens`，只读前者就等于把命中缓存
+ * 的提示词当成没发生过。OpenAI 的 `prompt_tokens` 相反，本来就是含缓存的总数，
+ * 细分在 `prompt_tokens_details.cached_tokens` 里——所以两边不能用同一套加法。
+ */
 function usageFromPayload(obj: unknown): PartialUsage | undefined {
   for (const raw of usageCandidates(obj)) {
-    const prompt = raw.prompt_tokens ?? raw.input_tokens ?? raw.input
+    const openaiPrompt = raw.prompt_tokens
+    const anthropicPrompt = raw.input_tokens ?? raw.input
+    const prompt = openaiPrompt ?? anthropicPrompt
     const completion = raw.completion_tokens ?? raw.output_tokens ?? raw.output
     if (prompt == null && completion == null) continue
+    const details = raw.prompt_tokens_details as Record<string, unknown> | undefined
+    const readRaw = openaiPrompt != null ? details?.cached_tokens : raw.cache_read_input_tokens
+    const writeRaw = openaiPrompt != null ? undefined : raw.cache_creation_input_tokens
+    const cacheRead = nonNegInt(readRaw)
+    // 写缓存的那部分也是这次真发出去的提示词，算进总量；但它不是「读到的缓存」，
+    // 不进 cached_tokens——两者单价不同。
+    const cacheWrite = nonNegInt(writeRaw)
     const out: PartialUsage = {}
     const pt = Number(prompt)
     const ct = Number(completion)
-    if (prompt != null && Number.isFinite(pt)) out.prompt_tokens = pt
+    if (prompt != null && Number.isFinite(pt)) {
+      out.prompt_tokens = openaiPrompt != null ? pt : pt + cacheRead + cacheWrite
+      // **这一帧没带缓存字段就别写这个键。** 写成 0 的话，mergeUsage 取 next 优先，
+      // 会把前面帧里记下的缓存 token 抹掉：Anthropic 的 message_start 报了
+      // input 900 + cache_read 400，后面某个 message_delta 只回传累计 input_tokens
+      // 而不重复缓存字段，最终就落库成 900/0——正是这次要修的那个漏记又回来了。
+      if (readRaw != null) out.cached_tokens = cacheRead
+    }
     if (completion != null && Number.isFinite(ct)) out.completion_tokens = ct
     if (out.prompt_tokens != null || out.completion_tokens != null) return out
   }
@@ -300,11 +378,18 @@ function usageFromPayload(obj: unknown): PartialUsage | undefined {
 /**
  * 逐帧累积，不整块替换。Anthropic 把输入 token 放在 message_start、输出 token 放在
  * message_delta——整块替换的话最后一帧会把输入抹成 0。
+ *
+ * **取较大值，不是后来居上。** 一次请求的提示词大小是定值，各帧只是报得完整程度不同：
+ * message_start 给 input 900 + cache_read 400（合成 1300），而某些版本的 message_delta
+ * 会再回传一次累计 input_tokens 却不重复缓存字段（算出 900）。后来居上就会把 1300
+ * 覆盖成 900，缓存那截又漏掉了。输出 token 在流式里是累计上报的，取大同样成立。
  */
 function mergeUsage(cur: TokenUsage | undefined, next: PartialUsage): TokenUsage {
+  const pick = (a: number | undefined, b: number | undefined) => Math.max(a ?? 0, b ?? 0)
   return {
-    prompt_tokens: next.prompt_tokens ?? cur?.prompt_tokens ?? 0,
-    completion_tokens: next.completion_tokens ?? cur?.completion_tokens ?? 0,
+    prompt_tokens: pick(next.prompt_tokens, cur?.prompt_tokens),
+    completion_tokens: pick(next.completion_tokens, cur?.completion_tokens),
+    cached_tokens: pick(next.cached_tokens, cur?.cached_tokens),
   }
 }
 
@@ -416,7 +501,7 @@ async function completeChatCompletions(
   found: { provider: string; id: string },
   secret: string,
   body: Record<string, unknown>,
-): Promise<{ prompt_tokens: number; completion_tokens: number } | undefined> {
+): Promise<TokenUsage | undefined> {
   const modelId = openaiModelId(found)
   const piModel = llm.piModel(found.provider, found.id)
   if (!piModel) throw new HttpError(404, '模型不在可见目录里', { model: modelId })
@@ -464,9 +549,7 @@ async function completeChatCompletions(
     ],
     usage: openaiUsage(message?.usage) ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   })
-  const usage = openaiUsage(message?.usage)
-  if (!usage) return undefined
-  return { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens }
+  return tokensOf(openaiUsage(message?.usage))
 }
 
 async function proxyUpstream(
@@ -589,11 +672,11 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
     const stream = body.stream === true
     if (stream) {
       const usage = await streamChatCompletions(req, res, llm, found, secret, body)
-      if (usage) await db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
+      if (usage) await db.updateLlmCallTokens(callId, usage)
       return
     }
     const usage = await completeChatCompletions(res, llm, found, secret, body)
-    if (usage) await db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
+    if (usage) await db.updateLlmCallTokens(callId, usage)
   })
 
   router.post('/v1/responses', async (req, res) => {
@@ -618,7 +701,7 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
       body,
       secret,
     })
-    if (usage) await db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
+    if (usage) await db.updateLlmCallTokens(callId, usage)
   })
 
   router.post('/v1/messages', async (req, res) => {
@@ -643,6 +726,6 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
       body,
       secret,
     })
-    if (usage) await db.updateLlmCallTokens(callId, usage.prompt_tokens, usage.completion_tokens)
+    if (usage) await db.updateLlmCallTokens(callId, usage)
   })
 }

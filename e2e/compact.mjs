@@ -1,0 +1,114 @@
+/**
+ * 上下文压缩与翻历史的语义。探针在 bot/e2e-compact.mjs（纯函数，要 tsx）。
+ *
+ * 压缩是「一个 Bot 一条长会话」这个方案能成立的前提，而它错起来有两种面孔：
+ * 一种是当场炸（边界切在轮次中间，provider 拒收），一种是悄悄变笨（旧事件还在发、
+ * 或者摘要没进上下文、或者时间区间偏了 8 小时）。后一种要靠这里钉住。
+ */
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+
+const TZ = 'Asia/Shanghai'
+
+function runProbe(root) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-compact.mjs')], {
+      cwd: join(root, 'bot'),
+      env: { ...process.env, SATUWORK_TZ: TZ },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (err += d))
+    child.on('error', reject)
+    child.on('close', (code) => {
+      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
+      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
+      try {
+        resolve(JSON.parse(line.slice('__RESULT__'.length)))
+      } catch (e) {
+        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
+      }
+    })
+  })
+}
+
+export async function runCompact({ root, test, assert, log }) {
+  log('\n# compact')
+  const r = await runProbe(root)
+
+  await test('压缩边界只落在 turn/end 上，不留孤儿 tool_result', () => {
+    assert(r.boundary.type === 'turn/end', `边界事件是 ${r.boundary.type}，必须是 turn/end`)
+    // 这条挂了意味着线上会收到 provider 的 400：
+    // 「role 'tool' 必须紧跟在带 tool_calls 的消息之后」。
+    assert(
+      r.boundary.orphanToolResults === 0,
+      `保留段里有 ${r.boundary.orphanToolResults} 条工具结果找不到它的助手消息`,
+    )
+  })
+
+  await test('预算宽就多留原文，预算紧也至少留最后一轮', () => {
+    assert(r.budget.roomy, '预算足够时应该切在最早的可切点，尽量少压')
+    assert(r.budget.tight, '预算为 0 时应该切在最靠后的可切点，但仍要留最后一轮')
+    assert(r.budget.tooShort, '只有一轮时无处可切，应该返回 undefined 而不是硬切')
+  })
+
+  await test('有压缩点之后：摘要顶在最前，旧事件不再逐条回传', () => {
+    assert(r.compacted.first?.startsWith('[对话摘要 ·'), `第一条应是摘要，实际 ${r.compacted.first}`)
+    assert(r.compacted.hasSummaryBody, '摘要正文没进去')
+    // 覆盖区间写在摘要抬头里——压缩之后「昨天」还要答得出来，靠的就是这个。
+    assert(/\d+年\d+月\d+日/.test(r.compacted.first), `摘要抬头缺时间区间：${r.compacted.first}`)
+    assert(!r.compacted.leakedOldQuestion, '被压掉的轮次又回到上下文里了，等于没压')
+    assert(r.compacted.keptLatestQuestion, '最近一轮被压掉了')
+    assert(r.compacted.shorterThanFull, '压完之后消息数没变少')
+  })
+
+  await test('摘要并进第一条用户消息，不产生连续同角色', () => {
+    assert(r.compacted.summaryMergedIntoFirstUser, '摘要没有并进保留段的第一条用户消息')
+    // 压缩边界固定落在 turn/end 上，其后第一条必然是 user。摘要要是自己占一条，
+    // 前两条就都是 user——Anthropic 会以 roles must alternate 拒掉整个请求，
+    // 而 OpenAI 兼容口一切正常，本地根本照不出来。
+    assert(!r.compacted.consecutiveSameRole, '出现了两条连续的 user 消息')
+  })
+
+  await test('摘要输入超长时掐中间，上一次的摘要必须留住', () => {
+    // 只留末尾的话，级联压缩时第一个被丢掉的就是上一次的摘要——新摘要因此不含
+    // 第一次压缩之前的任何事实，摘要链当场断掉，而且不报任何错。
+    assert(r.clamp.keepsHead, '头部被切掉了，上一次的摘要就是在这个位置')
+    assert(r.clamp.keepsTail, '尾部（最近的对话）被切掉了')
+    assert(r.clamp.saysDropped, '省略了中间却没说，模型会以为自己看到了全文')
+    assert(r.clamp.shrank, '没有真正缩短')
+    assert(r.clamp.shortStaysWhole, '没超限的输入被改动了')
+  })
+
+  await test('压第二次时边界继续往前，不退回上一个压缩点之前', () => {
+    assert(r.second.movesForward, '第二次压缩挑的边界没有越过第一次的压缩点')
+    // toAgentMessages 只认最后一条压缩事件。边界要是退回去了，上次压掉的原文就整段
+    // 回到上下文里——症状是「越压越大」，而且没有任何报错。
+    assert(r.second.naiveGoesBackward, '这条不成立说明用例没造出会退化的场景，断言就白写了')
+  })
+
+  await test('时间区间按席位时区解析，不是 UTC', () => {
+    // Asia/Shanghai 的 8/18 00:00 就是 UTC 的 8/17 16:00。
+    // 这条挂了 = 直接 Date.parse，「取昨天」会整整偏出 8 小时。
+    assert(r.parse.sinceIso === '2026-08-17T16:00:00.000Z', `since 解析成了 ${r.parse.sinceIso}`)
+    assert(r.parse.untilIso === '2026-08-18T15:59:59.000Z', `until 解析成了 ${r.parse.untilIso}`)
+    assert(r.parse.withTimeIso === '2026-08-18T14:10:00.000Z', `带时刻的解析成了 ${r.parse.withTimeIso}`)
+    assert(r.parse.spanHours > 23.9 && r.parse.spanHours < 24, `只给日期时应覆盖整天，实际 ${r.parse.spanHours} 小时`)
+    assert(r.parse.empty, '空字符串应视为不限，不是 1970 年')
+  })
+
+  await test('工具参数两种形状估算出同一段文本，不二次编码', () => {
+    // 日志事件里 arguments 已经是 JSON 字符串，再 stringify 一遍会包引号并转义，
+    // 长度凭空涨五成——带大量工具调用的会话因此被高估，压缩切得比需要的早。
+    assert(r.digest.same, `两种形状得出的文本不一致：${r.digest.fromLog}`)
+    assert(r.digest.noEscapedQuotes, `参数被二次编码了：${r.digest.fromLog}`)
+  })
+
+  await test('翻历史能看到用户、助理和工具三种记录', () => {
+    assert(r.rows.roles.length === 3, `角色应有三种，实际 ${JSON.stringify(r.rows.roles)}`)
+    assert(r.rows.hasToolOutput, '工具结果没出现在历史里')
+    assert(r.rows.ordered, '历史行不是按时间升序的')
+  })
+}
