@@ -12,3 +12,12 @@ allowBuilds:
   # pi-ai 的可选 provider 依赖。我们没启用 Gemini / Vertex，不放行。
   '@google/genai': false
   protobufjs: false
+
+# exceljs 4.4.0 钉着 uuid@8，而 uuid <11.1.1 有一条 moderate 通告
+# （GHSA-w5hq-g745-h8pq：v3/v5/v6 传了 buf 时缺边界检查）。
+#
+# exceljs 只调 v4() 且不传 buf，那条通告对它其实不适用；override 是为了让
+# `pnpm audit` 能保持干净——一个长期红着的 audit 等于没有 audit，真出事时没人看。
+# v4() 的签名从 v8 到 v11 没变。
+overrides:
+  uuid@<11.1.1: ^11.1.1

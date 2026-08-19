@@ -4,6 +4,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { humanSize, looksBinary, WorkspaceError } from '../workspace/index.ts'
+import { docKindOf, extractDocument } from '../workspace/extract.ts'
 import type { WorkspaceFile } from './index.ts'
 
 /**
@@ -214,7 +215,8 @@ export function apply(ctx: Context, config: Config = {}) {
     {
       name: 'read',
       description:
-        '读取工作区里的一个文件，按行返回并带行号。改文件之前必须先读——edit 要求 old_string 与文件里的内容逐字相同。',
+        '读取工作区里的一个文件，按行返回并带行号。PDF、Word（.docx）、Excel（.xlsx）会先转成文本再读，同样按行分页。' +
+        '改文件之前必须先读——edit 要求 old_string 与文件里的内容逐字相同。',
       parameters: {
         type: 'object',
         properties: {
@@ -230,11 +232,32 @@ export function apply(ctx: Context, config: Config = {}) {
       const target = resolveIn(path)
       const info = await stat(target)
       if (info.isDirectory()) fail(`${show(target)} 是目录，用 ls 列它的内容。`)
-      const buf = await readFile(target)
-      if (!buf.length) return `${show(target)} 是空文件。`
-      if (looksBinary(buf)) return `${show(target)} 是二进制文件（${humanSize(info.size)}），不能按文本读。`
 
-      const lines = buf.toString('utf8').split('\n')
+      /**
+       * PDF / Word / Excel 先转成文本，再照常按行分页。
+       *
+       * 放在 looksBinary 之前：这几种格式**都是二进制**，交给下面那一关只会得到
+       * 「不能按文本读」——而它们恰恰是人最想让 Bot 读的东西。
+       */
+      const kind = docKindOf(target)
+      let text: string | undefined
+      if (kind) {
+        const doc = await extractDocument(target, kind).catch((e: Error) => {
+          fail(`${show(target)} 解析失败：${e.message}。文件可能是坏的，或者加了密。`)
+        })
+        const head =
+          `${show(target)}（${kind.toUpperCase()}，${doc.parts} ${doc.unit}${doc.truncated ? '，太长已截断' : ''}）\n` +
+          `以下是转成文本之后的内容，行号是转换后的行号，不是原文件里的。\n`
+        text = head + doc.text
+      }
+
+      const buf = text === undefined ? await readFile(target) : Buffer.alloc(0)
+      if (text === undefined) {
+        if (!buf.length) return `${show(target)} 是空文件。`
+        if (looksBinary(buf)) return `${show(target)} 是二进制文件（${humanSize(info.size)}），不能按文本读。`
+      }
+
+      const lines = (text ?? buf.toString('utf8')).split('\n')
       const start = Math.max(1, Math.floor(offset ?? 1))
       const count = Math.max(1, Math.min(Math.floor(limit ?? MAX_READ_LINES), MAX_READ_LINES))
       const picked = lines.slice(start - 1, start - 1 + count)
