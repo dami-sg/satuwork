@@ -817,3 +817,7 @@
 .sw-nodeploy p { margin: 0; font-size: 13px; line-height: 1.7; color: var(--muted-foreground); }
 .sw-nodeploy .btn { margin-top: var(--space-2); }
 .sw-nodeploy-hint { font-size: 12px !important; }
+
+/* 已经发出去、还没收到回执的那一条。淡一档：它是真的在路上，不是画着玩的，所以要
+   看得见；但和已经落库的消息不能长得一模一样。 */
+.sw-msg[data-pending="1"] { opacity: 0.6; }

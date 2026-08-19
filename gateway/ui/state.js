@@ -184,6 +184,8 @@ const state = {
   chatStatus: '',
   chatFiles: [],
   /** botId → 没发出去的草稿。切走再切回来，打了一半的话还在。 */
+  /** 已经发出去、还没从流里回来的那几条。见 chat.js 的 mergePending。 */
+  chatPending: [],
   chatDrafts: {},
   /** 正在重放历史。期间只收不画，见 startChatStream。 */
   chatReplaying: false,

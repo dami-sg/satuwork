@@ -952,7 +952,7 @@ function rowShell(b, key) {
   // 时间戳两侧一致，都挂在气泡外面（见 chat.css 里 .sw-time 的说明）。
   const time = b.time ? `<time class="sw-time" datetime="${new Date(b.time).toISOString()}">${esc(chatClock(b.time))}</time>` : ''
   return (
-    `<div class="sw-msg" data-role="${b.kind}" data-key="${key}">` +
+    `<div class="sw-msg" data-role="${b.kind}" data-key="${key}"${b.pending ? ' data-pending="1"' : ''}>` +
     `<div class="sw-msg-avatar" aria-hidden="true">${avatar}</div>` +
     `<div class="sw-msg-col">` +
     `<div class="sw-bubble" data-role="${b.kind}"><div class="sw-md"></div><div class="sw-chips" hidden></div></div>` +
@@ -1133,6 +1133,41 @@ function threadRows(folded, sessionId) {
   return rows
 }
 
+/**
+ * 本地回显。**发出去的那一刻就画上，不等流把它送回来。**
+ *
+ * 消息流是单向的：POST 出去，等席位那边把 `user/message` 事件经 SSE 回传，界面才画。
+ * Bot 一忙，这中间就是几秒到几十秒的**纯空白**——输入框清空了，屏幕上什么都没多，人
+ * 完全看不出自己那一下有没有生效，只好再按一次。
+ *
+ * 回执一到就撤掉本地这条，换成流里的真货（它带 seq 和服务端时间）。
+ *
+ * **只认「发出去之后」的那些**：拿 afterSeq 卡住。不卡的话，历史里任何一条同样文字的
+ * 消息都会把它抵消掉——发第二遍「好的」时，本地这条会在流还没回来时就凭空消失。
+ */
+function mergePending(folded, sessionId) {
+  const all = state.chatPending || []
+  const mine = all.filter((p) => p.sessionId === sessionId)
+  if (!mine.length) return folded
+  const fresh = folded.blocks.filter((b) => b.kind === 'user' && b.seq != null)
+  const left = []
+  for (const p of mine) {
+    const hit = fresh.findIndex((b) => b.seq > p.afterSeq && b.text === p.text)
+    if (hit >= 0) fresh.splice(hit, 1)
+    else left.push(p)
+  }
+  if (left.length !== mine.length) {
+    state.chatPending = all.filter((p) => p.sessionId !== sessionId || left.includes(p))
+  }
+  if (!left.length) return folded
+  for (const p of left) {
+    folded.blocks.push({ kind: 'user', text: p.text, images: p.images || [], time: p.at, pending: true })
+  }
+  // 没回执之前也要有「正在想」：那一行是人按下回车之后唯一的进度反馈。
+  if (!folded.status) folded.status = 'sending'
+  return folded
+}
+
 function syncThread(thread, folded, sessionId) {
   const rows = threadRows(folded, sessionId)
   // 空会话就留空。以前这里摆一句「继续这段对话…」——它只在**刚开一条新对话**时出现
@@ -1192,7 +1227,7 @@ function nearBottom(el) {
 
 function paintChat() {
   const thread = document.getElementById('chat-thread')
-  const folded = fold(state.chatEvents, chatLive.get(state.chatSessionId))
+  const folded = mergePending(fold(state.chatEvents, chatLive.get(state.chatSessionId)), state.chatSessionId)
   state.chatStatus = folded.status
   if (!thread) return
 
@@ -2418,12 +2453,26 @@ async function sendChat() {
   paintChatFiles()
 
   const images = pickImages(uploaded)
+  const body = composeChatBody(uploaded, text)
+  /**
+   * 先画上，再发。**这一条是给人看的回执**：POST 出去到席位把 user/message 经 SSE 送
+   * 回来，中间少则几百毫秒、多则几十秒（bot 在忙的时候），原先那段时间屏幕上什么也
+   * 没有，人只能再按一次回车。
+   *
+   * afterSeq 记住「此刻流走到哪儿了」，回执认领时只认它之后的——见 mergePending。
+   */
+  const afterSeq = (state.chatEvents || []).reduce((m, ev) => (ev.seq > m ? ev.seq : m), -1)
+  const pending = { sessionId, text: body, images, at: Date.now(), afterSeq }
+  state.chatPending = (state.chatPending || []).concat(pending)
+  paintChat()
   try {
     await api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/messages', {
-      text: composeChatBody(uploaded, text),
+      text: body,
       ...(images.length ? { images } : {}),
     })
   } catch (err) {
+    // 没发出去就把这条回显撤掉，别让屏幕上留一条其实不存在的消息。
+    state.chatPending = (state.chatPending || []).filter((p) => p !== pending)
     // 文件已经传上去了，退回来的只有草稿——附件不还，还了会传第二遍。
     state.chatDraft = text
     if (uploaded.length) flash('err', t('附件已经在工作区里了，但这条消息没发出去。'))
