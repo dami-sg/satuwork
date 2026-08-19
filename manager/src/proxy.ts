@@ -121,6 +121,20 @@ export function proxyIntercept(deps: ProxyDeps) {
       return true
     }
     const rest = vnc[2] || '/'
+    /**
+     * Gateway 反代过来的那条路：认机器票，和 `/bot` 那条一模一样。
+     *
+     * 桌面现在是 Gateway 同域的 `/desktop/:seatId/*` 反代过来的（见
+     * gateway/src/desktop.ts）——那一侧没有、也不该有这块屏的 cookie，它手里只有
+     * 机器票。**这一支要放在票/cookie 前面**：Gateway 不会带 ticket，也不会带
+     * cookie，落到下面就是一句 401。
+     *
+     * 浏览器直连那条路没变，下面原样留着：管理员从后台点进来还走它。
+     */
+    if (machineTokenOk(req, deps.machineToken())) {
+      pipeUpstream(req, res, row.novncPort, rest + url.search, forwardHeaders(req, row.novncPort))
+      return true
+    }
     const ticket = url.searchParams.get('ticket')
     if (ticket) {
       // 入口带票 → 换成一张 path 限定的 cookie 再跳转。之后 noVNC 自己发的那些请求
@@ -192,9 +206,12 @@ export function attachUpgrade(server: Server, deps: ProxyDeps) {
       const seatId = vnc[1]
       const row = seat(seatId)
       if (!row) return bail('404 Not Found')
-      const token = cookieOf(req, cookieName(seatId))
-      const ok = token ? await verifyTicket(token, deps.gatewayUrl()) : undefined
-      if (!ok || ok.seatId !== seatId) return bail('401 Unauthorized')
+      // 同上：Gateway 反代过来的升级请求带的是机器票，没有 cookie。
+      if (!machineTokenOk(req, deps.machineToken())) {
+        const token = cookieOf(req, cookieName(seatId))
+        const ok = token ? await verifyTicket(token, deps.gatewayUrl()) : undefined
+        if (!ok || ok.seatId !== seatId) return bail('401 Unauthorized')
+      }
 
       // `connection` 在普通反代里是 hop-by-hop，要摘掉；但在升级请求里它**就是**
       // 那个把请求变成升级的头。摘了上游不会发 101，Node 的客户端也不会触发

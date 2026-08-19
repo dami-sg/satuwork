@@ -82,18 +82,23 @@ export function portsOf(slot: number): SeatPorts {
 }
 
 /**
- * 桌面地址。**走机器管家，不再直连席位端口。**
+ * 桌面地址。**Gateway 同域的一条路径，不再是管家的地址。**
  *
- * 以前是 `http://<sshHost>:<6081+N>/vnc.html`——每个席位一个对外端口，明文，
- * 只有一个 VNC 口令挡着。现在 noVNC 收回 127.0.0.1，浏览器打管家这一个口，
- * 凭一张五分钟的票进去（管家验完换成 path 限定的 cookie）。
+ * 一路走过来：先是 `http://<sshHost>:<6081+N>/vnc.html`（每个席位一个对外端口，明
+ * 文），然后收成 `{machine.host}/seats/:id/vnc/`（noVNC 回到 127.0.0.1，浏览器只打
+ * 管家一个口），现在再收一层到 `/desktop/:seatId/`，由 Gateway 反代过去。
  *
- * 没有票就只返回入口路径：给 owner 在后台看一眼用，点不进去。
+ * **为什么还要再收一层。** 桌面现在内嵌在右栏的 iframe 里。管家发的那张 cookie 是
+ * `SameSite=Lax`：顶层跳转（原来那种新标签页）放行，跨站 iframe 里连存都不给存，于
+ * 是画面永远出不来，而且不报错。同域之后 cookie 是第一方的，问题从根上没了；顺带
+ * 浏览器也不再需要能连到管家——只要 Gateway 连得到就行。
+ *
+ * `managerHost` 留着不是摆设：它为空表示这块屏还没落到任何一台机器上，那就没有地址
+ * 可给。没有票时只返回入口路径，给 owner 在后台看一眼用，点不进去。
  */
 export function novncUrlOf(managerHost: string | null, seatId: string, ticket?: string): string {
-  const base = (managerHost || '').trim().replace(/\/$/, '')
-  if (!base || !seatId) return ''
-  const url = `${base}/seats/${encodeURIComponent(seatId)}/vnc/`
+  if (!(managerHost || '').trim() || !seatId) return ''
+  const url = `/desktop/${encodeURIComponent(seatId)}/`
   return ticket ? `${url}?ticket=${encodeURIComponent(ticket)}` : url
 }
 

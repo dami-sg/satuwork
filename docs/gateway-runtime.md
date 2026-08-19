@@ -152,7 +152,7 @@ Gateway 没有任何能登录这台机器的凭据，只能在心跳响应里把
 - systemd：`slim-desktop@{seatId}`、`satuwork-bot@{seatId}`。**实例名不再是用户名**——一个员工有多个席位，用户名不唯一了。`User=` 由部署时写的 drop-in 提供：`/etc/systemd/system/{unit}@{seatId}.service.d/seat.conf`
 - 机器上常驻 **机器管家**（`satuwork-manager`，root systemd 服务），Gateway 通过它下发部署；**Gateway 不持有任何能登录这台机器的凭据**
 - 席位用户无 sudo
-- 员工能看见：noVNC URL、VNC 密码、linuxUser、seatId、共享目录、botVersion。看不见 CDP、sudo、LLM 密钥
+- 员工能看见：桌面地址、linuxUser、seatId、共享目录、botVersion。看不见 CDP、sudo、LLM 密钥。**VNC 密码不再显示在对话页右栏**——票里已经带着它自动填进 noVNC，界面上留一行等于把随时可用的凭据摆在屏幕上；接口仍然返回，管理员在公司详情的席位卡里看得到
 - Bot 环境必有 `SATUWORK_BOT_ID`。目录 `GET /runtime/catalog?botId=`，只钉那一颗，不种本地 `default`
 - Bot 运行包在 Gateway 按版本发布；部署指定版本。公司可批量更新已部署的 pair：`POST /platform/orgs/:id/runtime/update`
 - `$SATUWORK_HOME` 是 `/home/{linuxUser}/.satuwork/{seatId}`，席位之间不共用
@@ -254,7 +254,9 @@ v1 约束：一家公司一台机器；机器先按 **pair 进程** 隔离，不
 
 - 每家公司**一个** `accessUrl`，由 Gateway 在派机器时发出，写在公司记录里。这是机器/DNS 登记，不是聊天入口
 - 浏览器：管理页和聊天都打 Gateway。SSE / 发消息由 Gateway 反代到该 pair 的 Bot HTTP（`3200+N`）
-- 桌面：员工拿该 pair 的 noVNC URL（`{machine.host}/seats/{seatId}/vnc/?ticket=…`，票由 Gateway 用 JWT 私钥签、五分钟有效，管家验完换成 path 限定的 HttpOnly cookie）和 VNC 密码。x11vnc、websockify、CDP 全部只听 `127.0.0.1`
+- 桌面：**Gateway 同域**的 `/desktop/{seatId}/?ticket=…`。票由 Gateway 用 JWT 私钥签、五分钟有效；Gateway 验完换成 path 限定的 HttpOnly cookie，再把请求（含 WebSocket 升级）反代到管家的 `/seats/{seatId}/vnc/*`，用机器票（`smt_`）认。x11vnc、websockify、CDP 全部只听 `127.0.0.1`
+  - **为什么不再让浏览器直连管家**：桌面现在内嵌在对话页右栏的 iframe 里。管家发的 cookie 是 `SameSite=Lax`——顶层跳转（原来那种新标签页）放行，跨站 iframe 里浏览器连存都不给存，于是画面永远出不来，而且不报错。同域之后 cookie 是第一方的；顺带浏览器也不再需要能连到管家，只要 Gateway 连得到就行。代价是桌面的像素全部经过 Gateway
+  - 管家侧 `/seats/:id/vnc/*` 同时认两种：机器票（Gateway 反代过来的）和票/cookie（管理员从后台直连的）
 
 ---
 

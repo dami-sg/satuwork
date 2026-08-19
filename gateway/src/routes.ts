@@ -35,6 +35,7 @@ import {
   releaseArch,
   sessionPageLimit,
 } from './db.ts'
+import { desktopIntercept } from './desktop.ts'
 import {
   type MachineLoad,
   botBaseOf,
@@ -2014,6 +2015,9 @@ function kindOf(name: string): CatalogKind {
  * 对话 UI 在这里；正文仍只活在 Bot 磁盘上，本进程只反代、不落库。
  */
 export function attach(router: Router, db: Db, keys: JwtKeys) {
+  // 桌面反代。`/desktop/:seatId/*` → 管家的 noVNC。注册成拦截器而不是路由：它要拿
+  // 原始 req 当流用，不能让路由器先把 body 读掉，路径也是通配的。
+  router.intercept(desktopIntercept(db, keys))
   const llm = createLlm(db)
   attachV1(router, db, keys, llm)
 

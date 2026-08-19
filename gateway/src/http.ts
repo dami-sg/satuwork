@@ -57,6 +57,9 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   }
 }
 
+/** 拦截器。返回 true 表示这个请求已经被接管（桌面反代走这条）。 */
+export type Intercept = (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean> | boolean
+
 interface Route {
   method: string
   parts: string[]
@@ -127,6 +130,7 @@ function serveUi(pathname: string, res: ServerResponse): boolean {
  */
 export class Router {
   private routes: Route[] = []
+  private intercepts: Intercept[] = []
 
   on(method: string, path: string, handler: Handler, raw = false) {
     this.routes.push({ method, parts: path.split('/').filter(Boolean), handler, raw })
@@ -156,11 +160,19 @@ export class Router {
     this.on('DELETE', path, handler)
   }
 
+  /** 反代注册在这儿：它要拿原始 req 当流用，不能让路由器先把 body 读掉。 */
+  intercept(fn: Intercept) {
+    this.intercepts.push(fn)
+  }
+
   async handle(raw: IncomingMessage, res: ServerResponse) {
     const host = raw.headers.host ?? '127.0.0.1'
     const url = new URL(raw.url ?? '/', `http://${host}`)
     const method = (raw.method ?? 'GET').toUpperCase()
     try {
+      for (const fn of this.intercepts) {
+        if (await fn(raw, res, url)) return
+      }
       for (const route of this.routes) {
         if (route.method !== method) continue
         const params = match(route.parts, url.pathname)
