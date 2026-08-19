@@ -390,25 +390,29 @@ export function apply(ctx: Context) {
   ctx.inject(['catalog'], (ctx: Context) => {
     void ctx.catalog.pull()
 
-    ctx.server.get('/api/runtime/status', async (req, res) => res.json(ctx.catalog.status()))
+    ctx.server.get('/api/runtime/status', async (req, res) => {
+      res.json(ctx.catalog.status())
+    })
 
     ctx.server.post('/api/bots/pin', async (req, res) => {
       if ((process.env.SATUWORK_BOT_ID || '').trim()) {
         res.status = 410
-        return res.json({ error: 'Bot 配置在 Gateway' })
+        res.json({ error: 'Bot 配置在 Gateway' })
+        return
       }
       const body = (await req.json().catch(() => ({}))) as { remoteId?: string }
       const remoteId = typeof body.remoteId === 'string' ? body.remoteId.trim() : ''
       if (!remoteId) {
         res.status = 400
-        return res.json({ error: 'remoteId 不能为空' })
+        res.json({ error: 'remoteId 不能为空' })
+        return
       }
       try {
-        return res.json({ bot: await ctx.catalog.pinRemote(remoteId) })
+        res.json({ bot: await ctx.catalog.pinRemote(remoteId) })
       } catch (e) {
         const msg = (e as Error).message
         res.status = msg.startsWith('目录里没有') ? 404 : 400
-        return res.json({ error: msg })
+        res.json({ error: msg })
       }
     })
   })

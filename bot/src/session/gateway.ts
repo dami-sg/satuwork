@@ -55,23 +55,27 @@ export function apply(ctx: Context) {
     const ok = Boolean(token) && Boolean(seat) && timingSafeToken(token!, seat)
     if (!ok) {
       res.status = 404
-      return res.json({ error: 'not found' })
+      res.json({ error: 'not found' })
+      return
     }
     try {
       const events = await ctx.sessions.events(req.params.sessionId)
-      return res.json({ events })
+      res.json({ events })
     } catch {
       res.status = 404
-      return res.json({ error: 'not found' })
+      res.json({ error: 'not found' })
     }
   })
 
-  let me: { accountId: string; companyId: string; machineId: string | null; at: number } | null = null
-  let fetchingMe: Promise<typeof me> | null = null
+  // 写成具名类型，不要用类型查询：me 的初值是 null，控制流分析会把那处查询收窄成
+  // null，fetchingMe 于是成了 Promise<null>，赋真值时报错。
+  type Me = { accountId: string; companyId: string; machineId: string | null; at: number }
+  let me: Me | null = null
+  let fetchingMe: Promise<Me | null> | null = null
   const outbox = ctx.storage.collection<OutboxItem>(OUTBOX)
   let flushing = false
 
-  async function loadMe(): Promise<typeof me> {
+  async function loadMe(): Promise<Me | null> {
     const base = gatewayUrl()
     const token = gatewayToken()
     if (!base || !token) return null
