@@ -19,14 +19,16 @@ export function apply(ctx: Context, _config: Config = {}) {
   /** 运行时地址。真正听在哪个端口由 server 服务说了算。 */
   console.log(`satuwork: runtime ${ctx.server.baseUrl}`)
 
-  ctx.server.get('/api/health', async (req, res) => res.json({ ok: true }))
+  ctx.server.get('/api/health', async (req, res) => {
+    res.json({ ok: true })
+  })
 
   /**
    * 模型目录。来自 Gateway /v1/models 的缓存。本机没有密钥。
    */
   ctx.server.get('/api/models', async (req, res) => {
     const catalog = await ctx.llm.refresh()
-    return res.json({
+    res.json({
       catalog,
       configured: [],
       available: await ctx.llm.available(),
@@ -35,39 +37,43 @@ export function apply(ctx: Context, _config: Config = {}) {
   })
 
   /** 生效设置。只读：改模型 / 提示词在 Gateway。 */
-  ctx.server.get('/api/settings', async (req, res) =>
+  ctx.server.get('/api/settings', async (req, res) => {
     res.json({
       provider: ctx.agents.provider,
       model: ctx.agents.model,
       system: ctx.agents.system,
-    }),
-  )
+    })
+  })
 
   ctx.server.put('/api/settings', async (req, res) => {
     res.status = 410
-    return res.json({ error: '模型配置在 Gateway' })
+    res.json({ error: '模型配置在 Gateway' })
   })
 
   ctx.server.put('/api/credentials/:provider', async (req, res) => {
     res.status = 410
-    return res.json({ error: 'credentials live on Gateway' })
+    res.json({ error: 'credentials live on Gateway' })
   })
 
-  ctx.server.get('/api/sessions', async (req, res) => res.json(await ctx.sessions.list()))
+  ctx.server.get('/api/sessions', async (req, res) => {
+    res.json(await ctx.sessions.list())
+  })
 
   ctx.server.post('/api/sessions', async (req, res) => {
     const body = (await req.json().catch(() => ({}))) as { title?: string; botId?: string; agentId?: string }
     const botId = body.botId || body.agentId
     if (!botId) {
       res.status = 400
-      return res.json({ error: 'botId 不能为空' })
+      res.json({ error: 'botId 不能为空' })
+      return
     }
     const bot = ctx.roster.get(botId)
     if (!bot) {
       res.status = 404
-      return res.json({ error: `没有这个助理：${botId}` })
+      res.json({ error: `没有这个助理：${botId}` })
+      return
     }
-    return res.json({
+    res.json({
       id: await ctx.sessions.create({
         title: body.title ?? bot.name,
         botId: bot.id,
@@ -92,10 +98,10 @@ export function apply(ctx: Context, _config: Config = {}) {
     const turns = Math.min(50, Math.max(1, Number(req.query.get('turns') ?? 20)))
     try {
       const all = await ctx.sessions.events(req.params.id)
-      return res.json(historySlice(all, { turns, before: before > 0 ? before : undefined }))
+      res.json(historySlice(all, { turns, before: before > 0 ? before : undefined }))
     } catch (e) {
       res.status = 404
-      return res.json({ error: (e as Error).message })
+      res.json({ error: (e as Error).message })
     }
   })
 
@@ -109,21 +115,25 @@ export function apply(ctx: Context, _config: Config = {}) {
     const body = (await req.json().catch(() => ({}))) as { text?: string }
     if (!body.text?.trim()) {
       res.status = 400
-      return res.json({ error: 'text 不能为空' })
+      res.json({ error: 'text 不能为空' })
+      return
     }
-    if (ctx.agents.steer(req.params.id, body.text)) return res.json({ steered: true })
+    if (ctx.agents.steer(req.params.id, body.text)) {
+      res.json({ steered: true })
+      return
+    }
     // 不等 turn 跑完就返回：结果通过 SSE 推，HTTP 只负责「收到了」。
     void ctx.agents.send(req.params.id, body.text).catch((e: Error) => {
       console.error(`satuwork: agents.send 失败：${e.message}`)
       ctx.logger?.warn?.(`agents.send 失败：${e.message}`)
     })
-    return res.json({ accepted: true })
+    res.json({ accepted: true })
   })
 
   /** 中止当前这一轮。 */
-  ctx.server.post('/api/sessions/:id/abort', async (req, res) =>
-    res.json({ aborted: ctx.agents.abort(req.params.id) }),
-  )
+  ctx.server.post('/api/sessions/:id/abort', async (req, res) => {
+    res.json({ aborted: ctx.agents.abort(req.params.id) })
+  })
 
   // 未知的 /api/* 必须是 JSON 404，不能掉进下面的 SPA 兜底——否则前端 fetch
   // 拿到一段 HTML，报错会指向 JSON 解析而不是真正的路由缺失。
@@ -135,19 +145,19 @@ export function apply(ctx: Context, _config: Config = {}) {
     const response = await next()
     if (response || res.claimed) return response
     res.status = 404
-    return res.json({ error: 'unknown endpoint', path: req.path })
+    res.json({ error: 'unknown endpoint', path: req.path })
   })
 
   ctx.server.all('/internal/{*rest}', async (req, res, next) => {
     const response = await next()
     if (response || res.claimed) return response
     res.status = 404
-    return res.json({ error: 'unknown endpoint', path: req.path })
+    res.json({ error: 'unknown endpoint', path: req.path })
   })
 
   ctx.server.get('/', async (req, res) => {
     res.status = 404
-    return res.json({ error: 'unknown endpoint', path: req.path || '/' })
+    res.json({ error: 'unknown endpoint', path: req.path || '/' })
   })
 
   /**
@@ -157,7 +167,7 @@ export function apply(ctx: Context, _config: Config = {}) {
     const response = await next()
     if (response || res.claimed) return response
     res.status = 404
-    return res.json({ error: 'unknown endpoint', path: req.path })
+    res.json({ error: 'unknown endpoint', path: req.path })
   })
 
 }
