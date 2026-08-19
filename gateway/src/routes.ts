@@ -123,13 +123,6 @@ function intField(body: Record<string, unknown>, key: string): number | undefine
   return Math.trunc(n)
 }
 
-function tokenCount(v: unknown, key: string): number {
-  if (v == null || v === '') return 0
-  const n = typeof v === 'number' ? v : Number(v)
-  if (!Number.isFinite(n) || n < 0) throw new HttpError(400, `${key} 必须是非负数字`)
-  return Math.trunc(n)
-}
-
 function seatsOf(v: unknown, fallback?: number): number {
   if (v == null) {
     if (fallback == null) throw new HttpError(400, 'seats 不能为空')
@@ -5252,24 +5245,24 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     send(res, 200, { session })
   })
 
+  /**
+   * 收下就算了，**不写库**。
+   *
+   * bot 的每一次模型调用都是走 `/v1/chat/completions` 从这里出去的，那条路上
+   * `recordLlmCall` 已经按请求写了一行 llm_calls，用的还是上游返回的原始 usage。
+   * 这里再插一行，同一次调用就记了两遍——账面上的用量直接翻倍。
+   *
+   * 端点保留，是因为线上还有旧版 bot 在轮次结束时调它：改成 404 会让它们的本地
+   * 队列永远重试不掉。新版 bot 已经不发了（见 bot/src/session/gateway.ts）。
+   * 等所有席位都升上去之后，这段可以整个删掉。
+   */
   router.post('/internal/usage', async (req, res) => {
     const caller = await requireInternalCaller(req, db)
-    const body = bodyOf(req)
-    const accountId = callerAccountId(caller, () => strField(body, 'accountId'))
+    // 不写库了，但**租户边界照查**：这条路仍然是一台机器拿着自己的票点名某个账号，
+    // 少了这一层，跨公司的机器就能拿别家账号的 id 试出「这个账号存不存在」。
+    const accountId = callerAccountId(caller, () => strField(bodyOf(req), 'accountId'))
     const account = await db.account(accountId)
     if (!account || account.companyId !== caller.companyId) throw new HttpError(403, '账号不属于这家公司')
-    const provider = strField(body, 'provider')
-    const model = strField(body, 'model')
-    const promptTokens = tokenCount(body.promptTokens, 'promptTokens')
-    const completionTokens = tokenCount(body.completionTokens, 'completionTokens')
-    await db.insertLlmCall({
-      accountId: account.id,
-      companyId: account.companyId,
-      provider,
-      model,
-      promptTokens,
-      completionTokens,
-    })
-    send(res, 200, { ok: true })
+    send(res, 200, { ok: true, recorded: false })
   })
 }

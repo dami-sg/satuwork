@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { gatewayToken, gatewayUrl } from '../llm/gateway.ts'
-import type { SessionEvent, SessionOrigin, Usage } from './types.ts'
+import type { SessionEvent, SessionOrigin } from './types.ts'
 
 export const name = 'satu-session-gateway'
 export const inject = ['server', 'sessions', 'catalog', 'storage']
@@ -26,20 +26,19 @@ function timingSafeToken(given: string, expected: string): boolean {
 const OUTBOX = 'gateway-outbox'
 const READY_CAP_MS = 30_000
 
-type OutboxItem =
-  | { kind: 'index'; sessionId: string; createdAt: number; attempts: number; lastError?: string }
-  | {
-      kind: 'usage'
-      accountId?: string
-      provider: string
-      model: string
-      promptTokens: number
-      completionTokens: number
-      botId: string | null
-      createdAt: number
-      attempts: number
-      lastError?: string
-    }
+/**
+ * 只剩 index 一种了。
+ *
+ * 以前还有 `kind: 'usage'`——每轮结束把这轮的 token 报去 `/internal/usage`。那是
+ * **重复记账**：调用本来就是走 Gateway 的 `/v1/chat/completions` 出去的，代理那一侧
+ * 已经按每次请求写了一行 llm_calls，bot 再报一次就是同一次调用记两遍。实测 8/19
+ * 那天 11 行里有 4 对是完全重复的（token 数一样，createdAt 一个是请求开始、一个是
+ * 收流结束）。留代理侧那一份：它拿的是上游返回的原始 usage，而且第三方直接用
+ * API key 调 `/v1/*` 的那些请求只有它看得见。
+ *
+ * 老队列里可能还压着 usage 项，flushOutbox 会把它们直接丢掉，不再往外发。
+ */
+type OutboxItem = { kind: 'index'; sessionId: string; createdAt: number; attempts: number; lastError?: string }
 
 /**
  * 给 Gateway 拉全文，以及把会话索引报到控制面。
@@ -148,21 +147,14 @@ export function apply(ctx: Context) {
     flushing = true
     try {
       for (const row of outbox.list()) {
+        // 升级前压在队列里的 usage 项：丢掉，别发。留着只会重复计费，
+        // 而且新的 /internal/usage 也不再写库了。
+        if (row.value.kind !== 'index') {
+          outbox.delete(row.id)
+          continue
+        }
         try {
-          if (row.value.kind === 'index') {
-            await sendIndex(row.value.sessionId)
-          } else {
-            const who = await cachedMe()
-            if (!who) throw new Error('/me 未就绪')
-            await postInternal('/internal/usage', {
-              accountId: row.value.accountId || who.accountId,
-              provider: row.value.provider,
-              model: row.value.model,
-              promptTokens: row.value.promptTokens,
-              completionTokens: row.value.completionTokens,
-              botId: row.value.botId,
-            })
-          }
+          await sendIndex(row.value.sessionId)
           outbox.delete(row.id)
         } catch (e) {
           outbox.put(row.id, {
@@ -222,52 +214,6 @@ export function apply(ctx: Context) {
     }
   }
 
-  async function reportUsage(sessionId: string, turn: number) {
-    if (!configured()) return
-    const events = await ctx.sessions.events(sessionId)
-    const root = events.find((e) => e.type === 'session')
-    const botId = (root?.data as { botId?: string } | undefined)?.botId || pinnedBotId() || null
-    let promptTokens = 0
-    let completionTokens = 0
-    for (const ev of events) {
-      if (ev.type !== 'assistant/message') continue
-      if ((ev.data as { turn: number }).turn !== turn) continue
-      const usage = (ev.data as { usage?: Usage }).usage
-      promptTokens += usage?.inputTokens ?? 0
-      completionTokens += usage?.outputTokens ?? 0
-    }
-    // 没有真实 token 就不报，避免把 0 当成用量。
-    if (promptTokens <= 0 && completionTokens <= 0) return
-    const header = [...events]
-      .reverse()
-      .find((e) => e.type === 'request/header' && (e.data as { turn: number }).turn === turn)
-    const provider = header ? String((header.data as { provider?: string }).provider || '') : ''
-    const model = header ? String((header.data as { model?: string }).model || '') : ''
-    if (!provider || !model) return
-    const who = await cachedMe()
-    const body = {
-      accountId: who?.accountId,
-      provider,
-      model,
-      promptTokens,
-      completionTokens,
-      botId,
-    }
-    try {
-      if (!who) throw new Error('/me 未就绪')
-      await postInternal('/internal/usage', { ...body, accountId: who.accountId })
-    } catch (e) {
-      ctx.logger?.warn?.(`usage: 上报失败 ${(e as Error).message}`)
-      enqueue({
-        kind: 'usage',
-        ...body,
-        createdAt: Date.now(),
-        attempts: 0,
-        lastError: (e as Error).message,
-      })
-    }
-  }
-
   ctx.on('session/event', (sessionId: string, event: SessionEvent) => {
     if (
       event.type === 'session' ||
@@ -277,9 +223,7 @@ export function apply(ctx: Context) {
     ) {
       void report(sessionId)
     }
-    if (event.type === 'turn/end') {
-      void reportUsage(sessionId, event.data.turn)
-    }
+    // turn/end 不再上报用量：那一份由 Gateway 代理侧记，见 OutboxItem 上的说明。
   })
 
   const flushTimer = setInterval(() => void flushOutbox(), 5000)

@@ -24,6 +24,8 @@ import { runReplaySlice } from './replay-slice.mjs'
 import { runWorkspaceFiles } from './workspace-files.mjs'
 import { runDocExtract } from './doc-extract.mjs'
 import { runVision } from './vision.mjs'
+import { runHistoryTime } from './history-time.mjs'
+import { runCompact } from './compact.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
 import { uiSource } from './ui-dom.mjs'
@@ -942,17 +944,23 @@ async function runGateway() {
     })
     assert(crossUse.status === 403, `cross usage ${crossUse.status} ${crossUse.text}`)
 
+    // `/internal/usage` **收下但不记账**。记账那一份在 /v1 代理侧（见 llm-usage 那套），
+    // bot 每轮再报一次就是同一次调用记两遍——账面直接翻倍。端点保留只为了让线上还没
+    // 升级的旧 bot 能把本地队列排空，所以这里断言的是「调了也不涨」。
+    const before = await req(base, 'GET', `/orgs/${orgId}/usage`, { token })
+    assert(before.status === 200, `org usage before ingest ${before.status}`)
+    const callsOf = (r) => Number((r.json.stats || []).find((x) => x.label === '任务执行')?.value ?? 0)
+    const promptOf = (r) => Number((r.json.stats || []).find((x) => x.label === '输入 Tokens')?.value ?? 0)
     const usage = await req(base, 'POST', '/internal/usage', {
       token: orgMachineTok,
       body: { accountId: adminId, provider: 'deepseek', model: 'deepseek-v4-flash', promptTokens: 11, completionTokens: 7 },
     })
     assert(usage.status === 200 && usage.json.ok === true, `usage ingest ${usage.status} ${usage.text}`)
+    assert(usage.json.recorded === false, `usage 不该记账 ${usage.text}`)
     const stats = await req(base, 'GET', `/orgs/${orgId}/usage`, { token })
     assert(stats.status === 200, `org usage after ingest ${stats.status}`)
-    const tasks = (stats.json.stats || []).find((x) => x.label === '任务执行')
-    assert(tasks && Number(tasks.value) >= 1, `calls ${tasks && tasks.value}`)
-    const inp = (stats.json.stats || []).find((x) => x.label === '输入 Tokens')
-    assert(inp && Number(inp.value) >= 11, `prompt ${inp && inp.value}`)
+    assert(callsOf(stats) === callsOf(before), `调用数不该变：${callsOf(before)} → ${callsOf(stats)}`)
+    assert(promptOf(stats) === promptOf(before), `输入 tokens 不该变：${promptOf(before)} → ${promptOf(stats)}`)
   })
 
   await test('POST /v1/chat/completions|/v1/responses|/v1/messages 无票 → 401', async () => {
@@ -2781,6 +2789,8 @@ async function main() {
     await runWorkspaceFiles({ root, test, assert, log })
     await runDocExtract({ root, test, assert, log })
     await runVision({ root, test, assert, log })
+    await runHistoryTime({ root, test, assert, log })
+    await runCompact({ root, test, assert, log })
   } finally {
     killAll()
     try {

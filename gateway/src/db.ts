@@ -385,8 +385,11 @@ export interface LlmCall {
   companyId: string | null
   provider: string
   model: string
+  /** 整个提示词，含命中缓存的部分。 */
   promptTokens: number
   completionTokens: number
+  /** promptTokens 里命中缓存的那一截，是子集不是加项。 */
+  cachedTokens: number
   createdAt: number
 }
 
@@ -1335,6 +1338,10 @@ export class Db {
         "completionTokens" bigint not null default 0,
         "createdAt"        bigint not null
       );
+      -- promptTokens 是**整个提示词**，命中缓存的那部分也在里面；cachedTokens 是其中
+      -- 命中的一截，两者不相加。缓存读单价低，折价要用得上这个细分。
+      -- 老行都是 0：那时候我们连缓存命中都没记，追不回来了。
+      alter table llm_calls add column if not exists "cachedTokens" bigint not null default 0;
       create index if not exists llm_calls_company on llm_calls ("companyId", "createdAt" desc);
       create index if not exists llm_calls_account on llm_calls ("accountId");
     `)
@@ -1782,6 +1789,7 @@ export class Db {
     model: string
     promptTokens?: number
     completionTokens?: number
+    cachedTokens?: number
   }): Promise<LlmCall> {
     const row: LlmCall = {
       id: randomUUID(),
@@ -1791,10 +1799,11 @@ export class Db {
       model: input.model,
       promptTokens: input.promptTokens ?? 0,
       completionTokens: input.completionTokens ?? 0,
+      cachedTokens: input.cachedTokens ?? 0,
       createdAt: Date.now(),
     }
     await this.run(
-      'insert into llm_calls (id, "accountId", "companyId", provider, model, "promptTokens", "completionTokens", "createdAt") values (?,?,?,?,?,?,?,?)',
+      'insert into llm_calls (id, "accountId", "companyId", provider, model, "promptTokens", "completionTokens", "cachedTokens", "createdAt") values (?,?,?,?,?,?,?,?,?)',
       [
         row.id,
         row.accountId,
@@ -1803,16 +1812,21 @@ export class Db {
         row.model,
         row.promptTokens,
         row.completionTokens,
+        row.cachedTokens,
         row.createdAt,
       ],
     )
     return row
   }
 
-  async updateLlmCallTokens(id: string, promptTokens: number, completionTokens: number): Promise<void> {
-    await this.run('update llm_calls set "promptTokens"=?, "completionTokens"=? where id=?', [
-      promptTokens,
-      completionTokens,
+  async updateLlmCallTokens(
+    id: string,
+    usage: { prompt_tokens: number; completion_tokens: number; cached_tokens?: number },
+  ): Promise<void> {
+    await this.run('update llm_calls set "promptTokens"=?, "completionTokens"=?, "cachedTokens"=? where id=?', [
+      usage.prompt_tokens,
+      usage.completion_tokens,
+      usage.cached_tokens ?? 0,
       id,
     ])
   }
@@ -1827,6 +1841,7 @@ export class Db {
       model: str(r.model),
       promptTokens: num(r.promptTokens),
       completionTokens: num(r.completionTokens),
+      cachedTokens: num(r.cachedTokens),
       createdAt: num(r.createdAt),
     }))
   }

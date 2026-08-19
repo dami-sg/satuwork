@@ -91,6 +91,36 @@ export interface SessionEventMap {
   }
   'session/title': { title: string }
 
+  /**
+   * 上下文压缩点。
+   *
+   * 一个 Bot 一条长会话，会话只增不减，而每一轮都把全量历史重建成 messages 发出去——
+   * 这条路走到底必然撞上下文窗口。所以到了阈值就把**旧的那一段**换成一段摘要。
+   *
+   * **换的只是送进模型的那一份。** JSONL 一条不删，界面、审计、`/internal/sessions/:id`
+   * 看到的仍然是全量原文；模型想看原文也调得到（history_read / history_search）。
+   * 这正是这件事敢做的前提：压缩不是丢弃，是把远处的东西挪到伸手可及的地方。
+   *
+   * **throughSeq 必须落在 turn/end 上。** 边界切在一轮中间的话，带 tool_calls 的助手
+   * 消息会被摘要吃掉、而它的 tool/result 留在后面——provider 直接拒收
+   * 「role 'tool' 必须紧跟在带 tool_calls 的消息之后」。
+   *
+   * 加这一种事件不算破坏性变更：老版本读到不认识的 type 会跳过，退化成发全量历史，
+   * 也就是加它之前的行为。所以不动 SESSION_FORMAT_VERSION。
+   */
+  'session/compact': {
+    /** 摘要覆盖到这一条（含）为止。之后的事件照旧逐条进上下文。 */
+    throughSeq: number
+    /** 覆盖区间的首尾时间。摘要正文里要写出来，否则「昨天」在压缩之后就断了。 */
+    from: number
+    to: number
+    summary: string
+    /** 诊断用：压掉了多少条消息、前后各值多少 token（估算）。 */
+    droppedMessages: number
+    tokensBefore: number
+    tokensAfter: number
+  }
+
   'turn/start': { turn: number }
   'turn/end': { turn: number; reason: 'completed' | 'error' | 'aborted' }
   'step/start': { turn: number; step: number }
