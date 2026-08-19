@@ -526,6 +526,106 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(noNo.includes('abcdef01'), '短码也一起没了')
     })
 
+    await test('机器管理：菜单在「机器配置」上面，列表和详情画得出，公司侧进不去', async () => {
+      // 这一页答的是「平台上挂着哪些机器」，公司详情里那块「运行机器」答的是「这家
+      // 有几台」。断言分三层：入口在不在、两张页面画不画得出、以及**没派给公司的机器
+      // 有没有列出来**——最后这条正是这一页存在的理由，按公司列永远列不到它们。
+      const ui = await boot(ownerToken)
+      const nav = ui.html()
+      assert(nav.includes('机器管理'), '平台菜单里没有「机器管理」')
+      assert(
+        nav.indexOf('机器管理') < nav.indexOf('机器配置'),
+        '「机器管理」该排在「机器配置」上面：先看哪台机器出事，再谈给它发什么包',
+      )
+      assert(ui.pathAllowed('/machines') && ui.pathAllowed('/machines/some-id'), '列表或详情被挡在门外')
+
+      const machine = (over) => ({
+        no: null,
+        machine: {
+          id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+          host: 'http://10.0.0.12:8443',
+          paired: true,
+          pairedAt: Date.now(),
+          managerVersion: '0.3.1+abc-arm64',
+          protocol: 1,
+          lastError: null,
+          lastHeartbeatAt: Date.now() - 12000,
+          link: 'online',
+          heartbeatAge: 12000,
+          timezone: null,
+          currentTimezone: null,
+          arch: 'arm64',
+          ...(over || {}),
+        },
+        accounts: 3,
+        maxAccounts: 10,
+        seats: 2,
+        full: false,
+        botVersions: [{ version: '0.9.0+aaa-arm64', seats: 2 }],
+        botOutdated: false,
+        managerDesired: null,
+        managerOutdated: false,
+        managerPending: false,
+        timezonePending: false,
+        company: { id: 'c1', name: 'UI-SMOKE-公司', slug: 'smoke', status: 'active' },
+      })
+      const orphan = { ...machine({ id: 'ffffffff-0000-4000-8000-000000000000', host: null, paired: false, link: 'unpaired', lastHeartbeatAt: null, heartbeatAge: null, managerVersion: null }), company: null }
+
+      ui.state.path = '/machines'
+      ui.state.allMachines = [machine(), orphan]
+      ui.state.machineTotals = { machines: 2, paired: 1, online: 1, accounts: 3, max: 10, seats: 2 }
+      ui.render()
+      const list = ui.html()
+      assert(list.includes('UI-SMOKE-公司'), '列表没画出归属公司')
+      assert(list.includes('未分配'), '没派给公司的机器没标出来——它恰恰是这一页要看见的那种')
+      assert(list.includes('data-href="/machines/ffffffff-0000-4000-8000-000000000000"'), '行点不进详情')
+
+      ui.state.path = '/machines/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+      ui.state.machineDetail = {
+        ...machine(),
+        seatList: [
+          {
+            accountId: 'a1',
+            who: 'zhang@smoke.test',
+            whoName: '张三',
+            botId: 'b1',
+            botName: 'UI-SMOKE-助理',
+            seatId: 'smoke-zhang-b1',
+            linuxUser: 'sw_a1',
+            slot: 3,
+            status: 'ready',
+            botVersion: '0.9.0+aaa-arm64',
+            lastError: null,
+            deployedAt: Date.now(),
+          },
+        ],
+        companies: [{ id: 'c1', name: 'UI-SMOKE-公司', slug: 'smoke' }],
+      }
+      ui.render()
+      const detail = ui.html()
+      assert(detail.includes('smoke-zhang-b1'), '详情页没列出席位')
+      // 「席位数」和「席位清单」共用一个键的话，这里会画出一串 [object Object]，
+      // 而「这台机器上还有没有席位」也会跟着判错（空数组是真值）。
+      assert(!detail.includes('[object Object]'), '有字段被当成对象直接拼进 HTML 了')
+      // Bot 名要用接口给的那个。回落到 state.bots 的话，直接打开这个地址时整列是 uuid
+      // ——而 state.bots 只有逛过别的页面才会有内容。
+      assert(detail.includes('UI-SMOKE-助理'), '席位表没用接口给的 Bot 名')
+      // 出错的席位要比正常的显眼：这一页就是用来找坏掉那个的。
+      assert(/tag-accent">运行中/.test(detail) === false, '正常席位不该占着最扎眼的那档标签')
+      assert(detail.includes('tag-accent-2">运行中'), 'ready 该是安静的那一档')
+      assert(detail.includes('data-form="machine-capacity"'), '改容量的表单没接上')
+      assert(detail.includes('data-form="machine-company"'), '改归属的表单没接上')
+      // 有席位时移除按钮必须是禁的：删掉之后那些席位会指向一台不存在的机器。
+      assert(/data-act="machine-remove"[^>]*disabled/.test(detail), '这台机器上还有席位，移除按钮不该点得动')
+      // scope 决定接口前缀。漏了它，平台页上的每个动作都会打到公司那条路上去，
+      // 而那条路要 orgId——没归属的机器上一个动作都做不了。
+      assert(detail.includes('data-scope="platform"'), '动作没标 scope，会打到公司那条接口上')
+
+      // 公司管理员没有这一页：机器是平台的事。
+      const admin = await boot(adminToken)
+      assert(!admin.pathAllowed('/machines'), '公司管理员不该进得去机器管理')
+    })
+
     await test('会话列表截断时画出「加载更多」，没截断就不画', async () => {
       // 这条防的是「接口分页了、界面没接上」：后端只回最近一页，界面照样画成一份
       // 完整列表，管理员据此以为更早的会话不存在。按钮的 data-act 也要在，否则点了

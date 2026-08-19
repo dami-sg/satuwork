@@ -115,6 +115,7 @@ document.getElementById('app').addEventListener('submit', (e) => {
   if (form.getAttribute('data-form') === 'add-release') return addRelease(e)
   if (form.getAttribute('data-form') === 'machine-capacity') return saveCapacity(e)
   if (form.getAttribute('data-form') === 'machine-timezone') return saveTimezone(e)
+  if (form.getAttribute('data-form') === 'machine-company') return saveMachineCompany(e)
   if (form.getAttribute('data-form') === 'cred') {
     e.preventDefault()
     const provider = form.getAttribute('data-provider')
@@ -282,11 +283,20 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'machine-remove') {
-    await removeMachine(btn.getAttribute('data-id'), btn.getAttribute('data-machine'))
+    await removeMachine(btn)
     return
   }
   if (act === 'upgrade-manager') {
-    await upgradeManager(btn.getAttribute('data-id'), btn.getAttribute('data-machine'))
+    await upgradeManager(btn)
+    return
+  }
+  if (act === 'machine-bot-update') {
+    await updateMachineRuntime(btn.getAttribute('data-machine'))
+    return
+  }
+  if (act === 'machine-filter') {
+    state.machineFilter = btn.getAttribute('data-filter') || ''
+    render()
     return
   }
   if (act === 'seat-open') {
@@ -375,21 +385,32 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'machine-logs') {
-    // 平台侧：管家自己 + 这台机器上的每个席位。两者回答的问题不一样——部署失败和
-    // 升级卡住只写在管家的 journal 里，某一轮为什么不结束只写在 bot 的。
-    const orgId = btn.getAttribute('data-id') || ''
-    const machineId = btn.getAttribute('data-machine') || ''
-    const card = (state.machines || []).find((m) => m.machine && m.machine.id === machineId)
-    const base = `/platform/orgs/${encodeURIComponent(orgId)}/machines/${encodeURIComponent(machineId)}/logs`
-    const sources = [{ key: 'manager', label: t('机器管家'), url: `${base}?follow=1&lines=300` }]
-    for (const seat of (card && card.seatList) || []) {
+    // 管家自己 + 这台机器上的每个席位。两者回答的问题不一样——部署失败和升级卡住只
+    // 写在管家的 journal 里，某一轮为什么不结束只写在 bot 的。
+    //
+    // 卡片从哪儿来跟着 scope 走：公司详情页手上是 state.machines 里那张，机器管理的
+    // 详情页手上是 state.machineDetail。**不能混着找**——两边装的是不同公司的机器，
+    // 找错了会开出一张空的日志源清单。清单本身两边同名同义（seatList）。
+    const s = machineScope(btn)
+    const seatOnly = btn.getAttribute('data-seat') || ''
+    const card =
+      s.scope === 'platform'
+        ? state.machineDetail
+        : (state.machines || []).find((m) => m.machine && m.machine.id === s.machineId)
+    const base = `${s.base}/logs`
+    // 拆过的席位（status=none）机器上已经没有那个单元了，日志只会是空的，别列进来。
+    const seatList = ((card && card.seatList) || []).filter((x) => x.status !== 'none')
+    // 席位行上那颗「日志」是奔着这一个席位去的，别让它开出一张要再挑一次的清单。
+    const rows = seatOnly ? seatList.filter((x) => x.seatId === seatOnly) : seatList
+    const sources = seatOnly ? [] : [{ key: 'manager', label: t('机器管家'), url: `${base}?follow=1&lines=300` }]
+    for (const seat of rows) {
       sources.push({
         key: seat.seatId,
         label: `${t('席位')} ${seat.who} · ${seat.seatId}`,
         url: `${base}?follow=1&lines=300&seatId=${encodeURIComponent(seat.seatId)}`,
       })
     }
-    openLogs(`${(card && card.machine && card.machine.host) || machineId}`, sources)
+    openLogs(`${(card && card.machine && card.machine.host) || s.machineId}`, sources)
     return
   }
   if (act === 'logs-close') {

@@ -7,6 +7,7 @@ function pageView() {
   if (state.path.startsWith('/bots/')) return botDetailPage()
   if (state.path.startsWith('/companies/') && state.path !== '/companies') return companyDetailPage()
   if (state.path.startsWith('/users/') && state.path !== '/users') return userDetailPage()
+  if (state.path.startsWith('/machines/') && state.path !== '/machines') return machineDetailPage()
   if (state.path.startsWith('/audit/') && state.path !== '/audit') return auditDetailPage()
   if (isChatPath(state.path)) return chatPage()
   switch (state.path) {
@@ -24,6 +25,8 @@ function pageView() {
       return accountsPage()
     case '/audit':
       return auditPage()
+    case '/machines':
+      return machinesPage()
     case '/releases':
       return releasesPage()
     case '/companies':
@@ -607,23 +610,103 @@ async function createOrg(e) {
   }
 }
 
+/**
+ * 机器上的动作分两条路：公司详情页那块面板管的是「这家公司的第 n 台」，平台的机器
+ * 管理页管的是「平台上的这一台」。两边的动作**完全一样**，不同的只有接口前缀和改完
+ * 该刷新谁——所以处理器只有一套，靠元素上的 `data-scope` 分流，而不是两份迟早会各自
+ * 漂移的相似代码。
+ *
+ * 没写 `data-scope` 的一律当公司侧：公司详情页那些元素是先有的，不该为这件事全部改一遍。
+ */
+function machineScope(el) {
+  const scope = el.getAttribute('data-scope') === 'platform' ? 'platform' : 'org'
+  const machineId = el.getAttribute('data-machine') || ''
+  const orgId = el.getAttribute('data-id') || ''
+  return {
+    scope,
+    orgId,
+    machineId,
+    base:
+      scope === 'platform'
+        ? `/platform/machines/${encodeURIComponent(machineId)}`
+        : `/platform/orgs/${encodeURIComponent(orgId)}/machines/${encodeURIComponent(machineId)}`,
+    reload: () => (scope === 'platform' ? loadMachineDetail(machineId) : loadCompanyDetail(orgId)),
+  }
+}
+
 async function saveMachine(e) {
   e.preventDefault()
   const form = e.target
-  const id = form.getAttribute('data-id')
+  const s = machineScope(form)
   const host = String(new FormData(form).get('host') || '').trim()
-  const machineId = form.getAttribute('data-machine') || ''
   state.busy = true
   render()
   try {
-    const data = await api('PUT', `/platform/orgs/${encodeURIComponent(id)}/machine`, { host, machineId })
-    await loadCompanyDetail(id)
+    // 公司侧那条老接口收的是 `{host, machineId}`（它还兼着「把这台设成公司默认机器」），
+    // 平台侧是纯粹的改地址。两者的响应形状一样，下面这段共用。
+    const data =
+      s.scope === 'platform'
+        ? await api('PUT', `${s.base}/host`, { host })
+        : await api('PUT', `/platform/orgs/${encodeURIComponent(s.orgId)}/machine`, { host, machineId: s.machineId })
+    await s.reload()
     // 存下来还不够——地址写错了要当场知道，不能等到第一次部署。
     flash(data.reachable ? 'ok' : 'err', data.reachable ? '已保存，管家可达' : `已保存，但打不到管家：${data.error || '无响应'}`)
   } catch (err) {
     flash('err', err.message)
   } finally {
     state.busy = false
+    render()
+  }
+}
+
+/**
+ * 改这台机器归谁。留空 = 收回，变成待分配。
+ *
+ * 有席位时后端会 409 顶回来——席位是按公司建的账号和目录，改归属并不会把它们搬走。
+ * 界面上那颗按钮本来就是禁的，这里不重复判断：真到了两边不一致的时候，以后端为准。
+ */
+async function saveMachineCompany(e) {
+  e.preventDefault()
+  const form = e.target
+  const machineId = form.getAttribute('data-machine') || ''
+  const companyId = String(new FormData(form).get('companyId') || '')
+  state.busy = true
+  render()
+  try {
+    await api('PUT', `/platform/machines/${encodeURIComponent(machineId)}/company`, { companyId })
+    await loadMachineDetail(machineId)
+    flash('ok', companyId ? '已改归属' : '已收回，这台机器现在待分配')
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
+/** 把这台机器上的席位逐个重铺到最新的 Bot 版本。慢是正常的：一个席位一次真部署。 */
+async function updateMachineRuntime(machineId) {
+  if (!machineId || state.updatingRuntime) return
+  const version = state.botLatest || state.latestRelease
+  if (!version) {
+    flash('err', '还没有发布 Bot 版本')
+    render()
+    return
+  }
+  state.updatingRuntime = true
+  render()
+  try {
+    const data = await api('POST', `/platform/machines/${encodeURIComponent(machineId)}/runtime/update`, { version })
+    const results = Array.isArray(data.results) ? data.results : []
+    const ok = results.filter((r) => r.status === 'ready' && !r.error).length
+    const bad = results.filter((r) => r.error || r.status === 'error').length
+    if (!results.length) flash('ok', t('没有需要更新的席位', 'No seats needed updating'))
+    else flash(bad && !ok ? 'err' : 'ok', t(`更新 ${data.version}：成功 ${ok}，失败 ${bad}`, `Updated ${data.version}: ${ok} ok, ${bad} failed`))
+    await loadMachineDetail(machineId)
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.updatingRuntime = false
     render()
   }
 }
@@ -684,13 +767,20 @@ async function saveManagerVersion(e) {
  *
  * 只是下指令——换版、自检、失败回滚都在机器上做，所以提示语说的是「等机器换版」。
  */
-async function removeMachine(id, machineId) {
-  if (!id || !machineId) return
+async function removeMachine(el) {
+  const s = machineScope(el)
+  if (!s.machineId || (s.scope === 'org' && !s.orgId)) return
   state.busy = true
   render()
   try {
-    await api('DELETE', `/platform/orgs/${encodeURIComponent(id)}/machines/${encodeURIComponent(machineId)}`)
-    await loadCompanyDetail(id)
+    await api('DELETE', s.base)
+    // 平台侧删的就是当前这一页——它已经不存在了，留在原地会去拉一条 404。回列表。
+    if (s.scope === 'platform') {
+      state.machineDetail = null
+      go('/machines')
+    } else {
+      await s.reload()
+    }
     flash('ok', '已移除这台机器的登记（机器本身没动）')
   } catch (err) {
     flash('err', err.message)
@@ -703,16 +793,13 @@ async function removeMachine(id, machineId) {
 async function saveCapacity(e) {
   e.preventDefault()
   const form = e.target
-  const id = form.getAttribute('data-id')
-  const machineId = form.getAttribute('data-machine')
+  const s = machineScope(form)
   const maxAccounts = Number(new FormData(form).get('maxAccounts'))
   state.busy = true
   render()
   try {
-    await api('PUT', `/platform/orgs/${encodeURIComponent(id)}/machines/${encodeURIComponent(machineId)}/capacity`, {
-      maxAccounts,
-    })
-    await loadCompanyDetail(id)
+    await api('PUT', `${s.base}/capacity`, { maxAccounts })
+    await s.reload()
     flash('ok', `容量改为 ${maxAccounts} 个账号`)
   } catch (err) {
     flash('err', err.message)
@@ -725,18 +812,13 @@ async function saveCapacity(e) {
 async function saveTimezone(e) {
   e.preventDefault()
   const form = e.target
-  const id = form.getAttribute('data-id')
-  const machineId = form.getAttribute('data-machine')
+  const s = machineScope(form)
   const timezone = String(new FormData(form).get('timezone') || '').trim()
   state.busy = true
   render()
   try {
-    const data = await api(
-      'PUT',
-      `/platform/orgs/${encodeURIComponent(id)}/machines/${encodeURIComponent(machineId)}/timezone`,
-      { timezone },
-    )
-    await loadCompanyDetail(id)
+    const data = await api('PUT', `${s.base}/timezone`, { timezone })
+    await s.reload()
     // 「已下指令」而不是「已改好」：真正改的是机器，下一轮心跳才知道成没成。
     flash('ok', !timezone ? '不再管这台机器的时区' : data.pending ? `已下指令：${timezone}，等机器改` : `时区改为 ${timezone}`)
   } catch (err) {
@@ -747,13 +829,14 @@ async function saveTimezone(e) {
   }
 }
 
-async function upgradeManager(id, machineId) {
-  if (!id || !machineId) return
+async function upgradeManager(el) {
+  const s = machineScope(el)
+  if (!s.machineId || (s.scope === 'org' && !s.orgId)) return
   state.busy = true
   render()
   try {
-    const data = await api('POST', `/platform/orgs/${encodeURIComponent(id)}/machines/${encodeURIComponent(machineId)}/upgrade`, {})
-    await loadCompanyDetail(id)
+    const data = await api('POST', `${s.base}/upgrade`, {})
+    await s.reload()
     flash('ok', data.pending ? `已下指令升到 ${data.version}，等机器下一轮心跳换版` : `已经是 ${data.version}`)
   } catch (err) {
     flash('err', err.message)

@@ -109,6 +109,7 @@ const PATHS = {
   '/accounts': { title: '员工' },
   '/audit': { title: '审计' },
   '/companies': { title: '公司' },
+  '/machines': { title: '机器管理' },
   '/releases': { title: '机器配置' },
   '/users': { title: '用户' },
   '/plans': { title: '套餐' },
@@ -144,6 +145,13 @@ const ICONS = {
   usage: ['M3 12h4l3 8 4-16 3 8h4'],
   catalog: ['M4 6h7v7H4z', 'M13 6h7v7h-7z', 'M4 15h7v5H4z', 'M13 15h7v5h-7z'],
   bots: ['M3 8h18a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z', 'M12 4v4', 'M8 14h.01', 'M16 14h.01'],
+  // 机架：两层横条 + 各自一盏指示灯。跟 bots 那个「有触角的盒子」在 17px 下也分得开。
+  machines: [
+    'M4 4h16a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z',
+    'M4 14h16a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z',
+    'M7 7.5h.01',
+    'M7 17.5h.01',
+  ],
   skills: ['M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z'],
   chat: ['M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-4l-4 4v-4H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z'],
 }
@@ -243,6 +251,9 @@ const GEAR = [
 const OWNER_NAV = [
   { href: '/', label: '概览', icon: 'overview' },
   { href: '/companies', label: '公司', icon: 'company' },
+  // 机器管理在机器配置**上面**：先是「平台上有哪些机器、哪台出事了」，然后才是
+  // 「给它们发什么版本的包」。发布包那一页是给这一页服务的，不是反过来。
+  { href: '/machines', label: '机器管理', icon: 'machines' },
   { href: '/releases', label: '机器配置', icon: 'bots' },
   { href: '/users', label: '用户', icon: 'accounts' },
   { href: '/providers', label: '供应商', icon: 'providers' },

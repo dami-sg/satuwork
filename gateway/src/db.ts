@@ -2421,6 +2421,18 @@ export class Db {
     return r ? machineOf(r) : undefined
   }
 
+  /**
+   * 平台上登记过的所有机器，登记先后。
+   *
+   * **包括没派给任何公司的那些**（`companyId is null`）：机器管理页要答的是「平台上
+   * 现在有哪些机器」，而一台刚配对完还没分配、或者原公司被删之后落单的机器，恰恰是
+   * 最需要被人看见的——按公司去列永远列不到它们。
+   */
+  async allMachines(): Promise<Machine[]> {
+    const rows = await this.many('select * from machines order by "createdAt"')
+    return rows.map(machineOf)
+  }
+
   /** 这家公司的所有机器，登记先后。多机调度按这个顺序做兜底排序。 */
   async machinesOfCompany(companyId: string): Promise<Machine[]> {
     const rows = await this.many('select * from machines where "companyId" = ? order by "createdAt"', [companyId])

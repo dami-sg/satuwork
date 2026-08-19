@@ -204,9 +204,14 @@ export function normalizeTimezone(raw: string): string | null | undefined {
   }
 }
 
-/** owner 机器详情：像账号密钥一样带一次 token。公司 admin 的 publicMachine 永不带。 */
+/**
+ * owner 机器详情：像账号密钥一样带一次 token。公司 admin 的 publicMachine 永不带。
+ *
+ * `arch` 也只在这一侧给：它是选发布包的依据（包里带原生二进制，架构不对就起不来），
+ * 平台侧排查「为什么这台升不上去」第一眼看的就是它。公司管理员用不着，也不该看。
+ */
 export function ownerMachine(m: Machine) {
-  return { ...publicMachine(m), token: m.token || null }
+  return { ...publicMachine(m), arch: m.arch, token: m.token || null }
 }
 
 export function publicSeatRuntime(
@@ -285,6 +290,14 @@ export function activeAccountsOf(seats: SeatRuntime[]): Set<string> {
 
 export interface MachineLoad {
   machine: Machine
+  /**
+   * 这台机器上的席位行。
+   *
+   * **算负载的时候本来就查过一遍**，所以顺手带出来：下游要画席位清单的地方（机器
+   * 卡片）不必再查一次同一批行。少一次往返事小，两份可能对不上的数据事大——负载
+   * 数字和席位清单出自同一次查询，界面上「账号位 3/10」和底下那张表就永远一致。
+   */
+  seatRows: SeatRuntime[]
   accounts: number
   seats: number
   full: boolean
@@ -292,13 +305,14 @@ export interface MachineLoad {
 
 export async function machineLoads(db: Db, companyId: string): Promise<MachineLoad[]> {
   const machines = await db.machinesOfCompany(companyId)
-  return Promise.all(
-    machines.map(async (machine) => {
-      const seats = await db.seatRuntimesOfMachine(machine.id)
-      const accounts = activeAccountsOf(seats).size
-      return { machine, accounts, seats: seats.length, full: accounts >= machine.maxAccounts }
-    }),
-  )
+  return Promise.all(machines.map((machine) => machineLoadOf(db, machine)))
+}
+
+/** 单台机器的负载。多机公司走 machineLoads，平台侧按 id 拿单台的走这条。 */
+export async function machineLoadOf(db: Db, machine: Machine): Promise<MachineLoad> {
+  const seatRows = await db.seatRuntimesOfMachine(machine.id)
+  const accounts = activeAccountsOf(seatRows).size
+  return { machine, seatRows, accounts, seats: seatRows.length, full: accounts >= machine.maxAccounts }
 }
 
 /**
