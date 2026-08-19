@@ -801,23 +801,3 @@
 }
 .sw-deskb.is-on { opacity: 1; pointer-events: auto; }
 
-/* 席位详情的折叠面板。默认收起——里面是路径、版本号和两个排查入口，天天看的是
-   上面那块屏，不是这些。 */
-.sw-seatinfo { display: flex; flex-direction: column; gap: var(--space-3); }
-.sw-seatinfo-head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 0;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  color: var(--muted-foreground);
-  text-align: left;
-}
-.sw-seatinfo-head:hover { color: var(--color-text); }
-.sw-seatinfo-arrow { display: inline-flex; transition: transform 140ms ease; }
-.sw-seatinfo-arrow[data-open="true"] { transform: rotate(90deg); }
-.sw-seatinfo-body { display: flex; flex-direction: column; gap: var(--space-3); }

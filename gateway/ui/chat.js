@@ -1504,34 +1504,17 @@ function chatMachinePanel() {
       )
     }
     /**
-     * 席位的家底收进一个默认收起的折叠面板。
+     * **右栏到这儿就结束了。**
      *
-     * **VNC 口令不再露面。** 桌面就嵌在上面那块屏里，票里已经带着口令自动填进
-     * noVNC——留着那一行的唯一效果，是把一条随时能看的凭据摆在每个人的屏幕上。
-     * 要看它的人（管理员排查）在公司详情的席位卡里仍然看得到。
+     * 这里原先还挂着一个「席位详情」折叠面板：共享目录、linuxUser、Bot 版本，以及
+     * 「运行日志」「重新部署」两个入口。它们都是「出事那天」才用一次的东西，而这一
+     * 栏每天要看的只有上面那块屏——多一个可展开的标题，就多一次「这里面是什么」的
+     * 分神。
      *
-     * 剩下的路径、linuxUser、版本号，还有日志与重铺这两个入口，都是「出事那天」
-     * 才用一次的东西。天天挂在右栏里，只会把真正每天要看的那块屏往下挤。
+     * **日志和重铺跟着一起下线了，这是有代价的**：员工手上暂时没有自助重铺的入口，
+     * 席位坏了要找管理员。要把它们放回来的话，位置应该是桌面全屏时那条标题栏——出问
+     * 题的是那块屏，人当时也正看着它。
      */
-    const open = !!state.seatInfoOpen
-    const detail = [
-      `<div class="satu-kv"><span>${t('共享目录')}</span><span>${esc(mine.sharedDir || '—')}</span></div>`,
-      `<div class="satu-kv"><span>linuxUser</span><span>${esc(mine.linuxUser || '—')}</span></div>`,
-      mine.botVersion ? `<div class="satu-kv"><span>${t('Bot 版本')}</span><span>${esc(mine.botVersion)}</span></div>` : '',
-      // 重新部署留在这儿：换了 Bot 版本、或者席位坏了，这是唯一的自助入口。
-      // **要确认**：它会重启席位，正在跑的对话和开着的桌面会断。
-      // 运行日志。和「重新部署」放在一起，因为它俩是同一件事的两头：出问题时先看日志，
-      // 看不出来再重铺。**别放到 Bot 配置页**——那页是人设和能力，跟这台机器无关。
-      `<div style="display: flex; gap: var(--space-2);"><button type="button" class="btn btn-secondary" data-act="logs-open" data-bot="${esc(selected)}">${t('运行日志')}</button><button type="button" class="btn btn-secondary" data-act="runtime-redeploy" data-bot="${esc(selected)}" ${state.deploying ? 'disabled' : ''}>${state.deploying ? t('部署中…') : t('重新部署')}</button></div>`,
-    ].join('')
-    rows.push(
-      `<div class="sw-seatinfo">
-        <button type="button" class="sw-seatinfo-head" data-act="seat-info" aria-expanded="${open}">
-          <span class="sw-seatinfo-arrow" data-open="${open}">${svg(CHEVRON_RIGHT, 13)}</span>${t('席位详情')}
-        </button>
-        ${open ? `<div class="sw-seatinfo-body">${detail}</div>` : ''}
-      </div>`,
-    )
   }
 
   return rows.join('')
