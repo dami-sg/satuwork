@@ -192,10 +192,12 @@ function render() {
   paintedPath = state.path
   if (state.path.startsWith('/join/')) {
     root.innerHTML = joinView()
+    syncDesktop()
     return
   }
   if (!state.me && state.needsSetup) {
     root.innerHTML = setupView()
+    syncDesktop()
     return
   }
   root.innerHTML = state.me ? appView() : loginView()
@@ -204,6 +206,9 @@ function render() {
   if (document.getElementById('chat-thread')) paintChat()
   // 日志面板同理：壳在 render 里，内容由 paintLogs 增量填。
   if (document.getElementById('log-body')) paintLogs()
+  // 内嵌桌面那块屏活在 #app 外面（重绘换不掉它），但它的位置是照着右栏里的空槽算
+  // 的——壳换过一次就得重新对齐。
+  syncDesktop()
   if (!keep) return
   const after = document.querySelector('.gw-page')
   if (after) after.scrollTop = keep

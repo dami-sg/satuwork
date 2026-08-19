@@ -22,6 +22,30 @@ import { cookieName, cookieOf, verifyTicket } from './ticket.ts'
 const BOT_PREFIX = /^\/seats\/([^/]+)\/bot(\/.*)?$/
 const VNC_PREFIX = /^\/seats\/([^/]+)\/vnc(\/.*)?$/
 
+/**
+ * 入口 URL 上允许原样带到 noVNC 落地页的显示参数。
+ *
+ * Gateway 的右栏把桌面内嵌成一小块预览，那块地方只有两百来像素宽——不给
+ * `resize=scale` 的话 noVNC 按 1:1 画，看到的是桌面左上角那一小角，不是这块屏。
+ *
+ * **白名单，不是黑名单。** `path` 和 `password` 是这条链上唯一的连接地址和唯一的
+ * 凭据，两者都由票决定；放开透传等于让调用方覆盖它们。值也卡成简单 token，免得
+ * 有人往落地页的 query 里塞东西。
+ */
+const VIEW_PARAMS = new Set(['resize', 'view_only', 'bell', 'reconnect', 'quality', 'compression'])
+
+function viewParams(url: URL): string {
+  let out = ''
+  const seen = new Set<string>()
+  for (const [k, v] of url.searchParams) {
+    if (!VIEW_PARAMS.has(k) || seen.has(k)) continue
+    if (!/^[A-Za-z0-9_.-]{1,16}$/.test(v)) continue
+    seen.add(k)
+    out += `&${k}=${encodeURIComponent(v)}`
+  }
+  return out
+}
+
 export interface ProxyDeps {
   machineToken: () => string
   gatewayUrl: () => string
@@ -126,7 +150,8 @@ export function proxyIntercept(deps: ProxyDeps) {
       // 换来的是「点开就是桌面」。没带口令时照旧弹输入框，不会更差。
       const query =
         `path=${encodeURIComponent(wsPath)}&autoconnect=1` +
-        (ok.vnc ? `&password=${encodeURIComponent(ok.vnc)}` : '')
+        (ok.vnc ? `&password=${encodeURIComponent(ok.vnc)}` : '') +
+        viewParams(url)
       res.writeHead(302, {
         'set-cookie': `${cookieName(seatId)}=${encodeURIComponent(ticket)}; Path=${base}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax`,
         location: `${base}/vnc.html?${query}`,

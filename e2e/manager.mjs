@@ -354,6 +354,28 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       assert(q.get('path'), `path 丢了：${loc}`)
     })
 
+    await test('显示参数按白名单透传，path 与 password 不许被外面覆盖', async () => {
+      // 右栏那块内嵌预览只有两百来像素宽，没有 resize=scale 就只看得见桌面左上角。
+      // 但同一个入口不能让调用方顺手改掉连接地址和口令——那两个只能由票说了算。
+      const ticket = mintTicketWithPassword(GW_HOME, 'seat-1', 'PW-secret-9')
+      const q0 = new URLSearchParams({
+        ticket,
+        resize: 'scale',
+        bell: 'false',
+        path: 'evil/websockify',
+        password: 'stolen',
+        onload: '<script>',
+      })
+      const r = await fetch(`${mgrBase}/seats/seat-1/vnc/?${q0}`, { redirect: 'manual' })
+      assert(r.status === 302, `换 cookie ${r.status}`)
+      const q = new URLSearchParams(String(r.headers.get('location')).split('?')[1] || '')
+      assert(q.get('resize') === 'scale', `resize 没透传：${q}`)
+      assert(q.get('bell') === 'false', `bell 没透传：${q}`)
+      assert(q.get('path') === 'seats/seat-1/vnc/websockify', `path 被覆盖了：${q.get('path')}`)
+      assert(q.get('password') === 'PW-secret-9', `password 被覆盖了：${q.get('password')}`)
+      assert(q.get('onload') === null, `白名单外的参数漏过去了：${q}`)
+    })
+
     await test('席位诊断：给得出现场，而且不漏凭据', async () => {
       // 这个接口是为「没有 SSH 就看不见机器」补的洞。它最该答上的几个问题，正是今天
       // 排查里逐个靠人肉 ps/ss/journalctl 才问出来的：端口归谁、服务什么时候起的、
