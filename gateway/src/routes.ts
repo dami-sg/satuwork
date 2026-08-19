@@ -39,7 +39,9 @@ import {
 import { desktopIntercept } from './desktop.ts'
 import {
   type MachineLoad,
+  MACHINE_TOMBSTONE_TTL,
   botBaseOf,
+  machineLink,
   companyMachineOf,
   deploySeat,
   desktopUrlOf,
@@ -3289,6 +3291,7 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   router.get('/platform/machines', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireOwner(account)
+    await db.sweepRemovedMachines(Date.now() - MACHINE_TOMBSTONE_TTL)
     const latest = await releaseLatest()
     const rows = await db.allMachines()
     const machines = await Promise.all(
@@ -3566,9 +3569,17 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     requireOwner(account)
     const machine = await machineOr404(req.params.id)
     const seats = await db.seatRuntimesOfMachine(machine.id)
+    // 机器还在线才立墓碑：它下一轮心跳（≤30 秒）就会收到信，自己停席位、停自己、
+    // 回执。不在线的（没配对、失联、没票）没人来收信，留墓碑只是让它在库里躺满
+    // TTL，直接硬删。
+    const notify = machineLink(machine) === 'online' && Boolean(machine.token)
     await db.tx(async () => {
+      // 席位登记**立刻**清掉，不等机器收信：Gateway 侧的引用必须马上断，否则
+      // machineTokenFor 那一路会把聊天请求发到这家公司的另一台机器上。机器上的
+      // 进程由管家收到信之后自己停。
       await db.deleteSeatRuntimesOfMachine(machine.id)
-      await db.deleteMachine(machine.id)
+      if (notify) await db.markMachineRemoved(machine.id, Date.now())
+      else await db.deleteMachine(machine.id)
       if (machine.companyId) {
         const company = await db.company(machine.companyId)
         if (company?.machineId === machine.id) {
@@ -3577,13 +3588,17 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
         }
       }
     })
+    // 顺手收掉一直没来收信的旧墓碑。不开定时器：这条路和列表页的频率都远高于 TTL。
+    await db.sweepRemovedMachines(Date.now() - MACHINE_TOMBSTONE_TTL)
     // 席位数进审计：这条记录事后要能回答「那几个人的席位是哪一次没的」。
     await auditMachine(machine, account.id, 'machine.remove', {
       machineId: machine.id,
       host: machine.host,
       seats: seats.length,
+      notified: notify,
     })
-    send(res, 200, { ok: true, seats: seats.length })
+    // pending = 机器还得收一次信才算收拾干净。界面据此把话说全，别写成「已经停了」。
+    send(res, 200, { ok: true, seats: seats.length, pending: notify })
   })
 
   // 读发布列表跟上传同一套凭证：CI 传完要能回查，人在发布页看的是同一份数据。
@@ -5531,9 +5546,32 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
    * 管家发现和自己不一样就去换——换不换、什么时候换，由管家自己决定（部署跑到
    * 一半时它会跳过这一轮）。
    */
+  /**
+   * 管家的收尾回执：「席位停完了，我也要退出了」。收到就真删那一行。
+   *
+   * 收不到也不会卡住——墓碑有 TTL，sweepRemovedMachines 会收掉。回执的意义是让常见
+   * 情况（机器活着、收到了信）当场干净收场，而不是干等十分钟。
+   */
+  router.post('/internal/machines/:id/removed', async (req, res) => {
+    const machine = await requireMachine(req, db)
+    if (machine.id !== req.params.id) throw new HttpError(403, '机器凭证与路径不符')
+    if (!machine.removedAt) throw new HttpError(409, '这台机器没有被移除')
+    await db.deleteMachine(machine.id)
+    send(res, 200, { ok: true })
+  })
+
   router.post('/internal/machines/:id/heartbeat', async (req, res) => {
     const machine = await requireMachine(req, db)
     if (machine.id !== req.params.id) throw new HttpError(403, '机器凭证与路径不符')
+    // 这台机器已经在平台上被移除了，这一下心跳就是把消息交给它的机会。
+    //
+    // **不更新任何字段**：它不在册了，写 lastHeartbeatAt 只会让墓碑看起来还活着。
+    // 也不回 401——那是否定式信号，管家分不出「我被移除了」和「Gateway 那边出了
+    // 状况」，据此自毁的话一次库回滚就能带走整个机队。见 Machine.removedAt。
+    if (machine.removedAt) {
+      send(res, 200, { removed: true, minNode: MIN_MANAGER_NODE, minProtocol: MIN_MANAGER_PROTOCOL })
+      return
+    }
     const body = (bodyOf(req) ?? {}) as Record<string, unknown>
     const managerVersion = typeof body.managerVersion === 'string' ? body.managerVersion.trim() : ''
     const protocol = Number(body.protocol)

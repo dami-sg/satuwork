@@ -793,13 +793,11 @@ async function refreshMachine(id) {
   }
 }
 
-/** 这台机器上有几个席位。确认框要说出这个数，两边各从自己那份 state 里数。 */
-function machineSeatCount(s) {
-  const card =
-    s.scope === 'platform'
-      ? state.machineDetail
-      : (state.machines || []).find((m) => m.machine && m.machine.id === s.machineId)
-  return (card && card.seats) || 0
+/** 手上那张卡片。确认框要按它说话：几个席位、机器在不在线。 */
+function machineCardOf(s) {
+  return s.scope === 'platform'
+    ? state.machineDetail
+    : (state.machines || []).find((m) => m.machine && m.machine.id === s.machineId)
 }
 
 /**
@@ -809,18 +807,34 @@ function machineSeatCount(s) {
  *
  * 上面还有席位时先问一句：席位的登记会跟着一起没，那几位员工要重新部署，而这件事
  * 从按钮上看不出来。空机器不问——那一下没有任何人会受影响。
+ *
+ * 在线和离线的后果不一样，确认框要分开说：在线的机器会收到通知自己停干净，离线的
+ * 收不到信，上面的东西会一直跑着。把两种说成一种，人就会按错的预期去处置。
  */
 function removeMachine(el) {
   const s = machineScope(el)
   if (!s.machineId || (s.scope === 'org' && !s.orgId)) return
-  const seats = machineSeatCount(s)
+  const card = machineCardOf(s)
+  const seats = (card && card.seats) || 0
   if (!seats) return doRemoveMachine(s)
+  const online = card && card.machine && card.machine.link === 'online'
+  const tail = online
+    ? t(
+        '这台机器在线，会在下一轮心跳（≤30 秒）收到通知，自己停掉这些席位、取消开机自启并退出；~/work 里的文件留在机器上。',
+        'The machine is online: on its next heartbeat (≤30s) it stops those seats, disables its own autostart and exits. Files in ~/work stay on the box.',
+      )
+    : t(
+        '这台机器当前不在线，收不到通知——上面的管家和席位进程会一直跑着，要停得上去停。',
+        'The machine is offline and will not get the notice — its manager and seat processes keep running and must be stopped there.',
+      )
   state.confirm = {
     title: t('移除这台机器的登记？'),
-    body: t(
-      `这台机器上的 ${seats} 个席位登记会一起抹掉，那几位员工再进来是「未部署」，重新部署会落到别的机器上（~/work 里的文件不会跟过去）。机器本身不动：管家和席位进程还在上面跑着，要停得上去停。`,
-      `The ${seats} seat registrations on this machine are erased with it. Those members will see "not deployed" and a redeploy lands on another machine (files in ~/work do not follow). The machine itself is untouched — its manager and seat processes keep running and must be stopped there.`,
-    ),
+    body:
+      t(
+        `这台机器上的 ${seats} 个席位登记会一起抹掉，那几位员工再进来是「未部署」，重新部署会落到别的机器上。`,
+        `The ${seats} seat registrations on this machine are erased with it. Those members will see "not deployed" and a redeploy lands on another machine.`,
+      ) +
+      tail,
     label: '移除',
     kind: 'remove-machine',
     scope: s.scope,
@@ -844,14 +858,19 @@ async function doRemoveMachine(s) {
       await s.reload()
     }
     const seats = (data && data.seats) || 0
+    // 「已下指令」而不是「已经停了」：真正停席位、停自己的是机器，它得先收到那一轮
+    // 心跳。收不到信的（离线）更要说清楚，不然人会以为机器上已经干净了。
     flash(
       'ok',
-      seats
+      data && data.pending
         ? t(
-            `已移除这台机器的登记，连同 ${seats} 个席位（机器本身没动）`,
-            `Machine registration removed along with ${seats} seats (the machine itself is untouched)`,
+            `已移除。这台机器会在下一轮心跳收到通知，自己停掉${seats ? ` ${seats} 个席位并` : ''}退出。`,
+            `Removed. On its next heartbeat the machine stops${seats ? ` its ${seats} seats and ` : ' and '}exits.`,
           )
-        : '已移除这台机器的登记（机器本身没动）',
+        : t(
+            `已移除这台机器的登记${seats ? `，连同 ${seats} 个席位登记` : ''}。它不在线，机器上的东西不会自己停，要停得上去停。`,
+            `Machine registration removed${seats ? ` along with ${seats} seat registrations` : ''}. It is offline, so nothing on the box stops by itself — stop it there.`,
+          ),
     )
   } catch (err) {
     flash('err', err.message)

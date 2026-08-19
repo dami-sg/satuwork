@@ -320,7 +320,7 @@ function machineDangerPanel(card) {
   const seats = card.seats || 0
   return `<div class="satu-panel" style="border-color: var(--destructive);">
     <span class="satu-panel-title">${t('移除登记')}</span>
-    <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('只从 Gateway 上抹掉这条记录，不碰机器本身——上面的机器管家还跑着，要停得上去停。要让它重新回来，在机器上重跑一次配对。')}</p>
+    <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('机器在线的话，它会在下一轮心跳收到通知，自己停掉席位、取消开机自启并退出；~/work 里的文件留在机器上。不在线的收不到通知，上面的东西要停得上去停。要让它重新回来，在机器上重跑一次配对。')}</p>
     <div><button type="button" class="btn btn-secondary" data-act="machine-remove" data-scope="platform" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('移除这台机器的登记')}</button></div>
     ${seats ? `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t(`这台机器上的 ${seats} 个席位登记会一起抹掉，那几位员工要重新部署。`, `The ${seats} seat registrations on this machine go with it; those members will need to redeploy.`)}</p>` : ''}
   </div>`
