@@ -24,6 +24,7 @@ import { runReplaySlice } from './replay-slice.mjs'
 import { runWorkspaceFiles } from './workspace-files.mjs'
 import { runDocExtract } from './doc-extract.mjs'
 import { runVision } from './vision.mjs'
+import { runTurnImages } from './turn-images.mjs'
 import { runHistoryTime } from './history-time.mjs'
 import { runCompact } from './compact.mjs'
 import { runSetup } from './setup.mjs'
@@ -2789,6 +2790,7 @@ async function main() {
     await runWorkspaceFiles({ root, test, assert, log })
     await runDocExtract({ root, test, assert, log })
     await runVision({ root, test, assert, log })
+    await runTurnImages({ root, test, assert, log })
     await runHistoryTime({ root, test, assert, log })
     await runCompact({ root, test, assert, log })
   } finally {
