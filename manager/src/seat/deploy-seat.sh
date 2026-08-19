@@ -11,7 +11,10 @@
 #
 #   $HOME_DIR/work                 共享工作区。同员工的所有席位都看得见，这是共享入口。
 #   $HOME_DIR/.satuwork/$SEAT_ID   席位私有：$SATUWORK_HOME、app、Chrome profile、XDG 各目录
-set -euo pipefail
+# -E（errtrace）**不能省**：不加的话下面那条 ERR trap 只在顶层生效，进不了函数、
+# 命令替换和子 shell。这脚本里失败最可能发生的地方恰恰都在函数里（ensure_chrome、
+# verify_seat_listener），漏了 -E 等于白加——已经这样白加过一轮了。
+set -Eeuo pipefail
 
 # **失败要自报家门。** set -e 让任何一条命令非零时立刻退出，而这里有不少命令
 # （mkdir、chown、rsync、systemctl、runuser）失败时**两个流一个字都不写**，或者只往
@@ -185,10 +188,16 @@ HTTP=$HTTP
 CDP=$CDP
 WORK_DIR=$WORK_DIR
 EOF_ENV
-# stderr 也要吞：x11vnc 把「stored passwd in file: …」这句**正常输出**打在 stderr 上，
-# 不吞的话它会混进部署失败时收集的错误里，还恰好排在最前面——真正的原因被挤到后面，
-# 而错误信息在界面上是截断显示的，于是看到的第一句永远是这句无关的话。
-runuser -u "$LINUX_USER" -- x11vnc -storepasswd "$VNC_PASSWORD" "$SEAT_DIR/vnc-passwd" >/dev/null 2>&1
+# x11vnc 把「stored passwd in file: …」这句**正常输出**打在 stderr 上，直接放行的话它
+# 会混进部署失败时收集的错误里，还恰好排在最前面。但原先是 `>/dev/null 2>&1` 一倒了
+# 之——**成功时安静了，失败时也安静**，于是这一步挂掉的表现是「脚本退出码 1、两个流
+# 一个字都没有」，谁也不知道断在哪。真栽过两次。
+#
+# 改成收进变量：成功就扔掉，失败才打出来。口令要先抹掉——这段话会一路送到浏览器上。
+if ! vnc_out=$(runuser -u "$LINUX_USER" -- x11vnc -storepasswd "$VNC_PASSWORD" "$SEAT_DIR/vnc-passwd" 2>&1); then
+  echo "x11vnc -storepasswd 失败：${vnc_out//"$VNC_PASSWORD"/***}" >&2
+  exit 1
+fi
 printf 'backend = "xrender";\nvsync = false;\nuse-damage = false;\n' > "$SEAT_DIR/config/picom/picom.conf"
 
 if [ ! -f "$BOT_EXTRACT/bin/satuwork.mjs" ]; then
