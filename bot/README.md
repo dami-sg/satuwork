@@ -29,6 +29,7 @@ package.json 里有一条别名把 cordis 指向同一个物理包，避免加�
 | GATEWAY_MACHINE_TOKEN | 机器凭证。internal 口（ready、索引、拉全文） |
 | SATUWORK_BOT_ID | 部署必填。目录只钉这一颗，不种本地 default |
 | SATUWORK_WORK_DIR | 文件与命令工具的工作区根目录。部署注入 /home/{linuxUser}/work；本地回落 $SATUWORK_HOME/work |
+| SATUWORK_UPLOAD_MAX | 单个附件上限（字节）。默认 100 MiB |
 
 模型调用走 Gateway /v1（Chat Completions / Responses / Anthropic Messages）。pi-ai 和上游密钥都在 Gateway。每个 Bot 有自己的 provider + model。
 
@@ -37,6 +38,21 @@ package.json 里有一条别名把 cordis 指向同一个物理包，避免加�
 默认 ~/.satuwork，可用 SATUWORK_HOME 覆盖。不用启动目录——否则在哪儿敲的命令会决定看到谁的历史。部署时是 /home/{linuxUser}/.satuwork/{seatId}，席位之间不共用。
 
 同一个员工的多个 bot 跑在**同一个 Linux 账号**下，共享 /home/{linuxUser}/work（部署时注入 SATUWORK_WORK_DIR）。除了这个目录，别的都按席位隔离。
+
+## 附件
+
+聊天里传上来的文件走 `POST /api/sessions/:id/files`（裸字节，文件名在 `x-filename`，
+URL 编码），落进 `$SATUWORK_WORK_DIR/uploads/<sessionId>/`。**发给模型的是路径，不是
+内容**——它自己用 read/bash 去取，几百页的 PDF 不会一次撑爆上下文。
+
+反过来，`GET /api/workspace/file?path=` 把工作区里的文件流回去给浏览器预览。上传进来的
+和 Bot 自己写出来的走同一条路，因为它们本来就在同一个目录里。能不能内联由扩展名白名单
+决定（见 `src/workspace/index.ts`）：**SVG 和 HTML 不在里面**，它们能带脚本，内联等于让
+上传者在 Gateway 的源上执行代码；这两种照样能传、能下载，只是不给内联。
+
+Bot 写出来的文件怎么让人看见：`write` / `edit` 在工具结果里报出路径（`ToolResult.files`），
+经 `tool/result` 事件到界面，渲染成可点开的预览。**不去正则扫工具结果的文本猜路径**——
+那段文本是写给模型看的散文，措辞一改就扫不出来了。
 
 $SATUWORK_HOME/sessions/<id>.jsonl  会话日志：追加式，一行一条事件
 $SATUWORK_HOME/satuwork.db          运行时配置与非会话数据（SQLite）

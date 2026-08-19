@@ -145,6 +145,10 @@ export class Router {
   putRaw(path: string, handler: Handler) {
     this.on('PUT', path, handler, true)
   }
+  /** POST 二进制体：同上。附件上传走这条——8 MB 的 JSON 上限对文件没有意义。 */
+  postRaw(path: string, handler: Handler) {
+    this.on('POST', path, handler, true)
+  }
   patch(path: string, handler: Handler) {
     this.on('PATCH', path, handler)
   }

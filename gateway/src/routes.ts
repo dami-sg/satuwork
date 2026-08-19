@@ -1,5 +1,6 @@
 import type { ServerResponse } from 'node:http'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import {
   type Account,
@@ -1086,6 +1087,119 @@ async function proxyJson(
     parsed = { error: text.slice(0, 200) || INSTANCE_DOWN }
   }
   send(res, r.status, parsed)
+}
+
+/**
+ * 把浏览器传上来的字节**边收边转**给席位，不在 Gateway 落地。
+ *
+ * 附件动辄几十 MB，`readBody` 那条路会先攒进内存再解析成 JSON——对文件来说两件事
+ * 都是错的。所以路由用 `postRaw`，这里直接把 `req` 接到 fetch 的 body 上。
+ *
+ * `duplex: 'half'` 是流式 body 的硬性要求，不带这个参数 undici 直接拒绝发出。
+ */
+async function proxyUpload(
+  req: Req,
+  res: ServerResponse,
+  url: string,
+  headers: Record<string, string>,
+  token?: string,
+  machineToken?: string,
+) {
+  let r: Response
+  try {
+    r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        authorization: token ? `Bearer ${token}` : '',
+        accept: 'application/json',
+        'content-type': 'application/octet-stream',
+        ...headers,
+        ...machineHeader(machineToken),
+      },
+      body: Readable.toWeb(req) as ReadableStream<Uint8Array>,
+      duplex: 'half',
+      // 传大文件比一次 JSON 往返慢得多，15 秒那个超时会在半路砍断它。
+      signal: AbortSignal.timeout(10 * 60 * 1000),
+    } as RequestInit & { duplex: 'half' })
+  } catch {
+    throw new HttpError(503, INSTANCE_DOWN)
+  }
+  const text = await r.text()
+  let parsed: unknown
+  try {
+    parsed = text ? JSON.parse(text) : null
+  } catch {
+    parsed = { error: text.slice(0, 200) || INSTANCE_DOWN }
+  }
+  send(res, r.status, parsed)
+}
+
+/**
+ * 把席位上的文件字节转给浏览器。预览和下载都走这条。
+ *
+ * **安全头在这里加，不在 bot 那边**：面向浏览器的是这一跳，源也是这一跳的源。
+ * bot 那边同样设了一份，但那是防御纵深，真正生效的是这里。
+ *
+ * `content-type` 与 `content-disposition` 原样透传——它们由 bot 的白名单算出来
+ * （见 workspace/index.ts 的 INLINE），Gateway 不该二次猜测，猜了反而会和白名单打架。
+ */
+async function proxyDownload(req: Req, res: ServerResponse, url: string, token?: string, machineToken?: string) {
+  const ac = new AbortController()
+  const onClose = () => ac.abort()
+  req.on('close', onClose)
+  let r: Response
+  try {
+    r = await fetch(url, {
+      headers: {
+        authorization: token ? `Bearer ${token}` : '',
+        ...machineHeader(machineToken),
+      },
+      signal: ac.signal,
+    })
+  } catch {
+    req.off('close', onClose)
+    if (ac.signal.aborted) return
+    throw new HttpError(503, INSTANCE_DOWN)
+  }
+  if (!r.ok || !r.body) {
+    req.off('close', onClose)
+    const text = await r.text().catch(() => '')
+    let parsed: unknown
+    try {
+      parsed = text ? JSON.parse(text) : { error: INSTANCE_DOWN }
+    } catch {
+      parsed = { error: INSTANCE_DOWN }
+    }
+    send(res, r.status === 400 || r.status === 404 ? r.status : 503, parsed)
+    return
+  }
+  const type = r.headers.get('content-type') || 'application/octet-stream'
+  const disposition = r.headers.get('content-disposition') || 'attachment'
+  const length = r.headers.get('content-length')
+  res.writeHead(200, {
+    'content-type': type,
+    'content-disposition': disposition,
+    ...(length ? { 'content-length': length } : {}),
+    // 声明的类型就是最终类型：允许嗅探，一个改名成 .png 的 HTML 就能变回 HTML。
+    'x-content-type-options': 'nosniff',
+    /**
+     * 这段字节是**用户上传的**，而它此刻挂在 Gateway 的源上。没有这条，一个 SVG 或
+     * HTML 附件里的 `<script>` 就在登录态里跑起来了。
+     *
+     * `sandbox` 不带任何 allow-*：脚本、表单、同源存储、导航全关，图片和 PDF 照常
+     * 显示。扩展名白名单已经挡掉了 SVG/HTML 的内联（它们只会 attachment），这条是
+     * 第二道——白名单哪天加错一项，不至于当场变成 XSS。
+     */
+    'content-security-policy': "sandbox; default-src 'none'; img-src 'self' data:; object-src 'self'",
+    'cache-control': 'private, no-store',
+  })
+  try {
+    await pipeline(Readable.fromWeb(r.body as any), res)
+  } catch {
+    // 浏览器中途关掉预览是常事，不是故障。
+  } finally {
+    req.off('close', onClose)
+  }
 }
 
 async function proxySse(req: Req, res: ServerResponse, url: string, token?: string, machineToken?: string) {
@@ -4187,6 +4301,47 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
       'POST',
       `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/abort`,
       {},
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
+  /**
+   * 上传附件到这条会话的工作区。字节边收边转，Gateway 不落地。
+   *
+   * 文件名走 header 而不是查询串：查询串会进访问日志，而文件名常常就是内容本身
+   * （「二季度裁员名单.xlsx」）。
+   */
+  router.postRaw('/runtime/sessions/:id/files', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    const filename = req.headers['x-filename']
+    await proxyUpload(
+      req,
+      res,
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/files`,
+      typeof filename === 'string' ? { 'x-filename': filename } : {},
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
+  /**
+   * 预览（或下载）这条会话所在席位的工作区里的一个文件。
+   *
+   * 上传进来的和 Bot 自己写出来的走同一条路——它们本来就在同一个目录里。越界检查在
+   * 席位那头（workspace 服务），这里只负责证明「这个人有权打这台席位」。
+   */
+  router.get('/runtime/sessions/:id/files', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    const path = req.query.get('path') ?? ''
+    if (!path.trim()) throw new HttpError(400, 'path 不能为空')
+    const q = `?path=${encodeURIComponent(path)}${req.query.get('download') === '1' ? '&download=1' : ''}`
+    await proxyDownload(
+      req,
+      res,
+      `${target.host}/api/workspace/file${q}`,
       await seatBearer(db, account.id),
       target.machineToken,
     )

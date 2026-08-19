@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '../session/types.ts'
 import { historySlice } from '../session/replay.ts'
+import { WorkspaceError } from '../workspace/index.ts'
 
 /**
  * Satuwork 的 HTTP API。无头运行时：不发 SPA，未知路径 JSON 404。
@@ -9,7 +10,7 @@ import { historySlice } from '../session/replay.ts'
  * 所以下面不需要任何「服务还在吗」的防御判断。
  */
 export const name = 'satu-web'
-export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster']
+export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace']
 
 export interface Config {
 }
@@ -135,6 +136,85 @@ export function apply(ctx: Context, _config: Config = {}) {
     res.json({ aborted: ctx.agents.abort(req.params.id) })
   })
 
+  /**
+   * 上传附件。裸字节进 body，文件名走 `x-filename`（URL 编码）。
+   *
+   * **不用 multipart**：这条路只传一个文件，multipart 要么拉个解析依赖，要么自己写一个
+   * 状态机去切 boundary——都是为了一个这里根本用不上的「多部分」语义付钱。
+   *
+   * 文件落进工作区（`uploads/<sessionId>/`），返回相对路径。之后模型用 read/bash 读它，
+   * 浏览器用下面那条 GET 预览它——**同一份字节，没有第二处副本**。
+   */
+  ctx.server.post('/api/sessions/:id/files', async (req, res) => {
+    const sessionId = req.params.id
+    // 会话必须真的存在。Gateway 那边已经按账号校过一遍，这里再挡一次是因为
+    // 「往哪个目录写」是这条路唯一的副作用，不该由一个没人认领的 id 决定。
+    try {
+      await ctx.sessions.events(sessionId)
+    } catch {
+      res.status = 404
+      res.json({ error: `没有这个会话：${sessionId}` })
+      return
+    }
+    const raw = req.headers.get('x-filename') ?? ''
+    let filename = raw
+    try {
+      filename = decodeURIComponent(raw)
+    } catch {
+      // 不是合法的百分号编码就按原样用，safeName 会再洗一遍。
+    }
+    try {
+      const saved = await ctx.workspace.saveUpload(sessionId, filename, req.body)
+      ctx.logger?.info?.(`upload: ${sessionId} ← ${saved.path}（${saved.size} 字节）`)
+      res.json(saved)
+    } catch (e) {
+      if (e instanceof WorkspaceError) {
+        res.status = 400
+        res.json({ error: e.message })
+        return
+      }
+      throw e
+    }
+  })
+
+  /**
+   * 预览工作区里的一个文件。上传进来的和 Bot 自己写出来的走的是同一条路——
+   * 它们本来就在同一个目录里，没有理由分两套。
+   *
+   * `?download=1` 强制另存。除此之外，能不能内联由**扩展名白名单**说了算
+   * （见 workspace/index.ts 的 INLINE）：SVG 和 HTML 不在里面，它们能带脚本。
+   */
+  ctx.server.get('/api/workspace/file', async (req, res) => {
+    const path = req.query.get('path') ?? ''
+    if (!path.trim()) {
+      res.status = 400
+      res.json({ error: 'path 不能为空' })
+      return
+    }
+    let file: Awaited<ReturnType<typeof ctx.workspace.open>>
+    try {
+      file = await ctx.workspace.open(path)
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException
+      res.status = e instanceof WorkspaceError ? 400 : err?.code === 'ENOENT' ? 404 : 500
+      res.json({ error: e instanceof WorkspaceError ? e.message : err?.code === 'ENOENT' ? '文件不存在' : '读不出来' })
+      return
+    }
+    const inline = file.inline && req.query.get('download') !== '1'
+    return new Response(file.stream, {
+      status: 200,
+      headers: {
+        'content-type': file.contentType,
+        'content-length': String(file.size),
+        'content-disposition': `${inline ? 'inline' : 'attachment'}; ${dispositionName(file.name)}`,
+        // 声明的类型就是最终类型。允许嗅探，等于让一个改名成 .png 的 HTML
+        // 重新变回 HTML——白名单当场作废。
+        'x-content-type-options': 'nosniff',
+        'cache-control': 'private, no-store',
+      },
+    })
+  })
+
   // 未知的 /api/* 必须是 JSON 404，不能掉进下面的 SPA 兜底——否则前端 fetch
   // 拿到一段 HTML，报错会指向 JSON 解析而不是真正的路由缺失。
   //
@@ -170,6 +250,18 @@ export function apply(ctx: Context, _config: Config = {}) {
     res.json({ error: 'unknown endpoint', path: req.path })
   })
 
+}
+
+/**
+ * Content-Disposition 里的文件名。
+ *
+ * 两份一起给：`filename=` 是 ASCII 兜底，`filename*=` 按 RFC 5987 带 UTF-8 原名。
+ * 中文名只给前者会变成乱码，只给后者老浏览器不认。ASCII 那份把引号和反斜杠也换掉——
+ * 它在引号里，不换就能把这个 header 撑破。
+ */
+function dispositionName(name: string): string {
+  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
+  return `filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`
 }
 
 function sse(

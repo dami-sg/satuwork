@@ -42,8 +42,12 @@
 - name: './src/tools/index.ts'
 - name: './src/tools/builtin.ts'
 
-# 工作区里的手：read / write / edit / ls / find / grep / bash。
+# 工作区本身：根目录、越界检查、附件落盘、预览取流。
+# **必须排在工具和 web 前面**——那两处都 inject 它，根目录只能有这一份。
 # 根目录是 $SATUWORK_WORK_DIR（部署注入的共享 work 目录），本地回落 $SATUWORK_HOME/work。
+- name: './src/workspace/index.ts'
+
+# 工作区里的手：read / write / edit / ls / find / grep / bash。
 - name: './src/tools/workspace.ts'
 
 # Gateway 目录：拉 Skill / MCP / Bot，钉到名册，连 HTTP MCP。

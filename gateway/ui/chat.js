@@ -182,6 +182,9 @@ function fold(events, live) {
       if (hit) {
         hit.result = data.text || ''
         hit.failed = Boolean(data.failed)
+        // 工具自己报出来的产出文件。老日志没有这个字段，也**不去扫 text 猜路径**——
+        // 那段文本是写给模型的散文，措辞一改就扫不出来了。
+        hit.files = Array.isArray(data.files) ? data.files : null
       }
     } else if (type === 'turn/start') {
       status = 'running'
@@ -771,6 +774,8 @@ const ICON_TOOL =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>'
 const ICON_DOWN =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>'
+const ICON_FILE =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h6"/></svg>'
 
 /** 当前这条对话属于哪个 Bot。抬头和导出都要用。 */
 function chatBotOf() {
@@ -784,6 +789,30 @@ function chatBotOf() {
  * 只露名字和状态，**不展开结果**：工具结果动辄几千字（一次文件读、一次搜索），摊在
  * 对话里会把真正的回答挤到屏幕外。要看细节去右栏的运行环境。
  */
+/**
+ * 这条消息里 Bot 落地的文件，按路径去重。
+ *
+ * 同一个文件被 edit 三次只该出现一次——人关心的是「产出了什么」，不是「被碰了几下」。
+ */
+function outputFiles(tools) {
+  const seen = new Map()
+  for (const x of tools || []) {
+    for (const f of x.files || []) {
+      if (f && f.path && !seen.has(f.path)) seen.set(f.path, f)
+    }
+  }
+  return [...seen.values()]
+}
+
+/** 一个可点开的产出文件。这是「用户怎么发现 Bot 生成了东西」的那一环。 */
+function fileChipHtml(f) {
+  return (
+    `<button type="button" class="sw-chip sw-filechip" data-act="chat-preview" ` +
+    `data-path="${esc(f.path)}" data-name="${esc(f.name || f.path)}" title="${esc(f.path)}">` +
+    `${ICON_FILE}<span>${esc(f.name || f.path)}</span></button>`
+  )
+}
+
 function chipHtml(x) {
   const state_ = x.result == null ? 'running' : x.failed ? 'error' : 'done'
   const label = x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')
@@ -850,11 +879,15 @@ function updateRow(el, b, streaming) {
   }
 
   const tools = b.tools || []
-  const sig = tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|')
+  const outs = outputFiles(tools)
+  const sig =
+    tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|') +
+    '#' +
+    outs.map((f) => f.path).join('|')
   if (chips.getAttribute('data-sig') !== sig) {
     chips.setAttribute('data-sig', sig)
-    chips.innerHTML = tools.map(chipHtml).join('')
-    chips.hidden = !tools.length
+    chips.innerHTML = tools.map(chipHtml).join('') + outs.map(fileChipHtml).join('')
+    chips.hidden = !tools.length && !outs.length
   }
 }
 
@@ -1253,6 +1286,7 @@ function chatExportText() {
     out.push('## ' + (b.kind === 'user' ? me : title) + (b.time ? ' · ' + fmtTime(b.time) : ''), '')
     for (const x of b.tools || []) {
       out.push('- ' + t('工具') + ' `' + x.name + '` · ' + (x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')))
+      for (const f of x.files || []) out.push('  - ' + t('产出') + ' `' + f.path + '`')
     }
     if ((b.tools || []).length) out.push('')
     out.push(String(b.text || '').trim(), '')
@@ -1471,6 +1505,130 @@ function switchLogSource(key) {
   void startLogStream(hit.url)
 }
 
+/**
+ * 打开一个工作区文件的预览。
+ *
+ * **先取成 blob 再显示**，而不是把 URL 直接给 <img src>：Gateway 认 Authorization 头，
+ * 而 src= 发出去的请求带不了头。顺带还有个好处——blob: 是 opaque origin，即使哪天
+ * 白名单放进了带脚本的类型，它也够不着 Gateway 这一侧的登录态。
+ *
+ * 大文件不预览：整个读进内存只为看一眼不值当，给下载就行。判断用响应头里的
+ * content-length，在读 body **之前**——否则「太大所以不看」的代价是先下完它。
+ */
+async function openPreview(path, name) {
+  if (!state.chatSessionId) return
+  revokePreview()
+  state.preview = { path, name, loading: true, url: '', type: '', size: 0, error: '' }
+  render()
+  const url = '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/files?path=' + encodeURIComponent(path)
+  const ac = new AbortController()
+  state.preview.abort = ac
+  try {
+    const res = await fetch(url, { headers: authHeaders(), signal: ac.signal })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      let json = null
+      try {
+        json = text ? JSON.parse(text) : null
+      } catch {}
+      throw new Error(errText((json && json.error) || 'HTTP ' + res.status))
+    }
+    const type = (res.headers.get('content-type') || '').split(';')[0].trim()
+    const size = Number(res.headers.get('content-length') || 0)
+    // 席位那边判成不能内联的（SVG、HTML、未知格式）会带 attachment 回来。照办，
+    // 不去覆盖它——那张白名单就是干这个的。
+    const attachment = (res.headers.get('content-disposition') || '').includes('attachment')
+    if (attachment || (size && size > CHAT_PREVIEW_MAX)) {
+      ac.abort()
+      if (!state.preview || state.preview.path !== path) return
+      state.preview = { path, name, loading: false, url: '', type, size, error: '', tooBig: true }
+      render()
+      return
+    }
+    const blob = await res.blob()
+    if (!state.preview || state.preview.path !== path) return
+    state.preview = { path, name, loading: false, url: URL.createObjectURL(blob), type, size: blob.size, error: '' }
+  } catch (err) {
+    if (ac.signal.aborted) return
+    if (!state.preview || state.preview.path !== path) return
+    state.preview = { path, name, loading: false, url: '', type: '', size: 0, error: err.message }
+  }
+  render()
+}
+
+/** blob: 的生命周期得自己管——不撤销，这一份就在内存里待到刷新页面为止。 */
+function revokePreview() {
+  const p = state.preview
+  if (!p) return
+  if (p.abort) try { p.abort.abort() } catch {}
+  if (p.url) setTimeout(() => URL.revokeObjectURL(p.url), 0)
+}
+
+function closePreview() {
+  revokePreview()
+  state.preview = null
+  render()
+}
+
+/** 直接把工作区里的文件存下来。走 fetch 而不是 <a href>，同样是为了带上票。 */
+async function downloadWorkspaceFile(path, name) {
+  if (!state.chatSessionId) return
+  const url =
+    '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/files?path=' + encodeURIComponent(path) + '&download=1'
+  try {
+    const res = await fetch(url, { headers: authHeaders() })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const blob = await res.blob()
+    const href = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = name || path.split('/').pop() || 'file'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(href), 1000)
+  } catch (err) {
+    flash('err', t('下载失败：') + err.message)
+  }
+}
+
+function previewModal() {
+  const p = state.preview
+  if (!p) return ''
+  let body
+  if (p.loading) {
+    body = `<p class="sw-preview-note">${t('正在取文件…')}</p>`
+  } else if (p.error) {
+    body = `<p class="sw-preview-note sw-preview-err">${esc(p.error)}</p>`
+  } else if (p.tooBig) {
+    body = `<p class="sw-preview-note">${t('这个文件不适合在浏览器里打开（太大，或者是不能安全内联的格式）。下载下来看吧。')}</p>`
+  } else if (p.type.startsWith('image/')) {
+    body = `<img class="sw-preview-img" src="${esc(p.url)}" alt="${esc(p.name)}">`
+  } else {
+    /**
+     * PDF 与纯文本走 iframe。`sandbox` 不带任何 allow-*：脚本、表单、同源全关。
+     * blob: 本来就是 opaque origin，这条是叠在上面的第二道——两道都便宜。
+     */
+    body = `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}"></iframe>`
+  }
+  const meta = p.size ? fileSize(p.size) : ''
+  return `<div class="gw-modal-backdrop" data-act="preview-close">
+    <div class="gw-modal sw-preview" data-stop>
+      <div class="sw-preview-head">
+        <div style="min-width: 0;">
+          <h2>${esc(p.name)}</h2>
+          <p><code>${esc(p.path)}</code>${meta ? ' · ' + esc(meta) : ''}</p>
+        </div>
+        <div class="sw-preview-acts">
+          <button type="button" class="btn" data-act="preview-download" data-path="${esc(p.path)}" data-name="${esc(p.name)}">${t('下载')}</button>
+          <button type="button" class="btn btn-ghost btn-icon" aria-label="${esc(t('关闭'))}" data-act="preview-close">${svg(['M18 6 6 18', 'M6 6l12 12'], 16)}</button>
+        </div>
+      </div>
+      <div class="sw-preview-body">${body}</div>
+    </div>
+  </div>`
+}
+
 function logsModal() {
   if (!state.logsOpen) return ''
   const { title, sources = [], active } = state.logsOpen
@@ -1595,80 +1753,155 @@ function chatPage() {
     </div>`
 }
 
-/** 单个附件的上限。贴进正文的东西要跟消息一起进模型上下文，不能没有边。 */
-const CHAT_FILE_MAX = 256 * 1024
+/**
+ * 预览能在浏览器里直接打开的上限。
+ *
+ * 预览得把整个文件读成 blob 才能喂给 <img>/<iframe>——Gateway 认的是 Authorization
+ * 头，而 src= 发出去的请求带不了头。所以这个数字是「愿意为看一眼吃多少内存」，
+ * 超过就只给下载，不是不给看。
+ *
+ * 上传**没有**前端上限：文件是流着走的，不进模型上下文，把关的是席位那边的
+ * SATUWORK_UPLOAD_MAX。
+ */
+const CHAT_PREVIEW_MAX = 25 * 1024 * 1024
 
 function paintChatFiles() {
   const box = document.getElementById('chat-files')
   if (!box) return
   const files = state.chatFiles || []
   box.hidden = !files.length
+  const busy = Boolean(state.chatUploading)
   box.innerHTML = files
     .map(
       (f, i) =>
-        `<span class="sw-file"><span>${esc(f.name)}</span>` +
-        `<button type="button" class="sw-file-x" data-act="chat-file-drop" data-i="${i}" ` +
-        `aria-label="${esc(t('移除'))} ${esc(f.name)}">${ICON_X}</button></span>`,
+        `<span class="sw-file">` +
+        `<span>${esc(f.name)}</span><small>${esc(fileSize(f.size))}</small>` +
+        // 传的时候不给「移除」：那一下删得掉列表项，删不掉已经在路上的请求。
+        (busy
+          ? ''
+          : `<button type="button" class="sw-file-x" data-act="chat-file-drop" data-i="${i}" ` +
+            `aria-label="${esc(t('移除'))} ${esc(f.name)}">${ICON_X}</button>`) +
+        `</span>`,
     )
     .join('')
 }
 
+function fileSize(bytes) {
+  const n = Number(bytes)
+  if (!Number.isFinite(n)) return ''
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
+
 /**
- * 读入选中的附件。
+ * 记下选中的附件。**不读内容**——文件在发送时整个流给席位，落进工作区，Bot 用
+ * read/bash 自己取。
  *
- * 二进制在这里就挡掉：接口只能带文本，一个 PNG 贴成乱码进上下文，对谁都没有用。
- * 判据是内容里有没有 NUL——比看后缀名准，也不用维护一张白名单。
+ * 以前这里要 file.text() 把正文贴进消息，于是 256 KB 就是天花板，PDF、Excel、图片
+ * 一概传不了（贴成乱码对谁都没用）。现在传的是路径，格式和大小都不再是这一层的事。
  */
-async function takeChatFiles(input) {
+function takeChatFiles(input) {
   const picked = Array.from(input.files || [])
   input.value = ''
-  const bad = []
-  for (const file of picked) {
-    if (file.size > CHAT_FILE_MAX) {
-      bad.push(file.name + t('（超过 256 KB）'))
-      continue
-    }
-    let text
-    try {
-      text = await file.text()
-    } catch {
-      bad.push(file.name)
-      continue
-    }
-    if (text.includes('\u0000')) {
-      bad.push(file.name + t('（不是文本文件）'))
-      continue
-    }
-    state.chatFiles = [...(state.chatFiles || []), { name: file.name, text }]
-  }
-  if (bad.length) flash('err', t('这些文件没能附上：') + bad.join('、') + t('。附件会随消息贴成正文，所以只能是 256 KB 以内的文本。'))
+  if (!picked.length) return
+  state.chatFiles = [...(state.chatFiles || []), ...picked.map((file) => ({ name: file.name, size: file.size, file }))]
   paintChatFiles()
-  if (bad.length) render()
+}
+
+/** 带登录票的请求头。预览和上传都不走 api()——它们收发的不是 JSON。 */
+function authHeaders(extra) {
+  const headers = { ...(extra || {}) }
+  const tok = token()
+  if (tok) headers.authorization = 'Bearer ' + tok
+  return headers
+}
+
+/**
+ * 把一个文件传进这条会话的工作区，返回 { path, name, size }。
+ *
+ * 文件名走 header：查询串会进访问日志，而文件名常常就是内容本身
+ * （「二季度裁员名单.xlsx」）。header 只认 ASCII，所以先 encodeURIComponent，
+ * 席位那边解回来。
+ */
+async function uploadChatFile(sessionId, file) {
+  const res = await fetch('/runtime/sessions/' + encodeURIComponent(sessionId) + '/files', {
+    method: 'POST',
+    headers: authHeaders({
+      accept: 'application/json',
+      'content-type': 'application/octet-stream',
+      'x-filename': encodeURIComponent(file.name),
+    }),
+    body: file,
+  })
+  const text = await res.text()
+  let json = null
+  try {
+    json = text ? JSON.parse(text) : null
+  } catch {}
+  if (!res.ok) throw new Error(errText((json && json.error) || 'HTTP ' + res.status))
+  return json
+}
+
+/**
+ * 附件在正文里的样子。
+ *
+ * 给的是**路径，不是内容**：文件已经躺在工作区里了，Bot 想读哪段读哪段，几百页的
+ * PDF 也不会一次撑爆上下文。
+ *
+ * 排在正文前面——先给材料再给指令，模型读到「照这个文件改」时文件已经在眼前。
+ */
+function composeChatBody(files, text) {
+  if (!files.length) return text
+  const list = files.map((f) => '- `' + f.path + '`').join('\n')
+  return t('我上传了文件，在工作区里：') + '\n' + list + (text ? '\n\n' + text : '')
 }
 
 async function sendChat() {
   const text = (state.chatDraft || '').trim()
   const files = state.chatFiles || []
-  if ((!text && !files.length) || !state.chatSessionId) return
-  // 附件排在正文**前面**：先给材料再给指令，模型读到「照这个文件改」时文件已经在眼前。
-  const body = files.map((f) => '`' + f.name + '`：\n\n```\n' + f.text + '\n```').concat(text ? [text] : []).join('\n\n')
+  const sessionId = state.chatSessionId
+  if ((!text && !files.length) || !sessionId || state.chatUploading) return
+
   state.chatDraft = ''
-  state.chatFiles = []
-  paintChatFiles()
   const input = document.getElementById('chat-input')
   if (input) {
     input.value = ''
     input.style.height = ''
   }
-  try {
-    await api('POST', '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/messages', { text: body })
-  } catch (err) {
-    // 发失败要把草稿和附件都还回去，不然人得重新选一遍文件。
-    state.chatDraft = text
-    state.chatFiles = files
+
+  // 附件先落地，再发消息。反过来的话，模型会先读到路径、文件还没到。
+  let uploaded = []
+  if (files.length) {
+    state.chatUploading = true
     paintChatFiles()
+    render()
+    try {
+      for (const f of files) uploaded.push(await uploadChatFile(sessionId, f.file))
+    } catch (err) {
+      // 传失败就把草稿和附件原样还回去，别让人重新选一遍文件。
+      state.chatUploading = false
+      state.chatDraft = text
+      paintChatFiles()
+      flash('err', t('附件没传上去：') + err.message)
+      render()
+      return
+    }
+    state.chatUploading = false
+  }
+  state.chatFiles = []
+  paintChatFiles()
+
+  try {
+    await api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/messages', {
+      text: composeChatBody(uploaded, text),
+    })
+  } catch (err) {
+    // 文件已经传上去了，退回来的只有草稿——附件不还，还了会传第二遍。
+    state.chatDraft = text
+    if (uploaded.length) flash('err', t('附件已经在工作区里了，但这条消息没发出去。'))
     if (String(err.message || '').includes('实例还没上线')) state.runtimeError = '实例还没上线'
-    else flash('err', err.message)
+    else if (!uploaded.length) flash('err', err.message)
     render()
   }
 }

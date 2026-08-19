@@ -26,6 +26,12 @@ export interface ToolCall {
   sessionId: string
 }
 
+/** 工具产出（或改动）的一个文件。路径相对工作区根目录。 */
+export interface WorkspaceFile {
+  path: string
+  name: string
+}
+
 export interface ToolResult {
   /** 给模型看的文本。业务失败也写在这里，用工具自己的语义表达。 */
   text: string
@@ -34,6 +40,14 @@ export interface ToolResult {
    * 命令退出码非零、查询没结果这类**业务失败**不置位——它们是正常返回。
    */
   failed?: boolean
+  /**
+   * 这次调用落地的文件。**给人看的，不给模型看**——它已经从 text 里知道自己写了什么。
+   *
+   * 存在的理由是「用户怎么发现 Bot 生成的东西」：没有它，界面只能去正则扫工具结果
+   * 的文本找路径，而那段文本是给模型写的散文，措辞一改就扫不出来了。让产出文件的
+   * 那个工具直接报出来，是这条链路上唯一不靠猜的一环。
+   */
+  files?: WorkspaceFile[]
 }
 
 export interface ToolDefinition extends ToolSchema {

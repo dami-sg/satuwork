@@ -189,9 +189,23 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'chat-file-drop') {
+    // 传的过程中不让删：删得掉列表项，删不掉已经在路上的请求。
+    if (state.chatUploading) return
     const i = Number(btn.getAttribute('data-i'))
     state.chatFiles = (state.chatFiles || []).filter((_, n) => n !== i)
     paintChatFiles()
+    return
+  }
+  if (act === 'chat-preview') {
+    await openPreview(btn.getAttribute('data-path') || '', btn.getAttribute('data-name') || '')
+    return
+  }
+  if (act === 'preview-close') {
+    closePreview()
+    return
+  }
+  if (act === 'preview-download') {
+    await downloadWorkspaceFile(btn.getAttribute('data-path') || '', btn.getAttribute('data-name') || '')
     return
   }
   if (act === 'chat-menu') {
@@ -1434,6 +1448,14 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || !state.chatCtxOpen) return
   state.chatCtxOpen = false
   paintChatCtx()
+})
+
+/* Esc 关预览。排在上一条后面：两者不会同时开着，而预览是盖住整屏的那个，
+   人按 Esc 时想关的是它。 */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !state.preview) return
+  e.preventDefault()
+  closePreview()
 })
 
 /**

@@ -21,6 +21,7 @@ import { runMarkdown } from './markdown.mjs'
 import { runSessionStore } from './session-store.mjs'
 import { runLlmIdle } from './llm-idle.mjs'
 import { runReplaySlice } from './replay-slice.mjs'
+import { runWorkspaceFiles } from './workspace-files.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
 import { uiSource } from './ui-dom.mjs'
@@ -2419,6 +2420,89 @@ async function runBot() {
     assert(r.status === 400, `sessions ${r.status} ${r.text}`)
   })
 
+  // ── 附件：上传进工作区，再原样取回来。────────────────────────────────
+  // workspace-files 那一组钉的是服务层的边界，这里钉的是**HTTP 这一跳**：
+  // 文件名怎么过 header、字节有没有在路上被改、预览的响应头对不对。
+  let uploadedPath
+
+  await test('上传附件：落进工作区，返回相对路径', async () => {
+    const bytes = Buffer.from('列,值\n甲,1\n乙,2\n', 'utf8')
+    const r = await req(base, 'POST', `/api/sessions/${sessionId}/files`, {
+      cookie,
+      raw: bytes,
+      headers: { 'content-type': 'application/octet-stream', 'x-filename': encodeURIComponent('二季度.csv') },
+    })
+    assert(r.status === 200, `upload ${r.status} ${r.text}`)
+    assert(typeof r.json.path === 'string' && r.json.path.startsWith('uploads/'), `落点不对：${r.text}`)
+    // 中文名要能穿过 header 活着回来——这正是不用查询串、改用 URL 编码 header 的原因。
+    assert(r.json.name === '二季度.csv', `文件名坏了：${r.json.name}`)
+    assert(r.json.size === bytes.length, `大小对不上：${r.json.size} ≠ ${bytes.length}`)
+    uploadedPath = r.json.path
+    const onDisk = join(BOT_HOME, 'work', uploadedPath)
+    assert(existsSync(onDisk), `磁盘上没有 ${onDisk}`)
+    assert(readFileSync(onDisk, 'utf8') === bytes.toString('utf8'), '落盘内容和传上去的不一样')
+  })
+
+  await test('上传到不存在的会话 → 404', async () => {
+    const r = await req(base, 'POST', '/api/sessions/no-such-session/files', {
+      cookie,
+      raw: Buffer.from('x'),
+      headers: { 'content-type': 'application/octet-stream', 'x-filename': 'a.txt' },
+    })
+    assert(r.status === 404, `应该 404，实为 ${r.status} ${r.text}`)
+  })
+
+  await test('预览：字节一个不差，响应头挡住嗅探', async () => {
+    const r = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(uploadedPath)}`, { cookie })
+    assert(r.status === 200, `preview ${r.status} ${r.text}`)
+    assert(r.text === '列,值\n甲,1\n乙,2\n', `内容对不上：${JSON.stringify(r.text)}`)
+    assert(String(r.headers.get('content-type')).startsWith('text/plain'), `类型不对：${r.headers.get('content-type')}`)
+    assert(r.headers.get('x-content-type-options') === 'nosniff', '少了 nosniff，白名单会被嗅探绕过')
+    const cd = String(r.headers.get('content-disposition') || '')
+    assert(cd.startsWith('inline'), `csv 该能内联：${cd}`)
+    // 中文名两份都要在：ASCII 那份兜底，filename* 带原名。
+    assert(cd.includes("filename*=UTF-8''"), `少了 RFC 5987 的那份：${cd}`)
+  })
+
+  await test('预览：?download=1 强制另存', async () => {
+    const r = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(uploadedPath)}&download=1`, { cookie })
+    assert(r.status === 200, `download ${r.status}`)
+    assert(String(r.headers.get('content-disposition')).startsWith('attachment'), '没强制另存')
+  })
+
+  await test('预览：能带脚本的类型一律另存，不给内联', async () => {
+    const r = await req(base, 'POST', `/api/sessions/${sessionId}/files`, {
+      cookie,
+      raw: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
+      headers: { 'content-type': 'application/octet-stream', 'x-filename': 'evil.svg' },
+    })
+    assert(r.status === 200, `upload svg ${r.status} ${r.text}`)
+    const g = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(r.json.path)}`, { cookie })
+    assert(g.status === 200, `get svg ${g.status}`)
+    // 内联一个带 <script> 的 SVG，等于让上传者在这个源上执行代码。
+    assert(String(g.headers.get('content-disposition')).startsWith('attachment'), 'SVG 被允许内联了')
+    assert(g.headers.get('content-type') === 'application/octet-stream', `SVG 的 MIME 不该是 image/svg+xml：${g.headers.get('content-type')}`)
+  })
+
+  await test('预览：路径越界 → 400，文件不存在 → 404', async () => {
+    const bad = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent('../../../etc/passwd')}`, { cookie })
+    assert(bad.status === 400, `越界应该 400，实为 ${bad.status} ${bad.text}`)
+    const missing = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent('nope.txt')}`, { cookie })
+    assert(missing.status === 404, `不存在应该 404，实为 ${missing.status} ${missing.text}`)
+    const empty = await req(base, 'GET', '/api/workspace/file', { cookie })
+    assert(empty.status === 400, `缺 path 应该 400，实为 ${empty.status}`)
+  })
+
+  await test('附件这两条路一样要过鉴权', async () => {
+    const up = await req(base, 'POST', `/api/sessions/${sessionId}/files`, {
+      raw: Buffer.from('x'),
+      headers: { 'content-type': 'application/octet-stream', 'x-filename': 'a.txt' },
+    })
+    assert(up.status === 401, `未登录上传 ${up.status}`)
+    const get = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(uploadedPath)}`)
+    assert(get.status === 401, `未登录预览 ${get.status}`)
+  })
+
   await test('发消息：无 Gateway 密钥也不准把进程打挂；JSONL 根有 botId+origin', async () => {
     const r = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
       cookie,
@@ -2597,6 +2681,7 @@ async function main() {
     await runSessionStore({ root, test, assert, log })
     await runLlmIdle({ root, test, assert, log })
     await runReplaySlice({ root, test, assert, log })
+    await runWorkspaceFiles({ root, test, assert, log })
   } finally {
     killAll()
     try {

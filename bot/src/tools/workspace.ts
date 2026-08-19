@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process'
 import type { Dirent } from 'node:fs'
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { satuworkHome } from '../home.ts'
+import { humanSize, looksBinary, WorkspaceError } from '../workspace/index.ts'
+import type { WorkspaceFile } from './index.ts'
 
 /**
  * 工作区工具：read / write / edit / ls / find / grep / bash。
@@ -25,11 +26,9 @@ import { satuworkHome } from '../home.ts'
  * 短路才是强制执行。别指望这里的 resolve() 顶那两层的用。
  */
 export const name = 'satu-tools-workspace'
-export const inject = ['tools']
+export const inject = ['tools', 'workspace']
 
 export interface Config {
-  /** 工作区根目录。默认 `$SATUWORK_WORK_DIR`，回落 `$SATUWORK_HOME/work`。 */
-  root?: string
   /** bash 默认超时（毫秒）。 */
   timeout?: number
 }
@@ -61,43 +60,8 @@ function fail(message: string): never {
   throw new ToolFailure(message)
 }
 
-function workspaceRoot(config: Config): string {
-  const raw = config.root?.trim() || process.env.SATUWORK_WORK_DIR?.trim()
-  return raw ? resolve(raw) : satuworkHome('work')
-}
-
-/**
- * 参数路径 → 绝对路径。越界即拒。
- *
- * 这里不 realpath：解析一条还不存在的写入路径会失败，而 write 要能创建新文件。
- * 也就是说符号链接绕得过去——见文件头，这层挡的是手滑，不是恶意。
- */
-function resolveIn(root: string, path?: string): string {
-  const target = resolve(root, path?.trim() || '.')
-  if (target !== root && !target.startsWith(root + sep)) {
-    fail(`路径越界：${path}。只能访问工作区 ${root} 以内的文件。`)
-  }
-  return target
-}
-
-/** 展示用相对路径。根目录本身显示成 `.`。 */
-function show(root: string, path: string): string {
-  return relative(root, path) || '.'
-}
-
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}\n…（已截断，共 ${text.length} 字符）`
-}
-
-/** \0 出现在头部就当二进制。够用，且比嗅探 MIME 便宜。 */
-function looksBinary(buf: Buffer): boolean {
-  return buf.subarray(0, 8000).includes(0)
-}
-
-function humanSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
 /**
@@ -213,24 +177,28 @@ function runCommand(command: string, cwd: string, timeout: number) {
 }
 
 export function apply(ctx: Context, config: Config = {}) {
-  const root = workspaceRoot(config)
+  // 根目录和越界检查都在 workspace 服务上——上传和预览走的是同一份，
+  // 各写一份 resolve 迟早会有一条写松。
+  const root = ctx.workspace.root
+  const resolveIn = (path?: string) => ctx.workspace.resolve(path)
+  const show = (path: string) => ctx.workspace.show(path)
   const defaultTimeout = Math.min(config.timeout || DEFAULT_TIMEOUT, MAX_TIMEOUT)
-
-  // 工作区不存在时先建出来。缺了它，第一次 ls 会以「路径不存在」收场，
-  // 而那其实不是模型的错。
-  void mkdir(root, { recursive: true }).catch(() => {})
 
   /** 统一把业务失败收成文本。管道故障（真异常）继续往上抛，由 ToolService 标 failed。 */
   const tool = (
     def: { name: string; description: string; parameters: Record<string, unknown> },
-    execute: (args: any) => Promise<string> | string,
+    execute: (args: any) => Promise<string | { text: string; files: WorkspaceFile[] }> | string,
   ) => {
     ctx.tools.register({
       ...def,
       async execute(args) {
         try {
-          return { text: await execute((args ?? {}) as any) }
+          const out = await execute((args ?? {}) as any)
+          return typeof out === 'string' ? { text: out } : out
         } catch (e) {
+          // 越界是模型写错了路径，跟「文件不存在」同类——告诉它，让它改，
+          // 不是管道故障。
+          if (e instanceof WorkspaceError) return { text: e.message }
           if (e instanceof ToolFailure) return { text: e.message }
           const err = e as NodeJS.ErrnoException
           if (err?.code === 'ENOENT') return { text: `文件或目录不存在：${err.path ?? ''}` }
@@ -259,12 +227,12 @@ export function apply(ctx: Context, config: Config = {}) {
     },
     async ({ path, offset, limit }: { path?: string; offset?: number; limit?: number }) => {
       if (!path) fail('缺少 path 参数')
-      const target = resolveIn(root, path)
+      const target = resolveIn(path)
       const info = await stat(target)
-      if (info.isDirectory()) fail(`${show(root, target)} 是目录，用 ls 列它的内容。`)
+      if (info.isDirectory()) fail(`${show(target)} 是目录，用 ls 列它的内容。`)
       const buf = await readFile(target)
-      if (!buf.length) return `${show(root, target)} 是空文件。`
-      if (looksBinary(buf)) return `${show(root, target)} 是二进制文件（${humanSize(info.size)}），不能按文本读。`
+      if (!buf.length) return `${show(target)} 是空文件。`
+      if (looksBinary(buf)) return `${show(target)} 是二进制文件（${humanSize(info.size)}），不能按文本读。`
 
       const lines = buf.toString('utf8').split('\n')
       const start = Math.max(1, Math.floor(offset ?? 1))
@@ -300,15 +268,18 @@ export function apply(ctx: Context, config: Config = {}) {
     async ({ path, content }: { path?: string; content?: string }) => {
       if (!path) fail('缺少 path 参数')
       if (typeof content !== 'string') fail('缺少 content 参数')
-      const target = resolveIn(root, path)
+      const target = resolveIn(path)
       const existed = await stat(target).then(
-        (s) => (s.isDirectory() ? fail(`${show(root, target)} 是目录，不能当文件写。`) : true),
+        (s) => (s.isDirectory() ? fail(`${show(target)} 是目录，不能当文件写。`) : true),
         () => false,
       )
       await mkdir(dirname(target), { recursive: true })
       await writeFile(target, content, 'utf8')
       const bytes = Buffer.byteLength(content)
-      return `${existed ? '已覆盖' : '已创建'} ${show(root, target)}（${content.split('\n').length} 行，${humanSize(bytes)}）`
+      return {
+        text: `${existed ? '已覆盖' : '已创建'} ${show(target)}（${content.split('\n').length} 行，${humanSize(bytes)}）`,
+        files: [{ path: show(target), name: basename(target) }],
+      }
     },
   )
 
@@ -339,20 +310,23 @@ export function apply(ctx: Context, config: Config = {}) {
       if (typeof newString !== 'string') fail('缺少 new_string 参数')
       if (oldString === newString) fail('old_string 与 new_string 相同，没有可改的东西。')
 
-      const target = resolveIn(root, path)
+      const target = resolveIn(path)
       const buf = await readFile(target)
-      if (looksBinary(buf)) fail(`${show(root, target)} 是二进制文件，不能编辑。`)
+      if (looksBinary(buf)) fail(`${show(target)} 是二进制文件，不能编辑。`)
       const before = buf.toString('utf8')
 
       const hits = before.split(oldString).length - 1
-      if (!hits) fail(`没找到那段文本。先用 read 确认 ${show(root, target)} 里的原文（缩进和空白要一致）。`)
+      if (!hits) fail(`没找到那段文本。先用 read 确认 ${show(target)} 里的原文（缩进和空白要一致）。`)
       if (hits > 1 && !replaceAll) {
         fail(`那段文本出现了 ${hits} 次。多带几行上下文让它唯一，或者置 replace_all=true 全部替换。`)
       }
 
       const after = replaceAll ? before.split(oldString).join(newString) : before.replace(oldString, newString)
       await writeFile(target, after, 'utf8')
-      return `已修改 ${show(root, target)}（替换 ${replaceAll ? hits : 1} 处）`
+      return {
+        text: `已修改 ${show(target)}（替换 ${replaceAll ? hits : 1} 处）`,
+        files: [{ path: show(target), name: basename(target) }],
+      }
     },
   )
 
@@ -369,14 +343,14 @@ export function apply(ctx: Context, config: Config = {}) {
       },
     },
     async ({ path, all }: { path?: string; all?: boolean }) => {
-      const target = resolveIn(root, path)
+      const target = resolveIn(path)
       const info = await stat(target)
-      if (!info.isDirectory()) fail(`${show(root, target)} 不是目录，用 read 读它。`)
+      if (!info.isDirectory()) fail(`${show(target)} 不是目录，用 read 读它。`)
 
       const entries = (await readdir(target, { withFileTypes: true })).filter(
         (e) => all || !e.name.startsWith('.'),
       )
-      if (!entries.length) return `${show(root, target)} 是空目录。`
+      if (!entries.length) return `${show(target)} 是空目录。`
 
       entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
       const shown = entries.slice(0, MAX_LIST_ENTRIES)
@@ -389,7 +363,7 @@ export function apply(ctx: Context, config: Config = {}) {
         }),
       )
       const more = entries.length > shown.length ? `\n…（还有 ${entries.length - shown.length} 条未列出）` : ''
-      return `${show(root, target)}：\n${lines.join('\n')}${more}`
+      return `${show(target)}：\n${lines.join('\n')}${more}`
     },
   )
 
@@ -410,9 +384,9 @@ export function apply(ctx: Context, config: Config = {}) {
     },
     async ({ pattern, path, limit }: { pattern?: string; path?: string; limit?: number }) => {
       if (!pattern) fail('缺少 pattern 参数')
-      const base = resolveIn(root, path)
+      const base = resolveIn(path)
       const info = await stat(base)
-      if (!info.isDirectory()) fail(`${show(root, base)} 不是目录。`)
+      if (!info.isDirectory()) fail(`${show(base)} 不是目录。`)
 
       const match = globMatcher(pattern)
       const cap = Math.max(1, Math.min(Math.floor(limit ?? MAX_FIND_RESULTS), MAX_FIND_RESULTS))
@@ -423,9 +397,9 @@ export function apply(ctx: Context, config: Config = {}) {
         const rel = relative(base, file).split(sep).join('/')
         if (!match(rel)) continue
         const s = await stat(file).catch(() => undefined)
-        found.push({ rel: show(root, file).split(sep).join('/'), mtime: s?.mtimeMs ?? 0 })
+        found.push({ rel: show(file).split(sep).join('/'), mtime: s?.mtimeMs ?? 0 })
       }
-      if (!found.length) return `没有匹配 ${pattern} 的文件（起点 ${show(root, base)}）。`
+      if (!found.length) return `没有匹配 ${pattern} 的文件（起点 ${show(base)}）。`
 
       found.sort((a, b) => b.mtime - a.mtime)
       const shown = found.slice(0, cap)
@@ -474,7 +448,7 @@ export function apply(ctx: Context, config: Config = {}) {
       } catch (e) {
         fail(`正则写错了：${(e as Error).message}`)
       }
-      const base = resolveIn(root, path)
+      const base = resolveIn(path)
       const match = glob ? globMatcher(glob) : undefined
       const cap = Math.max(1, Math.min(Math.floor(limit ?? MAX_GREP_MATCHES), MAX_GREP_MATCHES))
 
@@ -483,7 +457,7 @@ export function apply(ctx: Context, config: Config = {}) {
       let truncated = false
 
       outer: for await (const file of filesUnder(base)) {
-        const rel = show(root, file).split(sep).join('/')
+        const rel = show(file).split(sep).join('/')
         if (match && !match(relative(base, file).split(sep).join('/'))) continue
         const s = await stat(file).catch(() => undefined)
         if (!s || s.size > MAX_GREP_FILE_BYTES) continue
@@ -515,7 +489,7 @@ export function apply(ctx: Context, config: Config = {}) {
         if (!hitFiles.length) return `没有文件匹配 ${pattern}。`
         return hitFiles.join('\n') + (truncated ? `\n…（已达 ${cap} 条上限）` : '')
       }
-      if (!lines.length) return `没有匹配 ${pattern} 的内容（范围 ${show(root, base)}）。`
+      if (!lines.length) return `没有匹配 ${pattern} 的内容（范围 ${show(base)}）。`
       return (
         `${lines.length} 条匹配，来自 ${hitFiles.length} 个文件：\n${lines.join('\n')}` +
         (truncated ? `\n…（已达 ${cap} 条上限，缩小范围或加 glob）` : '')
@@ -541,9 +515,9 @@ export function apply(ctx: Context, config: Config = {}) {
     },
     async ({ command, cwd, timeout }: { command?: string; cwd?: string; timeout?: number }) => {
       if (!command?.trim()) fail('缺少 command 参数')
-      const dir = resolveIn(root, cwd)
-      const info = await stat(dir).catch(() => fail(`工作目录不存在：${show(root, dir)}`))
-      if (!info.isDirectory()) fail(`${show(root, dir)} 不是目录。`)
+      const dir = resolveIn(cwd)
+      const info = await stat(dir).catch(() => fail(`工作目录不存在：${show(dir)}`))
+      if (!info.isDirectory()) fail(`${show(dir)} 不是目录。`)
       const ms = Math.max(1000, Math.min(Math.floor(timeout || defaultTimeout), MAX_TIMEOUT))
 
       const { code, signal, out, bytes, timedOut, error } = await runCommand(command, dir, ms)
