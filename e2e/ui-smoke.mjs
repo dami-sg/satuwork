@@ -514,16 +514,21 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       // 版本刚升完的机器，头一行写着「还没有配对」——把「字段缺席」和「机器没配对」
       // 混成同一个结论，而这两件事差得最远。
       const ui = await boot(ownerToken)
-      const stale = ui.machineHead({ no: 1 }, { id: 'abcdef0123', paired: true })
+      const stale = ui.machineHead('org-1', { no: 1 }, { id: 'abcdef0123', paired: true })
       assert(stale.includes('状态未知'), `缺 link 时该说不知道，实际：${stale}`)
       assert(!stale.includes('还没有配对'), '对一台已配对的机器谎称没配对')
       // paired 是老响应里就有的，可信：它说没配对，那就是真没配对。
-      const virgin = ui.machineHead({ no: 2 }, { id: 'abcdef0123', paired: false })
+      const virgin = ui.machineHead('org-1', { no: 2 }, { id: 'abcdef0123', paired: false })
       assert(virgin.includes('还没有配对'), '真没配对时反而不说了')
       // 编号缺席就整个略过——「机器 ?」既指代不了机器，也说不清哪儿出了问题。
-      const noNo = ui.machineHead({}, { id: 'abcdef0123', paired: true, link: 'online' })
+      const noNo = ui.machineHead('org-1', {}, { id: 'abcdef0123', paired: true, link: 'online' })
       assert(!noNo.includes('?'), `编号缺席时画出了问号：${noNo}`)
       assert(noNo.includes('abcdef01'), '短码也一起没了')
+      // 刷新那颗要挂着公司 id：机器那个接口是按公司回整张列表的，没有 id 就无处可拉。
+      assert(
+        /data-act="machine-refresh"[^>]*data-id="org-1"/.test(stale),
+        `刷新按钮没带上公司 id：${stale}`,
+      )
     })
 
     await test('机器管理：菜单在「机器配置」上面，列表和详情画得出，公司侧进不去', async () => {

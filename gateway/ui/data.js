@@ -296,6 +296,28 @@ async function loadMachineDetail(id) {
   }
 }
 
+/** GET /platform/orgs/:id/machine 那一份响应 → state。整页加载和单独刷新走的是同一条。 */
+function applyMachineRes(res) {
+  state.machine = res && res.machine ? res.machine : null
+  state.machines = (res && res.machines) || []
+  state.machineCapacity = (res && res.capacity) || null
+  state.botLatest = (res && res.botLatest) || null
+  state.managerLatest = (res && res.managerLatest) || null
+}
+
+/**
+ * 只重新拉机器那一块，不动这一页的其它数据。
+ *
+ * 卡片上的心跳、管家版本、bot 版本都是**机器自报**的，Gateway 这边只是存着——下指令
+ * 之后要等下一轮心跳（≤30 秒）才变。所以要有一条比整页重载轻的路给人手动催一下。
+ *
+ * 失败时**不动 state**：把机器列表清空会让一次网络抖动看起来像「机器全没了」。
+ */
+async function loadMachines(id) {
+  if (!id) return
+  applyMachineRes(await api('GET', `/platform/orgs/${encodeURIComponent(id)}/machine`))
+}
+
 async function loadCompanyDetail(id) {
   if (!id) {
     flash('err', t('公司不存在'))
@@ -324,11 +346,7 @@ async function loadCompanyDetail(id) {
     state.accounts = accounts.members || accounts.accounts || []
     state.seats = accounts.seats || { total: 0, used: 0 }
     state.billing = billing
-    state.machine = machineRes && machineRes.machine ? machineRes.machine : null
-    state.machines = (machineRes && machineRes.machines) || []
-    state.machineCapacity = (machineRes && machineRes.capacity) || null
-    state.botLatest = (machineRes && machineRes.botLatest) || null
-    state.managerLatest = (machineRes && machineRes.managerLatest) || null
+    applyMachineRes(machineRes)
     if (botsRes && Array.isArray(botsRes.bots)) state.bots = botsRes.bots
   } catch (err) {
     flash('err', err.message)

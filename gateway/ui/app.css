@@ -235,6 +235,11 @@ body { margin: 0; background: var(--color-bg); color: var(--color-text); font-fa
   font-size: 12px;
   color: var(--muted-foreground);
 }
+/* 刷新推到最右。头一行是 flex-wrap 的，窄屏上它会自己换行到下一行的右端——
+   比固定定位好：绝对定位到卡片右上角，窄屏时会压在状态文字上。 */
+.satu-machinerefresh {
+  margin-left: auto;
+}
 .satu-botname {
   flex: 1;
   min-width: 0;

@@ -763,9 +763,31 @@ async function saveManagerVersion(e) {
 }
 
 /**
- * 给这台机器钉一个新的管家版本。
+ * 手动重拉一遍机器信息。
  *
- * 只是下指令——换版、自检、失败回滚都在机器上做，所以提示语说的是「等机器换版」。
+ * **只重拉，不去戳机器。** 心跳是机器主动打的（30 秒一轮），Gateway 没有把它叫醒的
+ * 路子——这颗按钮能做的就是把 Gateway 手上这一份再取一次。所以刚下完指令马上点，
+ * 大概率还是旧值，得等机器自己下一轮心跳。
+ */
+async function refreshMachine(id) {
+  if (!id) return
+  state.busy = true
+  render()
+  try {
+    await loadMachines(id)
+    flash('ok', t('已刷新'))
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
+/**
+ * 移除一台机器的登记。**只是从 Gateway 上抹掉这条记录**，不碰机器本身。
+ *
+ * 公司侧和平台侧共用它，靠元素上的 data-scope 分流（见 machineScope）。
  */
 async function removeMachine(el) {
   const s = machineScope(el)
@@ -829,6 +851,11 @@ async function saveTimezone(e) {
   }
 }
 
+/**
+ * 给这台机器钉一个新的管家版本。
+ *
+ * 只是下指令——换版、自检、失败回滚都在机器上做，所以提示语说的是「等机器换版」。
+ */
 async function upgradeManager(el) {
   const s = machineScope(el)
   if (!s.machineId || (s.scope === 'org' && !s.orgId)) return
