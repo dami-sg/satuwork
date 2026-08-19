@@ -99,11 +99,50 @@ function upstreamPath(seatId: string, rest: string, search: string): string {
   return `/seats/${encodeURIComponent(seatId)}/vnc${rest}${search}`
 }
 
+/**
+ * 落地页上补的一段样式：**关掉 noVNC 自己的控制条**。
+ *
+ * 那条竖条（连接/断开、剪贴板、Ctrl-Alt-Del、全屏、设置）是给「整页就是一块屏」那
+ * 种用法准备的。我们这边它嵌在对话页右栏里、外面已经有自己的标题栏和「重连 / 收起」，
+ * 于是它变成了两套控件叠在一起，还压着桌面右边一条。
+ *
+ * 藏的是 `#noVNC_control_bar_anchor` ——**连那个把手一起**。只藏 `#noVNC_control_bar`
+ * 的话，把手还在，点开又是那条。
+ *
+ * 代价说清楚：noVNC 的剪贴板面板和 Ctrl-Alt-Del 都在这条里，藏了就没了。剪贴板仍然
+ * 可以走系统那一路（在桌面里自己复制粘贴），跨机器的粘贴要另想办法。选择器对不上时
+ * 这段样式什么也不做，页面照旧——不会因为 noVNC 换版本而白屏。
+ */
+const HIDE_CONTROL_BAR = '<style>#noVNC_control_bar_anchor{display:none!important}</style>'
+
+/**
+ * 落地页要改内容，所以不能像别的资源那样直接对接两个流：先收完，插一段样式，再按
+ * 新长度发出去。它只有几十 KB，且一次会话只取一次。
+ *
+ * **请求上游时把 `accept-encoding` 摘掉**：浏览器会要 gzip/br，而收进内存改字符串
+ * 之前得先解压。这一页小，让上游发明文最省事。
+ */
+function pipeLanding(
+  req: IncomingMessage,
+  res: ServerResponse,
+  target: { base: string; token: string },
+  path: string,
+) {
+  pipeUpstream(req, res, target, path, (body, type) => {
+    if (!type.includes('text/html')) return body
+    const html = body.toString('utf8')
+    const at = html.lastIndexOf('</head>')
+    if (at < 0) return body
+    return Buffer.from(html.slice(0, at) + HIDE_CONTROL_BAR + html.slice(at), 'utf8')
+  })
+}
+
 function pipeUpstream(
   req: IncomingMessage,
   res: ServerResponse,
   target: { base: string; token: string },
   path: string,
+  transform?: (body: Buffer, contentType: string) => Buffer,
 ) {
   let url: URL
   try {
@@ -118,6 +157,8 @@ function pipeUpstream(
     // hop-by-hop、我们自己的 cookie、以及 host 都不往下传。**cookie 尤其不能传**：
     // 那是 Gateway 这一侧的凭据，管家不需要，传过去只是多一个泄露面。
     if (k === 'host' || k === 'connection' || k === 'cookie' || k === 'authorization') continue
+    // 要改内容就不能收到压缩过的字节——见 pipeLanding。
+    if (transform && k === 'accept-encoding') continue
     headers[k] = v
   }
   headers.host = url.host
@@ -140,8 +181,27 @@ function pipeUpstream(
         json(res, 409, { error: TOO_OLD })
         return
       }
-      res.writeHead(up.statusCode ?? 502, up.headers as Record<string, string | string[]>)
-      up.pipe(res)
+      const head = { ...(up.headers as Record<string, string | string[]>) }
+      if (!transform || up.statusCode !== 200) {
+        res.writeHead(up.statusCode ?? 502, head)
+        up.pipe(res)
+        return
+      }
+      const chunks: Buffer[] = []
+      up.on('data', (c: Buffer) => chunks.push(c))
+      up.on('end', () => {
+        const out = transform(Buffer.concat(chunks), String(head['content-type'] || ''))
+        // 长度变了；分块编码是上游那一跳的事，我们这一跳自己定长发。
+        delete head['content-length']
+        delete head['transfer-encoding']
+        head['content-length'] = String(out.length)
+        res.writeHead(200, head)
+        res.end(out)
+      })
+      up.on('error', () => {
+        if (!res.headersSent) json(res, 502, { error: '机器管家中途断了' })
+        else res.end()
+      })
     },
   )
   upstream.on('error', (e) => {
@@ -211,7 +271,9 @@ export function desktopIntercept(db: Db, keys: JwtKeys) {
       json(res, 409, { error: TOO_OLD })
       return true
     }
-    pipeUpstream(req, res, target, upstreamPath(seatId, rest, url.search))
+    // 落地页要改（关掉 noVNC 自己的控制条），别的资源原样对接两个流。
+    const send = rest === '/vnc.html' || rest === '/vnc_lite.html' ? pipeLanding : pipeUpstream
+    send(req, res, target, upstreamPath(seatId, rest, url.search))
     return true
   }
 }

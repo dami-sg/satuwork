@@ -741,6 +741,8 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
      * 票换 cookie → 静态资源 → WebSocket 升级，以及三种不该放行的情况。
      */
     await test('桌面从 Gateway 同域反代出去：票换 cookie、资源与 WebSocket 都通', async () => {
+      // 像 noVNC 落地页那样有个 </head>，好验证控制条那段样式插进去了。
+      const FAKE_PAGE = '<html><head><title>noVNC</title></head><body>VNC-PAGE</body></html>'
       const seen = { headers: [], paths: [] }
       const fake = createServer((req, res) => {
         seen.headers.push(req.headers)
@@ -749,7 +751,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
           res.writeHead(401).end('no machine token')
           return
         }
-        res.writeHead(200, { 'content-type': 'text/html' }).end('VNC-PAGE')
+        res.writeHead(200, { 'content-type': 'text/html' }).end(FAKE_PAGE)
       })
       fake.on('upgrade', (req, socket) => {
         if (req.headers['x-satuwork-machine'] !== machineTok) {
@@ -818,12 +820,24 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
 
         const page = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`, { headers: { cookie } })
         assert(page.status === 200, `静态 ${page.status}`)
-        assert((await page.text()) === 'VNC-PAGE', '字节没原样带回来')
+        const body = await page.text()
+        assert(body.includes('VNC-PAGE'), '字节没带回来')
+        /**
+         * 落地页要**改一处**：把 noVNC 自己的控制条关掉。那条竖条在右栏这种嵌法里
+         * 和我们自己的标题栏叠在一起，还压着桌面右边一条。
+         */
+        assert(body.includes('#noVNC_control_bar_anchor'), '控制条那段样式没插进去')
+        assert(body.indexOf('#noVNC_control_bar_anchor') < body.indexOf('</head>'), '样式要在 </head> 之前')
+        assert(page.headers.get('content-length') === String(new TextEncoder().encode(body).length), '改了内容没重算长度')
         assert(seen.paths.some((p) => p.startsWith(`/seats/${seatId}/vnc/vnc.html`)), `上游路径 ${seen.paths}`)
         // 机器票只该活在 Gateway 与管家之间；Gateway 这一侧的 cookie 不该漏下去。
         const last = seen.headers[seen.headers.length - 1]
         assert(last['x-satuwork-machine'] === machineTok, '没带机器票')
         assert(!last.cookie, `Gateway 的 cookie 漏给了管家：${last.cookie}`)
+
+        // 别的资源不许被碰：只有落地页走改写那条路。
+        const asset = await fetch(`${gwBase}/desktop/${seatId}/app/ui.js`, { headers: { cookie } })
+        assert(!(await asset.text()).includes('noVNC_control_bar_anchor'), '普通资源不该被改写')
 
         const anon = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`)
         assert(anon.status === 401, `无 cookie 应 401：${anon.status}`)
