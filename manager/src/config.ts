@@ -42,6 +42,14 @@ export interface ManagerState {
    * 掐断一次聊天。记下来，认出这种情况就停手并把原因报上去。
    */
   lastUpgradeTo: string
+  /**
+   * 上一次换版是什么时候（epoch 毫秒）。
+   *
+   * 回滚脚本靠它分辨「新版本连不上 Gateway」和「新版本还没来得及起来」。少了它，
+   * 那个每 120 秒敲一次的定时器会把撞进升级窗口的一次好升级判成失败——见
+   * src/seat/manager-confirm.sh 里的宽限期那一段。
+   */
+  lastUpgradeAt: number
 }
 
 export function managerHome(...segments: string[]): string {
@@ -95,6 +103,7 @@ export function readState(): ManagerState | undefined {
       jwks: raw.jwks ?? null,
       confirmedVersion: raw.confirmedVersion ?? '',
       lastUpgradeTo: raw.lastUpgradeTo ?? '',
+      lastUpgradeAt: Number(raw.lastUpgradeAt) || 0,
     }
   } catch {
     return
