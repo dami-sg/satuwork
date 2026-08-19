@@ -665,3 +665,156 @@
 /* 还没取回来、或者太大不自动取的那些，留一个占位而不是塌成一条缝。 */
 .sw-shot-ph { color: var(--muted-foreground); opacity: 0.7; }
 .sw-bubble[data-role='user'] .sw-shot { border-color: color-mix(in srgb, var(--primary-foreground) 28%, transparent); }
+
+/* ── 右栏里的内嵌桌面 ─────────────────────────────────────────────────────
+   槽是占位，真正的 iframe 在 body 上的常驻层里（见 chat.js 的 syncDesktop）——
+   整页重绘换不掉它，桌面才不会每重绘一次就断一次。两者的圆角要对得上。 */
+.sw-desk { display: flex; flex-direction: column; gap: 6px; }
+.sw-desk-slot {
+  /* 席位的屏是 1280x800。比例写死成一样的，预览里就不会有黑边或者被裁。 */
+  aspect-ratio: 16 / 10;
+  width: 100%;
+  /* 这套界面没有全局的 box-sizing 重置。常驻层是照这个槽的 border-box 尺寸摆的，
+     两边都得算上那 1px 边框，否则层会比槽宽高各多出 2px，右下角对不齐。 */
+  box-sizing: border-box;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+}
+.sw-desk-cap { margin: 0; text-align: center; font-size: 11.5px; color: var(--muted-foreground); }
+
+.sw-deskl {
+  position: fixed;
+  /* 20：在页面之上、在 .gw-modal-backdrop（25）之下。开日志那类弹层时，这块屏要
+     跟着一起被压到蒙版底下去，不能孤零零地浮在上面。 */
+  z-index: 20;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  /* 见 .sw-desk-slot：宽高是照槽的 border-box 给的，这里必须同口径。 */
+  box-sizing: border-box;
+  background: var(--color-neutral-900, #111);
+  box-shadow: var(--shadow-sm);
+  /* 列：全屏时标题条占一行、屏占剩下的。**不叠在屏上面**——叠上去挡掉的正好是
+     桌面顶栏那一条，而那是要点的地方。 */
+  display: flex;
+  flex-direction: column;
+}
+.sw-deskl.is-full {
+  z-index: 61;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+.sw-deskl-frame { display: block; flex: 1; min-height: 0; width: 100%; border: 0; background: #000; }
+
+/* 预览态的挡片。盖住整块屏：点不进去、也拿不到键盘焦点，所以那块屏在这个状态下
+   纯粹是「看」。鼠标移上去才浮出「打开」。 */
+.sw-deskl-shield {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 140ms ease;
+  font-family: inherit;
+}
+.sw-deskl.is-full .sw-deskl-shield { display: none; }
+.sw-deskl-shield:hover, .sw-deskl-shield:focus-visible {
+  background: color-mix(in srgb, var(--color-neutral-900) 42%, transparent);
+}
+.sw-deskl-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  background: var(--popover);
+  color: var(--color-text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  font-size: 12.5px;
+  font-weight: 600;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+.sw-deskl-shield:hover .sw-deskl-open, .sw-deskl-shield:focus-visible .sw-deskl-open {
+  opacity: 1;
+  transform: none;
+}
+
+/* 全屏时的标题条。**必须一直看得见**：焦点一进 iframe，noVNC 就把键盘抓走了，
+   Esc 到不了我们这儿，这颗按钮是唯一确定出得去的路。 */
+.sw-deskl-bar {
+  display: none;
+  flex: none;
+  /* 标题条在 DOM 里排在 iframe 后面（iframe 要第一个进树，src 才只加载一次），
+     所以位置靠 order 提到顶上，而不是靠改顺序。 */
+  order: -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 6px 8px 6px var(--space-4);
+  background: var(--color-neutral-900, #111);
+  color: #fff;
+  font-size: 12.5px;
+}
+.sw-deskl.is-full .sw-deskl-bar { display: flex; }
+.sw-deskl-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-deskl-acts { display: flex; align-items: center; gap: var(--space-2); flex: none; }
+/* 「重连」。掉过线之后 noVNC 自己回不来（票过期了），这是人手里唯一确定管用的那一下。 */
+.sw-deskl-btn {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #fff 28%, transparent);
+  background: transparent;
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sw-deskl-btn:hover { background: color-mix(in srgb, #fff 16%, transparent); }
+.sw-deskl-close { color: #fff; flex: none; }
+.sw-deskl-close:hover { background: color-mix(in srgb, #fff 18%, transparent); }
+
+.sw-deskb {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: color-mix(in srgb, var(--color-neutral-900) 62%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+}
+.sw-deskb.is-on { opacity: 1; pointer-events: auto; }
+
+/* 席位详情的折叠面板。默认收起——里面是路径、版本号和两个排查入口，天天看的是
+   上面那块屏，不是这些。 */
+.sw-seatinfo { display: flex; flex-direction: column; gap: var(--space-3); }
+.sw-seatinfo-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  text-align: left;
+}
+.sw-seatinfo-head:hover { color: var(--color-text); }
+.sw-seatinfo-arrow { display: inline-flex; transition: transform 140ms ease; }
+.sw-seatinfo-arrow[data-open="true"] { transform: rotate(90deg); }
+.sw-seatinfo-body { display: flex; flex-direction: column; gap: var(--space-3); }

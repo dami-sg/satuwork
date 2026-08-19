@@ -149,6 +149,12 @@ const state = {
   userReveal: { apiKey: false, accessToken: false },
   runtimeMachine: null,
   desktopRuntime: null,
+  /** 桌面票签发的时刻。票只有五分钟，内嵌那块屏要重挂时得先看看它还新不新。 */
+  desktopRuntimeAt: 0,
+  /** 内嵌桌面是不是正撑成全屏。侧栏那块是预览，点开才接管键鼠。 */
+  deskFull: false,
+  /** 右栏那个「席位详情」折叠面板开着没有。默认收起：里面全是排查时才看的东西。 */
+  seatInfoOpen: false,
   deploying: false,
   /**
    * 运行日志面板。null 表示没开着；开着时是

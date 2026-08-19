@@ -270,17 +270,36 @@ async function loadRuntimeMachine() {
   }
 }
 
+/**
+ * 现在这一屏对着的是哪个 Bot。地址优先于 state：`go()` 先改地址再去拉数据，切换
+ * 途中 state.chatBotId 还是上一个（见 ensureChatSession），照它去拉就是拉错人。
+ */
+function chatBotIdNow() {
+  return chatBotIdOf(state.path) || state.chatBotId
+}
+
 async function loadDesktopRuntime(botId) {
-  const id = botId || chatBotIdOf(state.path) || state.chatBotId
+  const id = botId || chatBotIdNow()
   if (isOwner() || !id) {
     state.desktopRuntime = null
+    state.desktopRuntimeAt = 0
     return
   }
+  let rt
   try {
-    state.desktopRuntime = await api('GET', '/runtime/desktop?botId=' + encodeURIComponent(id))
+    rt = await api('GET', '/runtime/desktop?botId=' + encodeURIComponent(id))
   } catch {
+    // 期间人已经切走了：这次的失败也不作数，别把新 Bot 的席位清成 null。
+    if (chatBotIdNow() !== id) return
     state.desktopRuntime = null
+    state.desktopRuntimeAt = 0
+    return
   }
+  // 这一份是给 `id` 拉的。人在等待期间换了 Bot 的话，认领它就等于把新 Bot 的席位
+  // 顶掉——右栏会显示上一个 Bot 的路径和桌面，而对话是新的那个。
+  if (chatBotIdNow() !== id) return
+  state.desktopRuntime = rt
+  state.desktopRuntimeAt = Date.now()
 }
 
 /**
@@ -1469,30 +1488,352 @@ function chatMachinePanel() {
   }
 
   if (mine && mine.status === 'ready') {
-    if (mine.novncUrl) {
+    if (mine.novncUrl && deskEmbeddable(mine.novncUrl)) {
+      // 只放一个空槽。真正的 iframe 挂在 #app 外面的常驻层里（见 syncDesktop），
+      // 整页重绘换不掉它——换掉一次就是断一次 VNC。
+      rows.push(
+        `<div class="sw-desk">
+          <div class="sw-desk-slot" id="sw-desk-slot"><span>${t('正在连桌面…')}</span></div>
+          <p class="sw-desk-cap">${esc(deskCaption())}</p>
+        </div>`,
+      )
+    } else if (mine.novncUrl) {
+      // 页面是 https、管家是 http：iframe 会被浏览器按混合内容拦掉，且拦得没有声音。
+      // 这种情况下退回原来那颗按钮——新标签页没有这条限制。
       rows.push(
         `<a class="btn btn-primary" href="${esc(mine.novncUrl)}" target="_blank" rel="noopener noreferrer" style="text-align: center;">${t('打开桌面')}</a>`,
       )
     }
-    rows.push(
-      `<div class="satu-kv"><span>${t('VNC 密码')}</span><span>${esc(state.seatReveal ? mine.vncPassword || '—' : '••••••••')} <button type="button" class="satu-linkbtn" data-act="seat-reveal">${state.seatReveal ? t('隐藏') : t('显示')}</button></span></div>`,
-    )
-    rows.push(`<div class="satu-kv"><span>${t('共享目录')}</span><span>${esc(mine.sharedDir || '—')}</span></div>`)
-    rows.push(`<div class="satu-kv"><span>linuxUser</span><span>${esc(mine.linuxUser || '—')}</span></div>`)
-    if (mine.botVersion) {
-      rows.push(`<div class="satu-kv"><span>${t('Bot 版本')}</span><span>${esc(mine.botVersion)}</span></div>`)
-    }
-    // 重新部署留在这儿：换了 Bot 版本、或者席位坏了，这是唯一的自助入口。
-    // **要确认**：它会重启席位，正在跑的对话和开着的桌面会断。
-    // 运行日志。和「重新部署」放在一起，因为它俩是同一件事的两头：出问题时先看日志，
-    // 看不出来再重铺。**别放到 Bot 配置页**——那页是人设和能力，跟这台机器无关。
-    rows.push(
+    /**
+     * 席位的家底收进一个默认收起的折叠面板。
+     *
+     * **VNC 口令不再露面。** 桌面就嵌在上面那块屏里，票里已经带着口令自动填进
+     * noVNC——留着那一行的唯一效果，是把一条随时能看的凭据摆在每个人的屏幕上。
+     * 要看它的人（管理员排查）在公司详情的席位卡里仍然看得到。
+     *
+     * 剩下的路径、linuxUser、版本号，还有日志与重铺这两个入口，都是「出事那天」
+     * 才用一次的东西。天天挂在右栏里，只会把真正每天要看的那块屏往下挤。
+     */
+    const open = !!state.seatInfoOpen
+    const detail = [
+      `<div class="satu-kv"><span>${t('共享目录')}</span><span>${esc(mine.sharedDir || '—')}</span></div>`,
+      `<div class="satu-kv"><span>linuxUser</span><span>${esc(mine.linuxUser || '—')}</span></div>`,
+      mine.botVersion ? `<div class="satu-kv"><span>${t('Bot 版本')}</span><span>${esc(mine.botVersion)}</span></div>` : '',
+      // 重新部署留在这儿：换了 Bot 版本、或者席位坏了，这是唯一的自助入口。
+      // **要确认**：它会重启席位，正在跑的对话和开着的桌面会断。
+      // 运行日志。和「重新部署」放在一起，因为它俩是同一件事的两头：出问题时先看日志，
+      // 看不出来再重铺。**别放到 Bot 配置页**——那页是人设和能力，跟这台机器无关。
       `<div style="display: flex; gap: var(--space-2);"><button type="button" class="btn btn-secondary" data-act="logs-open" data-bot="${esc(selected)}">${t('运行日志')}</button><button type="button" class="btn btn-secondary" data-act="runtime-redeploy" data-bot="${esc(selected)}" ${state.deploying ? 'disabled' : ''}>${state.deploying ? t('部署中…') : t('重新部署')}</button></div>`,
+    ].join('')
+    rows.push(
+      `<div class="sw-seatinfo">
+        <button type="button" class="sw-seatinfo-head" data-act="seat-info" aria-expanded="${open}">
+          <span class="sw-seatinfo-arrow" data-open="${open}">${svg(CHEVRON_RIGHT, 13)}</span>${t('席位详情')}
+        </button>
+        ${open ? `<div class="sw-seatinfo-body">${detail}</div>` : ''}
+      </div>`,
     )
   }
 
   return rows.join('')
 }
+
+/* ── 内嵌桌面 ─────────────────────────────────────────────────────────────
+ *
+ * 右栏里那块屏是**真的桌面**，不是截图：一个连着席位 noVNC 的 iframe。鼠标移上去
+ * 出「打开」，点一下撑成全屏遮罩，键鼠这时才交给它。
+ *
+ * **iframe 不能画在 #app 里面。** render() 是整页 innerHTML 换掉的，画在里面等于
+ * 每重绘一次就重连一次 VNC——发条消息、切个状态，桌面就黑一下。所以它挂在 body 上
+ * 的一个常驻层里，位置每次跟着右栏那个空槽（#sw-desk-slot）算出来。全屏也是同一个
+ * 层改几何，不重新挂——不然「点开」这个动作本身就会把连接掐断再连一次。
+ *
+ * 预览态不做 view_only：那是 URL 参数，换它要重载页面。改成在上面盖一层挡片，
+ * 点击进不去，键盘也拿不到焦点，代价只有一个 div。
+ */
+
+/** 票只有五分钟。挂之前超过这个岁数就先换一张，不然 iframe 一开就是 401。 */
+const DESK_TICKET_FRESH_MS = 180_000
+/** 当前挂着的是哪个席位、用的哪个地址。**地址变了也要重挂**——见 syncDesktop。 */
+let deskMounted = null
+let deskMounting = false
+let deskSlotSeen = null
+let deskObserver = null
+let deskPlacePending = false
+/** 页面被切到后台的时刻。回来得太晚就重挂，因为票早过期了，noVNC 自己连不回来。 */
+let deskHiddenAt = 0
+
+function deskCaption() {
+  const name = (chatBotOf() || {}).name || t('这个 Bot')
+  return localeMode === 'en' ? `${name}'s screen` : `${name} 的桌面`
+}
+
+/**
+ * 这个地址能不能内嵌。
+ *
+ * 页面是 https、管家是 http 的时候，iframe 会被浏览器按混合内容拦掉，而且拦得**没有
+ * 声音**——什么都不显示，控制台以外看不出所以然。这种情况下不如不嵌，退回按钮。
+ */
+function deskEmbeddable(url) {
+  if (!url) return false
+  return !(location.protocol === 'https:' && /^http:/i.test(url))
+}
+
+/** 内嵌用的地址：按预览尺寸缩放，别把桌面裁成左上角一小块。 */
+function deskUrl() {
+  const rt = state.desktopRuntime
+  if (!rt || rt.status !== 'ready' || !rt.novncUrl || !deskEmbeddable(rt.novncUrl)) return ''
+  return rt.novncUrl + (rt.novncUrl.includes('?') ? '&' : '?') + 'resize=scale&reconnect=1&bell=false'
+}
+
+const DESK_EXPAND = ['M15 3h6v6', 'M9 21H3v-6', 'M21 3l-7 7', 'M3 21l7-7']
+const DESK_SHRINK = ['M9 3v6H3', 'M15 21v-6h6', 'M3 9l7-7', 'M21 15l-7 7']
+
+function deskLayer() {
+  return document.getElementById('sw-deskl')
+}
+
+function unmountDesktop() {
+  const layer = deskLayer()
+  if (layer) layer.remove()
+  const back = document.getElementById('sw-deskb')
+  if (back) back.remove()
+  if (deskObserver) {
+    deskObserver.disconnect()
+    deskObserver = null
+  }
+  deskSlotSeen = null
+  deskMounted = null
+  state.deskFull = false
+}
+
+function mountDesktop(url, seatId) {
+  // 换一块屏不等于收起这块屏：重连时人可能正开着全屏，unmountDesktop 会把它清掉。
+  const wasFull = state.deskFull
+  unmountDesktop()
+  const back = document.createElement('div')
+  back.id = 'sw-deskb'
+  back.className = 'sw-deskb'
+  back.addEventListener('click', () => setDeskFull(false))
+  const layer = document.createElement('div')
+  layer.id = 'sw-deskl'
+  layer.className = 'sw-deskl'
+  /**
+   * `sandbox` 不能省。框进来的是席位自己供的页面，没有沙箱它就能 `top.location = …`
+   * 把整个 Gateway 界面换掉——原来那颗「打开桌面」是新标签页加 `rel=noopener`，没这
+   * 条路；一内嵌就有了。
+   *
+   * `allow-same-origin` 必须留着：路径限定的那张 cookie 靠它才发得出去，去掉就是
+   * 一页 401。它不会让沙箱失效——能自己摘掉沙箱的只有和父页同源的框，而这一个是
+   * 跨源的。`allow-forms` 是留给「票里没带口令」时那个登录框的。
+   */
+  layer.innerHTML = `
+    <iframe class="sw-deskl-frame" title="${esc(t('桌面'))}" tabindex="-1"
+      sandbox="allow-scripts allow-same-origin allow-forms" allow="clipboard-read; clipboard-write"></iframe>
+    <button type="button" class="sw-deskl-shield" data-desk="open">
+      <span class="sw-deskl-open">${svg(DESK_EXPAND, 15)}${esc(t('打开'))}</span>
+    </button>
+    <div class="sw-deskl-bar">
+      <span class="sw-deskl-title"></span>
+      <span class="sw-deskl-acts">
+        <button type="button" class="sw-deskl-btn" data-desk="reload">${esc(t('重连'))}</button>
+        <button type="button" class="btn btn-ghost btn-icon sw-deskl-close" data-desk="close"
+          aria-label="${esc(t('收起桌面'))}" title="${esc(t('收起桌面'))}">${svg(DESK_SHRINK, 16)}</button>
+      </span>
+    </div>`
+  layer.addEventListener('click', (e) => {
+    const hit = e.target instanceof Element ? e.target.closest('[data-desk]') : null
+    if (!hit) return
+    const act = hit.getAttribute('data-desk')
+    if (act === 'reload') void remountDesktop(true)
+    else setDeskFull(act === 'open')
+  })
+  document.body.appendChild(back)
+  document.body.appendChild(layer)
+  // src 最后给：DOM 先进树，iframe 才只加载一次。
+  layer.querySelector('.sw-deskl-frame').src = url
+  deskMounted = { seat: seatId, url }
+  state.deskFull = wasFull
+}
+
+/** 预览 ⇄ 全屏。几何变化加一段过渡，拖右栏宽度时不加——那是每帧都在动的。 */
+function setDeskFull(on) {
+  const layer = deskLayer()
+  if (!layer || state.deskFull === on) return
+  state.deskFull = on
+  layer.style.transition = 'top .22s ease, left .22s ease, width .22s ease, height .22s ease, border-radius .22s ease'
+  clearTimeout(setDeskFull.timer)
+  setDeskFull.timer = setTimeout(() => {
+    layer.style.transition = ''
+  }, 260)
+  syncDesktop()
+  if (on) {
+    const frame = layer.querySelector('.sw-deskl-frame')
+    // 焦点交给 iframe，键盘才进得去桌面。noVNC 会自己抓键盘。
+    if (frame) setTimeout(() => frame.focus(), 240)
+  }
+}
+
+/**
+ * 把常驻层对齐到右栏那个空槽上，顺带管挂载与卸载。render() 之后、以及右栏尺寸或
+ * 滚动变化时都要调一次。
+ */
+function syncDesktop() {
+  const slot = document.getElementById('sw-desk-slot')
+  const url = deskUrl()
+  const seatId = (state.desktopRuntime && state.desktopRuntime.seatId) || ''
+  if (!slot || !url) {
+    if (deskMounted) unmountDesktop()
+    return
+  }
+  // **地址也要比，不只是席位。** 重新部署之后席位 id 一个字都没变，变的是票；只比
+  // 席位的话，那张新票永远用不上，屏上留着的是重装前那条已经死掉的连接。
+  if (!deskMounted || deskMounted.seat !== seatId || deskMounted.url !== url) {
+    void remountDesktop()
+    return
+  }
+  if (slot !== deskSlotSeen) {
+    // 整页重绘换了个新的槽元素：观察器要跟着换过去。
+    deskSlotSeen = slot
+    if (deskObserver) deskObserver.disconnect()
+    if (typeof ResizeObserver === 'function') {
+      deskObserver = new ResizeObserver(() => placeSoon())
+      deskObserver.observe(slot)
+    }
+  }
+  placeDesktop()
+}
+
+/**
+ * 票过期了就先换一张再挂。
+ *
+ * 五分钟的票换成的是 path 限定 cookie，连上之后 WebSocket 一直活着；但 iframe
+ * **重新加载**的那一刻要拿票换 cookie，票馊了就是一页 401。
+ *
+ * `force` 是「重连」那颗按钮走的路：不管票看着新不新都换一张。掉过一次线之后
+ * noVNC 自己重连不回来——它手里那张 cookie 里的票早过期了，升级请求一律 401——
+ * 所以人得有一个确定能把它救回来的动作。
+ */
+async function remountDesktop(force = false) {
+  if (deskMounting) return
+  deskMounting = true
+  try {
+    const want = chatBotIdNow()
+    if (force || Date.now() - (state.desktopRuntimeAt || 0) > DESK_TICKET_FRESH_MS) {
+      await loadDesktopRuntime(want)
+      // 等票的这段时间里人切了 Bot：这一轮作废，新的那个 Bot 自己会触发一次。
+      if (chatBotIdNow() !== want) return
+    }
+    const url = deskUrl()
+    const slot = document.getElementById('sw-desk-slot')
+    if (!url || !slot) {
+      unmountDesktop()
+      return
+    }
+    mountDesktop(url, (state.desktopRuntime && state.desktopRuntime.seatId) || '')
+    deskSlotSeen = null
+  } finally {
+    deskMounting = false
+  }
+  syncDesktop()
+}
+
+function placeDesktop() {
+  const layer = deskLayer()
+  const back = document.getElementById('sw-deskb')
+  if (!layer) return
+  layer.classList.toggle('is-full', !!state.deskFull)
+  if (back) back.classList.toggle('is-on', !!state.deskFull)
+  const title = layer.querySelector('.sw-deskl-title')
+  if (title) title.textContent = deskCaption()
+  // 挡片只挡得住鼠标。iframe 本身还在 Tab 序里，键盘一路 Tab 过去就进了那块两百
+  // 像素宽的预览，之后敲的每个字都送进了真桌面。预览态直接把它从 Tab 序里摘掉。
+  const frame = layer.querySelector('.sw-deskl-frame')
+  if (frame) {
+    if (state.deskFull) frame.removeAttribute('tabindex')
+    else frame.setAttribute('tabindex', '-1')
+  }
+  if (state.deskFull) {
+    const vw = window.innerWidth || 0
+    const vh = window.innerHeight || 0
+    const pad = Math.round(Math.min(vw, vh) * 0.035)
+    layer.style.top = pad + 'px'
+    layer.style.left = pad + 'px'
+    layer.style.width = vw - pad * 2 + 'px'
+    layer.style.height = vh - pad * 2 + 'px'
+    layer.style.clipPath = ''
+    layer.style.visibility = ''
+    return
+  }
+  const slot = document.getElementById('sw-desk-slot')
+  if (!slot) {
+    unmountDesktop()
+    return
+  }
+  const r = slot.getBoundingClientRect()
+  layer.style.top = r.top + 'px'
+  layer.style.left = r.left + 'px'
+  layer.style.width = r.width + 'px'
+  layer.style.height = r.height + 'px'
+  // 层是 fixed 的，不受右栏的 overflow 裁剪——右栏一滚，它会浮到别的东西上面去。
+  // 自己按右栏可视区裁一刀。
+  const body = slot.closest('.gw-aside-body')
+  if (!body || !r.height) {
+    layer.style.clipPath = ''
+    layer.style.visibility = r.height ? '' : 'hidden'
+    return
+  }
+  const b = body.getBoundingClientRect()
+  const top = Math.max(0, b.top - r.top)
+  const bottom = Math.max(0, r.bottom - b.bottom)
+  layer.style.visibility = top + bottom >= r.height ? 'hidden' : ''
+  layer.style.clipPath = `inset(${top}px 0px ${bottom}px 0px round 10px)`
+}
+
+/**
+ * 一帧最多重排一次。
+ *
+ * 下面那个 scroll 是捕获阶段挂在 window 上的——消息流每吐一段就自动跟随一次，那些
+ * 滚动全从这儿过。直接调 placeDesktop 的话，每一次都要量两个 getBoundingClientRect
+ * 再写六条内联样式，等于在流式输出最吃帧的时候反复强制同步布局。
+ */
+function placeSoon() {
+  if (deskPlacePending) return
+  if (typeof requestAnimationFrame !== 'function') {
+    placeDesktop()
+    return
+  }
+  deskPlacePending = true
+  requestAnimationFrame(() => {
+    deskPlacePending = false
+    placeDesktop()
+  })
+}
+
+// 窗口尺寸、右栏滚动都会挪动那个槽。滚动用捕获，因为滚的是右栏自己而不是 window。
+window.addEventListener('resize', placeSoon)
+window.addEventListener('scroll', placeSoon, true)
+/**
+ * 回到前台时，离开得够久就重挂。
+ *
+ * 合盖、切标签页几十分钟回来，那条 WebSocket 基本已经断了，而 noVNC 的自动重连注定
+ * 失败——cookie 里那张票只活五分钟。这时候重挂的代价是一秒钟的黑屏，不重挂的代价是
+ * 一块永远回不来的死屏。
+ */
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    deskHiddenAt = Date.now()
+    return
+  }
+  const away = deskHiddenAt ? Date.now() - deskHiddenAt : 0
+  deskHiddenAt = 0
+  if (deskMounted && away > DESK_TICKET_FRESH_MS) void remountDesktop(true)
+})
+window.addEventListener('keydown', (e) => {
+  // 焦点在 iframe 里时这一条收不到（noVNC 把键盘抓走了），所以标题栏那颗收起按钮
+  // 必须一直看得见——Esc 只是顺手。
+  if (e.key === 'Escape' && state.deskFull) setDeskFull(false)
+})
 
 /**
  * 运行日志。
@@ -2105,6 +2446,7 @@ async function deployMyRuntime(botId, opts = {}) {
       try {
         const rt = await api('GET', '/runtime/desktop?botId=' + encodeURIComponent(id))
         state.desktopRuntime = rt
+        state.desktopRuntimeAt = Date.now()
         if (rt.status === 'ready' || rt.status === 'error') break
       } catch {}
       await new Promise((r) => setTimeout(r, 400))

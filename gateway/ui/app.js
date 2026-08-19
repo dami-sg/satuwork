@@ -246,6 +246,11 @@ document.getElementById('app').addEventListener('click', async (e) => {
     if (thread) thread.scrollTo({ top: thread.scrollHeight, behavior: 'smooth' })
     return
   }
+  if (act === 'seat-info') {
+    state.seatInfoOpen = !state.seatInfoOpen
+    render()
+    return
+  }
   if (act === 'aside-toggle') {
     asidePref.open = !asidePref.open
     saveAside()
