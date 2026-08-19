@@ -102,7 +102,9 @@ try {
   if (!existsSync(join(stage, 'node_modules', 'tsx'))) die('staging 里没有 tsx，包跑不起来')
   if (!process.argv.includes('--allow-foreign-platform')) assertLinuxPack(stage)
   // 席位脚本必须跟着走：管家靠它们建账号、起屏、起 bot。
-  for (const f of ['deploy-seat.sh', 'remove-seat.sh', 'slim-desktop.sh', 'satuwork-bot.sh']) {
+  // manager-confirm.sh 也在这张单子里：它是自升级的兜底，装机脚本从包里拷它，管家每次
+  // 启动也照包里这份刷新一遍。漏进包里的话，兜底会在下一次升级之后静悄悄消失。
+  for (const f of ['deploy-seat.sh', 'remove-seat.sh', 'slim-desktop.sh', 'satuwork-bot.sh', 'manager-confirm.sh']) {
     if (!existsSync(join(stage, 'src', 'seat', f))) die(`staging 里没有 src/seat/${f}`)
   }
 

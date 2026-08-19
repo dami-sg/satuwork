@@ -145,29 +145,15 @@ AccuracySec=15
 WantedBy=timers.target
 EOF_TIMER
 
-cat > /usr/local/bin/satuwork-manager-confirm.sh << 'EOF_SCRIPT'
-#!/bin/bash
-# A new manager records its own version in confirmedVersion only after one
-# successful heartbeat. Still unset 120s after the swap means it came up but
-# cannot talk to the Gateway: point 'current' back and restart.
-set -euo pipefail
-ROOT=/opt/satuwork/manager
-STATE=/etc/satuwork/manager.json
-[ -L "$ROOT/previous" ] || exit 0
-[ -f "$STATE" ] || exit 0
-CUR="$(basename "$(readlink -f "$ROOT/current")")"
-OK="$(node -p 'JSON.parse(require("fs").readFileSync("'"$STATE"'","utf8")).confirmedVersion||""' 2>/dev/null || echo "")"
-[ "$OK" = "$CUR" ] && exit 0
-# A machine that has never paired has no confirmedVersion to compare against.
-# Do not mistake that for a failed upgrade.
-[ -z "$OK" ] && exit 0
-logger -t satuwork-manager "version $CUR started but never checked in; rolling back to $(basename "$(readlink -f "$ROOT/previous")")"
-ln -sfn "$(readlink -f "$ROOT/previous")" "$ROOT/.current.tmp"
-mv -T "$ROOT/.current.tmp" "$ROOT/current"
-rm -f "$ROOT/previous"
-systemctl restart satuwork-manager.service
-EOF_SCRIPT
-chmod 755 /usr/local/bin/satuwork-manager-confirm.sh
+# The rollback script ships **inside the manager package** (src/seat/manager-confirm.sh),
+# not inline here. One copy, and — more importantly — the manager rewrites it from its own
+# package on every boot, so a fix to it rides a normal upgrade instead of needing a
+# re-install. Older packages may not carry it; keep going, the next upgrade brings it.
+if [ -f "$FINAL/src/seat/manager-confirm.sh" ]; then
+  install -m 755 "$FINAL/src/seat/manager-confirm.sh" /usr/local/bin/satuwork-manager-confirm.sh
+else
+  echo "    note: this manager package has no manager-confirm.sh; rollback safety net is off until the next upgrade" >&2
+fi
 
 echo "==> Starting"
 systemctl daemon-reload

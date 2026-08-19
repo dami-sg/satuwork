@@ -6,7 +6,7 @@ import { bootChallenge, pairIfNeeded } from './pair.ts'
 import { diagnose } from './diag.ts'
 import { botUnit, clampLines, followLogs, MANAGER_UNIT, recentLogs } from './logs.ts'
 import { deploySeat, removeSeat, seat, seatsWithLiveness, type SeatSpec } from './seats.ts'
-import { confirmVersion, maybeUpgrade, upgradeError } from './upgrade.ts'
+import { confirmVersion, maybeUpgrade, refreshConfirmScript, upgradeError } from './upgrade.ts'
 import { currentTimezone, maybeSetTimezone, timezoneError } from './timezone.ts'
 import { standDown } from './standdown.ts'
 
@@ -249,6 +249,10 @@ if (!state) {
 } else {
   console.log(`satuwork-manager: paired machineId=${state.machineId} -> ${state.gatewayUrl}`)
 }
+
+// 兜底脚本跟着包走，每次启动刷一遍——它装在 /usr/local/bin，不刷的话机器装好那天是
+// 什么样就一直是什么样，改了也只有重装才拿得到。dryRun 下不碰宿主机的 /usr/local/bin。
+if (!boot.dryRun) refreshConfirmScript()
 
 const HEARTBEAT_MS = 30_000
 

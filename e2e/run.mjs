@@ -34,6 +34,7 @@ import { runCustomProvider } from './custom-provider.mjs'
 import { runStats } from './stats.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
 import { runManager } from './manager.mjs'
+import { runManagerConfirm } from './manager-confirm.mjs'
 import { PG_URL, requirePg } from './pg.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -2782,6 +2783,7 @@ async function main() {
     await runStats({ gwRoot, test, req, start, waitHttp, assert, log })
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
+    await runManagerConfirm({ root, test, assert, log })
     await runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runMarkdown({ root, test, assert, log })
     await runSessionStore({ root, test, assert, log })
