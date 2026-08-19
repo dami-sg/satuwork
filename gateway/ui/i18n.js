@@ -878,4 +878,14 @@ window.SATU_I18N = {
   '正在画图…': 'Drawing…',
   '复制表格': 'Copy table',
   '这张图画不出来，下面是源码。': 'This diagram could not be rendered; the source is below.',
+
+  // ── 附件与预览 ──────────────────────────────────────────────────────
+  '添加附件': 'Attach a file',
+  '我上传了文件，在工作区里：': 'I uploaded some files. They are in the workspace at:',
+  '附件没传上去：': 'The attachment failed to upload: ',
+  '附件已经在工作区里了，但这条消息没发出去。': 'The files are in the workspace, but the message itself was not sent.',
+  '正在取文件…': 'Fetching the file…',
+  '这个文件不适合在浏览器里打开（太大，或者是不能安全内联的格式）。下载下来看吧。': 'This file cannot be shown in the browser — it is either too large or a format that is not safe to render inline. Download it instead.',
+  '下载失败：': 'Download failed: ',
+  '产出': 'wrote',
 }

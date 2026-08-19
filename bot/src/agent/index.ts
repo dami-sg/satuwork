@@ -248,7 +248,12 @@ export class AgentService extends Service {
           sessionId,
         })
         if (result.failed) throw new Error(result.text)
-        return { content: [{ type: 'text' as const, text: result.text }], details: undefined }
+        // files 走 details 而不是 content：content 是给模型的，它已经从 text 里知道
+        // 自己写了什么；details 是 pi 留给「日志与界面渲染」的那一格，正好是这个用途。
+        return {
+          content: [{ type: 'text' as const, text: result.text }],
+          details: result.files?.length ? { files: result.files } : undefined,
+        }
       },
     })) as any
   }
@@ -408,6 +413,7 @@ export class AgentService extends Service {
             callId: event.toolCallId,
             text: textOf(event.result),
             failed: Boolean(event.isError),
+            files: filesOf(event.result),
           })
           break
       }
@@ -420,6 +426,21 @@ function textOf(result: any): string {
   const content = result?.content
   if (Array.isArray(content)) return content.map((c: any) => c?.text ?? '').join('')
   return JSON.stringify(result ?? null)
+}
+
+/**
+ * 工具报出来的产出文件（见 tools/index.ts 的 `ToolResult.files`）。
+ *
+ * 逐字段挑而不是整个 details 塞进日志：details 是 `unknown`，工具想放什么都行，
+ * 原样落盘等于让任意一个工具决定会话日志的形状。
+ */
+function filesOf(result: any): { path: string; name: string }[] | undefined {
+  const raw = result?.details?.files
+  if (!Array.isArray(raw)) return undefined
+  const files = raw
+    .filter((f: any) => typeof f?.path === 'string' && typeof f?.name === 'string')
+    .map((f: any) => ({ path: f.path as string, name: f.name as string }))
+  return files.length ? files : undefined
 }
 
 /**

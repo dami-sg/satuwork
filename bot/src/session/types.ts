@@ -122,6 +122,13 @@ export interface SessionEventMap {
     text: string
     /** 管道层失败（抛异常、超时、执行前被拒）。业务失败请写进 text。 */
     failed: boolean
+    /**
+     * 这次调用落地的文件，路径相对工作区根目录。界面据此给出可点开的预览。
+     *
+     * 可选字段，老日志没有——界面退回只显示工具名，**不去正则扫 text 猜路径**：
+     * 那段文本是写给模型看的散文，措辞一改就扫不出来了。
+     */
+    files?: { path: string; name: string }[]
   }
 }
 

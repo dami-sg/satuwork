@@ -172,6 +172,7 @@ function appView() {
     </main>
     ${confirmModal()}
     ${logsModal()}
+    ${previewModal()}
   </div>`
 }
 

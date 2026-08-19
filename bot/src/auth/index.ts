@@ -520,6 +520,9 @@ function runtimeApiPath(path: string) {
   if (path === '/api/runtime/status') return true
   if (path === '/api/bots' || path.startsWith('/api/bots/')) return true
   if (path === '/api/sessions' || path.startsWith('/api/sessions/')) return true
+  // 附件预览。上传走 /api/sessions/:id/files 所以本来就在上一行里，预览是另一条
+  // 路径——漏了它的话，传得上去、看不了，而且报的是「需要登录」，最难往这儿想。
+  if (path === '/api/workspace' || path.startsWith('/api/workspace/')) return true
   return false
 }
 

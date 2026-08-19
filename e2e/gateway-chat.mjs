@@ -268,6 +268,56 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(r.json.accepted === true || r.json.steered === true, 'accepted/steered')
     })
 
+    // ── 附件反代。这一跳是 proxyUpload / proxyDownload：字节从浏览器流到席位，
+    //    再流回来。前面几组都是直连 bot，只有这里能验「Gateway 中间那段没把它弄坏」。
+    let gwPath
+
+    await test('经 Gateway 上传附件：落到席位的工作区', async () => {
+      // 挑一段跨 chunk 边界也要拼对的内容，顺带把中文名一路带过去。
+      const bytes = Buffer.from('报表内容\n第二行\n', 'utf8')
+      const r = await req(gwBase, 'POST', `/runtime/sessions/${sessionId}/files`, {
+        token: adminTok,
+        raw: bytes,
+        headers: { 'content-type': 'application/octet-stream', 'x-filename': encodeURIComponent('季度报表.txt') },
+      })
+      assert(r.status === 200, `upload ${r.status} ${r.text}`)
+      assert(typeof r.json.path === 'string' && r.json.path.startsWith('uploads/'), `落点不对：${r.text}`)
+      assert(r.json.name === '季度报表.txt', `文件名在路上坏了：${r.json.name}`)
+      assert(r.json.size === bytes.length, `大小对不上：${r.json.size} ≠ ${bytes.length}`)
+      gwPath = r.json.path
+      // 正文只在席位磁盘上——Gateway 不该留副本，这条和「Gateway home 不含对话正文」是同一条纪律。
+      assert(existsSync(join(BOT_HOME, 'work', gwPath)), '席位磁盘上没有这个文件')
+      assert(!treeHas(GW_HOME, '报表内容'), 'Gateway 落了一份附件正文')
+    })
+
+    await test('经 Gateway 预览：字节一个不差，安全头齐全', async () => {
+      const r = await req(gwBase, 'GET', `/runtime/sessions/${sessionId}/files?path=${encodeURIComponent(gwPath)}`, {
+        token: adminTok,
+      })
+      assert(r.status === 200, `preview ${r.status} ${r.text}`)
+      assert(r.text === '报表内容\n第二行\n', `内容对不上：${JSON.stringify(r.text)}`)
+      assert(r.headers.get('x-content-type-options') === 'nosniff', '少了 nosniff')
+      // 这段字节是用户传的，却挂在 Gateway 的源上。没有 sandbox，一个带脚本的附件
+      // 就能在登录态里跑起来。
+      const csp = String(r.headers.get('content-security-policy') || '')
+      assert(csp.includes('sandbox'), `少了 CSP sandbox：${csp}`)
+    })
+
+    await test('附件反代也认账号：别人的会话碰不到', async () => {
+      const r = await req(gwBase, 'GET', `/runtime/sessions/${sessionId}/files?path=${encodeURIComponent(gwPath)}`, {
+        token: memberTok,
+      })
+      assert(r.status >= 400, `成员读到了管理员的附件：${r.status} ${r.text}`)
+      const up = await req(gwBase, 'POST', `/runtime/sessions/${sessionId}/files`, {
+        token: memberTok,
+        raw: Buffer.from('x'),
+        headers: { 'content-type': 'application/octet-stream', 'x-filename': 'a.txt' },
+      })
+      assert(up.status >= 400, `成员往管理员的会话里传了文件：${up.status} ${up.text}`)
+      const anon = await req(gwBase, 'GET', `/runtime/sessions/${sessionId}/files?path=${encodeURIComponent(gwPath)}`)
+      assert(anon.status === 401, `未登录预览 ${anon.status}`)
+    })
+
     await test('SSE 含 user/message ping（或 request/header）', async () => {
       const sse = await readSse(`${gwBase}/runtime/sessions/${encodeURIComponent(sessionId)}/events`, {
         token: adminTok,
