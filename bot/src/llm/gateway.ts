@@ -27,12 +27,36 @@ function contentText(content: unknown): string {
   return content == null ? '' : String(content)
 }
 
-function toOpenAI(context: any, model: { provider: string; id: string }) {
+/**
+ * 用户消息 → provider 的 content。
+ *
+ * 有图就必须是数组，没图就还给字符串——后者是绝大多数消息，多包一层数组只会让
+ * 请求体变胖，也让抓包出来的东西不好认。
+ *
+ * pi 的 ImageContent 是 `{type:'image', data, mimeType}`（data 是 base64），两家
+ * provider 的字段名各不相同，所以在各自的转换函数里分别摊平。
+ */
+function userContent(content: unknown, image: (c: any) => any): any {
+  if (!Array.isArray(content)) return contentText(content)
+  if (!content.some((c: any) => c?.type === 'image')) return contentText(content)
+  return content
+    .map((c: any) => (c?.type === 'image' ? image(c) : { type: 'text', text: c?.text ?? '' }))
+    .filter((c: any) => c.type !== 'text' || c.text)
+}
+
+export function toOpenAI(context: any, model: { provider: string; id: string }) {
   const messages: any[] = []
   if (context.systemPrompt) messages.push({ role: 'system', content: context.systemPrompt })
   for (const m of context.messages ?? []) {
     if (m.role === 'user') {
-      messages.push({ role: 'user', content: contentText(m.content) })
+      // OpenAI 走 data URI：`image_url.url` 里塞 `data:<mime>;base64,<...>`。
+      messages.push({
+        role: 'user',
+        content: userContent(m.content, (c) => ({
+          type: 'image_url',
+          image_url: { url: `data:${c.mimeType || 'image/png'};base64,${c.data}` },
+        })),
+      })
     } else if (m.role === 'assistant') {
       const text = (m.content ?? [])
         .filter((c: any) => c.type === 'text')
@@ -69,11 +93,18 @@ function toOpenAI(context: any, model: { provider: string; id: string }) {
   }
 }
 
-function toAnthropic(context: any, model: { id: string }) {
+export function toAnthropic(context: any, model: { id: string }) {
   const messages: any[] = []
   for (const m of context.messages ?? []) {
     if (m.role === 'user') {
-      messages.push({ role: 'user', content: contentText(m.content) })
+      // Anthropic 要 source 对象，不认 data URI。
+      messages.push({
+        role: 'user',
+        content: userContent(m.content, (c) => ({
+          type: 'image',
+          source: { type: 'base64', media_type: c.mimeType || 'image/png', data: c.data },
+        })),
+      })
     } else if (m.role === 'assistant') {
       const content: any[] = []
       for (const c of m.content ?? []) {

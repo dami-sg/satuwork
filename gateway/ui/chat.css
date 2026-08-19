@@ -643,3 +643,25 @@
   color: var(--muted-foreground);
 }
 .sw-preview-err { color: var(--color-accent-800); }
+
+/* 用户发的图。缩略图排在正文上面——先看见发了什么，再看见说了什么，跟消息本身的
+   顺序一致（图片块在正文前面）。 */
+.sw-shots { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.sw-shots[hidden] { display: none; }
+.sw-shot {
+  width: 108px;
+  height: 108px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--muted);
+  overflow: hidden;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.sw-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 还没取回来、或者太大不自动取的那些，留一个占位而不是塌成一条缝。 */
+.sw-shot-ph { color: var(--muted-foreground); opacity: 0.7; }
+.sw-bubble[data-role='user'] .sw-shot { border-color: color-mix(in srgb, var(--primary-foreground) 28%, transparent); }

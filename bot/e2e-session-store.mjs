@@ -12,6 +12,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionService } from './src/session/index.ts'
+import { SESSION_FORMAT_VERSION } from './src/session/types.ts'
 
 /** 每次都要一个空缓存的服务——竞态只在「还没缓存」那一刻存在。 */
 async function freshService(root) {
@@ -97,6 +98,7 @@ async function migrateUnderLoad() {
     reloadedEvents: events.length,
     expectedEvents: legacy.length + CONCURRENCY,
     rootVersion: root0?.data?.version,
+    currentVersion: SESSION_FORMAT_VERSION,
     rootBotId: root0?.data?.botId,
     keptLegacyBody: events.some(
       (e) => e.type === 'user/message' && e.data.message.content[0].text === 'LEGACY-KEEP',

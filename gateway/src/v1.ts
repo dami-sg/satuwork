@@ -150,7 +150,39 @@ function safeParse(s: unknown): unknown {
   }
 }
 
-function toPiContext(body: Record<string, unknown>, provider: string, modelId: string) {
+/**
+ * 用户消息 → pi 的 content。
+ *
+ * **这一层最容易被漏掉**：Bot 那边把图片发对了，到这儿再被 contentText() 拍成字符串，
+ * 图就没了——而且没有任何报错，模型只是看不见它。
+ *
+ * 进来的是 OpenAI 口径的 content 数组（`image_url.url` 里是 data URI），出去的是 pi 的
+ * `{type:'image', data, mimeType}`。没有图就还给字符串，跟以前一样。
+ */
+export function userContent(content: unknown): any {
+  if (!Array.isArray(content)) return contentText(content)
+  if (!content.some((c: any) => c?.type === 'image_url' || c?.type === 'image')) return contentText(content)
+  const out: any[] = []
+  for (const c of content as any[]) {
+    if (c?.type === 'image_url') {
+      const url = String(c.image_url?.url ?? '')
+      const m = /^data:([^;,]+);base64,(.*)$/s.exec(url)
+      // 只收内联的 base64。远程 URL 得由这一层去取，那是一个可以被指使去打内网的
+      // 出站请求（SSRF），不做。
+      if (m) out.push({ type: 'image', mimeType: m[1], data: m[2] })
+      continue
+    }
+    if (c?.type === 'image' && typeof c.data === 'string') {
+      out.push({ type: 'image', mimeType: c.mimeType || 'image/png', data: c.data })
+      continue
+    }
+    const t = typeof c === 'string' ? c : (c?.text ?? '')
+    if (t) out.push({ type: 'text', text: t })
+  }
+  return out.length ? out : contentText(content)
+}
+
+export function toPiContext(body: Record<string, unknown>, provider: string, modelId: string) {
   const messagesIn = Array.isArray(body.messages) ? body.messages : []
   let systemPrompt: string | undefined
   const messages: any[] = []
@@ -163,7 +195,7 @@ function toPiContext(body: Record<string, unknown>, provider: string, modelId: s
       continue
     }
     if (role === 'user') {
-      messages.push({ role: 'user', content: contentText(m.content), timestamp: Date.now() })
+      messages.push({ role: 'user', content: userContent(m.content), timestamp: Date.now() })
       continue
     }
     if (role === 'assistant') {

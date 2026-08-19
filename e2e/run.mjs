@@ -22,6 +22,8 @@ import { runSessionStore } from './session-store.mjs'
 import { runLlmIdle } from './llm-idle.mjs'
 import { runReplaySlice } from './replay-slice.mjs'
 import { runWorkspaceFiles } from './workspace-files.mjs'
+import { runDocExtract } from './doc-extract.mjs'
+import { runVision } from './vision.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
 import { uiSource } from './ui-dom.mjs'
@@ -37,6 +39,16 @@ const botRoot = join(root, 'bot')
 
 const GW_HOME = process.env.E2E_GW_HOME || '/tmp/satuwork-e2e-gw'
 const BOT_HOME = process.env.E2E_BOT_HOME || '/tmp/satuwork-e2e-bot'
+
+/**
+ * 当前的会话落盘格式版本，直接从源码里读出来。
+ *
+ * 写死数字的话，每升一版都要来改一遍测试——改着改着就会有人图省事把断言删掉，
+ * 而这几条断言恰恰是「迁移真的跑了」的唯一证据。
+ */
+const SESSION_FORMAT = Number(
+  /SESSION_FORMAT_VERSION = (\d+)/.exec(readFileSync(join(root, 'bot/src/session/types.ts'), 'utf8'))?.[1],
+)
 const GW_PORT = Number(process.env.E2E_GW_PORT || 18080)
 const BOT_PORT = Number(process.env.E2E_BOT_PORT || 18082)
 const MACHINE_TOK = 'e2e-machine-token'
@@ -2503,6 +2515,91 @@ async function runBot() {
     assert(get.status === 401, `未登录预览 ${get.status}`)
   })
 
+  // ── 图片：发进消息里，模型是真能看见的那种。────────────────────────
+  let shotPath
+
+  await test('带图发消息：图片块落进 JSONL，存的是路径不是字节', async () => {
+    const png = Buffer.from(
+      '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001',
+      'hex',
+    )
+    const up = await req(base, 'POST', `/api/sessions/${sessionId}/files`, {
+      cookie,
+      raw: png,
+      headers: { 'content-type': 'application/octet-stream', 'x-filename': 'shot.png' },
+    })
+    assert(up.status === 200, `传图 ${up.status} ${up.text}`)
+    shotPath = up.json.path
+
+    const r = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
+      cookie,
+      body: { text: '这张图里是什么', images: [{ path: shotPath, mime: 'image/png' }] },
+    })
+    assert(r.status === 200, `带图发消息 ${r.status} ${r.text}`)
+    assert(r.json.accepted === true || r.json.steered === true, `既没 accepted 也没 steered：${r.text}`)
+
+    await new Promise((x) => setTimeout(x, 800))
+    assert(!child._exited, '带图发消息把进程打挂了')
+
+    const file = join(BOT_HOME, 'sessions', `${sessionId}.jsonl`)
+    const lines = readFileSync(file, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
+    const withImage = lines.filter(
+      (e) => e.type === 'user/message' && (e.data?.message?.content ?? []).some((c) => c.type === 'image'),
+    )
+    // steer 的消息不写日志（既有行为），所以这条可能没落下来——落下来了就必须是对的。
+    if (withImage.length) {
+      const block = withImage[0].data.message.content.find((c) => c.type === 'image')
+      assert(block.path === shotPath, `图片块路径不对：${block.path}`)
+      assert(block.mime === 'image/png', `图片块 mime 不对：${block.mime}`)
+      // 一张 2 MB 的图 base64 之后是 2.7 MB，写进 JSONL 会让这一行没法 grep、没法 tail。
+      const raw = JSON.stringify(withImage[0])
+      assert(!raw.includes(png.toString('base64')), '图片字节被写进会话日志了')
+      assert(raw.length < 2000, `事件行 ${raw.length} 字符，太长了，多半是把字节写进去了`)
+    }
+  })
+
+  await test('图片路径逃不出工作区，也不能指一个不存在的文件', async () => {
+    // 路径是浏览器传上来的。这一层不挡，工作区边界就等于没有。
+    const escape = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
+      cookie,
+      body: { text: 'x', images: [{ path: '../../../etc/passwd', mime: 'image/png' }] },
+    })
+    assert(escape.status === 400, `越界路径应该 400，实为 ${escape.status} ${escape.text}`)
+
+    const missing = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
+      cookie,
+      body: { text: 'x', images: [{ path: 'nope.png', mime: 'image/png' }] },
+    })
+    assert(missing.status === 400, `不存在的图应该 400，实为 ${missing.status} ${missing.text}`)
+  })
+
+  await test('模型看不了的图片格式当场拒掉', async () => {
+    // 不在白名单里的（TIFF、SVG、HEIC）各家 provider 支持不一，发过去多半换回一个
+    // 400——而那个 400 长得像我们自己的 bug，查起来要绕一大圈。
+    const bad = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
+      cookie,
+      body: { text: 'x', images: [{ path: shotPath, mime: 'image/svg+xml' }] },
+    })
+    assert(bad.status === 400, `svg 应该 400，实为 ${bad.status} ${bad.text}`)
+    const nomime = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
+      cookie,
+      body: { text: 'x', images: [{ path: shotPath }] },
+    })
+    assert(nomime.status === 400, `缺 mime 应该 400，实为 ${nomime.status}`)
+  })
+
+  await test('只有图、没有正文也能发', async () => {
+    // 「这张图什么意思」本来就常常只有一张图。
+    const r = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
+      cookie,
+      body: { images: [{ path: shotPath, mime: 'image/png' }] },
+    })
+    assert(r.status === 200, `只带图 ${r.status} ${r.text}`)
+    // 但两样都没有仍然要拒——那是一条空消息。
+    const empty = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, { cookie, body: {} })
+    assert(empty.status === 400, `空消息应该 400，实为 ${empty.status}`)
+  })
+
   await test('发消息：无 Gateway 密钥也不准把进程打挂；JSONL 根有 botId+origin', async () => {
     const r = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
       cookie,
@@ -2548,12 +2645,12 @@ async function runBot() {
     assert(r.status === 404 || r.status === 410, `accounts ${r.status} ${r.text}`)
   })
 
-  await test('create+session 后 JSONL 首条是 version 3 且带 botId', async () => {
+  await test('create+session 后 JSONL 首条是当前 version 且带 botId', async () => {
     const file = join(BOT_HOME, 'sessions', `${sessionId}.jsonl`)
     const first = readFileSync(file, 'utf8').split('\n').find((l) => l.trim())
     const ev = JSON.parse(first)
     assert(ev.type === 'session', '首条不是 session')
-    assert(ev.data.version === 3, `version=${ev.data.version}`)
+    assert(ev.data.version === SESSION_FORMAT, `version=${ev.data.version}，当前格式是 ${SESSION_FORMAT}`)
     assert(ev.data.botId === botId, 'botId')
   })
 
@@ -2570,7 +2667,7 @@ async function runBot() {
   })
 
   // 并发/原子性在 session-store 那组用探针直接压 SessionService，这里只管真进程里读得通。
-  await test('旧格式会话经 /internal/sessions 读一次就地迁到 v3', async () => {
+  await test('旧格式会话经 /internal/sessions 读一次就地迁到当前版本', async () => {
     // v1 根事件：没有 botId / origin。读一次应就地迁到 v3。
     const legacyId = 's-legacy-v1'
     const file = join(BOT_HOME, 'sessions', `${legacyId}.jsonl`)
@@ -2591,7 +2688,7 @@ async function runBot() {
 
     const after = readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
     assert(after.length === 2, `迁移后行数 ${after.length}`)
-    assert(after[0].data.version === 3, `迁移后 version ${after[0].data.version}`)
+    assert(after[0].data.version === SESSION_FORMAT, `迁移后 version ${after[0].data.version}，当前格式是 ${SESSION_FORMAT}`)
     assert(after[0].data.botId === 'default', `迁移后 botId ${after[0].data.botId}`)
     assert(after[0].data.origin === 'local', `迁移后 origin ${after[0].data.origin}`)
     assert(JSON.stringify(after[1]) === JSON.stringify(lines[1]), '正文事件被改动')
@@ -2682,6 +2779,8 @@ async function main() {
     await runLlmIdle({ root, test, assert, log })
     await runReplaySlice({ root, test, assert, log })
     await runWorkspaceFiles({ root, test, assert, log })
+    await runDocExtract({ root, test, assert, log })
+    await runVision({ root, test, assert, log })
   } finally {
     killAll()
     try {

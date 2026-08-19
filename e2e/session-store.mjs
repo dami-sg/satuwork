@@ -49,7 +49,9 @@ export async function runSessionStore({ root, test, assert, log }) {
   await test('旧格式迁移与并发追加同时发生：不丢事件、不留半个文件', async () => {
     const b = r.migrateUnderLoad
     assert(b.uniqueSeqs === b.expectedSeqs, `seq 去重后 ${b.uniqueSeqs}，应为 ${b.expectedSeqs}`)
-    assert(b.rootVersion === 3, `迁移后 version ${b.rootVersion}`)
+    // 跟着当前格式版本走，别写死数字：每升一版都要来改一次测试，改着改着就有人
+    // 直接把断言删了。
+    assert(b.rootVersion === b.currentVersion, `迁移后 version ${b.rootVersion}，当前格式是 ${b.currentVersion}`)
     assert(b.rootBotId === 'default', `迁移后 botId ${b.rootBotId}`)
     assert(b.keptLegacyBody, '迁移把旧正文弄丢了')
     assert(b.fileLines === b.expectedEvents, `落盘行数 ${b.fileLines}，应为 ${b.expectedEvents}`)

@@ -54,6 +54,31 @@ Bot 写出来的文件怎么让人看见：`write` / `edit` 在工具结果里�
 经 `tool/result` 事件到界面，渲染成可点开的预览。**不去正则扫工具结果的文本猜路径**——
 那段文本是写给模型看的散文，措辞一改就扫不出来了。
 
+### 文档：read 读得了 PDF / Word / Excel
+
+`read` 碰到 `.pdf` / `.docx` / `.xlsx` 会先转成文本，再照常按行分页。**在 read 的时候转，
+不在上传的时候转**：一份 50 页的 PDF 转出来几万 token，上传即转等于每次对话都把它整个
+灌进上下文，而 `read` 本来就有 offset/limit，模型想读哪段读哪段。转换结果按
+（路径 + mtime + 大小）缓存几份，翻页时不会反复重解析。
+
+PDF 用 `unpdf`（自带 pdfjs，不需要原生 canvas），按页分段。Word 用 `mammoth` 转 HTML
+再转 Markdown——**不用它的 `convertToMarkdown`**，那个 API 官方标了 deprecated，而且会
+把表格拍平成一列文本。Excel 用 `exceljs`，每个工作表转 CSV，公式取缓存的计算结果。
+
+有一类救不了：**扫描件 PDF 没有文字层**，提取出来是空的。那种会明说读不出来，而不是
+返回一片空白让人以为文件坏了。
+
+### 图片：模型是真能看见的
+
+图片除了能预览，还能作为**视觉输入**发给模型。发消息时带 `images: [{path, mime}]`
+（路径是工作区里的，文件早就传上去了），席位这边校验路径不越界、文件在、格式在白名单
+（png / jpeg / gif / webp）里，然后写成一个 `image` 内容块。
+
+会话日志里**存路径不存字节**（见 `session/types.ts`，格式 v4）。组模型请求时才读盘转
+base64：OpenAI 走 `image_url` 的 data URI，Anthropic 走 `source` 对象。单张超过 3.5 MB
+的不发——各家上限不一样，取最紧的那个留了余量；超了会换成一句说明，模型至少知道有
+这么个东西。
+
 $SATUWORK_HOME/sessions/<id>.jsonl  会话日志：追加式，一行一条事件
 $SATUWORK_HOME/satuwork.db          运行时配置与非会话数据（SQLite）
 
@@ -91,7 +116,9 @@ docs/             事件模型设计参考（仓库根 docs/）
 | GET /api/sessions | 会话列表 |
 | POST /api/sessions | 新建会话（必须带 botId） |
 | GET /api/sessions/:id/events | SSE：先补历史再转推实时，after=seq 用于断线重连 |
-| POST /api/sessions/:id/messages | 发消息，立即返回；结果走 SSE |
+| POST /api/sessions/:id/messages | 发消息，立即返回；结果走 SSE。可带 `images: [{path, mime}]` |
+| POST /api/sessions/:id/files | 上传附件：裸字节，文件名在 `x-filename`（URL 编码）|
+| GET /api/workspace/file?path= | 取工作区里的一个文件；`download=1` 强制另存 |
 | GET /api/models | 代理 Gateway 目录，本机无密钥 |
 
 产品聊天走 Gateway 反代这些口，不要把浏览器指到本进程端口。

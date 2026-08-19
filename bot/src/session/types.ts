@@ -7,7 +7,7 @@
  */
 
 /** 落盘格式版本。任何破坏性结构变更都要 +1，并同时给出迁移。 */
-export const SESSION_FORMAT_VERSION = 3
+export const SESSION_FORMAT_VERSION = 4
 
 /** 会话根上的 Bot 来源。M1 只有 local；company / global 是物化预留。 */
 export type SessionOrigin = 'local' | 'company' | 'global'
@@ -22,12 +22,20 @@ export interface EventEnvelope<T extends keyof SessionEventMap = keyof SessionEv
   data: SessionEventMap[T]
 }
 
-/** 消息内容块。先只做文本与工具调用，够跑通链路。 */
+/** 消息内容块。 */
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool-call'; callId: string; name: string; arguments: string }
   | { type: 'tool-result'; callId: string; text: string; failed?: boolean }
+  /**
+   * 一张给模型看的图（v4 起）。
+   *
+   * **存路径，不存 base64。** 一张 2 MB 的图 base64 之后是 2.7 MB，直接落进 JSONL 会让
+   * 单行大到没法 grep、没法 tail，整条会话的重放也要把它搬一遍。图片本体就在工作区里，
+   * 组模型请求的时候现读现转就行。
+   */
+  | { type: 'image'; path: string; mime: string }
 
 export interface Message {
   id: string

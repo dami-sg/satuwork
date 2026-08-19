@@ -88,6 +88,18 @@ function trimBotStreams(keepId) {
   }
 }
 
+/**
+ * 用户消息里的图片块（会话格式 v4 起）。
+ *
+ * 日志里存的是**路径**不是字节（见 bot 的 session/types.ts），所以这里拿到的也是路径，
+ * 要显示还得走一趟预览接口——和点开产出文件是同一条路。
+ */
+function messageImages(msg) {
+  const content = msg && msg.content
+  if (!Array.isArray(content)) return []
+  return content.filter((b) => b && b.type === 'image' && b.path).map((b) => ({ path: b.path, mime: b.mime || '' }))
+}
+
 function messageText(msg) {
   if (!msg) return ''
   if (typeof msg === 'string') return msg
@@ -146,7 +158,13 @@ function fold(events, live) {
       if (data.source && data.source.kind && data.source.kind !== 'user') continue
       assistant = null
       tools = []
-      blocks.push({ kind: 'user', text: messageText(data.message) || data.text || '', time: at, seq: ev.seq })
+      blocks.push({
+        kind: 'user',
+        text: messageText(data.message) || data.text || '',
+        images: messageImages(data.message),
+        time: at,
+        seq: ev.seq,
+      })
     } else if (type === 'assistant/message') {
       const text = messageText(data.message)
       if (!assistant) {
@@ -804,6 +822,95 @@ function outputFiles(tools) {
   return [...seen.values()]
 }
 
+/**
+ * 缩略图自动加载的上限。
+ *
+ * 缩略图取的是**原图**——没有服务端缩放（那要拉原生图像库，而部署包是预打的 arm64）。
+ * 所以大图不自动拉，留占位，点开再说：一屏十张 8 MB 的图会把内存和带宽一起吃掉。
+ */
+const SHOT_AUTO_MAX = 2 * 1024 * 1024
+
+/** path → blob URL。同一张图在历史里可能出现多次，只取一次。 */
+const SHOT_CACHE = new Map()
+const SHOT_CACHE_MAX = 40
+
+function shotCachePut(path, url) {
+  SHOT_CACHE.set(path, url)
+  while (SHOT_CACHE.size > SHOT_CACHE_MAX) {
+    const oldest = SHOT_CACHE.keys().next().value
+    const dead = SHOT_CACHE.get(oldest)
+    SHOT_CACHE.delete(oldest)
+    /**
+     * **只吊销没人再看的那份。**
+     *
+     * 被挤出缓存不等于没人用：那张图多半还挂在上面某条消息的 <img> 上。吊销掉，
+     * 那个节点下次重绘（往前翻一页历史、或者这一行的 data-sig 变了）就会拿着一个
+     * 已经作废的 blob: 去取图，显示成永久破图——而缓存里已经没有它，fillShots 也
+     * 只认带 data-shot 的占位元素，不会再去补。
+     */
+    if (dead && !shotInUse(dead)) setTimeout(() => URL.revokeObjectURL(dead), 0)
+  }
+}
+
+/** 这个 blob URL 还挂在页面上吗。遍历而不是拼属性选择器——省掉一层转义的坑。 */
+function shotInUse(url) {
+  for (const img of document.querySelectorAll('.sw-shot img')) {
+    if (img.src === url) return true
+  }
+  return false
+}
+
+/** 把占位换成真图。失败就留占位——一张图没取到，不该让整条消息看起来出了错。 */
+async function fillShots(host) {
+  if (!host || !state.chatSessionId) return
+  const sessionId = state.chatSessionId
+  for (const el of host.querySelectorAll('.sw-shot[data-shot]')) {
+    const path = el.getAttribute('data-shot')
+    // 取过就别再取：这个函数每帧都可能被调到。
+    el.removeAttribute('data-shot')
+    if (!path) continue
+    const cached = SHOT_CACHE.get(path)
+    if (cached) {
+      el.innerHTML = '<img src="' + esc(cached) + '" alt="">'
+      continue
+    }
+    try {
+      const url = '/runtime/sessions/' + encodeURIComponent(sessionId) + '/files?path=' + encodeURIComponent(path)
+      const res = await fetch(url, { headers: authHeaders() })
+      // 不读的响应体要显式收掉，否则连接和缓冲会一直挂着——一屏十张大图就是十条，
+      // 正好是下面那道大小闸想省下的开销。
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {})
+        continue
+      }
+      if (Number(res.headers.get('content-length') || 0) > SHOT_AUTO_MAX) {
+        await res.body?.cancel().catch(() => {})
+        continue
+      }
+      const blob = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      shotCachePut(path, objectUrl)
+      el.innerHTML = '<img src="' + esc(objectUrl) + '" alt="">'
+    } catch {
+      /* 留占位 */
+    }
+  }
+}
+
+/**
+ * 用户发的一张图。
+ *
+ * 用 <img> 直接指预览接口是不行的——Gateway 认 Authorization 头，而 src= 带不了头。
+ * 所以先画一个占位，等 loadShot 把 blob 取回来再填进去。
+ */
+function shotHtml(img) {
+  return (
+    `<button type="button" class="sw-shot" data-act="chat-preview" data-path="${esc(img.path)}" ` +
+    `data-name="${esc(img.path.split('/').pop() || img.path)}" data-shot="${esc(img.path)}" ` +
+    `title="${esc(img.path)}"><span class="sw-shot-ph">${ICON_FILE}</span></button>`
+  )
+}
+
 /** 一个可点开的产出文件。这是「用户怎么发现 Bot 生成了东西」的那一环。 */
 function fileChipHtml(f) {
   return (
@@ -869,6 +976,23 @@ function updateRow(el, b, streaming) {
   const bubble = el.querySelector('.sw-bubble')
   const md = bubble.querySelector('.sw-md')
   const chips = bubble.querySelector('.sw-chips')
+
+  // 用户发的图：缩略图排在正文上面，点开走预览。没有这一段，人发完图只看得见
+  // 自己那句话，图像是发进了黑洞。
+  const shots = b.images || []
+  let strip = bubble.querySelector('.sw-shots')
+  const shotSig = shots.map((x) => x.path).join('|')
+  if (shots.length && !strip) {
+    strip = document.createElement('div')
+    strip.className = 'sw-shots'
+    bubble.insertBefore(strip, md)
+  }
+  if (strip && strip.getAttribute('data-sig') !== shotSig) {
+    strip.setAttribute('data-sig', shotSig)
+    strip.innerHTML = shots.map(shotHtml).join('')
+    strip.hidden = !shots.length
+    void fillShots(strip)
+  }
 
   if (!String(b.text || '').trim() && streaming) {
     // 还没吐字。给一个空气泡里的三点——它就地长成正文，位置不跳。
@@ -1857,6 +1981,25 @@ function composeChatBody(files, text) {
   return t('我上传了文件，在工作区里：') + '\n' + list + (text ? '\n\n' + text : '')
 }
 
+/**
+ * 模型真能看的图片格式。跟席位那边的白名单是同一张表（web/index.ts 的
+ * MODEL_IMAGE_MIME）——这边先分好，能少一趟注定要被拒的往返。
+ */
+const MODEL_IMAGE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+
+/**
+ * 传上去的东西里，哪些能直接给模型看。
+ *
+ * 图片走 `images`（到了模型那边是真正的视觉输入），其余的只在正文里留个路径——
+ * 后者模型得自己去 read。两条路都要有：图片的路径也列进正文，因为模型可能想用
+ * 工具再处理它，而 image 块里是没有路径的。
+ */
+function pickImages(files) {
+  return files
+    .map((f) => ({ path: f.path, mime: String(f.contentType || '').split(';')[0].trim() }))
+    .filter((f) => f.path && MODEL_IMAGE.has(f.mime))
+}
+
 async function sendChat() {
   const text = (state.chatDraft || '').trim()
   const files = state.chatFiles || []
@@ -1892,9 +2035,11 @@ async function sendChat() {
   state.chatFiles = []
   paintChatFiles()
 
+  const images = pickImages(uploaded)
   try {
     await api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/messages', {
       text: composeChatBody(uploaded, text),
+      ...(images.length ? { images } : {}),
     })
   } catch (err) {
     // 文件已经传上去了，退回来的只有草稿——附件不还，还了会传第二遍。

@@ -1,7 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '../session/types.ts'
 import { historySlice } from '../session/replay.ts'
+import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
+import type { ImageRef } from '../agent/index.ts'
 
 /**
  * Satuwork 的 HTTP API。无头运行时：不发 SPA，未知路径 JSON 404。
@@ -113,18 +115,27 @@ export function apply(ctx: Context, _config: Config = {}) {
    * 否则开新的一轮。前端不需要知道这个分支，一个入口就够。
    */
   ctx.server.post('/api/sessions/:id/messages', async (req, res) => {
-    const body = (await req.json().catch(() => ({}))) as { text?: string }
-    if (!body.text?.trim()) {
+    const body = (await req.json().catch(() => ({}))) as { text?: string; images?: unknown }
+    let images: ImageRef[]
+    try {
+      images = await imageRefs(ctx, body.images)
+    } catch (e) {
+      res.status = 400
+      res.json({ error: (e as Error).message })
+      return
+    }
+    // 带图的消息可以没有正文——「这张图什么意思」本来就常常只有一张图。
+    if (!body.text?.trim() && !images.length) {
       res.status = 400
       res.json({ error: 'text 不能为空' })
       return
     }
-    if (ctx.agents.steer(req.params.id, body.text)) {
+    if (await ctx.agents.steer(req.params.id, body.text ?? '', images)) {
       res.json({ steered: true })
       return
     }
     // 不等 turn 跑完就返回：结果通过 SSE 推，HTTP 只负责「收到了」。
-    void ctx.agents.send(req.params.id, body.text).catch((e: Error) => {
+    void ctx.agents.send(req.params.id, body.text ?? '', images).catch((e: Error) => {
       console.error(`satuwork: agents.send 失败：${e.message}`)
       ctx.logger?.warn?.(`agents.send 失败：${e.message}`)
     })
@@ -250,6 +261,39 @@ export function apply(ctx: Context, _config: Config = {}) {
     res.json({ error: 'unknown endpoint', path: req.path })
   })
 
+}
+
+/**
+ * 模型真能看的图片格式。
+ *
+ * 是白名单不是黑名单：不在里面的（TIFF、SVG、HEIC）各家 provider 支持不一，发过去
+ * 多半换回一个 400，而那个 400 长得像我们自己的 bug，查起来要绕一大圈。不如在这儿
+ * 就说清楚。
+ */
+const MODEL_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+
+/**
+ * 请求里的图片 → 校验过的引用。
+ *
+ * 三件事一起做：路径必须落在工作区内（`resolve` 越界即抛）、文件必须真的在、格式必须
+ * 是模型看得懂的。**路径是浏览器传上来的**，这一层不做，工作区边界就等于没有。
+ */
+async function imageRefs(ctx: Context, raw: unknown): Promise<ImageRef[]> {
+  if (raw == null) return []
+  if (!Array.isArray(raw)) throw new Error('images 必须是数组')
+  if (raw.length > 10) throw new Error('一条消息最多带 10 张图')
+  const out: ImageRef[] = []
+  for (const item of raw) {
+    const path = typeof item?.path === 'string' ? item.path.trim() : ''
+    const mime = typeof item?.mime === 'string' ? item.mime.trim().toLowerCase() : ''
+    if (!path) throw new Error('images 里有一项缺 path')
+    if (!MODEL_IMAGE_MIME.has(mime)) throw new Error(`这种图片格式模型看不了：${mime || '(空)'}`)
+    const file = ctx.workspace.resolve(path)
+    const info = await stat(file).catch(() => null)
+    if (!info?.isFile()) throw new Error(`图片不存在：${path}`)
+    out.push({ path: ctx.workspace.show(file), mime })
+  }
+  return out
 }
 
 /**

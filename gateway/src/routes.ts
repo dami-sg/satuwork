@@ -4282,12 +4282,19 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     const account = await requireUser(req, db, keys)
     const target = await seatTargetForSession(db, account, req.params.id)
     const body = bodyOf(req)
-    const text = strField(body, 'text')
+    // 图片带的是**工作区里的路径**，不是字节——文件早就传上去了（见上面那条 files）。
+    // 真正的校验（路径越界、文件在不在、格式模型认不认）在席位那头，那里才有工作区。
+    const images = Array.isArray(body.images)
+      ? body.images.slice(0, 10).map((x) => {
+          const o = (x ?? {}) as Record<string, unknown>
+          return { path: String(o.path ?? ''), mime: String(o.mime ?? '') }
+        })
+      : undefined
     await proxyJson(
       res,
       'POST',
       `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/messages`,
-      { text },
+      images?.length ? { text: strField(body, 'text', false), images } : { text: strField(body, 'text') },
       await seatBearer(db, account.id),
       target.machineToken,
     )
