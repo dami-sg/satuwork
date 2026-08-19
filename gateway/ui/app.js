@@ -299,6 +299,10 @@ document.getElementById('app').addEventListener('click', async (e) => {
     render()
     return
   }
+  if (act === 'machine-refresh') {
+    await refreshMachine(btn.getAttribute('data-id'))
+    return
+  }
   if (act === 'seat-open') {
     const id = btn.getAttribute('data-id')
     const member = (state.accounts || []).find((x) => x.id === id)

@@ -802,13 +802,13 @@ function sinceMs(ms) {
 }
 
 /**
- * 卡片的头一行：灯、编号、短码、状态。
+ * 卡片的头一行：灯、编号、短码、状态，右端一颗刷新。
  *
  * **编号和短码是两样东西。** 「1 号机」是给人照着念的，中间删掉一台后面就会往前挪；
  * 要唯一地指一台得用 id，所以短码那颗按钮复制的是**完整 id**，显示的只是前 8 位——
  * 完整 UUID 摆在卡片头上，占一行，还没人读得下来。
  */
-function machineHead(card, m) {
+function machineHead(orgId, card, m) {
   // **「后端没给这个字段」不等于「机器没配对」。** 这两件事差得最远，而合成一个兜底
   // 值的代价是：一台心跳正常、版本刚升完的机器，界面上写着「还没有配对」。开发时
   // 前端比后端新一步就会撞上（浏览器读的是磁盘上的 app.js，Gateway 要重启才换代码）。
@@ -831,6 +831,12 @@ function machineHead(card, m) {
     ${card.no ? `<span class="satu-machineno">${t('机器')} ${esc(card.no)}</span>` : ''}
     ${short ? `<button type="button" class="satu-linkbtn satu-machineid" data-act="copy-machine-id" data-machine="${esc(m.id)}" title="${t('复制完整编号')}">${esc(short)}</button>` : ''}
     <span style="font-size: 13px; color: var(--muted-foreground);">${esc(label)}${esc(when)}</span>
+    ${/* 卡片上的心跳、版本都是机器自报的，下完指令要等下一轮心跳才变——所以要有一颗
+         「我现在就想知道」的按钮。它只重拉 Gateway 手上这一份，不去戳机器。
+
+         没有 data-machine：机器那个接口一次回整张列表，重拉就是全都新的，没有
+         「只刷这一台」这回事。挂一个用不上的 id 会让人以为有。 */ ''}
+    <button type="button" class="satu-linkbtn satu-machinerefresh" data-act="machine-refresh" data-id="${esc(orgId)}" ${state.busy ? 'disabled' : ''} title="${t('重新拉一遍这台机器的信息')}">${t('刷新')}</button>
   </div>`
 }
 
@@ -844,7 +850,7 @@ function machineCard(orgId, card) {
   const m = card.machine || {}
   const full = card.full
   return `<div class="satu-panel" style="margin: 0; background: var(--muted);">
-    ${machineHead(card, m)}
+    ${machineHead(orgId, card, m)}
     <div class="satu-kv"><span>${t('地址')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; word-break: break-all;">
       ${esc(m.host || '—')}
       ${card.seats ? '' : `<button type="button" class="satu-linkbtn" data-act="machine-remove" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('移除')}</button>`}
