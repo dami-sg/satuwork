@@ -643,13 +643,21 @@ async function managerDeploy(machine: Machine, spec: SeatSpec): Promise<void> {
     throw new Error('联系不上机器管家: ' + (e instanceof Error ? e.message : String(e)))
   }
   if (res.ok) return
-  const text = (await res.text()).slice(0, 400)
+  /**
+   * **先读完再解析，最后才截。** 原先是 `text().slice(0, 400)` 之后再 JSON.parse——
+   * 而真出错时这个响应体一定超过 400 字（里面整个席位记录都在），于是 JSON 被砍断、
+   * parse 必然失败、回退成「把那段残缺 JSON 当错误存起来」。也就是说：**越是有内容的
+   * 错误，越是拿不到内容**，界面上看到的是半句话加一个没闭合的花括号。真发生过。
+   *
+   * 上限放到 16 KiB：管家那侧已经把输出裁到 500 字级别，这里只需要够装下整个 JSON。
+   */
+  const text = (await res.text()).slice(0, 16_000)
   let message = text
   try {
     const body = JSON.parse(text) as { error?: string; seat?: { lastError?: string } }
     message = body.seat?.lastError || body.error || text
   } catch {}
-  throw new Error(`管家部署失败 ${res.status}: ${message}`)
+  throw new Error(`管家部署失败 ${res.status}: ${tailOf(message, 900)}`)
 }
 
 /** 拆席位：停单元、删 drop-in、删席位目录。账号和 ~/work 留着，别的席位还在用。 */
@@ -683,9 +691,19 @@ export async function managerHealth(
   }
 }
 
+/**
+ * 太长就砍头，不砍尾。
+ *
+ * 这些消息里装的是脚本输出：进度在前，原因在后。从头截等于把唯一有用的那一段扔掉。
+ */
+function tailOf(text: string, max: number): string {
+  const s = (text || '').replace(/\s+/g, ' ').trim()
+  return s.length <= max ? s : '…' + s.slice(-max)
+}
+
 export function sanitizeError(e: unknown, secrets: string[] = []): string {
   const raw = e instanceof Error ? e.message : String(e)
-  return stripSecrets(raw.replace(/\s+/g, ' ').trim(), secrets).slice(0, 500) || '部署失败'
+  return tailOf(stripSecrets(raw, secrets), 900) || '部署失败'
 }
 function stripSecrets(text: string, secrets: string | string[] = []): string {
   let s = text

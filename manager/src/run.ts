@@ -52,8 +52,24 @@ export function run(
   })
 }
 
-/** 出错信息压成一行，给 Gateway 看。保留尾部——报错都在最后。 */
+/**
+ * 出错信息压成一行，给 Gateway 看。保留尾部——报错都在最后。
+ *
+ * 两处是踩过坑之后改的：
+ *
+ * **退出码永远带上。** 原先它藏在 `fallback` 里，而 `fallback` 只在两个流都空的时候
+ * 才用得上。可失败的那条命令**很可能什么都不打印**（mkdir、chown、systemctl 都是这
+ * 样），偏偏前面又有一堆正常的进度输出——于是消息里全是无关的话，唯一有用的「exited
+ * 几」被挤掉了。
+ *
+ * **stdout 也留一段。** stderr 优先没错，但这个脚本的进度打在 stdout 上；出错那一步
+ * 静默时，stdout 的末尾就是「走到哪儿了」，那是唯一的线索。
+ */
 export function tailError(r: RunResult, fallback: string): string {
-  const raw = (r.stderr || r.stdout || fallback).replace(/\s+/g, ' ').trim()
-  return raw.slice(-500) || fallback
+  const one = (s: string) => (s || '').replace(/\s+/g, ' ').trim()
+  const err = one(r.stderr)
+  const out = one(r.stdout)
+  const head = typeof r.code === 'number' && r.code !== 0 ? `exited ${r.code}` : fallback
+  const body = [err && `stderr: ${err.slice(-400)}`, out && `stdout: ${out.slice(-400)}`].filter(Boolean).join(' | ')
+  return body ? `${head} — ${body}` : head || fallback
 }

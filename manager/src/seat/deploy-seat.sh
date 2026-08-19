@@ -13,6 +13,16 @@
 #   $HOME_DIR/.satuwork/$SEAT_ID   席位私有：$SATUWORK_HOME、app、Chrome profile、XDG 各目录
 set -euo pipefail
 
+# **失败要自报家门。** set -e 让任何一条命令非零时立刻退出，而这里有不少命令
+# （mkdir、chown、rsync、systemctl、runuser）失败时**两个流一个字都不写**，或者只往
+# stdout 写进度。那时候管家收到的是「非零退出」外加一堆无关的进度输出，看不出断在
+# 哪一步——真出过一次：日志显示走到了写 VNC 口令，再往后什么都没有。
+#
+# 这条 trap 保证 stderr 的最后一句永远说得出「第几行、退出码多少」。
+# **不打印 $BASH_COMMAND**：那一行展开之后可能带着 VNC 口令或票，而这条消息要一路
+# 送到浏览器上去。行号配上这个版本的脚本，足够定位到具体哪一条命令。
+trap 'rc=$?; echo "deploy-seat.sh 第 $LINENO 行失败（退出码 $rc）" >&2; exit $rc' ERR
+
 : "${LINUX_USER:?}"
 : "${SEAT_ID:?}"
 : "${HOME_DIR:?}"
