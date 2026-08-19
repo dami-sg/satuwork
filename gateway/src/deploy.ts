@@ -131,6 +131,18 @@ export function randomVncPassword(): string {
  */
 export const MANAGER_HEARTBEAT_MS = 30_000
 
+/**
+ * 墓碑最多躺多久。
+ *
+ * 移除一台在线的机器时，Gateway 留一行 `removedAt` 不删，等管家下一轮心跳来取信、
+ * 收拾完回执了才真删。机器要是再也不回来（已经关机、网线拔了、重装过），这一行不
+ * 能永远躺着——超过这个时限就当它收不到了，扫掉。
+ *
+ * 10 分钟 = 20 轮心跳。够一次重启加一段网络抖动，又不至于让人在列表里等太久才看到
+ * 那台机器彻底消失（其实界面上第一时间就看不见它了，墓碑只对库可见）。
+ */
+export const MACHINE_TOMBSTONE_TTL = 10 * 60_000
+
 /** 通联状态。界面上那盏灯只认这四个值。 */
 export type MachineLink = 'unpaired' | 'online' | 'stale' | 'offline'
 

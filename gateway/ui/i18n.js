@@ -444,6 +444,10 @@ window.SATU_I18N = {
   '机器心跳时拿到期望版本，自己换版并在失败时回滚。留空表示跟最新发布走。':
     'Machines pick up the desired version on heartbeat, upgrade themselves and roll back on failure. Empty means follow the latest release.',
   // ── 平台机器管理页 ────────────────────────────────────────────────
+  '移除这台机器的登记？': 'Remove this machine?',
+  移除: 'Remove',
+  '机器在线的话，它会在下一轮心跳收到通知，自己停掉席位、取消开机自启并退出；~/work 里的文件留在机器上。不在线的收不到通知，上面的东西要停得上去停。要让它重新回来，在机器上重跑一次配对。':
+    'If the machine is online it gets the notice on its next heartbeat, stops its seats, disables its own autostart and exits; files in ~/work stay on the box. An offline machine never gets the notice — stop things there yourself. To bring it back, re-run pairing on the machine.',
   运行中: 'Running',
   出错: 'Failed',
   部署中: 'Deploying',

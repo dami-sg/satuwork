@@ -231,6 +231,22 @@ export interface Machine {
    * 机器」这个按钮只能改全局设置，一按就是全机队。
    */
   desiredManagerVersion: string | null
+  /**
+   * 被移除的时刻。null = 在册。
+   *
+   * **这是一块墓碑，不是一台机器。** 平台上按「移除」之后，这一行对所有面向界面的
+   * 查询等于不存在（见下面那批 `removedAt is null`），留着只为一件事：把「你被移除
+   * 了」这个消息送到机器上——心跳是机器主动打的，Gateway 没有别的路子找它。
+   *
+   * 为什么不直接删了了事：删掉之后机器票就查不到，心跳只会拿到 401，而 401 是**否
+   * 定式**信号（「我不认识你」）。Gateway 回滚版本、库恢复到旧快照、DNS 指错，都会
+   * 让整个机队同时收到 401——管家要是据此自毁，那就是全机队自杀。墓碑让信号变成
+   * **肯定式**的：我认识你，并且我告诉你你被移除了。
+   *
+   * 管家收拾完会回执（POST /internal/machines/:id/removed），那时才真删。它一直不
+   * 来收信的话，超过 MACHINE_TOMBSTONE_TTL 由 sweepRemovedMachines 收掉。
+   */
+  removedAt: number | null
   token: string
 }
 
@@ -696,6 +712,7 @@ function machineOf(r: Row): Machine {
     timezone: strOrNull(r.timezone),
     currentTimezone: strOrNull(r.currentTimezone),
     desiredManagerVersion: strOrNull(r.desiredManagerVersion),
+    removedAt: numOrNull(r.removedAt),
     token: str(r.token || ''),
   }
 }
@@ -1084,6 +1101,8 @@ export class Db {
       -- 只有一列的话「已经改上了」和「还没改上」在界面上是一个样子。
       alter table machines add column if not exists timezone text;
       alter table machines add column if not exists "currentTimezone" text;
+      -- 移除是两步：先立墓碑把信送到机器上，管家收拾完回执了才真删。见 Machine.removedAt。
+      alter table machines add column if not exists "removedAt" bigint;
       -- 老库里 host 存的是 bot 直连地址，现在这一列的语义是管家基址；ssh 那套已经
       -- 没有对应物了。整行留着但清空 host，逼这台机器重新配对——留着旧值会让
       -- Gateway 一直往一个打不通的地方发部署。
@@ -2362,6 +2381,8 @@ export class Db {
       // 时区默认不管：没人指定之前，机器装成什么样就是什么样。
       timezone: null as string | null,
       currentTimezone: null as string | null,
+      // 新登记的机器当然在册。墓碑只由 markMachineRemoved 立。
+      removedAt: null as number | null,
     }
     for (let i = 0; i < 8; i++) {
       const row: Machine = { ...base, token: randomMachineToken() }
@@ -2410,15 +2431,42 @@ export class Db {
     throw new Error('无法签发机器凭证')
   }
 
+  /**
+   * 按 id 取一台**在册**的机器。墓碑当不存在——它对界面来说已经被移除了。
+   *
+   * 唯一看得见墓碑的是 `machineByToken`（心跳要靠它把「你被移除了」送下去）。
+   */
   async machine(id: string): Promise<Machine | undefined> {
-    const r = await this.one('select * from machines where id = ?', [id])
+    const r = await this.one('select * from machines where id = ? and "removedAt" is null', [id])
     return r ? machineOf(r) : undefined
   }
 
+  /**
+   * 按机器票取，**墓碑也返回**。
+   *
+   * 这是整个库里唯一看得见墓碑的查询，而且必须看得见：移除之后管家还会照常心跳，
+   * 那一下正是把「你被移除了」交给它的唯一机会。调用方（心跳）要自己判 `removedAt`。
+   */
   async machineByToken(token: string): Promise<Machine | undefined> {
     if (!token) return undefined
     const r = await this.one('select * from machines where token = ?', [token])
     return r ? machineOf(r) : undefined
+  }
+
+  /** 立墓碑。席位登记和公司默认机器的指向由调用方在同一个事务里先处理掉。 */
+  async markMachineRemoved(id: string, at: number): Promise<void> {
+    await this.run('update machines set "removedAt" = ? where id = ?', [at, id])
+  }
+
+  /**
+   * 收掉过期的墓碑。
+   *
+   * 管家一直不来收信（机器已经关机、网线拔了、被重装了）时，墓碑不能永远躺着。
+   * 不开定时器：读列表和删机器时各扫一次就够——这两处的频率远高于 TTL，而代价是
+   * 一条走主键之外单列的 delete。
+   */
+  async sweepRemovedMachines(before: number): Promise<number> {
+    return this.run('delete from machines where "removedAt" is not null and "removedAt" < ?', [before])
   }
 
   /**
@@ -2429,25 +2477,25 @@ export class Db {
    * 最需要被人看见的——按公司去列永远列不到它们。
    */
   async allMachines(): Promise<Machine[]> {
-    const rows = await this.many('select * from machines order by "createdAt"')
+    const rows = await this.many('select * from machines where "removedAt" is null order by "createdAt"')
     return rows.map(machineOf)
   }
 
   /** 这家公司的所有机器，登记先后。多机调度按这个顺序做兜底排序。 */
   async machinesOfCompany(companyId: string): Promise<Machine[]> {
-    const rows = await this.many('select * from machines where "companyId" = ? order by "createdAt"', [companyId])
+    const rows = await this.many('select * from machines where "companyId" = ? and "removedAt" is null order by "createdAt"', [companyId])
     return rows.map(machineOf)
   }
 
   /** 按管家基址找机器。重跑装机脚本时靠它认出「还是那一台」，而不是凭空多一台。 */
   async machineByHost(companyId: string, host: string): Promise<Machine | undefined> {
     if (!host) return undefined
-    const r = await this.one('select * from machines where "companyId" = ? and host = ?', [companyId, host])
+    const r = await this.one('select * from machines where "companyId" = ? and host = ? and "removedAt" is null', [companyId, host])
     return r ? machineOf(r) : undefined
   }
 
   async machineOfCompany(companyId: string): Promise<Machine | undefined> {
-    const r = await this.one('select * from machines where "companyId" = ?', [companyId])
+    const r = await this.one('select * from machines where "companyId" = ? and "removedAt" is null', [companyId])
     return r ? machineOf(r) : undefined
   }
 

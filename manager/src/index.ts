@@ -8,6 +8,7 @@ import { botUnit, clampLines, followLogs, MANAGER_UNIT, recentLogs } from './log
 import { deploySeat, removeSeat, seat, seatsWithLiveness, type SeatSpec } from './seats.ts'
 import { confirmVersion, maybeUpgrade, upgradeError } from './upgrade.ts'
 import { currentTimezone, maybeSetTimezone, timezoneError } from './timezone.ts'
+import { standDown } from './standdown.ts'
 
 /**
  * 机器管家。一台席位机器一个，root systemd 服务。
@@ -251,6 +252,20 @@ if (!state) {
 
 const HEARTBEAT_MS = 30_000
 
+/**
+ * 连续多少次 401 之后认定「Gateway 不认这台机器了」。10 轮 = 5 分钟。
+ *
+ * **401 只降频加报警，不自毁**：它是否定式信号，分不出「我被移除了」和「Gateway
+ * 那边出了状况」。真正的移除走的是心跳回包里的 `removed: true`（见 standDown）。
+ * 这一路是兜底——Gateway 要是老版本、或者那行记录被人直接从库里删了，管家至少不会
+ * 每 30 秒空敲到天荒地老，而且 journal 里有一句说得清的话。
+ */
+const AUTH_FAIL_LIMIT = 10
+/** 认定失联之后的心跳间隔。不彻底停：Gateway 恢复了还能自己接回来。 */
+const IDLE_HEARTBEAT_MS = 5 * 60_000
+let authFails = 0
+let idled = false
+
 async function heartbeat(): Promise<void> {
   if (!state) return
   try {
@@ -273,10 +288,27 @@ async function heartbeat(): Promise<void> {
       }),
       signal: AbortSignal.timeout(15_000),
     })
-    if (!res.ok) return
+    if (!res.ok) {
+      // 401/403 = Gateway 不认这把票了。别的状态码（5xx、502）是它自己的毛病，
+      // 不该算在这个账上，否则一次 Gateway 重启就会把整队机器推进「失联」。
+      if (res.status === 401 || res.status === 403) onAuthFail()
+      return
+    }
+    authFails = 0
+    if (idled) {
+      idled = false
+      retime(HEARTBEAT_MS)
+      console.log('satuwork-manager: Gateway 又认得这台机器了，心跳恢复正常间隔')
+    }
     // 心跳通了才算「这个版本活过来了」。confirm timer 看的就是这个标记。
     confirmVersion()
-    const reply = (await res.json()) as { timezone?: string | null }
+    const reply = (await res.json()) as { timezone?: string | null; removed?: boolean }
+    // 被移除了：停席位、清配对、停自己。这一支之后不再做别的活儿。
+    if (reply.removed) {
+      clearInterval(timer)
+      await standDown(state, boot.dryRun)
+      return
+    }
     // 时区在前：它便宜、不重启进程，而 maybeUpgrade 成功那一支会把自己重启掉，
     // 排在它后面的活儿这一轮就不一定跑得到了。
     await maybeSetTimezone(reply.timezone)
@@ -287,7 +319,31 @@ async function heartbeat(): Promise<void> {
 }
 
 void heartbeat()
-const timer = setInterval(() => void heartbeat(), HEARTBEAT_MS)
+let timer = setInterval(() => void heartbeat(), HEARTBEAT_MS)
+
+/** 换心跳间隔。`timer` 是 let，shutdown 那边照旧 clearInterval 得到当前这一个。 */
+function retime(ms: number): void {
+  clearInterval(timer)
+  timer = setInterval(() => void heartbeat(), ms)
+}
+
+/**
+ * 连着被拒了几次。到阈值就说一句话、把心跳降到低频。
+ *
+ * 只说一次：每 5 分钟往 journal 刷同一行，等于没说。
+ */
+function onAuthFail(): void {
+  authFails += 1
+  if (authFails !== AUTH_FAIL_LIMIT) return
+  idled = true
+  retime(IDLE_HEARTBEAT_MS)
+  console.error(
+    'satuwork-manager: Gateway 连续拒收心跳（401）。多半是这台机器已经在平台上被移除，' +
+      '或者这把机器票被吊销了。席位还在跑，不会自动停——要下线这台机器，' +
+      '在上面跑 `systemctl disable --now satuwork-manager` 并拆掉席位；要重新接回去，重跑一次配对。' +
+      `心跳已降到 ${IDLE_HEARTBEAT_MS / 60_000} 分钟一次。`,
+  )
+}
 
 let closing = false
 function shutdown() {

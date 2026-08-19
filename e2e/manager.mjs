@@ -850,6 +850,9 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
           const del = await req(gwBase, 'DELETE', `/platform/machines/${doomed}`, { token: ownerTok })
           assert(del.status === 200, `有席位也该删得掉，实际 ${del.status} ${del.text}`)
           assert(del.json.seats === 1, `该报出连带删了几个席位，实际 ${JSON.stringify(del.json.seats)}`)
+          // 这台假机器刚插进去，lastHeartbeatAt 是现在 → machineLink 判 online，
+          // 所以走的是「立墓碑等它来收信」那条，而不是硬删。
+          assert(del.json.pending === true, `在线的机器该留墓碑等收信，实际 pending=${del.json.pending}`)
 
           const seatRows = await client.query('select 1 from seat_runtimes where "machineId" = $1', [doomed])
           assert(seatRows.rowCount === 0, `席位登记没跟着删：还剩 ${seatRows.rowCount} 行`)
@@ -859,6 +862,38 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
 
           const gone = await req(gwBase, 'GET', `/platform/machines/${doomed}`, { token: ownerTok })
           assert(gone.status === 404, `删完还查得到，实际 ${gone.status}`)
+          const listed = (await req(gwBase, 'GET', '/platform/machines', { token: ownerTok })).json.machines
+          assert(!listed.some((m) => m.machine.id === doomed), '墓碑不该出现在列表里')
+
+          // ── 墓碑存在的全部意义：把「你被移除了」交到机器手上。─────────────
+          //
+          // **不能回 401。** 那是否定式信号（「我不认识你」），Gateway 回滚版本、库恢复
+          // 到旧快照、DNS 指错，都会让整队机器同时收到它——管家据此自毁就是全机队自杀。
+          const hb = await req(gwBase, 'POST', `/internal/machines/${doomed}/heartbeat`, {
+            token: 'smt_e2e-doomed',
+            body: { managerVersion: 'e2e-1', protocol: 1, node: process.versions.node, seats: [] },
+          })
+          assert(hb.status === 200, `墓碑上的心跳该是 200，实际 ${hb.status} ${hb.text}`)
+          assert(hb.json.removed === true, `没把「你被移除了」带下去：${hb.text}`)
+          // 不在册了就别再更新它的字段，否则墓碑看着像台活机器。
+          const stillThere = await client.query('select "lastHeartbeatAt", "removedAt" from machines where id = $1', [doomed])
+          assert(stillThere.rows[0]?.removedAt, '墓碑没了？')
+          assert(
+            Number(stillThere.rows[0].lastHeartbeatAt) < Number(stillThere.rows[0].removedAt),
+            '墓碑上的心跳不该刷新 lastHeartbeatAt',
+          )
+
+          // 管家收拾完的回执 → 这一行才真的没。
+          const receipt = await req(gwBase, 'POST', `/internal/machines/${doomed}/removed`, { token: 'smt_e2e-doomed', body: {} })
+          assert(receipt.status === 200, `回执 ${receipt.status} ${receipt.text}`)
+          const rows = await client.query('select 1 from machines where id = $1', [doomed])
+          assert(rows.rowCount === 0, `收到回执之后该真删，还剩 ${rows.rowCount} 行`)
+          // 票也跟着失效了：再敲就只有 401。
+          const after = await req(gwBase, 'POST', `/internal/machines/${doomed}/heartbeat`, {
+            token: 'smt_e2e-doomed',
+            body: { protocol: 1 },
+          })
+          assert(after.status === 401, `行都没了还认票？实际 ${after.status}`)
         } finally {
           await client.query('delete from seat_runtimes where "machineId" = $1', [doomed]).catch(() => {})
           await client.query('delete from machines where id = $1', [doomed]).catch(() => {})
@@ -877,6 +912,48 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         body: { code, managerPort: MGR_PORT, protocol: 1 },
       })
       assert(r.status === 401, `重放 ${r.status}`)
+    })
+
+    // **这一条放最后**：它把真管家注销掉了，之后那台机器就不再听话了。
+    await test('注销：平台移除之后，管家自己拆席位、清配对、回执', async () => {
+      // 前面那条 DELETE 测的是 Gateway 半边（墓碑、心跳带信、回执删行），用的是假机器。
+      // 这一条测的是**另外半边**：真管家进程收到 removed 之后到底做不做事。两边各自
+      // 看着都对、合起来不通，是这类握手最常见的坏法。
+      const machineId = await machineIdOf(req, gwBase, ownerTok, orgId)
+      const del = await req(gwBase, 'DELETE', `/platform/machines/${machineId}`, { token: ownerTok })
+      assert(del.status === 200, `移除 ${del.status} ${del.text}`)
+      assert(del.json.pending === true, `管家在线，该等它收信，实际 pending=${del.json.pending}`)
+
+      // 管家最多 30 秒一轮心跳，给它两轮的余量。
+      const stateFile = join(MGR_HOME, 'manager.json')
+      let cleared = false
+      for (let i = 0; i < 140; i++) {
+        if (!existsSync(stateFile)) {
+          cleared = true
+          break
+        }
+        await new Promise((r) => setTimeout(r, 500))
+      }
+      assert(cleared, '管家没有清掉 manager.json——重启回来它还会去敲一个不认识它的 Gateway')
+
+      // 回执到了，那一行才真的没。墓碑 TTL 是兜底，不该是常规路径。
+      const { createRequire } = await import('node:module')
+      const require = createRequire(new URL('../gateway/package.json', import.meta.url))
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      try {
+        await client.query('set search_path to e2e_manager')
+        let rows = 1
+        for (let i = 0; i < 20; i++) {
+          rows = (await client.query('select 1 from machines where id = $1', [machineId])).rowCount
+          if (!rows) break
+          await new Promise((r) => setTimeout(r, 500))
+        }
+        assert(rows === 0, '管家没回执，或者 Gateway 收到回执没删行')
+      } finally {
+        await client.end().catch(() => {})
+      }
     })
   } finally {
     bot.server.close()
