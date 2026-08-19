@@ -79,7 +79,7 @@ function asideToggle() {
   return `<button type="button" class="btn btn-ghost btn-icon" style="margin-left: auto; flex: none;"
     data-act="aside-toggle" aria-pressed="${open}"
     aria-label="${esc(open ? t('收起运行环境') : t('展开运行环境'))}"
-    title="${esc(t('运行环境'))}">${svg(open ? CHEVRON_RIGHT : CHEVRON_LEFT, 16)}</button>`
+    title="${esc(t('运行环境'))}">${svg(MONITOR, 16)}</button>`
 }
 
 /** 在不在对话页。顶栏换不换成会话身份行、右栏开不开，都看它，免得两处判断漂移。 */

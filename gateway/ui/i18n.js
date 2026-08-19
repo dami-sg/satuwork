@@ -282,7 +282,6 @@ window.SATU_I18N = {
   拖动调整宽度: 'Drag to resize',
   打开桌面: 'Open desktop',
   桌面: 'Desktop',
-  席位详情: 'Seat details',
   收起桌面: 'Collapse desktop',
   重连: 'Reconnect',
   '正在连桌面…': 'Connecting to desktop…',
