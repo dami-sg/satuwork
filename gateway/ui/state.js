@@ -131,6 +131,14 @@ const state = {
   /** 这家公司的机器列表（每台带负载和版本）。 */
   machines: [],
   machineCapacity: null,
+  /** 平台机器管理页：全平台的机器列表 + 汇总。和上面那个 machines（某家公司的）分开存，
+      不然从公司详情点回列表会看到上一家公司剩下的那几台。 */
+  allMachines: [],
+  machineTotals: null,
+  /** 列表页的通联筛选：'' = 全部，其余就是 machineLink 的四个值。 */
+  machineFilter: '',
+  /** 机器详情页那一份：卡片、席位清单、可改派的公司清单。 */
+  machineDetail: null,
   botLatest: null,
   managerLatest: null,
   managerReleases: null,
@@ -331,6 +339,7 @@ function pathAllowed(p) {
   if (p.startsWith('/bots/') && allowedHrefs().has('/bots')) return true
   if (p.startsWith('/companies/') && allowedHrefs().has('/companies')) return true
   if (p.startsWith('/users/') && allowedHrefs().has('/users')) return true
+  if (p.startsWith('/machines/') && allowedHrefs().has('/machines')) return true
   if (p.startsWith('/audit/') && allowedHrefs().has('/audit')) return true
   if (isChatPath(p)) return !isOwner()
   return false
@@ -344,6 +353,11 @@ function botIdOfPath(p) {
 function companyIdOfPath(p) {
   if (!p.startsWith('/companies/')) return ''
   return decodeURIComponent(p.slice('/companies/'.length).split('/')[0] || '')
+}
+
+function machineIdOfPath(p) {
+  if (!p.startsWith('/machines/')) return ''
+  return decodeURIComponent(p.slice('/machines/'.length).split('/')[0] || '')
 }
 
 function userIdOfPath(p) {
@@ -382,6 +396,11 @@ function crumbsOf(path) {
   if (path.startsWith('/companies/') && path !== '/companies') {
     const org = state.org && state.org.id === companyIdOfPath(path) ? state.org : null
     return { href: '/companies', parent: t('公司'), current: org?.name || t('公司详情') }
+  }
+  if (path.startsWith('/machines/') && path !== '/machines') {
+    const id = machineIdOfPath(path)
+    const one = state.machineDetail?.machine?.id === id ? state.machineDetail : null
+    return { href: '/machines', parent: t('机器管理'), current: machineTitleOf(one) || t('机器详情') }
   }
   if (path.startsWith('/users/') && path !== '/users') {
     const acc = state.userDetail?.account

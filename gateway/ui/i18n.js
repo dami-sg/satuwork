@@ -19,6 +19,7 @@ window.SATU_I18N = {
   公司: 'Companies',
   'Bot 运行时': 'Bot Runtime',
   机器配置: 'Machine setup',
+  机器管理: 'Machines',
   用户: 'Users',
   套餐: 'Plans',
   统计: 'Statistics',
@@ -442,6 +443,53 @@ window.SATU_I18N = {
     'No manager release yet. Push a manager-v* tag from CI.',
   '机器心跳时拿到期望版本，自己换版并在失败时回滚。留空表示跟最新发布走。':
     'Machines pick up the desired version on heartbeat, upgrade themselves and roll back on failure. Empty means follow the latest release.',
+  // ── 平台机器管理页 ────────────────────────────────────────────────
+  运行中: 'Running',
+  出错: 'Failed',
+  部署中: 'Deploying',
+  机器详情: 'Machine details',
+  归属公司: 'Company',
+  未分配: 'Unassigned',
+  未分配给任何公司: 'Not assigned to any company',
+  机器信息: 'Machine',
+  容量与时区: 'Capacity & time zone',
+  架构: 'Architecture',
+  管家协议: 'Manager protocol',
+  配对时间: 'Paired at',
+  保存并探活: 'Save and probe',
+  改归属: 'Reassign',
+  升级管家: 'Upgrade manager',
+  '成员 / 席位': 'Member / seat',
+  槽位: 'Slot',
+  '版本 / 错误': 'Version / error',
+  日志: 'Logs',
+  移除登记: 'Remove registration',
+  移除这台机器的登记: 'Remove this machine',
+  还没有地址: 'No address yet',
+  这一档下没有机器: 'No machines in this state',
+  等第一次心跳自报: 'Reported on first heartbeat',
+  跟平台的最新发布走: 'Follows the latest release',
+  这台机器上还没有席位: 'No seats on this machine yet',
+  台: '',
+  个: '',
+  '连到这台 Gateway 上的所有运行机器，包括还没派给公司的那些。点进去看详情、改配置、下指令。':
+    'Every machine connected to this Gateway, including ones not yet assigned to a company. Open one to inspect it, change its settings and send commands.',
+  '还没有机器配对进来。到某家公司的详情页生成配对码，在那台 Debian 上跑一条命令即可。':
+    'No machine has paired yet. Generate a pairing code on a company detail page and run one command on that Debian box.',
+  '机器是在公司名下配对进来的：新增一台请到公司详情页生成配对码。这里管的是已经进来的那些。':
+    'Machines pair in under a company: to add one, generate a pairing code on that company detail page. This page manages the ones already here.',
+  '只改地址，没有任何凭据字段——机器的身份是配对时签发的机器票。换 IP、换端口用它；换机器请重新配对。':
+    'Address only — no credential fields. A machine identity is the token issued at pairing. Use this for a new IP or port; for a different machine, pair again.',
+  '这台机器上还有席位，改不了归属——席位是按公司建的账号和目录，换个东家不会把它们搬走。先把席位拆掉。':
+    'Seats are still on this machine, so it cannot be reassigned — seats are accounts and directories created per company, and reassigning does not move them. Remove the seats first.',
+  '留空 = 收回，变成一台待分配的机器。新东家一台都没有时，它会成为那家的默认机器。':
+    'Empty = take it back as an unassigned machine. If the new company has none, this becomes its default machine.',
+  '账号位算的是激活账号数，不是席位数——一个员工的多个 Bot 落在同一台机器上，只占一个账号位。容量调小到低于当前占用不会赶人，只是不再往上放。':
+    'Account slots count active accounts, not seats — one member running several bots lands on one machine and takes a single slot. Lowering the cap below current usage evicts nobody; it only stops new placements.',
+  '一台机器上同时躺着几个 Bot 版本不是错误——有的席位部署得早。「全部升级」把这台机器上的席位逐个重铺到最新版，正在进行的对话会断。':
+    'Several bot versions on one machine is not an error — some seats were deployed earlier. "Upgrade all" reinstalls every seat on this machine to the latest version; ongoing conversations drop.',
+  '只从 Gateway 上抹掉这条记录，不碰机器本身——上面的机器管家还跑着，要停得上去停。要让它重新回来，在机器上重跑一次配对。':
+    'This only erases the record from the Gateway. The machine itself is untouched — its manager keeps running and must be stopped there. To bring it back, re-run pairing on the machine.',
   有效期至: 'Valid until',
   复制命令: 'Copy command',
   已配对: 'Paired',

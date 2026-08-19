@@ -27,6 +27,7 @@ import {
   type ReleaseKind,
   type Role,
   type Scope,
+  type SeatRuntime,
   type SessionIndex,
   type Topup,
   PRICE_MULTIPLIER_MAX,
@@ -42,6 +43,7 @@ import {
   deploySeat,
   desktopUrlOf,
   listSeatRuntime,
+  machineLoadOf,
   machineLoads,
   machinePaired,
   managerHealth,
@@ -830,9 +832,19 @@ async function machineCard(
    * ——中间删掉一台，后面的号会往前挪。要唯一地指一台，用 `machine.id`。
    */
   no: number,
+  /**
+   * `seatList: false` = 不带席位清单。
+   *
+   * 那份清单是给日志选择器用的，每个席位要查一次账号；而调用方里有两类根本用不上
+   * 它：只画汇总的列表页，以及自己会重建一份更全的详情页。默认带着（公司详情页要），
+   * 不要的显式说一声——**省掉的是一整轮按席位的账号查询**，机器一多就不是小数。
+   *
+   * 不要时整个键都不出现，而不是给一个空数组：空数组的意思是「这台机器没有席位」，
+   * 那是另一回事，会让日志选择器安静地少列几行。
+   */
+  opts: { seatList?: boolean } = {},
 ) {
-  const { machine, accounts, seats, full } = load
-  const seatRows = await db.seatRuntimesOfMachine(machine.id)
+  const { machine, seatRows, accounts, seats, full } = load
   const counts = new Map<string, number>()
   for (const r of seatRows) {
     if (r.status === 'none') continue
@@ -843,19 +855,22 @@ async function machineCard(
     .sort((a, b) => b.seats - a.seats)
   const desired = (await desiredManagerRelease(db, machine))?.version ?? null
   // 席位清单给平台端的日志选择器用：要看某个席位的 bot 日志，得先知道有哪些席位。
-  const seatList = await Promise.all(
-    seatRows
-      .filter((r) => r.status !== 'none')
-      .map(async (r) => ({
-        seatId: r.seatId,
-        botId: r.botId,
-        linuxUser: r.linuxUser,
-        who: (await db.account(r.accountId))?.email ?? r.accountId,
-      })),
-  )
+  const seatList =
+    opts.seatList === false
+      ? undefined
+      : await Promise.all(
+          seatRows
+            .filter((r) => r.status !== 'none')
+            .map(async (r) => ({
+              seatId: r.seatId,
+              botId: r.botId,
+              linuxUser: r.linuxUser,
+              who: (await db.account(r.accountId))?.email ?? r.accountId,
+            })),
+        )
   return {
     no,
-    seatList,
+    ...(seatList ? { seatList } : {}),
     machine: ownerMachine(machine),
     accounts,
     maxAccounts: machine.maxAccounts,
@@ -3173,6 +3188,380 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
       expiresAt: row.expiresAt,
       installCommand: installCommandFor(req, row.code),
     })
+  })
+
+  // ── 平台侧的机器管理。──────────────────────────────────────────────
+  //
+  // 上面那一组是「**这家公司**的机器」，进得去的前提是先挑一家公司。平台这一侧要
+  // 答的是另一个问题：**这台 Gateway 上现在挂着哪些机器、哪台出事了**。两者的差别
+  // 不只是入口——没派给任何公司的机器（刚配对完还没分、原公司被删之后落单的）在
+  // 按公司列的那条路上**永远列不出来**，而它们恰恰最需要被人看见。
+  //
+  // 所以这一组路由一律以 machineId 为主键，不带 orgId；公司只是机器上的一个属性。
+
+  /** 取一台机器，不问归属。跨公司在这一侧不是越权——owner 本来就管着全部。 */
+  async function machineOr404(id: string): Promise<Machine> {
+    const machine = await db.machine(id)
+    if (!machine) throw new HttpError(404, '没有这台机器')
+    return machine
+  }
+
+  /**
+   * 平台侧的一张机器卡：`machineCard` 那一套，外加归属公司。
+   *
+   * 编号（「几号机」）在这里是 null：那个短号是**一家公司内部**数出来的，平台这一
+   * 侧把两家公司的机器摆在一张表里，两个「1 号机」并排会指代不清。这里认 id。
+   */
+  async function platformMachineCard(load: MachineLoad, latest: { botLatest: string | null; managerLatest: string | null }) {
+    // 不要 machineCard 那份席位清单：列表页只画汇总，详情页在下面自己重建一份更全的
+    // 盖上去。带着它等于每台机器白跑一轮按席位的账号查询。
+    const card = await machineCard(db, load, latest, 0, { seatList: false })
+    const company = load.machine.companyId ? await db.company(load.machine.companyId) : undefined
+    return {
+      ...card,
+      no: null,
+      company: company ? { id: company.id, name: company.name, slug: company.slug, status: company.status } : null,
+    }
+  }
+
+  async function releaseLatest() {
+    return {
+      botLatest: (await db.latestBotRelease('bot'))?.version ?? null,
+      managerLatest: (await db.latestBotRelease('manager'))?.version ?? null,
+    }
+  }
+
+  /**
+   * 机器上的操作写审计。
+   *
+   * **没派给公司的机器写不进去**：`audit_events.companyId` 是 not null，而审计是按
+   * 公司分档看的，塞一个假 id 进去只会污染某家公司的账。这种机器上的动作只在
+   * Gateway 日志里留痕——它们还没有归属，也就没有该看到这条记录的人。
+   */
+  async function auditMachine(machine: Machine, accountId: string, action: string, detail: unknown) {
+    if (!machine.companyId) return
+    await db.audit({ companyId: machine.companyId, accountId, action, detail })
+  }
+
+  /**
+   * 席位行 + 人名和 Bot 名。
+   *
+   * 详情页的席位表是这一页的正题，出事时要看得见**是谁的、哪个槽位、上次部署报了
+   * 什么**，所以列比 `listSeatRuntime` 多。
+   *
+   * Bot 名由这里给，不留给前端查：前端那份 `state.bots` 是别的页面（公司详情、Bot
+   * 名录）顺带装进去的，机器详情页从不加载它——靠它的话，直接打开 /machines/:id
+   * 时整列会是一串 uuid，而先逛过某家公司再进来又变成名字，同一页两种结果。
+   *
+   * 账号和 Bot 都**按 id 去重后各查一次**：一个员工在同一台机器上常有好几个席位。
+   */
+  async function withSeatNames(rows: SeatRuntime[]) {
+    const accounts = new Map<string, Account | undefined>()
+    for (const id of new Set(rows.map((r) => r.accountId))) accounts.set(id, await db.account(id))
+    const bots = new Map<string, CatalogItem | undefined>()
+    for (const id of new Set(rows.map((r) => r.botId))) bots.set(id, await db.catalog(id))
+    return rows.map((r) => {
+      const who = accounts.get(r.accountId)
+      return {
+        accountId: r.accountId,
+        who: who?.email ?? r.accountId,
+        whoName: who?.name || null,
+        botId: r.botId,
+        // Bot 被删掉之后席位还在（拆席位是另一件事），名字就没了——退回 id，
+        // 至少还指得出是哪一个。
+        botName: bots.get(r.botId)?.name || null,
+        seatId: r.seatId,
+        linuxUser: r.linuxUser,
+        slot: r.slot,
+        status: r.status,
+        botVersion: r.botVersion ?? null,
+        lastError: r.lastError,
+        deployedAt: r.deployedAt,
+      }
+    })
+  }
+
+  /** 平台上所有机器。列表页一次拉齐，不分页——机器是几十台的量级，不是几万条。 */
+  router.get('/platform/machines', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const latest = await releaseLatest()
+    const rows = await db.allMachines()
+    const machines = await Promise.all(
+      rows.map(async (m) => platformMachineCard(await machineLoadOf(db, m), latest)),
+    )
+    send(res, 200, {
+      machines,
+      ...latest,
+      // 只把已配对的机器算进容量：没配对那行提供不了任何账号位，计进去就是在报一批
+      // 根本不存在的余量。在线台数另算，它答的是「现在有多少台真的在」。
+      totals: {
+        machines: machines.length,
+        paired: machines.filter((m) => m.machine.paired).length,
+        online: machines.filter((m) => m.machine.link === 'online').length,
+        accounts: machines.reduce((n, m) => n + m.accounts, 0),
+        max: machines.filter((m) => m.machine.paired).reduce((n, m) => n + m.maxAccounts, 0),
+        seats: machines.reduce((n, m) => n + m.seats, 0),
+      },
+    })
+  })
+
+  /**
+   * 一台机器的详情。
+   *
+   * 顺带把公司清单给出去——详情页要能改这台机器的归属，而那个下拉总不能让人手打
+   * 公司 id。清单只有 id / 名字 / slug，没有别的。
+   */
+  router.get('/platform/machines/:id', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const latest = await releaseLatest()
+    const load = await machineLoadOf(db, machine)
+    const card = await platformMachineCard(load, latest)
+    // 席位清单用的键名就是 `seatList`，和 machineCard 那份同名同义（这里是它的超集），
+    // 不另起一个。
+    //
+    // **不叫 `seats`**：那个键是席位**数**，撞上就出过事——详情页的「席位 2」画成了
+    // `[object Object],[object Object]`，而 `card.seats ?` 这类判断也跟着翻（空数组是
+    // 真值），一台一个席位都没有的机器会被判成「还有席位，改不了归属」。
+    //
+    // 账号和 Bot 名字**按 id 去重后各查一次**：一个员工在同一台机器上往往有好几个
+    // 席位，逐行查等于把同一行数据反复取回来。
+    const seatList = await withSeatNames(load.seatRows)
+    const companies = (await db.companies()).map((c) => ({ id: c.id, name: c.name, slug: c.slug }))
+    send(res, 200, { ...card, ...latest, seatList, companies })
+  })
+
+  /**
+   * 改机器地址。和公司侧那条同义：**只改地址，没有任何凭据字段**——机器的身份是
+   * 配对时签发的 `smt_`。换 IP、换端口用它；换机器请重新配对。
+   */
+  router.put('/platform/machines/:id/host', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const raw = strField(bodyOf(req), 'host', false)
+    if (!raw) throw new HttpError(400, 'host 不能为空')
+    const host = managerHostOf(raw)
+    const next = await db.updateMachine(machine.id, { host, lastError: null })
+    await auditMachine(next, account.id, 'machine.update', { machineId: next.id, host })
+    // 存下来还不够：地址写错了要当场知道，不能等到第一次部署。
+    const probe = await managerHealth(host, { token: next.token })
+    send(res, 200, { machine: ownerMachine(next), reachable: probe.ok, error: probe.error ?? null })
+  })
+
+  /** 改账号容量。调小到低于当前占用不拦——已经在上面的账号不会被赶走。 */
+  router.put('/platform/machines/:id/capacity', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const maxAccounts = intField(bodyOf(req), 'maxAccounts')
+    if (maxAccounts == null || maxAccounts < 1 || maxAccounts > 1000) {
+      throw new HttpError(400, 'maxAccounts 须为 1–1000')
+    }
+    const next = await db.updateMachine(machine.id, { maxAccounts })
+    await auditMachine(next, account.id, 'machine.capacity', { machineId: next.id, maxAccounts })
+    send(res, 200, { machine: ownerMachine(next) })
+  })
+
+  /** 设时区。只是把期望值钉在这里，真正改的是机器上的管家，下一轮心跳才知道成没成。 */
+  router.put('/platform/machines/:id/timezone', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const timezone = normalizeTimezone(strField(bodyOf(req), 'timezone', false))
+    if (timezone === undefined) throw new HttpError(400, '不认识这个时区，要填 IANA 名，例如 Asia/Shanghai')
+    const next = await db.updateMachine(machine.id, { timezone })
+    await auditMachine(next, account.id, 'machine.timezone', { machineId: next.id, timezone })
+    send(res, 200, { machine: ownerMachine(next), pending: Boolean(timezone) && next.currentTimezone !== timezone })
+  })
+
+  /** 钉一个管家版本。换版、自检、失败回滚都在机器上做，这里只下指令。 */
+  router.post('/platform/machines/:id/upgrade', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    if (!machinePaired(machine)) throw new HttpError(409, '这台机器还没有配对')
+    const requested = strField(bodyOf(req), 'version', false)
+    const rel = requested
+      ? await db.botRelease(parseBotVersion(requested), 'manager')
+      : await db.latestBotRelease('manager')
+    if (!rel) throw new HttpError(requested ? 404 : 409, requested ? '没有这个管家版本' : '还没有发布管家版本')
+    const next = await db.updateMachine(machine.id, { desiredManagerVersion: rel.version })
+    await auditMachine(next, account.id, 'machine.upgrade', { machineId: next.id, version: rel.version })
+    send(res, 200, { machine: ownerMachine(next), version: rel.version, pending: next.managerVersion !== rel.version })
+  })
+
+  /**
+   * 把**这台机器上**的席位统统重铺到某个 bot 版本。
+   *
+   * 和公司侧那条 `runtime/update` 是两个口径，两个都要有：公司侧答的是「让这家公司
+   * 的人都用上新版」，这一条答的是「这台机器上的东西都是新的」——排查一台机器时，
+   * 按公司升级会连带动到别的机器上的席位，那不是这时候想要的。
+   *
+   * 逐个席位串着推：部署要在机器上解包、建目录、起 systemd，并发推一台机器只会
+   * 让它更慢，还把失败搅在一起看不清是哪一个。
+   */
+  router.post('/platform/machines/:id/runtime/update', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const requested = strField(bodyOf(req), 'version', false)
+    let version: string
+    if (requested) {
+      parseBotVersion(requested)
+      const rel = await db.botRelease(requested)
+      if (!rel) throw new HttpError(404, '没有这个 Bot 版本')
+      version = rel.version
+    } else {
+      const latest = await db.latestBotRelease()
+      if (!latest) throw new HttpError(409, '还没有发布 Bot 版本')
+      version = latest.version
+    }
+    const seats = (await db.seatRuntimesOfMachine(machine.id)).filter((r) => r.status !== 'none')
+    const results: { accountId: string; botId: string; status: string; botVersion: string | null; error?: string }[] = []
+    for (const seat of seats) {
+      const row = await db.account(seat.accountId)
+      if (!row) {
+        results.push({
+          accountId: seat.accountId,
+          botId: seat.botId,
+          status: seat.status,
+          botVersion: seat.botVersion ?? null,
+          error: '账号不存在',
+        })
+        continue
+      }
+      const out = await deploySeat(db, keys, row, { botId: seat.botId, version, update: true })
+      results.push(
+        out.ok
+          ? {
+              accountId: row.id,
+              botId: seat.botId,
+              status: out.result.runtime.status,
+              botVersion: out.result.runtime.botVersion ?? null,
+            }
+          : {
+              accountId: row.id,
+              botId: seat.botId,
+              status: out.runtime?.status ?? 'error',
+              botVersion: out.runtime?.botVersion ?? null,
+              error: out.error,
+            },
+      )
+    }
+    await auditMachine(machine, account.id, 'runtime.update', {
+      machineId: machine.id,
+      version,
+      count: results.length,
+    })
+    send(res, 200, { version, results })
+  })
+
+  /**
+   * 改这台机器的归属公司。传空 = 收回，让它变成一台待分配的机器。
+   *
+   * **有席位就拒绝。** 席位是按公司建的账号和目录，改归属并不会把它们搬走，只会让
+   * 一台 A 公司的机器名义上属于 B 公司，而上面跑着 A 的人——那时谁看到谁的桌面就
+   * 说不清了。要改归属，先把席位拆干净。
+   */
+  router.put('/platform/machines/:id/company', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const wanted = strField(bodyOf(req), 'companyId', false)
+    const target = wanted ? await db.company(wanted) : undefined
+    if (wanted && !target) throw new HttpError(404, '公司不存在')
+    const nextCompanyId = target?.id ?? null
+    if (nextCompanyId === machine.companyId) {
+      send(res, 200, { machine: ownerMachine(machine) })
+      return
+    }
+    const seats = await db.seatRuntimesOfMachine(machine.id)
+    if (seats.length) throw new HttpError(409, `这台机器上还有 ${seats.length} 个席位，先把它们拆掉再改归属`)
+    const next = await db.tx(async () => {
+      const row = await db.updateMachine(machine.id, { companyId: nextCompanyId })
+      // 老东家把它当默认机器的话，得改指向别处——留着一个指向别人家机器的
+      // companies.machineId，部署会一路打到不该去的地方。
+      if (machine.companyId) {
+        const prev = await db.company(machine.companyId)
+        if (prev?.machineId === machine.id) {
+          const rest = (await db.machinesOfCompany(prev.id)).filter((m) => m.id !== machine.id)
+          await db.updateCompany(prev.id, { machineId: rest[0]?.id ?? null })
+        }
+      }
+      // 新东家一台都没有的话，这台就是它的默认机器。已经有默认的就不动——默认那台
+      // 是它自己挑的，不该被一次「加一台」悄悄换掉。
+      //
+      // accessUrl 跟着一起补：另外三条把机器挂到公司名下的路（配对回拨、公司认领、
+      // 平台改地址）都会顺手补上它，漏了这一条的话，一家从没配过机器的公司在这里
+      // 被指派了机器、却在自己的详情页上看到一个空的「访问地址」。
+      if (target && !target.machineId) {
+        await db.updateCompany(target.id, {
+          machineId: row.id,
+          accessUrl: target.accessUrl ?? accessUrlFor(target.slug),
+        })
+      }
+      return row
+    })
+    if (machine.companyId) {
+      await db.audit({
+        companyId: machine.companyId,
+        accountId: account.id,
+        action: 'machine.unassign',
+        detail: { machineId: machine.id, to: nextCompanyId },
+      })
+    }
+    await auditMachine(next, account.id, 'machine.assign', { machineId: next.id, from: machine.companyId })
+    send(res, 200, { machine: ownerMachine(next) })
+  })
+
+  /**
+   * 看这台机器上的日志：不带 seatId 是**管家自己**的，带了是那个席位上 bot 的。
+   *
+   * 走审计，理由和公司侧那条一样：席位的日志里有员工的对话正文和 bot 执行过的命令。
+   */
+  router.get('/platform/machines/:id/logs', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    if (!machine.host) throw new HttpError(503, INSTANCE_DOWN)
+    const seatId = (req.query.get('seatId') || '').trim()
+    if (seatId) {
+      const rows = await db.seatRuntimesOfMachine(machine.id)
+      if (!rows.some((r) => r.seatId === seatId)) throw new HttpError(404, '这台机器上没有这个席位')
+    }
+    const lines = Math.min(2000, Math.max(1, Math.trunc(Number(req.query.get('lines')) || 200)))
+    const follow = req.query.get('follow') === '1'
+    const path = seatId ? `/seats/${encodeURIComponent(seatId)}/logs` : '/logs'
+    await auditMachine(machine, account.id, 'machine.logs', { machineId: machine.id, seatId: seatId || null, follow })
+    const url = `${machineBase(machine.host)}${path}?lines=${lines}${follow ? '&follow=1' : ''}`
+    if (follow) await proxySse(req, res, url, undefined, machine.token || undefined)
+    else await proxyJson(res, 'GET', url, undefined, undefined, machine.token || undefined)
+  })
+
+  /**
+   * 移除一台机器的登记。**只是从 Gateway 上抹掉这条记录**，不碰机器本身——上面的
+   * 管家还跑着，要停得上去停。有席位就拒绝：删掉之后那些席位会指向一台不存在的
+   * 机器，聊天和桌面都会打到空处，而且再也查不出是哪一台。
+   */
+  router.delete('/platform/machines/:id', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const seats = await db.seatRuntimesOfMachine(machine.id)
+    if (seats.length) throw new HttpError(409, `这台机器上还有 ${seats.length} 个席位，先把它们拆掉`)
+    await db.deleteMachine(machine.id)
+    if (machine.companyId) {
+      const company = await db.company(machine.companyId)
+      if (company?.machineId === machine.id) {
+        const rest = await db.machinesOfCompany(company.id)
+        await db.updateCompany(company.id, { machineId: rest[0]?.id ?? null })
+      }
+    }
+    await auditMachine(machine, account.id, 'machine.remove', { machineId: machine.id, host: machine.host })
+    send(res, 200, { ok: true })
   })
 
   // 读发布列表跟上传同一套凭证：CI 传完要能回查，人在发布页看的是同一份数据。

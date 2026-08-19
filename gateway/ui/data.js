@@ -258,6 +258,44 @@ async function loadReleases() {
   state.managerReleases = mgr
 }
 
+/**
+ * 平台机器管理页的列表。
+ *
+ * 和公司详情里那份（`/platform/orgs/:id/machine`）不是一回事：这一份是**全平台**的，
+ * 包括没派给任何公司的机器——按公司去列永远列不到它们，而落单的机器最需要被看见。
+ */
+async function loadAllMachines() {
+  const data = await api('GET', '/platform/machines')
+  state.allMachines = data.machines || []
+  state.machineTotals = data.totals || null
+  state.botLatest = data.botLatest || null
+  state.managerLatest = data.managerLatest || null
+}
+
+async function loadMachineDetail(id) {
+  if (!id) {
+    flash('err', t('机器不存在'))
+    state.path = '/machines'
+    history.replaceState({}, '', '/machines')
+    await loadAllMachines()
+    return
+  }
+  try {
+    const data = await api('GET', `/platform/machines/${encodeURIComponent(id)}`)
+    state.machineDetail = data
+    state.botLatest = data.botLatest || null
+    state.managerLatest = data.managerLatest || null
+  } catch (err) {
+    flash('err', err.message)
+    if (err.status === 404) {
+      state.machineDetail = null
+      state.path = '/machines'
+      history.replaceState({}, '', '/machines')
+      await loadAllMachines().catch(() => {})
+    }
+  }
+}
+
 async function loadCompanyDetail(id) {
   if (!id) {
     flash('err', t('公司不存在'))
@@ -519,6 +557,10 @@ async function loadPage() {
       ])
     } else if (state.path.startsWith('/audit/')) {
       await loadSessionDetail(sessionIdOfPath(state.path))
+    } else if (state.path === '/machines') {
+      await loadAllMachines()
+    } else if (state.path.startsWith('/machines/')) {
+      await loadMachineDetail(machineIdOfPath(state.path))
     } else if (state.path === '/releases') {
       await loadReleases()
     } else if (state.path === '/orders') {

@@ -703,6 +703,127 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       }
     })
 
+    await test('平台机器管理：列得出所有机器，改得动配置，归属改得回来', async () => {
+      // 这一组和 /platform/orgs/:id/machine 是**两个口径**，两个都要有：那条答的是
+      // 「这家公司有几台」，这条答的是「这台 Gateway 上挂着哪些机器」。差别不只是
+      // 入口——没派给任何公司的机器在按公司列的那条路上永远列不出来。
+      const machineId = await machineIdOf(req, gwBase, ownerTok, orgId)
+
+      const anon = await req(gwBase, 'GET', '/platform/machines')
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+
+      // 公司管理员看不到别家的机器，这一整组都是 owner 的。
+      const adminLogin = await req(gwBase, 'POST', '/auth/login', {
+        body: { email: 'admin@mgrtest.local', password: 'manager-admin-1234' },
+      })
+      assert(adminLogin.status === 200, `admin login ${adminLogin.status} ${adminLogin.text}`)
+      const asAdmin = await req(gwBase, 'GET', '/platform/machines', { token: adminLogin.json.token })
+      assert(asAdmin.status === 403, `公司管理员该 403，实际 ${asAdmin.status} ${asAdmin.text}`)
+
+      const list = await req(gwBase, 'GET', '/platform/machines', { token: ownerTok })
+      assert(list.status === 200, `list ${list.status} ${list.text}`)
+      const row = (list.json.machines || []).find((c) => c.machine.id === machineId)
+      assert(row, `列表里没有这台机器：${list.text.slice(0, 300)}`)
+      assert(row.company && row.company.id === orgId, `归属公司没带出来：${JSON.stringify(row.company)}`)
+      // 编号在平台这一侧必须是 null：「1 号机」是一家公司内部数出来的短号，两家公司
+      // 的机器摆在同一张表里，两个「1 号机」并排会指代不清。
+      assert(row.no === null, `平台侧不该有编号：${row.no}`)
+      assert(list.json.totals.machines >= 1 && list.json.totals.paired >= 1, `totals 不对：${JSON.stringify(list.json.totals)}`)
+
+      const one = await req(gwBase, 'GET', `/platform/machines/${machineId}`, { token: ownerTok })
+      assert(one.status === 200, `detail ${one.status} ${one.text}`)
+      assert(one.json.machine.id === machineId, 'detail 的机器不对')
+      // 席位清单和「席位数」不能撞在同一个键上：撞了的话详情页上那个数字会变成
+      // 一串 [object Object]，而 `有没有席位` 这类判断会因为「空数组是真值」整个翻过来。
+      assert(Array.isArray(one.json.seatList), 'seatList 该是数组')
+      assert(typeof one.json.seats === 'number', `seats 该是个数：${JSON.stringify(one.json.seats)}`)
+      // 席位行要自带人名和 Bot 名。少了它们，界面上那一列只能显示 uuid——前端手上
+      // 那份 Bot 名录是别的页面顺带装进去的，这一页从不加载。
+      for (const seat of one.json.seatList) {
+        assert('who' in seat && 'botName' in seat, `席位行少了名字：${JSON.stringify(seat)}`)
+      }
+      // 列表页只画汇总，不该为每台机器白跑一轮按席位的账号查询。
+      const listRow = (await req(gwBase, 'GET', '/platform/machines', { token: ownerTok })).json.machines.find(
+        (c) => c.machine.id === machineId,
+      )
+      assert(!('seatList' in listRow), '列表页不用席位清单，就别带上它')
+      // 反过来，公司详情那条**必须**还带着它：那一页的日志选择器要靠它列出席位。
+      const orgCard = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machines.find(
+        (c) => c.machine.id === machineId,
+      )
+      assert(Array.isArray(orgCard.seatList), '公司侧的机器卡片把席位清单弄丢了')
+      assert((one.json.companies || []).some((c) => c.id === orgId), '改归属要用的公司清单没给')
+      const miss = await req(gwBase, 'GET', '/platform/machines/00000000-0000-4000-8000-00000000dead', { token: ownerTok })
+      assert(miss.status === 404, `不存在的机器该 404，实际 ${miss.status}`)
+
+      // 容量与时区：和公司侧那条改的是同一行，两边看到的必须是同一个值。
+      const cap = await req(gwBase, 'PUT', `/platform/machines/${machineId}/capacity`, {
+        token: ownerTok,
+        body: { maxAccounts: 33 },
+      })
+      assert(cap.status === 200, `capacity ${cap.status} ${cap.text}`)
+      const viaOrg = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machines.find(
+        (c) => c.machine.id === machineId,
+      )
+      assert(viaOrg.maxAccounts === 33, `公司侧看到的容量是 ${viaOrg.maxAccounts}`)
+      assert(
+        (await req(gwBase, 'PUT', `/platform/machines/${machineId}/capacity`, { token: ownerTok, body: { maxAccounts: 0 } }))
+          .status === 400,
+        '容量 0 该 400',
+      )
+      await req(gwBase, 'PUT', `/platform/machines/${machineId}/capacity`, { token: ownerTok, body: { maxAccounts: 10 } })
+
+      const badTz = await req(gwBase, 'PUT', `/platform/machines/${machineId}/timezone`, {
+        token: ownerTok,
+        body: { timezone: 'Asia/Shanghi' },
+      })
+      assert(badTz.status === 400, `坏时区该 400，实际 ${badTz.status}`)
+      const tz = await req(gwBase, 'PUT', `/platform/machines/${machineId}/timezone`, {
+        token: ownerTok,
+        body: { timezone: 'asia/singapore' },
+      })
+      assert(tz.status === 200 && tz.json.machine.timezone === 'Asia/Singapore', `时区 ${tz.status} ${tz.text}`)
+      await req(gwBase, 'PUT', `/platform/machines/${machineId}/timezone`, { token: ownerTok, body: { timezone: '' } })
+
+      // 地址：改完当场探活。这台真管家在，所以 reachable 必须为真——不然「保存成功」
+      // 就成了一句没人验过的话。
+      const host = await req(gwBase, 'PUT', `/platform/machines/${machineId}/host`, {
+        token: ownerTok,
+        body: { host: mgrBase },
+      })
+      assert(host.status === 200, `host ${host.status} ${host.text}`)
+      assert(host.json.reachable === true, `探活没通：${host.json.error}`)
+      assert((await req(gwBase, 'PUT', `/platform/machines/${machineId}/host`, { token: ownerTok, body: { host: '' } })).status === 400, '空地址该 400')
+
+      // 日志跟公司侧那条一样要留审计，也一样只认这台机器上的席位。
+      const logs = await req(gwBase, 'GET', `/platform/machines/${machineId}/logs?lines=5`, { token: ownerTok })
+      assert(logs.status === 200, `logs ${logs.status} ${logs.text}`)
+      assert(Array.isArray(logs.json.lines), `lines 该是数组：${logs.text.slice(0, 200)}`)
+      const badSeat = await req(gwBase, 'GET', `/platform/machines/${machineId}/logs?seatId=seat-not-here`, { token: ownerTok })
+      assert(badSeat.status === 404, `外来 seatId 该 404，实际 ${badSeat.status}`)
+
+      // 归属：收回来再派回去。收回之后它仍然列得出来——这正是这一页存在的理由。
+      const off = await req(gwBase, 'PUT', `/platform/machines/${machineId}/company`, { token: ownerTok, body: { companyId: '' } })
+      assert(off.status === 200, `收回 ${off.status} ${off.text}`)
+      const orphan = (await req(gwBase, 'GET', '/platform/machines', { token: ownerTok })).json.machines.find(
+        (c) => c.machine.id === machineId,
+      )
+      assert(orphan && orphan.company === null, `收回后该是无归属，实际 ${JSON.stringify(orphan && orphan.company)}`)
+      const gone = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
+      assert(!gone.json.machines.some((c) => c.machine.id === machineId), '收回后不该还挂在公司名下')
+
+      const badOrg = await req(gwBase, 'PUT', `/platform/machines/${machineId}/company`, {
+        token: ownerTok,
+        body: { companyId: '00000000-0000-4000-8000-00000000dead' },
+      })
+      assert(badOrg.status === 404, `不存在的公司该 404，实际 ${badOrg.status}`)
+
+      const back = await req(gwBase, 'PUT', `/platform/machines/${machineId}/company`, { token: ownerTok, body: { companyId: orgId } })
+      assert(back.status === 200, `派回 ${back.status} ${back.text}`)
+      const again = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
+      assert(again.json.machine && again.json.machine.id === machineId, '派回之后该重新成为这家公司的默认机器')
+    })
+
     await test('配对码一次性：同一个码换不了第二把票', async () => {
       const r = await req(gwBase, 'POST', '/machines/pair', {
         body: { code, managerPort: MGR_PORT, protocol: 1 },
