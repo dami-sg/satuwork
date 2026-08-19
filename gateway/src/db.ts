@@ -2573,6 +2573,12 @@ export class Db {
     return r ? seatRuntimeOf(r) : undefined
   }
 
+  /** 按席位 id 反查。桌面反代只认得 URL 里那个 seatId，没有 accountId/botId。 */
+  async seatRuntimeBySeatId(seatId: string): Promise<SeatRuntime | undefined> {
+    const r = await this.one('select * from seat_runtimes where "seatId" = ?', [seatId])
+    return r ? seatRuntimeOf(r) : undefined
+  }
+
   async seatRuntimesOf(companyId: string): Promise<SeatRuntime[]> {
     const rows = await this.many('select * from seat_runtimes where "companyId" = ? order by slot', [companyId])
     return rows.map(seatRuntimeOf)

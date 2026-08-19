@@ -3,6 +3,8 @@
  */
 import { createHash } from 'node:crypto'
 import { existsSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { connect } from 'node:net'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { publishRelease, sha256Of, tarGz } from './release.mjs'
@@ -19,6 +21,37 @@ function seatIdOf(accountId, botId) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+/**
+ * 手写一次 WebSocket 升级。不引 ws：要验的是**反代把这一跳接没接对**，不是握手协议
+ * 本身；裸 socket 反而看得见回来的原始状态行。
+ */
+function wsUpgrade(port, path, cookie) {
+  return new Promise((ok, bad) => {
+    const sock = connect(port, '127.0.0.1', () => {
+      sock.write(
+        `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+          `Sec-WebSocket-Key: ${Buffer.from('satuwork-e2e-key').toString('base64')}\r\nSec-WebSocket-Version: 13\r\n` +
+          (cookie ? `Cookie: ${cookie}\r\n` : '') +
+          '\r\n',
+      )
+    })
+    let out = ''
+    sock.on('data', (b) => {
+      out += b.toString('utf8')
+      if (out.includes('HELLO-WS') || out.length > 512) {
+        sock.destroy()
+        ok(out)
+      }
+    })
+    sock.on('error', bad)
+    sock.on('close', () => ok(out))
+    setTimeout(() => {
+      sock.destroy()
+      ok(out)
+    }, 3000)
+  })
 }
 
 export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, assert, log }) {
@@ -224,10 +257,13 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(r.json.status === 'ready', `status ${r.json.status}`)
       assert(r.json.botVersion === '0.1.0', `botVersion ${r.json.botVersion}`)
       assert(typeof r.json.vncPassword === 'string' && r.json.vncPassword.length === 16, 'vncPassword 16')
+      // 桌面地址是 **Gateway 同域**的一条路径，不是管家的地址：那块屏内嵌在 iframe 里，
+      // 跨站的话 SameSite=Lax 的 cookie 连存都不给存（见 gateway/src/desktop.ts）。
       assert(
-        String(r.json.novncUrl).startsWith(`http://127.0.0.1:8443/seats/${r.json.seatId}/vnc/?ticket=`),
+        String(r.json.novncUrl).startsWith(`/desktop/${r.json.seatId}/?ticket=`),
         `novncUrl ${r.json.novncUrl}`,
       )
+      assert(!String(r.json.novncUrl).includes('8443'), `桌面地址不该指向管家：${r.json.novncUrl}`)
       assert(r.json.display === 10, `display ${r.json.display}`)
       assert(r.json.vncPort === 5910, `vncPort ${r.json.vncPort}`)
       assert(r.json.novncPort === 6081, `novncPort ${r.json.novncPort}`)
@@ -302,7 +338,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(r.json.seatId === seatIdOf(memberId, botA), 'seatId')
       assert(r.json.botId === botA, 'botId')
       assert(r.json.vncPassword && r.json.vncPassword.length === 16, 'vncPassword')
-      assert(String(r.json.novncUrl).includes(`/seats/${r.json.seatId}/vnc/?ticket=`), 'novncUrl 要带票')
+      assert(String(r.json.novncUrl).startsWith(`/desktop/${r.json.seatId}/?ticket=`), 'novncUrl 要带票')
       const miss = await req(gwBase, 'GET', '/runtime/desktop', { token: memberTok })
       assert(miss.status === 400, `desktop no botId ${miss.status}`)
       const ownerRt = await req(gwBase, 'GET', `/platform/orgs/${orgId}/accounts/${memberId}/runtime`, { token: ownerTok })
@@ -344,7 +380,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(a.seatId === seatIdOf(memberId, botA), 'list seatId')
       assert(a.botVersion === '0.1.0', `list botVersion ${a.botVersion}`)
       // 列表里不签票：那是给管理员看的引用，点进去要走 /runtime/desktop 现签一张。
-      assert(a.novncUrl === `http://127.0.0.1:8443/seats/${a.seatId}/vnc/`, `list novncUrl ${a.novncUrl}`)
+      assert(a.novncUrl === `/desktop/${a.seatId}/`, `list novncUrl ${a.novncUrl}`)
       assert(!JSON.stringify(row).includes('vncPassword'), '列表含 vncPassword')
       const dumped = JSON.stringify(r.json)
       assert(!dumped.includes('smt_'), 'accounts 泄漏机器票')
@@ -399,9 +435,10 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       // 粘住：member1 已经在 m1 上，m1 满了也还得落在 m1——他的 bot 要共享同一份 ~/work。
       const again = await req(gwBase, 'POST', '/runtime/deploy', { token: memberTok, body: { botId: botB, update: true } })
       assert(again.status === 200, `member1 再部署 ${again.status} ${again.text}`)
-      // 两台机器的端口不同，novncUrl 里就能看出席位落在哪台——顺带验了「每个席位
-      // 用自己那台机器的地址」，多机之后用错地址会把桌面开到别人的机器上。
-      assert(again.json.novncUrl.includes(':8443/'), `member1 应还在 m1：${again.json.novncUrl}`)
+      // 落在哪台机器上，从平台清单的每台账号数看——桌面地址现在是 Gateway 同域的
+      // 路径，里面不再有机器的影子（哪台机器由 seatId 反查，见 desktop.ts）。
+      const stick = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
+      assert(stick.json.machines.find((x) => x.machine.id === m2).accounts === 0, 'member1 不该被挪到 m2')
 
       // 新账号：m1 满了，只能落到 m2。
       const m3 = await req(gwBase, 'POST', `/orgs/${orgId}/accounts`, {
@@ -414,7 +451,6 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       ).json.token
       const on2 = await req(gwBase, 'POST', '/runtime/deploy', { token: tok3, body: { botId: botA } })
       assert(on2.status === 200, `member3 部署 ${on2.status} ${on2.text}`)
-      assert(on2.json.novncUrl.includes(':9443/'), `member3 应落到 m2：${on2.json.novncUrl}`)
 
       const after = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
       const c1 = after.json.machines.find((x) => x.machine.id === m1)
@@ -441,7 +477,6 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       await req(gwBase, 'PUT', `/platform/orgs/${orgId}/machines/${m1}/capacity`, { token: ownerTok, body: { maxAccounts: 5 } })
       const ok4 = await req(gwBase, 'POST', '/runtime/deploy', { token: tok4, body: { botId: botA } })
       assert(ok4.status === 200, `放开后 ${ok4.status} ${ok4.text}`)
-      assert(ok4.json.novncUrl.includes(':8443/'), `member4 应落回 m1：${ok4.json.novncUrl}`)
       const final = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })
       assert(final.json.machines.find((x) => x.machine.id === m1).accounts === 3, 'member4 应落在 m1')
     })
@@ -693,6 +728,109 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(list.json.releases.some((r) => r.version === '1.0.0+ci'), '列表里没有上传的版本')
       const bad = await req(gwBase, 'GET', '/platform/bot-releases', { token: 'not-a-token' })
       assert(bad.status === 401, `bogus token ${bad.status}`)
+    })
+
+    /**
+     * 桌面反代：`/desktop/:seatId/*` → 管家的 noVNC。
+     *
+     * 这条路是为「把桌面内嵌进右栏」开的。浏览器直连管家那条路仍然在（管家侧另有
+     * 一组用例钉它），但 iframe 里用不了：管家发的 cookie 是 SameSite=Lax，跨站的
+     * iframe 里浏览器连存都不给存，画面永远出不来而且不报错。
+     *
+     * 这里起一个假管家听在配对时记下的那个地址上（127.0.0.1:8443），然后整条走一遍：
+     * 票换 cookie → 静态资源 → WebSocket 升级，以及三种不该放行的情况。
+     */
+    await test('桌面从 Gateway 同域反代出去：票换 cookie、资源与 WebSocket 都通', async () => {
+      const seen = { headers: [], paths: [] }
+      const fake = createServer((req, res) => {
+        seen.headers.push(req.headers)
+        seen.paths.push(req.url)
+        if (req.headers['x-satuwork-machine'] !== machineTok) {
+          res.writeHead(401).end('no machine token')
+          return
+        }
+        res.writeHead(200, { 'content-type': 'text/html' }).end('VNC-PAGE')
+      })
+      fake.on('upgrade', (req, socket) => {
+        if (req.headers['x-satuwork-machine'] !== machineTok) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
+        socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n')
+        socket.write('HELLO-WS')
+      })
+      const guard = (p, what, ms = 15000) =>
+        Promise.race([
+          Promise.resolve(p),
+          new Promise((_, bad) => setTimeout(() => bad(new Error(`卡在「${what}」超过 ${ms}ms`)), ms)),
+        ])
+      await guard(
+        new Promise((ok, bad) => {
+          fake.once('error', bad)
+          fake.listen(8443, '127.0.0.1', ok)
+        }),
+        'fake listen 8443',
+      )
+      try {
+        const rt = await req(gwBase, 'GET', '/runtime/desktop?botId=' + encodeURIComponent(botA), { token: memberTok })
+        assert(rt.status === 200, `desktop ${rt.status} ${rt.text}`)
+        const seatId = rt.json.seatId
+        const entry = rt.json.novncUrl
+        assert(entry.startsWith(`/desktop/${seatId}/?ticket=`), `entry ${entry}`)
+
+        const hop = await fetch(gwBase + entry, { redirect: 'manual' })
+        assert(hop.status === 302, `换 cookie ${hop.status}`)
+        const setCookie = String(hop.headers.get('set-cookie') || '')
+        assert(setCookie.startsWith(`satu_desk_${seatId}=`), `cookie 名 ${setCookie}`)
+        assert(setCookie.includes('HttpOnly'), 'cookie 要 HttpOnly')
+        assert(setCookie.includes(`Path=/desktop/${seatId}`), 'cookie 要限定到这块屏')
+        // http 部署不能加 Secure，否则浏览器直接把这张 cookie 丢掉。
+        assert(!setCookie.includes('Secure'), `http 这一跳不该加 Secure：${setCookie}`)
+        const cookie = setCookie.split(';')[0]
+
+        const loc = String(hop.headers.get('location'))
+        const q = new URLSearchParams(loc.split('?')[1] || '')
+        assert(loc.startsWith(`/desktop/${seatId}/vnc.html`), `location ${loc}`)
+        // noVNC 拼 WebSocket 地址的写法是 `'/' + path`，从根开始。不告诉它就会去连
+        // /websockify——那个路径不属于任何席位，反代认不出来。
+        assert(q.get('path') === `desktop/${seatId}/websockify`, `path ${q.get('path')}`)
+        assert(q.get('autoconnect') === '1', `autoconnect ${loc}`)
+        assert(q.get('password') === rt.json.vncPassword, '口令没随票转过去')
+
+        const page = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`, { headers: { cookie } })
+        assert(page.status === 200, `静态 ${page.status}`)
+        assert((await page.text()) === 'VNC-PAGE', '字节没原样带回来')
+        assert(seen.paths.some((p) => p.startsWith(`/seats/${seatId}/vnc/vnc.html`)), `上游路径 ${seen.paths}`)
+        // 机器票只该活在 Gateway 与管家之间；Gateway 这一侧的 cookie 不该漏下去。
+        const last = seen.headers[seen.headers.length - 1]
+        assert(last['x-satuwork-machine'] === machineTok, '没带机器票')
+        assert(!last.cookie, `Gateway 的 cookie 漏给了管家：${last.cookie}`)
+
+        const anon = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`)
+        assert(anon.status === 401, `无 cookie 应 401：${anon.status}`)
+        const stolen = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`, {
+          headers: { cookie: `satu_desk_${seatId}=not-a-jwt` },
+        })
+        assert(stolen.status === 401, `伪造 cookie 应 401：${stolen.status}`)
+        // 别人那块屏的票，换不来这块屏的 cookie。
+        const other = seatIdOf(member2Id, botA)
+        const crossed = await fetch(`${gwBase}/desktop/${other}/?ticket=${encodeURIComponent(entry.split('ticket=')[1])}`, {
+          redirect: 'manual',
+        })
+        assert(crossed.status === 401, `串屏应 401：${crossed.status}`)
+
+        const ws = await wsUpgrade(GW_PORT, `/desktop/${seatId}/websockify`, cookie)
+        assert(ws.includes('101'), `升级失败: ${ws.slice(0, 120)}`)
+        assert(ws.includes('HELLO-WS'), '升级后字节没通')
+        const wsAnon = await wsUpgrade(GW_PORT, `/desktop/${seatId}/websockify`, '')
+        assert(wsAnon.includes('401'), `无 cookie 的升级应 401: ${wsAnon.slice(0, 80)}`)
+      } finally {
+        // 先掐连接再 close：Gateway 那侧的反代是 keep-alive，光 close 会一直等着它
+        // 自己断开——套件就停在这儿不动了。
+        fake.closeAllConnections?.()
+        await guard(new Promise((r) => fake.close(() => r())), 'fake close', 5000).catch(() => {})
+      }
     })
   } finally {
     if (gw && !gw._exited) {

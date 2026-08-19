@@ -4,6 +4,7 @@ import { hashPassword, loadKeys } from './crypto.ts'
 import { Router, listen } from './http.ts'
 import { gatewayHome } from './home.ts'
 import { attach } from './routes.ts'
+import { attachDesktopUpgrade } from './desktop.ts'
 
 /**
  * Satuwork Gateway。控制面：公司、账号、套餐、席位、目录、JWT。
@@ -60,6 +61,8 @@ const keys = loadKeys(home)
 const router = new Router()
 attach(router, db, keys)
 const server = listen(router)
+// 桌面的画面走 WebSocket，而升级请求不进 Router——它是 server 上的一个事件。
+attachDesktopUpgrade(server, db, keys)
 
 let closing = false
 function shutdown() {

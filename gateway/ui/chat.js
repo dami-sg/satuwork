@@ -1498,8 +1498,7 @@ function chatMachinePanel() {
         </div>`,
       )
     } else if (mine.novncUrl) {
-      // 页面是 https、管家是 http：iframe 会被浏览器按混合内容拦掉，且拦得没有声音。
-      // 这种情况下退回原来那颗按钮——新标签页没有这条限制。
+      // 嵌不了的时候退回原来那颗按钮——新标签页是顶层导航，没有 iframe 那些限制。
       rows.push(
         `<a class="btn btn-primary" href="${esc(mine.novncUrl)}" target="_blank" rel="noopener noreferrer" style="text-align: center;">${t('打开桌面')}</a>`,
       )
@@ -1571,8 +1570,10 @@ function deskCaption() {
 /**
  * 这个地址能不能内嵌。
  *
- * 页面是 https、管家是 http 的时候，iframe 会被浏览器按混合内容拦掉，而且拦得**没有
- * 声音**——什么都不显示，控制台以外看不出所以然。这种情况下不如不嵌，退回按钮。
+ * 桌面地址现在是 Gateway 同域的一条相对路径（`/desktop/:seatId/`），所以这条基本不
+ * 会再触发。留着是因为它挡的那个失败**没有声音**：页面是 https、地址是 http 的时候，
+ * iframe 被浏览器按混合内容拦掉，什么都不显示，控制台以外看不出所以然。真有哪天地址
+ * 又变回绝对的，这里退回按钮，比留一块黑屏强。
  */
 function deskEmbeddable(url) {
   if (!url) return false
