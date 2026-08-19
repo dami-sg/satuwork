@@ -107,13 +107,23 @@ function upstreamPath(seatId: string, rest: string, search: string): string {
  * 于是它变成了两套控件叠在一起，还压着桌面右边一条。
  *
  * 藏的是 `#noVNC_control_bar_anchor` ——**连那个把手一起**。只藏 `#noVNC_control_bar`
- * 的话，把手还在，点开又是那条。
+ * 的话，把手还在，点开又是那条。同一段样式里还关掉了「Connected to …」那条提示，
+ * 见 LANDING_CSS。
  *
  * 代价说清楚：noVNC 的剪贴板面板和 Ctrl-Alt-Del 都在这条里，藏了就没了。剪贴板仍然
  * 可以走系统那一路（在桌面里自己复制粘贴），跨机器的粘贴要另想办法。选择器对不上时
  * 这段样式什么也不做，页面照旧——不会因为 noVNC 换版本而白屏。
  */
-const HIDE_CONTROL_BAR = '<style>#noVNC_control_bar_anchor{display:none!important}</style>'
+/**
+ * 顺带把「Connected to …」那条提示也关掉。
+ *
+ * noVNC 的状态条只有一个元素（`#noVNC_status`），靠三个类分档：`normal` / `warn` /
+ * `error`，连上那句走的是 normal。**只关 normal**——控制条已经藏了，这行字是页面上
+ * 唯一还会说「连不上」「断开了」的地方，三档一起关掉，出问题时就只剩一块黑屏。
+ */
+const LANDING_CSS =
+  '<style>#noVNC_control_bar_anchor{display:none!important}' +
+  '#noVNC_status.noVNC_status_normal{display:none!important}</style>'
 
 /**
  * 落地页要改内容，所以不能像别的资源那样直接对接两个流：先收完，插一段样式，再按
@@ -133,7 +143,7 @@ function pipeLanding(
     const html = body.toString('utf8')
     const at = html.lastIndexOf('</head>')
     if (at < 0) return body
-    return Buffer.from(html.slice(0, at) + HIDE_CONTROL_BAR + html.slice(at), 'utf8')
+    return Buffer.from(html.slice(0, at) + LANDING_CSS + html.slice(at), 'utf8')
   })
 }
 

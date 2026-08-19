@@ -827,6 +827,10 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
          * 和我们自己的标题栏叠在一起，还压着桌面右边一条。
          */
         assert(body.includes('#noVNC_control_bar_anchor'), '控制条那段样式没插进去')
+        // 「Connected to …」那条提示也关掉，但**只关 normal 那一档**：控制条已经藏了，
+        // 报错和警告是页面上唯一还会说「连不上」的地方。
+        assert(body.includes('#noVNC_status.noVNC_status_normal'), '连接成功那条提示没关掉')
+        assert(!body.includes('noVNC_status_error'), '不该把报错那一档也关掉')
         assert(body.indexOf('#noVNC_control_bar_anchor') < body.indexOf('</head>'), '样式要在 </head> 之前')
         assert(page.headers.get('content-length') === String(new TextEncoder().encode(body).length), '改了内容没重算长度')
         assert(seen.paths.some((p) => p.startsWith(`/seats/${seatId}/vnc/vnc.html`)), `上游路径 ${seen.paths}`)
