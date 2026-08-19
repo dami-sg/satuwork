@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '../session/types.ts'
+import { historySlice } from '../session/replay.ts'
 
 /**
  * Satuwork 的 HTTP API。无头运行时：不发 SPA，未知路径 JSON 404。
@@ -77,8 +78,26 @@ export function apply(ctx: Context, _config: Config = {}) {
   })
 
   ctx.server.get('/api/sessions/:id/events', async (req, res) =>
-    sse(ctx, req.params.id, Number(req.query.get('after') ?? 0), res),
+    sse(ctx, req.params.id, Number(req.query.get('after') ?? 0), res, Number(req.query.get('tail') ?? 0)),
   )
+
+  /**
+   * 往前翻历史。一页几轮，游标是上一页最靠前那条的 seq。
+   *
+   * 走普通 HTTP 而不是塞进那条流：翻页是**人点出来的一次性动作**，和「跟着看新消息」
+   * 不是一回事。混在一条流里，既要发明一套请求帧，又会让重连的游标语义变浑。
+   */
+  ctx.server.get('/api/sessions/:id/history', async (req, res) => {
+    const before = Number(req.query.get('before') ?? 0)
+    const turns = Math.min(50, Math.max(1, Number(req.query.get('turns') ?? 20)))
+    try {
+      const all = await ctx.sessions.events(req.params.id)
+      return res.json(historySlice(all, { turns, before: before > 0 ? before : undefined }))
+    } catch (e) {
+      res.status = 404
+      return res.json({ error: (e as Error).message })
+    }
+  })
 
   /**
    * 发消息。
@@ -143,7 +162,13 @@ export function apply(ctx: Context, _config: Config = {}) {
 
 }
 
-function sse(ctx: Context, sessionId: string, after: number, res: { _res?: { on?: Function } }) {
+function sse(
+  ctx: Context,
+  sessionId: string,
+  after: number,
+  res: { _res?: { on?: Function } },
+  tail = 0,
+) {
   const encoder = new TextEncoder()
   return new Response(
     new ReadableStream({
@@ -158,9 +183,29 @@ function sse(ctx: Context, sessionId: string, after: number, res: { _res?: { on?
           else send(event)
         })
 
+        let replayed = 0
+        let firstSeq: number | null = null
+        let hasMore = false
         try {
-          for (const event of await ctx.sessions.events(sessionId, after)) send(event)
+          if (after > 0) {
+            // 断线续传：从游标之后原样发，不切也不筛——那是「补上错过的」，
+            // 和「打开页面看最近几轮」是两件事。
+            for (const event of await ctx.sessions.events(sessionId, after)) {
+              send(event)
+              replayed++
+            }
+          } else {
+            // 头一次连上：只发最近 tail 轮，并且丢掉已经作废的流式 chunk（见 replay.ts）。
+            const slice = historySlice(await ctx.sessions.events(sessionId), { turns: tail })
+            for (const event of slice.events) {
+              send(event)
+              replayed++
+            }
+            firstSeq = slice.firstSeq
+            hasMore = slice.hasMore
+          }
         } catch (e) {
+          ctx.logger?.warn?.(`sse: 会话 ${sessionId} 读不出来：${(e as Error).message}`)
           controller.enqueue(
             encoder.encode(`event: error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`),
           )
@@ -177,15 +222,59 @@ function sse(ctx: Context, sessionId: string, after: number, res: { _res?: { on?
          * 配对的 `turn/end`——会话越长挂得越久，而那期间什么都没在跑。
          *
          * 有了这条，客户端就能把标记之前的一律当历史，只认之后的状态。
+         *
+         * `live` 是**这条会话此刻到底在不在跑**，由 agents 直接给。带上它，是因为客户端
+         * 原来只能从事件顺序里猜：从头扫，遇 turn/start 算在跑、遇 turn/end 算跑完，最后
+         * 一个说了算。这个猜法有个前提——历史必须完整——而它经常不成立：
+         *
+         *   · 流断在重放中途，客户端手上就只剩半截，尾巴那条 turn/end 没到；
+         *   · 进程半路没了（崩溃、机器重启、每一次「重新部署」），日志里那条 turn/end
+         *     根本没写成——healDanglingTurn 要等下一次从磁盘读这条会话才补得上。
+         *
+         * 两种情况下界面都会一直挂着「正在处理」，而那边什么都没在跑，等多久都不会变。
+         * 少几条消息是看得出来的，假装在跑不是——所以这件事不该猜，让知道的人说。
          */
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'replay/done' })}\n\n`))
+        const live = ctx.agents.isRunning(sessionId)
+        // 「界面为什么一直显示正在处理」全靠这一行断案：live 是 true 就是真在跑，
+        // 是 false 而界面还挂着，那就是前端的事。
+        ctx.logger?.info?.(
+          `sse: 会话 ${sessionId} 接上，after=${after}，tail=${tail}，重放 ${replayed} 条，live=${live}，还有更早的=${hasMore}`,
+        )
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ type: 'replay/done', live, firstSeq, hasMore })}\n\n`),
+        )
 
         const pending = queue
         queue = null
         for (const event of pending) if (event.seq > after) send(event)
 
+        /**
+         * 心跳。
+         *
+         * **尾巴会卡在缓冲里。** 上面那些 `send()` 是 `controller.enqueue`，不阻塞——
+         * 它只把事件塞进队列，什么时候真的写到浏览器由下游决定。而浏览器在 fetch 流
+         * 上会攒够一定量才交付（Safari 尤其明显），于是一条安静下来的会话，最后几十
+         * 条事件连同 `replay/done` 就一直压在那儿，再也没有新字节把它们顶出去。
+         *
+         * 实测长这样：bot 报「重放 1078 条」，客户端手上只有 1054 条，`replay/done`
+         * 从没到达，而连接看着还开着、也不会重连——历史缺一截，界面因为拿不到那句
+         * 「在不在跑」而永远挂着「正在处理」。哪条会话中招取决于它的字节数落在缓冲
+         * 边界的哪一侧，所以刷一次换一个，看着像见了鬼。
+         *
+         * 一条 `: ping` 注释就够：它不是事件，客户端解析时直接跳过，但它是新字节，
+         * 会把压着的那一截一起冲出去。顺带也让掉线被及时发现。
+         */
+        const beat = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(': ping\n\n'))
+          } catch {
+            clearInterval(beat)
+          }
+        }, 15000)
+
         // 长连接不该等到插件卸载才释放。ctx.on 是 effect，那只是兜底。
         res._res?.on?.('close', () => {
+          clearInterval(beat)
           off()
           try {
             controller.close()

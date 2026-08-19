@@ -16,6 +16,10 @@
     host: 127.0.0.1
     port: 3082
 
+# 日志。**必须有**：在它之前 ctx.logger 是 undefined，代码里那 16 处 ?.warn?.() 全是
+# 空转，席位的 journal 里除了 systemd 什么都没有——出了问题只能靠猜。
+- name: './src/logger/index.ts'
+
 # ── 核心 ──────────────────────────────────────────────────────────────────
 # 运行时配置与非会话数据（SQLite，$SATUWORK_HOME/satuwork.db）。
 # 会话日志不在这里——那是追加式 JSONL，两种数据的访问形态不一样。
@@ -38,6 +42,10 @@
 - name: './src/tools/index.ts'
 - name: './src/tools/builtin.ts'
 
+# 工作区里的手：read / write / edit / ls / find / grep / bash。
+# 根目录是 $SATUWORK_WORK_DIR（部署注入的共享 work 目录），本地回落 $SATUWORK_HOME/work。
+- name: './src/tools/workspace.ts'
+
 # Gateway 目录：拉 Skill / MCP / Bot，钉到名册，连 HTTP MCP。
 - name: './src/catalog/index.ts'
 
@@ -49,7 +57,7 @@
   config:
     provider: deepseek
     model: deepseek-v4-flash
-    system: 你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间或精确计算时调用工具，不要凭猜测。
+    system: 你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间、查看或修改文件、执行命令时调用工具，不要凭猜测。
 
 # HTTP API（无 SPA）。对话 UI 在 Gateway。
 - name: './src/web/index.ts'

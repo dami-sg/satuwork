@@ -88,7 +88,12 @@ export class AgentService extends Service {
   }
 
   async send(sessionId: string, text: string): Promise<void> {
-    if (this.isRunning(sessionId)) throw new Error('agents: 该会话正在运行中')
+    if (this.isRunning(sessionId)) {
+      // 这条以前是静默的，而它意味着**用户那句话被丢掉了**——steer 没接住、send 又
+      // 拒收。界面上什么都看不出来，日志里也没有。
+      this.ctx.logger?.warn?.(`agents: 会话 ${sessionId} 已在运行，这条消息没能进去`)
+      throw new Error('agents: 该会话正在运行中')
+    }
     // 同步占位，之后才允许出现 await。
     this.starting.add(sessionId)
     try {
@@ -101,7 +106,7 @@ export class AgentService extends Service {
   private async runTurn(sessionId: string, text: string): Promise<void> {
     const { sessions, llm } = this.ctx
     const history = await sessions.events(sessionId)
-    let system: string
+    let system: { text: string; base: string; skills: string }
     let provider: string
     let modelId: string
     let model: ReturnType<typeof llm.modelOf>
@@ -144,7 +149,7 @@ export class AgentService extends Service {
 
     const agent = new Agent({
       initialState: {
-        systemPrompt: system,
+        systemPrompt: system.text,
         model,
         messages: toAgentMessages(history, model),
         tools: this.bridgeTools(sessionId, new Set(toolSchemas.map((t) => t.name))),
@@ -156,9 +161,26 @@ export class AgentService extends Service {
     } as any)
 
     this.live.set(sessionId, agent)
-    const off = agent.subscribe(this.projector(sessionId, turn, { provider, model: modelId, system, tools: toolSchemas }))
+    const isMcp = (t: { name: string }) => t.name.startsWith('mcp_')
+    const off = agent.subscribe(
+      this.projector(sessionId, turn, {
+        provider,
+        model: modelId,
+        system: system.text,
+        tools: toolSchemas,
+        contextWindow: this.windowOf(provider, modelId),
+        sections: {
+          system: estTokens(system.base),
+          skills: estTokens(system.skills),
+          builtinTools: estTokens(toolsText(toolSchemas.filter((t) => !isMcp(t)))),
+          mcpTools: estTokens(toolsText(toolSchemas.filter(isMcp))),
+        },
+      }),
+    )
 
     let reason: 'completed' | 'error' | 'aborted' = 'completed'
+    const startedAt = Date.now()
+    this.ctx.logger?.info?.(`agents: 会话 ${sessionId} 第 ${turn} 轮开始（${provider}/${modelId}）`)
     try {
       await agent.prompt(text)
       // pi-agent **不抛**模型侧错误，它落在 state.errorMessage / 最终消息的
@@ -195,6 +217,10 @@ export class AgentService extends Service {
       off()
       this.live.delete(sessionId)
       await sessions.append(sessionId, 'turn/end', { turn, reason })
+      // 有这一行，「那一轮到底结束没有」就不用再猜了。
+      this.ctx.logger?.info?.(
+        `agents: 会话 ${sessionId} 第 ${turn} 轮结束（${reason}，${Date.now() - startedAt}ms）`,
+      )
     }
   }
 
@@ -241,8 +267,13 @@ export class AgentService extends Service {
   /**
    * 把该 Bot 挂上的、且已启用的 Skill 正文拼进系统提示词。
    * 没有 skills 列表 → 本机所有启用的 Skill；空数组 → 不加。
+   *
+   * 返回时把两段分开留一份：上下文占比要分别报「提示词」和「Skill」，拼完再去切
+   * 字符串既脆（提示词里出现同样的小标题就切错）又白算一遍。
    */
-  private composeSystem(bot: { prompt?: string; skills?: string[] } | undefined): string {
+  private composeSystem(
+    bot: { prompt?: string; skills?: string[] } | undefined,
+  ): { text: string; base: string; skills: string } {
     const base = bot?.prompt?.trim() || this.system
     const col = this.ctx.storage.collection<{ id: string; name: string; body: string; enabled?: boolean }>('skills')
     const ids = bot?.skills
@@ -252,9 +283,18 @@ export class AgentService extends Service {
         : ids
             .map((id) => col.get(id))
             .filter((s): s is { id: string; name: string; body: string; enabled?: boolean } => !!s && s.enabled !== false)
-    if (!picked.length) return base
+    if (!picked.length) return { text: base, base, skills: '' }
     const extra = picked.map((s) => `## Skill: ${s.name}\n${s.body}`).join('\n\n')
-    return `${base}\n\n${extra}`
+    return { text: `${base}\n\n${extra}`, base, skills: extra }
+  }
+
+  /** 模型的上下文窗口，来自 Gateway 目录。拉不到就没有——界面那条占比会自己让位。 */
+  private windowOf(provider: string, model: string): number | undefined {
+    const found = this.ctx.llm
+      .catalog()
+      .find((p) => p.provider === provider)
+      ?.models.find((m) => m.id === model)
+    return typeof found?.contextWindow === 'number' ? found.contextWindow : undefined
   }
 
   /** 内置工具始终在。MCP 工具只在成功 list 之后才注册，再按 Bot.mcps 过滤。 */
@@ -280,7 +320,14 @@ export class AgentService extends Service {
   private projector(
     sessionId: string,
     turn: number,
-    used: { provider: string; model: string; system: string; tools: { name: string; description: string }[] },
+    used: {
+      provider: string
+      model: string
+      system: string
+      tools: { name: string; description: string }[]
+      contextWindow?: number
+      sections?: { system: number; skills: number; builtinTools: number; mcpTools: number }
+    },
   ) {
     const { sessions } = this.ctx
     let step = 0
@@ -301,6 +348,8 @@ export class AgentService extends Service {
             model: used.model,
             system: used.system,
             tools: used.tools.map((t) => ({ name: t.name, description: t.description })),
+            contextWindow: used.contextWindow,
+            sections: used.sections,
           })
           break
         }
@@ -371,6 +420,26 @@ function textOf(result: any): string {
   const content = result?.content
   if (Array.isArray(content)) return content.map((c: any) => c?.text ?? '').join('')
   return JSON.stringify(result ?? null)
+}
+
+/**
+ * 估算 token 数。
+ *
+ * 没有分词器，也不该为了输入框上一行灰字去装一个：那要么按模型各配一份词表，要么把
+ * 整段提示词再跑一遍分词。CJK 大致一字一 token，其余按 ~3.6 字符一 token，够撑一条
+ * 「占了多少」的提示。**总量不用它**——那个是模型自己回报的，见 usage。
+ */
+function estTokens(text: string): number {
+  if (!text) return 0
+  const cjk = (text.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) ?? []).length
+  return Math.round(cjk + (text.length - cjk) / 3.6)
+}
+
+/** 工具表进模型时的实际形状。参数表往往比描述还大，只量描述会差出一大截。 */
+function toolsText(tools: { name: string; description: string; parameters?: unknown }[]): string {
+  return tools
+    .map((t) => JSON.stringify({ name: t.name, description: t.description, parameters: t.parameters ?? {} }))
+    .join('')
 }
 
 function toUsage(u: any): Usage {

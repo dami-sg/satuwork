@@ -4,6 +4,7 @@ import { HttpError, json, listen, Router, type Req } from './http.ts'
 import { attachUpgrade, proxyIntercept } from './proxy.ts'
 import { bootChallenge, pairIfNeeded } from './pair.ts'
 import { diagnose } from './diag.ts'
+import { botUnit, clampLines, followLogs, MANAGER_UNIT, recentLogs } from './logs.ts'
 import { deploySeat, removeSeat, seat, seatsWithLiveness, type SeatSpec } from './seats.ts'
 import { confirmVersion, maybeUpgrade, upgradeError } from './upgrade.ts'
 import { currentTimezone, maybeSetTimezone, timezoneError } from './timezone.ts'
@@ -169,6 +170,36 @@ router.get('/seats/:seatId/diag', async (req, res) => {
   requireMachine(req)
   const lines = Number(req.query.get('lines') || 40)
   json(res, 200, { diag: await diagnose(req.params.seatId, Number.isFinite(lines) ? lines : 40) })
+})
+
+/**
+ * 席位 bot 的运行日志。`?follow=1` 跟着滚（SSE），否则给最近 N 行。
+ *
+ * diag 那条能回答「它活着吗」，回答不了「它卡在哪一步」——而这一层最贵的故障恰恰
+ * 都不报错：单元 active、端口有人听，只是那一轮永远不结束。没有这条路，每查一次都
+ * 得请人登机器。
+ *
+ * seatId 先在名册里查，查不到就 404：unit 名是拿它拼的，只让已知席位过去，就不存在
+ * 「拼出别的单元」这件事（spawn 本来也走参数数组，不过 shell）。
+ */
+router.get('/seats/:seatId/logs', async (req, res) => {
+  requireMachine(req)
+  const seatId = req.params.seatId
+  if (!seat(seatId)) throw new HttpError(404, '没有这个席位')
+  const lines = clampLines(req.query.get('lines'))
+  if (req.query.get('follow') === '1') return followLogs(botUnit(seatId), lines, res)
+  json(res, 200, { seatId, lines: await recentLogs(botUnit(seatId), lines) })
+})
+
+/**
+ * 管家自己的日志。平台端排查「这台机器怎么了」看的是它——部署失败、升级卡住、
+ * 配对回拨不通，这些都写在管家的 journal 里，席位的日志里一个字都没有。
+ */
+router.get('/logs', async (req, res) => {
+  requireMachine(req)
+  const lines = clampLines(req.query.get('lines'))
+  if (req.query.get('follow') === '1') return followLogs(MANAGER_UNIT, lines, res)
+  json(res, 200, { unit: MANAGER_UNIT, lines: await recentLogs(MANAGER_UNIT, lines) })
 })
 
 router.put('/seats/:seatId', async (req, res) => {

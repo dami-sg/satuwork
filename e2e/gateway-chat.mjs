@@ -286,6 +286,48 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       }
     })
 
+    await test('replay/done 带着「在不在跑」，而且是真 bot 给的', async () => {
+      // 界面判断「正在处理」原来只能扫事件：从头扫，遇 turn/start 算在跑、遇 turn/end
+      // 算跑完。这个猜法要求历史完整，而它经常不完整（流断在重放中途、或者进程半路
+      // 没了、那条 turn/end 根本没写成），于是界面一直挂着「正在处理」。所以让知道的
+      // 人说：bot 在 replay/done 上带 live。这里要验的是它真的一路走到了 Gateway 出口。
+      const sse = await readSse(`${gwBase}/runtime/sessions/${encodeURIComponent(sessionId)}/events`, {
+        token: adminTok,
+        timeout: 8000,
+        until: (events) => events.some((e) => e.type === 'replay/done'),
+      })
+      assert(sse.status === 200, `sse ${sse.status} ${sse.text}`)
+      const done = sse.events.find((e) => e.type === 'replay/done')
+      assert(done, `没有 replay/done：${sse.events.map((e) => e.type).join(',')}`)
+      assert(typeof done.live === 'boolean', `replay/done 没带 live：${JSON.stringify(done)}`)
+      // 标记必须排在历史**后面**——它的意思就是「前面那些都是历史」。
+      const at = sse.events.indexOf(done)
+      assert(
+        sse.events.slice(0, at).some((e) => e.type === 'session'),
+        'replay/done 跑到历史前面去了，那它就不再是「历史放完了」的意思',
+      )
+    })
+
+    await test('bot 真的会写日志——那 16 处 ?.warn?.() 不能又是空转', async () => {
+      // 挂上 logger 服务之前，cordis.yml 里没有任何 logger 插件，ctx.logger 是
+      // undefined，代码里那 16 处可选链一条都没输出过。席位的 journal 里除了 systemd
+      // 和启动那两行什么都没有，查问题只能靠猜。**这条测的就是「日志真的出来了」。**
+      const sse = await readSse(`${gwBase}/runtime/sessions/${encodeURIComponent(sessionId)}/events`, {
+        token: adminTok,
+        timeout: 8000,
+        until: (events) => events.some((e) => e.type === 'replay/done'),
+      })
+      assert(sse.status === 200, `sse ${sse.status}`)
+      // 日志是异步刷出去的，给它一拍。
+      await new Promise((r) => setTimeout(r, 300))
+      const out = botChild._out || ''
+      assert(/\[INFO\]/.test(out), `bot 一行日志都没有，logger 多半又没挂上：${out.slice(-400)}`)
+      assert(
+        /sse: 会话 .*live=(true|false)/.test(out),
+        `没写出接流那行（live 是断案的关键）：${out.slice(-500)}`,
+      )
+    })
+
     await test('Bot GET / → JSON 404，不是 HTML SPA', async () => {
       const r = await req(botBase, 'GET', '/')
       assert(r.status === 404, `bot / ${r.status} ${r.text}`)

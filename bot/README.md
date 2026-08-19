@@ -28,6 +28,7 @@ package.json 里有一条别名把 cordis 指向同一个物理包，避免加�
 | GATEWAY_API_KEY | 席位 API Key（sk_sw_ 前缀）。打 /v1，用量记在该用户 |
 | GATEWAY_MACHINE_TOKEN | 机器凭证。internal 口（ready、索引、拉全文） |
 | SATUWORK_BOT_ID | 部署必填。目录只钉这一颗，不种本地 default |
+| SATUWORK_WORK_DIR | 文件与命令工具的工作区根目录。部署注入 /home/{linuxUser}/work；本地回落 $SATUWORK_HOME/work |
 
 模型调用走 Gateway /v1（Chat Completions / Responses / Anthropic Messages）。pi-ai 和上游密钥都在 Gateway。每个 Bot 有自己的 provider + model。
 
@@ -57,10 +58,10 @@ src/storage/      运行时配置与非会话数据（ctx.storage，SQLite）
 src/session/      追加式事件日志（ctx.sessions），一切从它派生
 src/llm/          模型接缝（ctx.llm），Gateway /v1 的薄客户端
 src/tools/        工具注册表与执行管道（ctx.tools），策略挂在它的 waterfall 上
+                  builtin.ts 是 now；workspace.ts 是 read/write/edit/ls/find/grep/bash
 src/agent/        turn/step 循环（ctx.agents）
 src/web/          无头 HTTP API（含 SSE）；不发 SPA
-ui/               遗留前端，不是产品路径
-design/           遗留设计稿（25 个视图），不是产品路径
+design/           设计稿（25 个视图），留在仓库备查；pack.mjs 不把它打进发布包
 docs/             事件模型设计参考（仓库根 docs/）
 
 ## API

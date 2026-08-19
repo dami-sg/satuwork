@@ -17,10 +17,23 @@
 import { unzip, stripTopDir, toPayload } from '/unzip.js';
 window.satuUnzip = { unzip, stripTopDir, toPayload };
 </script>
-<!-- 译表必须在 app.js 之前：app.js 里的 t() 直接查它。 -->
+<!-- 译表必须在下面那串之前：prefs.js 里的 t() 直接查它。 -->
 <script src="/i18n.js"></script>
-<!-- markdown.js 也要在 app.js 之前：paintChat 直接调 window.satuMd。 -->
+<!-- markdown.js 也要在下面那串之前：chat.js 的 paintChat 直接调 window.satuMd。 -->
 <script src="/markdown.js"></script>
-<script src="/app.js"></script>
+<!-- 前端就是这一串普通脚本，同一个全局作用域，按顺序拼起来等于原来那个 app.js。
+     data-app-part 是给 e2e 垫片认的：它照着这里的顺序拼源码，顺序永远不会和线上漂开。
+     prefs.js 必须第一个（唯一一段加载即执行的代码在它那儿），app.js 必须最后一个（boot()）。 -->
+<script src="/prefs.js" data-app-part></script>
+<script src="/state.js" data-app-part></script>
+<script src="/data.js" data-app-part></script>
+<script src="/shell.js" data-app-part></script>
+<script src="/pages-admin.js" data-app-part></script>
+<script src="/pages-audit.js" data-app-part></script>
+<script src="/pages-account.js" data-app-part></script>
+<script src="/pages-bots.js" data-app-part></script>
+<script src="/chat.js" data-app-part></script>
+<script src="/render.js" data-app-part></script>
+<script src="/app.js" data-app-part></script>
 </body>
 </html>

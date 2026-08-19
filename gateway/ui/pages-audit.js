@@ -1,0 +1,1010 @@
+/** 加入邀请页、审计（会话与事件），以及平台侧的公司、机器、发布包。 */
+function joinView() {
+  const inv = state.joinInvite || { loading: true }
+  const side = `
+    <div class="satu-authside">
+      <div style="position: absolute; top: -60px; right: -60px; width: 220px; height: 220px; border-radius: 50%; background: var(--color-accent-2-200); opacity: 0.6;"></div>
+      <div style="position: relative; display: flex; align-items: center; gap: var(--space-2);">
+        <img src="/assets/satuwork-logo.png" alt="Satuwork" style="width: 34px; height: 34px; border-radius: 999px;">
+        <span style="font-family: var(--font-heading); font-size: 20px;">Satuwork</span>
+      </div>
+      <div style="position: relative; display: flex; flex-direction: column; gap: var(--space-4); max-width: 440px;">
+        <div style="width: 100%; aspect-ratio: 4/3; border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-lg);">
+          <img src="/assets/login-hero.png" alt="" style="width: 100%; height: 100%; object-fit: cover;">
+        </div>
+        <p style="font-family: var(--font-heading); font-size: 26px; line-height: 1.2; margin: 0;">${t('加入同事的工作区，设置你自己的口令。')}</p>
+        <p style="margin: 0; color: color-mix(in srgb, var(--color-text) 65%, transparent); font-size: 14px; line-height: 1.6;">${t('管理员从头到尾看不到你的口令。链接只用一次。')}</p>
+      </div>
+      <div style="position: relative; display: flex; gap: var(--space-4); font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent);">
+        <span>© 2026 Satuwork</span>
+      </div>
+    </div>`
+  let inner
+  if (inv.loading) {
+    inner = `<p style="margin: 0; color: var(--muted-foreground);">${t('载入邀请…')}</p>`
+  } else if (!inv.valid) {
+    inner = `
+      <div style="display: flex; flex-direction: column; gap: var(--space-4); align-items: flex-start;">
+        <span class="tag tag-accent">${t('邀请已失效')}</span>
+        <h1 style="font-size: 28px; margin: 0;">${t('这条邀请链接不可用')}</h1>
+        <p style="margin: 0; color: var(--muted-foreground); font-size: 14px; line-height: 1.6;">${t('链接可能已过期、已被使用，或管理员重新生成了新的邀请。请联系邀请你的人重新发一条。')}</p>
+        ${inv.error ? `<div class="gw-flash gw-flash-err">${esc(inv.error)}</div>` : ''}
+        <button type="button" class="btn btn-secondary" data-act="join-login">${t('返回登录')}</button>
+      </div>`
+  } else {
+    const f = state.joinForm
+    inner = `
+      <div style="display: flex; flex-direction: column; gap: var(--space-6);">
+        <div>
+          <span class="tag tag-accent-2">${t('邀请有效')}</span>
+          <h1 style="font-size: 28px; margin: var(--space-3) 0 var(--space-2);">${t('设置登录口令')}</h1>
+          <p style="margin: 0; color: var(--muted-foreground); font-size: 14px;">${t('你的账号信息已由管理员填好，设置口令即可加入。')}</p>
+        </div>
+        <form id="join-form" style="display: flex; flex-direction: column; gap: var(--space-4);">
+          <div style="display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-md);">
+            <span class="satu-avatar" style="background: var(--color-accent-200); color: var(--color-accent-800);">${esc((inv.name || inv.email).slice(0, 1).toUpperCase())}</span>
+            <div style="min-width: 0;">
+              <div style="font-size: 14px; font-weight: 600;">${esc(inv.name || '')}</div>
+              <div style="font-size: 12px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(inv.email)}</div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="jn-name">${t('姓名')}</label>
+            <input class="input satu-input" id="jn-name" name="name" type="text" value="${esc(f.name)}" placeholder="${esc(t('你的姓名'))}" autocomplete="name">
+          </div>
+          <div class="field">
+            <label for="jn-pw">${t('设置口令')}</label>
+            <input class="input satu-input" id="jn-pw" name="password" type="password" required minlength="10" placeholder="${esc(t('至少 10 位'))}" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label for="jn-pw2">${t('确认口令')}</label>
+            <input class="input satu-input" id="jn-pw2" name="confirm" type="password" required minlength="10" placeholder="${esc(t('再输一次'))}" autocomplete="new-password">
+          </div>
+          ${state.joinError ? `<div class="gw-flash gw-flash-err">${esc(state.joinError)}</div>` : ''}
+          <button type="submit" class="btn btn-primary btn-block" ${state.busy ? 'disabled' : ''}>
+            ${state.busy ? t('加入中…') : t('加入 Satuwork')}
+            ${state.busy ? '' : svg(['M5 12h14', 'm12 5 7 7-7 7'], 14)}
+          </button>
+        </form>
+        <p style="text-align: center; margin: 0; font-size: 14px; color: color-mix(in srgb, var(--color-text) 60%, transparent);">
+          ${t('已经有账号？')}
+          <button type="button" class="satu-linkbtn" data-act="join-login">${t('直接登录')}</button>
+        </p>
+      </div>`
+  }
+  return `<div class="gw-login">${side}<div style="position: relative; display: flex; align-items: center; justify-content: center; padding: var(--space-8);"><div style="width: 100%; max-width: 400px;">${inner}</div></div></div>`
+}
+
+
+function auditTranscript(events) {
+  const blocks = []
+  for (const ev of events || []) {
+    if (ev.type === 'user/message' || ev.type === 'assistant/message') {
+      // messageText 收的是整条 message，不是它的 content 数组。
+      const text = messageText(ev.data && ev.data.message)
+      const role = ev.type === 'user/message' ? 'user' : 'ai'
+      const label = role === 'user' ? t('员工') : t('助理')
+      blocks.push(`<div class="satu-dbmsg" data-role="${role}" style="white-space: pre-wrap; overflow: visible;">
+        <div style="font-size: 11.5px; font-weight: 600; margin-bottom: 4px; opacity: 0.7;">${label}</div>
+        ${esc(text || t('（空）'))}
+      </div>`)
+      continue
+    }
+    if (ev.type === 'tool/call') {
+      const name = (ev.data && ev.data.name) || t('工具')
+      blocks.push(`<div style="font-size: 12px; color: var(--muted-foreground);">${esc(t('工具 ') + name)}</div>`)
+      continue
+    }
+    if (ev.type === 'tool/result') {
+      const text = (ev.data && ev.data.text) || ''
+      blocks.push(`<div style="font-size: 12px; color: var(--muted-foreground);">${esc(t('结果 ') + String(text).slice(0, 240))}</div>`)
+    }
+  }
+  if (!blocks.length) {
+    return `<div style="padding: var(--space-4); font-size: 13px; color: var(--muted-foreground);">${t('没有消息')}</div>`
+  }
+  return `<div style="display: flex; flex-direction: column; gap: var(--space-3);">${blocks.join('')}</div>`
+}
+
+function auditTabs(tab) {
+  const items = [
+    { key: 'chats', label: '对话' },
+    { key: 'events', label: '操作记录' },
+  ]
+  return items
+    .map(
+      (item) =>
+        `<button type="button" class="satu-assignee" style="padding: 5px 14px;" aria-pressed="${String(tab === item.key)}" data-act="audit-tab" data-tab="${item.key}">${t(item.label)}</button>`,
+    )
+    .join('')
+}
+
+function auditEventsTable() {
+  const rows = (state.events || [])
+    .map((e) => {
+      const detail = e.detail && typeof e.detail === 'object' ? JSON.stringify(e.detail) : String(e.detail ?? '')
+      return `<div class="satu-usagerow">
+        <span style="font-size: 13.5px; font-weight: 600;">${esc(e.action)}</span>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(fmtTime(e.createdAt))}</span>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(e.accountId || '—')}</span>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(detail)}</span>
+        <div></div>
+      </div>`
+    })
+    .join('')
+  return `<div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+          <div class="satu-usagehead">
+            <span>${t('事件')}</span><span>${t('时间')}</span><span>${t('账号')}</span><span>${t('详情')}</span><span></span>
+          </div>
+          ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有审计事件')}</div>`}
+        </div>`
+}
+
+function auditChatsTable() {
+  const members = state.accounts || []
+  const opts = [`<option value="">${t('全部')}</option>`]
+    .concat(
+      members.map(
+        (m) =>
+          `<option value="${esc(m.id)}" ${state.sessionAccountId === m.id ? 'selected' : ''}>${esc(m.name || m.email || m.id)}</option>`,
+      ),
+    )
+    .join('')
+  const grid = 'grid-template-columns: minmax(140px, 2fr) minmax(100px, 1.2fr) minmax(80px, 1fr) minmax(130px, 1.2fr) 64px;'
+  const rows = (state.sessions || [])
+    .map((row) => {
+      return `<div class="satu-usagerow" style="${grid}">
+        <span style="font-size: 13.5px; font-weight: 600;">${esc(row.title || t('未命名'))}</span>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(row.accountName || row.accountId || '—')}</span>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(row.botName || row.botId || '—')}</span>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(fmtTime(row.updatedAt))}</span>
+        <button type="button" class="satu-linkbtn" data-act="go" data-href="/audit/${esc(row.sessionId)}">${t('打开')}</button>
+      </div>`
+    })
+    .join('')
+  return `
+        <form id="audit-filter-form" style="display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: flex-end;">
+          <div class="field" style="margin: 0;">
+            <label for="audit-account">${t('员工')}</label>
+            <select class="input" id="audit-account" name="accountId" style="width: 200px;">${opts}</select>
+          </div>
+          <div class="field" style="margin: 0;">
+            <label for="audit-from">${t('开始日期')}</label>
+            <input class="input" id="audit-from" name="from" type="date" value="${esc(state.sessionFrom || '')}">
+          </div>
+          <div class="field" style="margin: 0;">
+            <label for="audit-to">${t('结束日期')}</label>
+            <input class="input" id="audit-to" name="to" type="date" value="${esc(state.sessionTo || '')}">
+          </div>
+          <button type="submit" class="btn btn-secondary" style="flex: none;">${t('筛选')}</button>
+        </form>
+        <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+          <div class="satu-usagehead" style="${grid}">
+            <span>${t('标题')}</span><span>${t('员工')}</span><span>Bot</span><span>${t('更新时间')}</span><span>${t('打开')}</span>
+          </div>
+          ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有对话索引。实例上报之后会列在这里。')}</div>`}
+        </div>
+        ${
+          state.sessionsHasMore
+            ? `<div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
+                 <button type="button" class="btn btn-secondary" style="flex: none;" data-act="sessions-more"${
+                   state.sessionsLoadingMore ? ' disabled' : ''
+                 }>${state.sessionsLoadingMore ? t('加载中…') : t('加载更多')}</button>
+                 <span style="font-size: 13px; color: var(--muted-foreground);">${esc(
+                   t(
+                     `已列出 ${(state.sessions || []).length} 条，还有更早的。`,
+                     `${(state.sessions || []).length} listed so far; there are older ones.`,
+                   ),
+                 )}</span>
+               </div>`
+            : ''
+        }`
+}
+
+function auditPage() {
+  const tab = state.auditTab === 'events' ? 'events' : 'chats'
+  return `
+    <div class="gw-page">
+      <div class="gw-page-inner">
+        <div>
+          <h1 style="font-size: 24px; margin: 0 0 4px;">${t('审计')}</h1>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('查看公司成员的对话。全文在执行机器上，这里只存索引。')}</p>
+        </div>
+        <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">${auditTabs(tab)}</div>
+        ${flashes()}
+        ${tab === 'events' ? auditEventsTable() : auditChatsTable()}
+      </div>
+    </div>`
+}
+
+function auditDetailPage() {
+  const row = state.sessionDetail
+  if (!row) {
+    return `
+    <div class="gw-page">
+      <div class="gw-page-inner">
+        ${flashes()}
+        <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('找不到这条对话。')}</p>
+      </div>
+    </div>`
+  }
+  const err = state.sessionPullError
+  const events = state.sessionEvents
+  let body
+  if (err) {
+    body = `<div class="gw-flash gw-flash-err">${esc(err)}</div>`
+  } else if (events == null) {
+    body = `<div class="gw-flash gw-flash-err">${t('机器不在线，全文拉不下来')}</div>`
+  } else {
+    body = auditTranscript(events)
+  }
+  return `
+    <div class="gw-page">
+      <div class="gw-page-inner">
+        <div>
+          ${/* 返回在内容区头上的面包屑里，这儿不再重复一个。 */ ''}
+          <h1 style="font-size: 24px; margin: 0 0 4px;">${esc(row.title || t('未命名'))}</h1>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(row.accountName || row.accountId || '—')} · ${esc(fmtTime(row.updatedAt || row.createdAt))}</p>
+        </div>
+        ${flashes()}
+        ${body}
+      </div>
+    </div>`
+}
+
+function roleTag(role) {
+  if (role === 'owner') return `<span class="tag tag-accent">${t('系统管理员')}</span>`
+  if (role === 'admin') return `<span class="tag tag-accent">${t('管理员')}</span>`
+  return `<span class="tag tag-neutral">${t('成员')}</span>`
+}
+
+function companyStatusTag(status) {
+  return status === 'disabled'
+    ? `<span class="tag tag-neutral">${t('已停用')}</span>`
+    : `<span class="tag tag-accent-2">${t('生效中')}</span>`
+}
+
+/** 套餐名：界面语言是英文且这条套餐存了英文名就用英文名——套餐名是数据，译表翻不了。 */
+function planLabel(plan) {
+  if (!plan) return ''
+  return (localeMode === 'en' && plan.skuNameEn ? plan.skuNameEn : plan.skuName) || ''
+}
+
+/**
+ * 常用国家区号。国家名是**数据**不是文案，中英各写一份，别丢进译表。
+ * 不求全：列里没有的号码照样存得下（见 phoneParts），只是要手填。
+ */
+const PHONE_CODES = [
+  { code: '+86', zh: '中国', en: 'China' },
+  { code: '+852', zh: '香港', en: 'Hong Kong' },
+  { code: '+853', zh: '澳门', en: 'Macau' },
+  { code: '+886', zh: '台湾', en: 'Taiwan' },
+  { code: '+65', zh: '新加坡', en: 'Singapore' },
+  { code: '+60', zh: '马来西亚', en: 'Malaysia' },
+  { code: '+62', zh: '印尼', en: 'Indonesia' },
+  { code: '+66', zh: '泰国', en: 'Thailand' },
+  { code: '+84', zh: '越南', en: 'Vietnam' },
+  { code: '+63', zh: '菲律宾', en: 'Philippines' },
+  { code: '+81', zh: '日本', en: 'Japan' },
+  { code: '+82', zh: '韩国', en: 'South Korea' },
+  { code: '+91', zh: '印度', en: 'India' },
+  { code: '+61', zh: '澳大利亚', en: 'Australia' },
+  { code: '+1', zh: '美国 / 加拿大', en: 'US / Canada' },
+  { code: '+44', zh: '英国', en: 'United Kingdom' },
+  { code: '+49', zh: '德国', en: 'Germany' },
+  { code: '+33', zh: '法国', en: 'France' },
+  { code: '+971', zh: '阿联酋', en: 'UAE' },
+]
+const PHONE_CODE_DEFAULT = '+86'
+
+/** 库里存的是一整串 `+86 13800000000`，编辑时拆成区号和号码两格。 */
+function phoneParts(raw) {
+  const s = String(raw || '').trim()
+  const m = s.match(/^(\+\d{1,4})[\s-]*(.*)$/)
+  if (!m) return { code: PHONE_CODE_DEFAULT, number: s }
+  return { code: m[1], number: m[2].trim() }
+}
+
+/**
+ * 区号 + 号码两格。区号是下拉，但库里那条不在列表里时把它补进去——
+ * 否则一打开表单就被默默改成了别的国家。
+ */
+function phoneField(idPrefix, value, required = true) {
+  const { code, number } = phoneParts(value)
+  const codes = PHONE_CODES.some((c) => c.code === code) ? PHONE_CODES : [{ code, zh: code, en: code }, ...PHONE_CODES]
+  return `<div style="display: flex; gap: var(--space-2);">
+    <select class="input" id="${idPrefix}-code" name="contactPhoneCode" style="width: 132px; flex: none;" aria-label="${esc(t('国家区号'))}">
+      ${codes
+        .map((c) => `<option value="${esc(c.code)}" ${c.code === code ? 'selected' : ''}>${esc(c.code)} ${esc(localeMode === 'en' ? c.en : c.zh)}</option>`)
+        .join('')}
+    </select>
+    <input class="input" id="${idPrefix}" name="contactPhone" type="tel" value="${esc(number)}" ${required ? 'required' : ''} placeholder="13800000000">
+  </div>`
+}
+
+/** 提交时再拼回一整串。号码里的空格保留，人怎么填就怎么存。 */
+function phoneValue(fd) {
+  const code = String(fd.get('contactPhoneCode') || PHONE_CODE_DEFAULT).trim()
+  const number = String(fd.get('contactPhone') || '').trim()
+  if (!number) return ''
+  return number.startsWith('+') ? number : `${code} ${number}`
+}
+
+function orgCreateModal() {
+  if (!state.orgCreateOpen) return ''
+  return `<div class="gw-modal-backdrop" data-act="org-create-close">
+    <form id="create-org-form" class="gw-modal" style="max-width: 500px; max-height: 88vh; overflow-y: auto;" data-stop>
+      <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);">
+        <div>
+          <h2 style="font-size: 20px; margin: 0 0 4px;">${t('新建公司')}</h2>
+          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('创建公司并指定一名管理员。')}</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-icon" aria-label="${esc(t('关闭'))}" data-act="org-create-close">${svg(['M18 6 6 18', 'M6 6l12 12'], 16)}</button>
+      </div>
+      ${state.orgCreateError ? `<div class="gw-flash gw-flash-err">${esc(state.orgCreateError)}</div>` : ''}
+      <div class="field">
+        <label for="org-name">${t('名称')}</label>
+        <input class="input" id="org-name" name="name" required>
+      </div>
+      <div class="field">
+        <label for="org-slug">slug</label>
+        <input class="input" id="org-slug" name="slug" required>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${t('访问地址里的短名，小写字母开头，只能用字母数字和连字符')}</span>
+      </div>
+      <div class="field">
+        <label for="org-contact-name">${t('联系人')}</label>
+        <input class="input" id="org-contact-name" name="contactName" required>
+      </div>
+      <div class="field">
+        <label for="org-contact-phone">${t('电话')}</label>
+        ${phoneField('org-contact-phone', '')}
+      </div>
+      <div class="field">
+        <label for="org-contact-email">${t('联系邮箱')}</label>
+        <input class="input" id="org-contact-email" name="contactEmail" type="email" required>
+      </div>
+      <div class="field">
+        <label for="org-address">${t('公司地址')}<span style="color: var(--muted-foreground); font-weight: 400;"> · ${t('选填')}</span></label>
+        <input class="input" id="org-address" name="address">
+      </div>
+      <div class="field">
+        <label for="org-website">${t('网站')}<span style="color: var(--muted-foreground); font-weight: 400;"> · ${t('选填')}</span></label>
+        <input class="input" id="org-website" name="website" placeholder="https://acme.com">
+      </div>
+      <div class="field">
+        <label for="org-admin-email">${t('管理员邮箱')}</label>
+        <input class="input" id="org-admin-email" name="adminEmail" type="email" required>
+      </div>
+      <div class="field">
+        <label for="org-admin-password">${t('管理员口令')}</label>
+        <input class="input" id="org-admin-password" name="adminPassword" type="password" minlength="10" required>
+      </div>
+      <div class="field">
+        <label for="org-admin-password2">${t('确认管理员口令')}</label>
+        <input class="input" id="org-admin-password2" name="adminPassword2" type="password" minlength="10" required>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2);">
+        <button type="button" class="btn btn-secondary" data-act="org-create-close">${t('取消')}</button>
+        <button type="submit" class="btn btn-primary" ${state.busy ? 'disabled' : ''}>${state.busy ? t('创建中…') : t('创建')}</button>
+      </div>
+    </form>
+  </div>`
+}
+
+function companiesPage() {
+  // 席位那一列拿掉了：席位在公司详情的订阅里管，列表看的是「这家是谁、订了什么、什么时候到期」。
+  const cols = 'minmax(160px, 1.8fr) 84px minmax(90px, 1fr) minmax(120px, 1fr) minmax(150px, 1.4fr) minmax(110px, 1fr) 104px'
+  const cell = (text) =>
+    `<span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(text || '—')}</span>`
+  const rows = (state.orgs || [])
+    .map((c) => {
+      const plan = c.plan || {}
+      return `<div class="satu-memberrow" style="cursor: pointer; grid-template-columns: ${cols};" data-act="go" data-href="/companies/${esc(c.id)}">
+        <div style="min-width: 0;">
+          <div style="font-size: 14px; font-weight: 600;">${esc(c.name)}</div>
+          <div style="font-size: 12px; color: var(--muted-foreground);">${esc(c.slug)}</div>
+        </div>
+        ${companyStatusTag(c.status)}
+        ${cell(c.contactName)}
+        ${cell(c.contactPhone)}
+        ${cell(c.contactEmail)}
+        ${cell(planLabel(plan))}
+        ${cell(plan.expiresAt ? dayISO(plan.expiresAt) : t('不限期'))}
+      </div>`
+    })
+    .join('')
+  return `
+    <div class="gw-page">
+      <div class="gw-page-inner">
+        <div style="display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4);">
+          <div>
+            <h1 style="font-size: 24px; margin: 0 0 4px;">${t('公司')}</h1>
+            <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('所有注册公司。点进去改资料、定套餐、分席位。')}</p>
+          </div>
+          <button type="button" class="btn btn-primary" style="flex: none;" data-act="org-create-open">${t('新建公司')}</button>
+        </div>
+        ${flashes()}
+        <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+          <div class="satu-memberhead" style="grid-template-columns: ${cols};">
+            <span>${t('公司')}</span><span>${t('状态')}</span><span>${t('联系人')}</span><span>${t('电话')}</span><span>${t('联系邮箱')}</span><span>${t('订阅套餐')}</span><span>${t('到期时间')}</span>
+          </div>
+          ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有公司')}</div>`}
+        </div>
+      </div>
+      ${orgCreateModal()}
+    </div>`
+}
+
+function fmtSize(n) {
+  const x = Number(n)
+  if (!Number.isFinite(x) || x < 0) return '—'
+  if (x < 1024) return x + ' B'
+  if (x < 1024 * 1024) return (x / 1024).toFixed(1) + ' KB'
+  return (x / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+function shaShort(h) {
+  const s = String(h || '')
+  return s ? s.slice(0, 12) : '—'
+}
+
+/**
+ * 上传示例。**先在 Linux 上打包**那一步不能省：包里带 esbuild 的原生二进制，在
+ * Mac 上打的解到席位机器上 tsx 加载不了它，bot 起不来。pack.mjs 会拦，但示例里
+ * 直接给对的做法，比让人先撞一次再看报错强。
+ */
+const UPLOAD_SNIPPET = `# 打包（Linux，架构要和席位机器一致）
+node bot/pack.mjs --upload "$GATEWAY_URL"
+# 或者手动传已有的包
+curl -sf -X PUT "$GATEWAY_URL/platform/bot-releases/$VERSION" \\
+  -H "Authorization: Bearer $GATEWAY_PLATFORM_TOKEN" \\
+  -H "X-Bot-Sha256: $(shasum -a 256 bot.tgz | cut -d' ' -f1)" \\
+  --data-binary @bot.tgz`
+
+/**
+ * 机器配置。两个 tab：机器管家、Bot 运行时。
+ *
+ * 两边是同一套东西——按版本发布的包、一张列表、一个新增表单——只是 kind 不同，
+ * 所以渲染共用 `releaseSection`，避免两份会各自漂移的相似代码。
+ */
+function releasesPage() {
+  const tab = state.machineTab === 'bot' ? 'bot' : 'manager'
+  const tabBtn = (id, label) =>
+    `<button type="button" class="btn ${tab === id ? 'btn-primary' : ''}" data-act="machine-tab" data-tab="${id}">${label}</button>`
+  const body =
+    tab === 'manager'
+      ? releaseSection({
+          kind: 'manager',
+          title: t('机器管家'),
+          hint: t('机器心跳时拿到期望版本，自己换版并在失败时回滚。留空表示跟最新发布走。'),
+          data: state.managerReleases,
+          desired: true,
+        })
+      : releaseSection({
+          kind: 'bot',
+          title: t('Bot 运行时'),
+          hint: t('部署席位时用最新版本；也可以在部署时指定某一版。'),
+          data: { releases: state.releases || [], latest: state.latestRelease, desired: '' },
+          desired: false,
+        })
+  return `
+    <div class="gw-page">
+      <div class="gw-page-inner">
+        <div>
+          <h1 style="font-size: 24px; margin: 0 0 4px;">${t('机器配置')}</h1>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('Gateway 只登记和分发发布包，自己不构建。包必须在 Linux 上打，架构要和席位机器一致。')}</p>
+          <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted-foreground);">${t('下载地址就是那台 Debian 拉包用的 URL，凭机器令牌访问（curl -H "Authorization: Bearer smt_…"）。管家自己会带上，这里给出来是为了能人工核对。')}</p>
+        </div>
+        ${flashes()}
+        <div style="display: flex; gap: var(--space-2);">
+          ${tabBtn('manager', t('机器管家'))}${tabBtn('bot', t('Bot 运行时'))}
+        </div>
+        ${body}
+      </div>
+    </div>`
+}
+
+function releaseRow(r, latest) {
+  // 下载地址永远给出来，**包括字节就在 Gateway 磁盘上的时候**：那台 Debian 上没有
+  // 别的地方能看到它，这一栏写「本机存储」等于没给。字节在哪儿降级成一行小字。
+  const dl = r.downloadUrl || r.url || ''
+  const from = r.url ? `${t('外部来源')} ${esc(r.url)}` : t('本机存储')
+  const where = `<span style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+      <span style="font-family: var(--font-mono, ui-monospace, monospace); word-break: break-all;">${esc(dl)}</span>
+      <span style="color: var(--muted-foreground); word-break: break-all;">${from}${dl ? ` · <button type="button" class="satu-linkbtn" data-act="copy-release-url" data-url="${esc(dl)}">${t('复制')}</button>` : ''}</span>
+    </span>`
+  return `<div class="satu-memberrow" style="grid-template-columns: 200px 90px 120px 1fr 150px;">
+    <span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all;">${esc(r.version)}${r.version === latest ? ` <span class="tag tag-accent">${t('最新')}</span>` : ''}</span>
+    <span style="font-size: 13px;">${esc(fmtSize(r.size))}</span>
+    <span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted-foreground);">${esc(shaShort(r.sha256))}</span>
+    <span style="font-size: 12px;">${where}</span>
+    <span style="font-size: 13px; color: var(--muted-foreground);">${esc(fmtTime(r.createdAt))}</span>
+  </div>`
+}
+
+function releaseSection({ kind, title, hint, data, desired }) {
+  const d = data || { releases: [], latest: null, desired: '' }
+  const rows = d.releases || []
+  const table = rows.length
+    ? `<div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover); overflow: hidden;">
+        <div class="satu-memberhead" style="grid-template-columns: 200px 90px 120px 1fr 150px;">
+          <span>${t('版本')}</span><span>${t('大小')}</span><span>sha256</span><span>${t('下载地址')}</span><span>${t('时间')}</span>
+        </div>
+        ${rows.map((r) => releaseRow(r, d.latest)).join('')}
+      </div>`
+    : `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground); border: 1px solid var(--border); border-radius: var(--radius-lg);">${t('还没有发布版本')}</div>`
+  // 期望版本只有管家有：bot 是部署时挑版本，管家是机器自己去追一个目标版本。
+  const desiredForm = desired
+    ? `<form data-form="manager-version" style="display: flex; gap: var(--space-2); align-items: flex-end;">
+        <div class="field" style="margin: 0; flex: 1;">
+          <label for="mgr-ver">${t('期望版本')}</label>
+          <input class="input" id="mgr-ver" name="managerVersion" value="${esc(d.desired || '')}" placeholder="${esc(t('留空 = 跟最新'))}" autocomplete="off">
+        </div>
+        <button type="submit" class="btn" ${state.busy ? 'disabled' : ''}>${t('保存')}</button>
+      </form>`
+    : ''
+  return `<div class="satu-panel" style="display: flex; flex-direction: column; gap: var(--space-3);">
+    <span class="satu-panel-title">${esc(title)}</span>
+    <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${esc(hint)}</p>
+    ${desiredForm}
+    ${table}
+    ${addReleaseForm(kind)}
+  </div>`
+}
+
+/**
+ * 新增版本。
+ *
+ * 四个字段都必填：**大小和 sha256 是拿来核对的，不是拿来记录的**。保存时 Gateway
+ * 会把包整个拉一遍,比对这两项、确认入口文件在,对不上就不入库——一条指向坏包的
+ * 记录会一路传染到席位机器上,而那时已经没人能上去看了。
+ */
+function addReleaseForm(kind) {
+  const busy = state.busy
+  return `<details ${state.addRelease === kind ? 'open' : ''}>
+    <summary style="cursor: pointer; font-size: 13px; color: var(--muted-foreground);">${t('新增版本')}</summary>
+    <form data-form="add-release" data-kind="${kind}" style="display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-3);">
+      <div style="display: flex; gap: var(--space-3); flex-wrap: wrap;">
+        <div class="field" style="margin: 0; flex: 1; min-width: 200px;">
+          <label for="ar-ver-${kind}">${t('版本号')}</label>
+          <input class="input" id="ar-ver-${kind}" name="version" required placeholder="0.1.0+abc1234-arm64" autocomplete="off">
+        </div>
+        <div class="field" style="margin: 0; width: 160px;">
+          <label for="ar-size-${kind}">${t('大小')}（${t('字节')}）</label>
+          <input class="input" id="ar-size-${kind}" name="size" required inputmode="numeric" placeholder="9376749" autocomplete="off">
+        </div>
+      </div>
+      <div class="field" style="margin: 0;">
+        <label for="ar-sha-${kind}">sha256</label>
+        <input class="input" id="ar-sha-${kind}" name="sha256" required placeholder="${esc(t('64 位十六进制'))}" autocomplete="off">
+      </div>
+      <div class="field" style="margin: 0;">
+        <label for="ar-url-${kind}">${t('下载地址')}</label>
+        <input class="input" id="ar-url-${kind}" name="url" required placeholder="https://…/${kind}-0.1.0.tgz" autocomplete="off">
+      </div>
+      <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('保存前会把包整个拉一遍，核对大小与 sha256、确认入口文件在。验不过不入库。')}</p>
+      <div><button type="submit" class="btn btn-primary" ${busy ? 'disabled' : ''}>${busy ? t('验证中…') : t('验证并保存')}</button></div>
+    </form>
+  </details>`
+}
+
+function companyDetailPage() {
+  const c = state.org
+  if (!c) {
+    return `<div class="gw-page"><div class="gw-page-inner">${flashes()}<p style="color: var(--muted-foreground);">${t('载入中…')}</p></div></div>`
+  }
+  const plan = state.plan || { seats: 0, used: 0 }
+  const seats = state.seats || { total: plan.seats || 0, used: plan.used || 0 }
+  const members = state.accounts || []
+  const billing = state.billing || { plan: {}, invoices: [] }
+  const bplan = billing.plan || {}
+  const invoices = Array.isArray(billing.invoices) ? billing.invoices : []
+  const used = plan.used ?? seats.used ?? 0
+  const total = plan.seats ?? seats.total ?? 0
+  const envCols = 'minmax(170px, 2fr) 88px 72px minmax(90px, 1fr) minmax(120px, 1.3fr) 72px'
+  const memberRows = members
+    .map((m) => {
+      const st = MEMBER_STATUS[m.status] || MEMBER_STATUS.active
+      const runtimes = Array.isArray(m.runtimes) ? m.runtimes : []
+      const env = runtimes.length
+        ? runtimes.map((rt) => esc(rt.botVersion || rt.botId || rt.status || '—')).join(' · ')
+        : t('未部署')
+      return `<div class="satu-memberrow" style="grid-template-columns: ${envCols};">
+      <button type="button" class="satu-linkbtn" data-act="seat-open" data-id="${esc(m.id)}" style="min-width: 0; display: flex; align-items: center; gap: var(--space-3); text-align: left; padding: 0; border: 0; background: transparent;">
+        <span class="satu-avatar" style="background: var(--color-neutral-300); color: var(--color-neutral-800);">${esc((m.name || m.email || '·').slice(0, 1).toUpperCase())}</span>
+        <div style="min-width: 0;">
+          <div style="font-size: 13.5px; font-weight: 600;">${esc(m.name || m.email)}</div>
+          <div style="font-size: 12px; color: var(--muted-foreground);">${esc(m.email)}</div>
+        </div>
+      </button>
+      ${roleTag(m.role)}
+      <span class="tag ${st.tag}">${t(st.label)}</span>
+      <span style="font-size: 13px; color: var(--muted-foreground);">${esc(ago(m.lastSeenAt))}</span>
+      <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${env}</span>
+      <button type="button" class="satu-linkbtn" data-act="seat-open" data-id="${esc(m.id)}">${t('查看')}</button>
+    </div>`
+    })
+    .join('')
+  const invoiceRows = invoices
+    .map(
+      (b) => `<div class="satu-billrow">
+        <span style="font-size: 13.5px;">${esc(b.period)}</span>
+        <span style="font-size: 13.5px;">${esc(b.amount)}</span>
+        <span class="tag tag-accent-2">${esc(b.status)}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(b.paid)}</span>
+        <span></span>
+      </div>`,
+    )
+    .join('')
+  const empty = (msg) =>
+    `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${esc(msg)}</div>`
+  return `
+    <div class="gw-page">
+      <div class="gw-page-inner">
+        <div>
+          <h1 style="font-size: 24px; margin: 0 0 4px;">${esc(c.name || t('公司详情'))}</h1>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(c.slug || '')}</p>
+        </div>
+        ${flashes()}
+        <form class="satu-panel" data-form="org-profile" data-id="${esc(c.id)}" style="gap: var(--space-4);">
+          <span class="satu-panel-title">${t('公司信息')}</span>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-3);">
+            <div class="field" style="margin: 0;">
+              <label for="cd-name">${t('名称')}</label>
+              <input class="input" id="cd-name" name="name" value="${esc(c.name || '')}" required>
+            </div>
+            <div class="field" style="margin: 0;">
+              <label for="cd-slug">slug</label>
+              <input class="input" id="cd-slug" name="slug" value="${esc(c.slug || '')}" required>
+            </div>
+            <div class="field" style="margin: 0;">
+              <label>${t('状态')}</label>
+              <div style="display: flex; align-items: center; gap: var(--space-3);">
+                ${companyStatusTag(c.status)}
+                <button type="button" class="btn btn-secondary" data-act="org-status" data-id="${esc(c.id)}" data-next="${c.status === 'disabled' ? 'active' : 'disabled'}">
+                  ${c.status === 'disabled' ? t('启用') : t('停用')}
+                </button>
+              </div>
+              <span style="font-size: 12px; color: var(--muted-foreground);">${t('状态单独生效，不用保存这张表单。停用后这家公司的人一律登不进来')}</span>
+            </div>
+            <div class="field" style="margin: 0;">
+              <label for="cd-contact-name">${t('联系人')}</label>
+              <input class="input" id="cd-contact-name" name="contactName" value="${esc(c.contactName || '')}" required>
+            </div>
+            <div class="field" style="margin: 0;">
+              <label for="cd-contact-phone">${t('电话')}</label>
+              ${phoneField('cd-contact-phone', c.contactPhone)}
+            </div>
+            <div class="field" style="margin: 0;">
+              <label for="cd-contact-email">${t('联系邮箱')}</label>
+              <input class="input" id="cd-contact-email" name="contactEmail" type="email" value="${esc(c.contactEmail || '')}" required>
+            </div>
+            <div class="field" style="margin: 0;">
+              <label for="cd-address">${t('公司地址')}<span style="color: var(--muted-foreground); font-weight: 400;"> · ${t('选填')}</span></label>
+              <input class="input" id="cd-address" name="address" value="${esc(c.address || '')}">
+            </div>
+            <div class="field" style="margin: 0;">
+              <label for="cd-website">${t('网站')}<span style="color: var(--muted-foreground); font-weight: 400;"> · ${t('选填')}</span></label>
+              <input class="input" id="cd-website" name="website" value="${esc(c.website || '')}" placeholder="https://acme.com">
+            </div>
+            <div class="field" style="margin: 0;">
+              <label for="cd-url">${t('访问地址')}</label>
+              <input class="input" id="cd-url" name="accessUrl" value="${esc(c.accessUrl || '')}" placeholder="https://acme.satuwork.com">
+            </div>
+          </div>
+          <div class="satu-kv"><span>id</span><span>${esc(c.id || '—')}</span></div>
+          <div class="satu-kv"><span>${t('创建时间')}</span><span>${esc(fmtTime(c.createdAt))}</span></div>
+          <div class="satu-kv"><span>machineId</span><span>${esc(c.machineId || '—')}</span></div>
+          <div style="display: flex; justify-content: flex-end;">
+            <button type="submit" class="btn btn-primary" ${state.busy ? 'disabled' : ''}>${t('保存')}</button>
+          </div>
+        </form>
+        ${machinePanel(c.id)}
+        <div style="display: flex; flex-direction: column; gap: var(--space-3);">
+          <div style="display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;">
+            <h2 style="font-size: 18px; margin: 0;">${t('成员')}</h2>
+            <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
+              <span style="font-size: 12px; color: var(--muted-foreground);">${t(`平台最新 ${esc(state.latestRelease || t('还没有发布版本'))}`, `Latest ${esc(state.latestRelease || t('还没有发布版本'))}`)} · ${t(`${members.length} 人`, `${members.length} people`)} · ${t('已用')} ${t(`${esc(used)} / ${esc(total)} 席位`, `${esc(used)} / ${esc(total)} seats`)}</span>
+            </div>
+          </div>
+          <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+            <div class="satu-memberhead" style="grid-template-columns: ${envCols};">
+              <span>${t('成员')}</span><span>${t('角色')}</span><span>${t('状态')}</span><span>${t('最近活跃')}</span><span>${t('环境')}</span><span></span>
+            </div>
+            ${memberRows || empty(t('还没有成员'))}
+          </div>
+        </div>
+        <div class="satu-panel">
+          <span class="satu-panel-title">${t('订阅')}</span>
+          <div style="display: flex; align-items: baseline; gap: var(--space-2);">
+            <span style="font-family: var(--font-heading); font-size: 26px; line-height: 1;">${esc(planLabel(plan) || t('无套餐'))}</span>
+            ${plan.expiresAt && plan.expiresAt < Date.now() ? `<span class="tag tag-neutral">${t('已到期')}</span>` : ''}
+          </div>
+          <div class="satu-kv"><span>${t('席位')}</span><span>${esc(used)} / ${esc(total)}</span></div>
+          <div class="satu-kv"><span>${t('账期')}</span><span>${esc(bplan.period || '—')}</span></div>
+          <div class="satu-kv"><span>${t('到期时间')}</span><span>${esc(plan.expiresAt ? dayISO(plan.expiresAt) : t('不限期'))}</span></div>
+          <div class="satu-kv"><span>${t('周期费用')}</span><span>${esc(bplan.amount || '—')}</span></div>
+          <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('订阅按订单走：套餐、席位、到期时间都跟着订单，改这些请到订单页下单。')}</p>
+        </div>
+        ${balancePanel()}
+        ${topupRecordsPanel()}
+        <div style="display: flex; flex-direction: column; gap: var(--space-3);">
+          <h2 style="font-size: 18px; margin: 0;">${t('订阅账单')}</h2>
+          <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+            <div class="satu-billhead">
+              <span>${t('账期')}</span><span>${t('金额')}</span><span>${t('状态')}</span><span>${t('付款时间')}</span><span></span>
+            </div>
+            ${invoiceRows || empty(t('还没有订阅账单。支付接上之后，账期会列在这里。'))}
+          </div>
+        </div>
+        ${seatEnvModal()}
+      </div>
+    </div>`
+}
+
+function machinePanel(orgId) {
+  const list = state.machines || []
+  const cap = state.machineCapacity || { accounts: 0, max: 0 }
+  const code = state.pairingCode
+  // 配对码只在生成的那一刻拿得到，刷新页面就没了——所以要显眼，还要能一键复制。
+  const codeBox = code
+    ? `<div class="satu-panel" style="margin: 0; background: var(--muted);">
+        <div class="satu-kv"><span>${t('配对码')}</span><span style="font-family: var(--font-mono); font-size: 16px; letter-spacing: 1px;">${esc(code.code)}</span></div>
+        <div class="satu-kv"><span>${t('有效期至')}</span><span>${esc(new Date(code.expiresAt).toLocaleString())}</span></div>
+        <p style="margin: var(--space-2) 0 6px; font-size: 12px; color: var(--muted-foreground);">${t('在那台 Debian 上用 root 跑这一条，装完即配对：')}</p>
+        <pre style="margin: 0; padding: 10px; overflow-x: auto; background: var(--background); border-radius: var(--radius); font-size: 12px;"><code>${esc(code.installCommand)}</code></pre>
+        <p style="margin: var(--space-2) 0 0; font-size: 12px; color: var(--muted-foreground);">${t('同一个地址重跑 = 重新配对那一台；换一台机器跑 = 新增一台。')}</p>
+        <div style="margin-top: var(--space-2);"><button type="button" class="satu-linkbtn" data-act="copy-install">${t('复制命令')}</button></div>
+      </div>`
+    : ''
+  const cards = list.length
+    ? list.map((m) => machineCard(orgId, m)).join('')
+    : `<p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('还没有配对任何机器')}</p>`
+  return `<div class="satu-panel">
+    <span class="satu-panel-title">${t('运行机器')}</span>
+    <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('装上机器管家并配对之后，建账号、装包、起桌面全归它——Gateway 不保存任何登录这台机器的凭据。')}</p>
+    <div class="satu-kv"><span>${t('账号位')}</span><span>${cap.accounts} / ${cap.max}${cap.max && cap.accounts >= cap.max ? ' · ' + t('已满，新员工无法部署') : ''}</span></div>
+    ${cards}
+    ${list.length ? timezoneOptions() : ''}
+    ${codeBox}
+    <div><button type="button" class="btn btn-primary" data-act="pairing-code" data-id="${esc(orgId)}" ${state.busy ? 'disabled' : ''}>${list.length ? t('新增 / 重配机器') : t('生成配对码')}</button></div>
+  </div>`
+}
+
+/**
+ * 通联状态 → 一盏灯 + 一句话。
+ *
+ * **判据是心跳的新旧，不是 `lastError`。** 能报错说明线是通的；把两件事塞进同一盏灯，
+ * 「机器失联」和「机器在线但升级失败」就长成一个样子，而这两种的处置完全不同。错误
+ * 另有一行 lastError 管。
+ *
+ * 中间那档 `stale` 不是凑数：换版重启本身就会断几十秒，一超时就报红会让每次自升级都
+ * 闪一次红灯，几次之后没人再信这盏灯。
+ */
+const LINK_TEXT = {
+  online: () => t('在线'),
+  stale: () => t('心跳迟了'),
+  offline: () => t('失联'),
+  unpaired: () => t('还没有配对'),
+  unknown: () => t('状态未知'),
+}
+
+/** 「多久之前」。秒级起步——心跳 30 秒一轮，只报到分钟就看不出刚刚断没断。 */
+function sinceMs(ms) {
+  if (ms == null) return ''
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return t(`${sec} 秒前`, `${sec}s ago`)
+  const min = Math.floor(sec / 60)
+  if (min < 60) return t(`${min} 分钟前`, `${min} min ago`)
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return t(`${hr} 小时前`, `${hr} h ago`)
+  return t(`${Math.floor(hr / 24)} 天前`, `${Math.floor(hr / 24)} d ago`)
+}
+
+/**
+ * 卡片的头一行：灯、编号、短码、状态。
+ *
+ * **编号和短码是两样东西。** 「1 号机」是给人照着念的，中间删掉一台后面就会往前挪；
+ * 要唯一地指一台得用 id，所以短码那颗按钮复制的是**完整 id**，显示的只是前 8 位——
+ * 完整 UUID 摆在卡片头上，占一行，还没人读得下来。
+ */
+function machineHead(card, m) {
+  // **「后端没给这个字段」不等于「机器没配对」。** 这两件事差得最远，而合成一个兜底
+  // 值的代价是：一台心跳正常、版本刚升完的机器，界面上写着「还没有配对」。开发时
+  // 前端比后端新一步就会撞上（浏览器读的是磁盘上的 app.js，Gateway 要重启才换代码）。
+  //
+  // `paired` 是老响应里就有的，可信；`link` 缺了就老实说不知道，不替它猜一个。
+  const link = m.link || (m.paired === false ? 'unpaired' : 'unknown')
+  const label = (LINK_TEXT[link] || LINK_TEXT.unknown)()
+  // 「还没有配对」本身就说完了，再缀一个「从未」是废话；配对过却没心跳过才要点出来。
+  // 状态未知时也不缀——那个数字同样来自缺席的那批字段。
+  const when =
+    link === 'unpaired' || link === 'unknown'
+      ? ''
+      : m.heartbeatAge == null
+        ? ' · ' + t('从未心跳')
+        : ' · ' + sinceMs(m.heartbeatAge)
+  const short = String(m.id || '').slice(0, 8)
+  return `<div class="satu-machinehead">
+    <span class="satu-linkdot" data-link="${esc(link)}" title="${esc(label)}"></span>
+    ${/* 编号缺席时整个略过，不画「机器 ?」——一个问号既指代不了机器，也说不清是哪儿出了问题。 */ ''}
+    ${card.no ? `<span class="satu-machineno">${t('机器')} ${esc(card.no)}</span>` : ''}
+    ${short ? `<button type="button" class="satu-linkbtn satu-machineid" data-act="copy-machine-id" data-machine="${esc(m.id)}" title="${t('复制完整编号')}">${esc(short)}</button>` : ''}
+    <span style="font-size: 13px; color: var(--muted-foreground);">${esc(label)}${esc(when)}</span>
+  </div>`
+}
+
+/**
+ * 一台机器一张卡：地址、容量、两行版本、各自的升级按钮。
+ *
+ * 「已用」是**激活账号数**，不是席位数——一个员工的多个 bot 落在同一台机器上，只占
+ * 一个账号位。席位数另外标出来，运维时想知道机器上到底有多少个进程。
+ */
+function machineCard(orgId, card) {
+  const m = card.machine || {}
+  const full = card.full
+  return `<div class="satu-panel" style="margin: 0; background: var(--muted);">
+    ${machineHead(card, m)}
+    <div class="satu-kv"><span>${t('地址')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; word-break: break-all;">
+      ${esc(m.host || '—')}
+      ${card.seats ? '' : `<button type="button" class="satu-linkbtn" data-act="machine-remove" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('移除')}</button>`}
+    </span></div>
+    <div class="satu-kv"><span>${t('账号位')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
+      ${m.paired ? `${card.accounts} / ${card.maxAccounts}` : `<span style="color: var(--muted-foreground);">${t('未配对，不提供账号位')}</span>`}${full ? ` <span class="tag">${t('已满')}</span>` : ''} · ${t('席位')} ${card.seats}
+      <form data-form="machine-capacity" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" style="display: inline-flex; gap: 6px; align-items: center;">
+        <input class="input" name="maxAccounts" type="number" min="1" max="1000" value="${esc(card.maxAccounts)}" style="width: 84px;">
+        <button type="submit" class="satu-linkbtn" ${state.busy ? 'disabled' : ''}>${t('改容量')}</button>
+      </form>
+    </span></div>
+    <div class="satu-kv"><span>${t('最近心跳')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
+      ${m.lastHeartbeatAt ? esc(new Date(m.lastHeartbeatAt).toLocaleString()) : t('还没有')}
+      ${/* 没有 SSH 的时候，「这台机器怎么了」只能靠日志。管家自己那条和各席位的 bot
+           那条答的不是同一个问题，所以两个都要能选。 */ ''}
+      ${m.paired ? `<button type="button" class="satu-linkbtn" data-act="machine-logs" data-id="${esc(orgId)}" data-machine="${esc(m.id)}">${t('查看日志')}</button>` : ''}
+    </span></div>
+    ${timezoneRow(orgId, m, card)}
+    ${managerVersionRow(orgId, m, card)}
+    ${botVersionRow(orgId, card)}
+    ${m.lastError ? `<div class="satu-kv"><span>lastError</span><span>${esc(m.lastError)}</span></div>` : ''}
+    <form data-form="machine" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" style="display: flex; gap: var(--space-2); align-items: flex-end;">
+      <div class="field" style="margin: 0; flex: 1;">
+        <label>${t('管家地址')}</label>
+        <input class="input" name="host" value="${esc(m.host || '')}" placeholder="http://10.0.0.12:8443" autocomplete="off">
+      </div>
+      <button type="submit" class="btn" ${state.busy ? 'disabled' : ''}>${t('保存')}</button>
+    </form>
+  </div>`
+}
+
+/**
+ * 机器时区行。
+ *
+ * 和「升级」是同一条路：Gateway 没有登录这台机器的凭据，填进去只是**把期望时区钉在
+ * 这台机器上**，真正 `timedatectl set-timezone` 的是机器上的管家，下一轮心跳才知道
+ * 成没成。所以这里显示的是**机器自报的实际时区**，指令还没落地时另标一句，不写成
+ * 「已生效」。
+ *
+ * 留空 = 不再管这台机器的时区（不会把机器改回去）。
+ */
+function timezoneRow(orgId, m, card) {
+  const cur = m.currentTimezone || (m.paired ? t('机器没报') : '—')
+  const note = card.timezonePending
+    ? ` · ${t('已下指令，等机器改')} → ${esc(m.timezone || '')}`
+    : m.timezone
+      ? ` · ${t('已生效')}`
+      : ` · ${t('没有指定，跟机器现状')}`
+  return `<div class="satu-kv"><span>${t('时区')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
+    ${esc(cur)}${note}
+    <form data-form="machine-timezone" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" style="display: inline-flex; gap: 6px; align-items: center;">
+      <input class="input" name="timezone" list="satu-timezones" value="${esc(m.timezone || '')}" placeholder="Asia/Shanghai" autocomplete="off" spellcheck="false" style="width: 200px;">
+      <button type="submit" class="satu-linkbtn" ${state.busy ? 'disabled' : ''}>${t('改时区')}</button>
+    </form>
+  </span></div>`
+}
+
+/**
+ * 时区候选。浏览器自己就有全套 IANA 表（`Intl.supportedValuesOf`），不必在前端塞一份
+ * 会过期的清单。取不到就退回几个常用的——datalist 只是补全，手打任何合法名字都收，
+ * 真正认不认由 Gateway 判。
+ *
+ * **整个面板只出一份**（不是每台机器一份）：id 要唯一，而且这张表有四百多项，
+ * 多机公司逐台复制一遍纯属白搭 DOM。
+ */
+let timezoneList = null
+function timezoneOptions() {
+  if (!timezoneList) {
+    try {
+      timezoneList = Intl.supportedValuesOf('timeZone')
+    } catch {
+      timezoneList = ['Asia/Shanghai', 'Asia/Singapore', 'Asia/Tokyo', 'Asia/Kolkata', 'Europe/London', 'UTC']
+    }
+  }
+  return `<datalist id="satu-timezones">${timezoneList.map((z) => `<option value="${esc(z)}"></option>`).join('')}</datalist>`
+}
+
+/**
+ * 管家版本行。
+ *
+ * 「升级」只是**把期望版本钉到这台机器上**——真正换版由机器在下一轮心跳里自己做：
+ * 它要挑不忙的时候、要跑自检、失败要回滚，这些只有机器上做得了。所以按下之后显示
+ * 的是「等机器换版」，不是「已升级」。
+ */
+function managerVersionRow(orgId, m, card) {
+  const cur = m.managerVersion || '—'
+  const latest = state.managerLatest
+  const canUp = card.managerOutdated
+  const note = card.managerPending
+    ? ` · ${t('已下指令，等机器换版')} → ${esc(card.managerDesired || '')}`
+    : m.protocolTooOld
+      ? ' · ' + t('版本过旧，等它自升级')
+      : canUp
+        ? ` · ${t('最新')} ${esc(latest)}`
+        : ''
+  const btn = canUp
+    ? `<button type="button" class="btn" data-act="upgrade-manager" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('升级')}</button>`
+    : ''
+  return `<div class="satu-kv"><span>${t('管家版本')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${esc(cur)}${note}${btn}</span></div>`
+}
+
+/**
+ * Bot 运行时版本行。
+ *
+ * 一台机器上可以同时躺着几个版本——有的席位部署得早、有的重新部署过。混版本本身
+ * 不是错误，但得看得见，不然「升级完了吗」永远说不清。所以列的是清单加席位数。
+ */
+function botVersionRow(orgId, card) {
+  const list = card.botVersions || []
+  const text = list.length
+    ? list.map((v) => `${esc(v.version || t('未部署'))} × ${v.seats}`).join('、')
+    : t('还没有部署席位')
+  const canUp = card.botOutdated
+  const note = canUp ? ` · ${t('最新')} ${esc(state.botLatest || '')}` : ''
+  const btn = canUp
+    ? `<button type="button" class="btn" data-act="upgrade-bot" data-id="${esc(orgId)}" ${state.updatingRuntime ? 'disabled' : ''}>${state.updatingRuntime ? t('更新中…') : t('全部升级')}</button>`
+    : ''
+  return `<div class="satu-kv"><span>${t('Bot 运行时')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${text}${note}${btn}</span></div>`
+}
+
+function botNameOfId(id) {
+  const b = (state.bots || []).find((x) => x.id === id)
+  return (b && b.name) || id || '—'
+}
+
+function seatEnvModal() {
+  if (!state.seatMember) return ''
+  const m = state.seatMember
+  const runtimes = Array.isArray(state.seatRuntimes) ? state.seatRuntimes : []
+  const body = runtimes.length
+    ? runtimes
+        .map((rt) => {
+          const pw = rt && rt.vncPassword ? (state.seatReveal ? rt.vncPassword : '••••••••') : '—'
+          return `<div class="satu-panel" style="margin: 0;">
+        <span class="satu-panel-title">${esc(botNameOfId(rt.botId))}</span>
+        <div class="satu-kv"><span>botId</span><span>${esc(rt.botId || '—')}</span></div>
+        <div class="satu-kv"><span>linuxUser</span><span>${esc(rt.linuxUser || '—')}</span></div>
+        <div class="satu-kv"><span>seatId</span><span style="word-break: break-all;">${esc(rt.seatId || '—')}</span></div>
+        <div class="satu-kv"><span>${t('共享目录')}</span><span style="word-break: break-all;">${esc(rt.sharedDir || '—')}</span></div>
+        <div class="satu-kv"><span>DISPLAY</span><span>${esc(rt.display != null ? ':' + rt.display : '—')}</span></div>
+        <div class="satu-kv"><span>noVNC</span><span style="word-break: break-all;">${esc(rt.novncUrl || '—')}</span></div>
+        <div class="satu-kv"><span>${t('VNC 密码')}</span><span>${esc(pw)} <button type="button" class="satu-linkbtn" data-act="seat-reveal">${state.seatReveal ? t('隐藏') : t('显示')}</button></span></div>
+        <div class="satu-kv"><span>${t('状态')}</span><span>${esc(rt.status || '—')}</span></div>
+        <div class="satu-kv"><span>${t('Bot 版本')}</span><span>${esc(rt.botVersion || t('未部署'))}</span></div>
+        ${rt.lastError ? `<div class="satu-kv"><span>lastError</span><span>${esc(rt.lastError)}</span></div>` : ''}
+      </div>`
+        })
+        .join('') +
+      `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('x11vnc 只听 localhost；noVNC 走内网 HTTP。不要当成公网安全。')}</p>`
+    : `<p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${state.seatError || t('还没有部署。员工打开某个 Bot 后可以点「部署这个 Bot」。')}</p>`
+  return `<div class="gw-modal-backdrop" data-act="seat-close">
+    <div class="gw-modal" style="max-width: 520px;" data-stop>
+      <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);">
+        <div>
+          <h2 style="font-size: 20px; margin: 0 0 4px;">${t('员工环境')}</h2>
+          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${esc(m.name || m.email)} · ${esc(m.email)}</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-icon" aria-label="${esc(t('关闭'))}" data-act="seat-close">${svg(['M18 6 6 18', 'M6 6l12 12'], 16)}</button>
+      </div>
+      ${body}
+    </div>
+  </div>`
+}

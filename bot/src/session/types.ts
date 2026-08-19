@@ -96,6 +96,18 @@ export interface SessionEventMap {
     model: string
     system: string
     tools: { name: string; description: string }[]
+    /** 这个模型的上下文窗口。目录没拉到就没有这个字段。 */
+    contextWindow?: number
+    /**
+     * 提示词各段占多少 token（估算）。
+     *
+     * **只有 bot 这边算得了**：事件里的 `tools` 只留了名字和描述，而参数表通常比描述
+     * 还大，界面拿这份去估会把工具那段算漏一大半；`system` 里的 Skill 正文同理，拼完
+     * 再切字符串既脆又白算一遍。所以在拼提示词的地方顺手量一次，量完带出来。
+     *
+     * 老日志没有这个字段——界面会退回只报总量，不编一个分段出来。
+     */
+    sections?: { system: number; skills: number; builtinTools: number; mcpTools: number }
   }
 
   'user/message': { message: Message; source: MessageSource }

@@ -96,9 +96,9 @@ async function tryRun(file: string, args: string[], timeout = 8000): Promise<str
  * 部署脚本的环境里有席位票、API key、VNC 口令，任何一个被打进 journal 都会跟着这份
  * 报告跑到浏览器里。宁可多盖几个字，也不能漏一个。
  */
-function scrub(line: string): string {
+export function scrub(line: string): string {
   return line
-    .replace(/\b(sat_|smt_|sk-|Bearer\s+)[A-Za-z0-9._-]{8,}/g, '$1***')
+    .replace(/\b(sat_|smt_|sk_sw_|sk-|Bearer\s+)[A-Za-z0-9._-]{8,}/g, '$1***')
     .replace(/\b(GATEWAY_TOKEN|GATEWAY_API_KEY|VNC_PASSWORD|password|passwd)\s*[=:]\s*\S+/gi, '$1=***')
     .replace(/\beyJ[A-Za-z0-9._-]{20,}/g, 'eyJ***')
 }

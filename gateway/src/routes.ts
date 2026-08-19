@@ -848,8 +848,20 @@ async function machineCard(
     .map(([version, n]) => ({ version: version || null, seats: n }))
     .sort((a, b) => b.seats - a.seats)
   const desired = (await desiredManagerRelease(db, machine))?.version ?? null
+  // 席位清单给平台端的日志选择器用：要看某个席位的 bot 日志，得先知道有哪些席位。
+  const seatList = await Promise.all(
+    seatRows
+      .filter((r) => r.status !== 'none')
+      .map(async (r) => ({
+        seatId: r.seatId,
+        botId: r.botId,
+        linuxUser: r.linuxUser,
+        who: (await db.account(r.accountId))?.email ?? r.accountId,
+      })),
+  )
   return {
     no,
+    seatList,
     machine: ownerMachine(machine),
     accounts,
     maxAccounts: machine.maxAccounts,
@@ -986,6 +998,31 @@ async function seatTargetFor(db: Db, account: Account, botId: string): Promise<S
     host: await instanceHostFor(account, db, botId),
     machineToken: await machineTokenFor(db, account, botId),
   }
+}
+
+/**
+ * **管家自己**那一层的地址，不是 bot 的。
+ *
+ * `instances.host` 长这样：`http://机器:8443/seats/<seatId>/bot`——它是给反代 bot 用
+ * 的完整前缀。拿它再去拼 `/seats/:id/diag`，出来的是
+ * `…/seats/X/bot/seats/X/diag`，管家把它当成「转给 bot 的路径」原样递下去，bot 回
+ * 404。席位诊断从上线起就是这么坏的，而 404 长得像「这台机器没这个接口」，不像
+ * 「地址拼错了」。
+ *
+ * 管家的地址只有一个来源：机器记录的 host。
+ */
+async function managerTargetFor(
+  db: Db,
+  account: Account,
+  botId: string,
+): Promise<{ base: string; seatId: string; machineToken: string | undefined }> {
+  requireSeat(account)
+  if (!botId) throw new HttpError(400, 'botId 不能为空')
+  const runtime = await db.seatRuntime(account.id, botId)
+  if (!runtime) throw new HttpError(404, '还没有部署')
+  const machine = await db.machine(runtime.machineId)
+  if (!machine?.host) throw new HttpError(503, INSTANCE_DOWN)
+  return { base: machineBase(machine.host), seatId: runtime.seatId, machineToken: machine.token || undefined }
 }
 
 async function seatTargetForSession(db: Db, account: Account, sessionId: string): Promise<SeatTarget> {
@@ -1162,7 +1199,7 @@ function defaultIconFor(scope: Scope): string {
   return scope === 'global' ? 'g-core' : 'c-bot'
 }
 const DEFAULT_BOT_PROMPT =
-  '你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间或精确计算时调用工具，不要凭猜测。'
+  '你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间、查看或修改文件、执行命令时调用工具，不要凭猜测。'
 const DEFAULT_BOT_PROVIDER = 'deepseek'
 const DEFAULT_BOT_MODEL = 'deepseek-v4-flash'
 
@@ -2813,6 +2850,44 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   })
 
   /**
+   * 平台端看机器上的日志：不带 seatId 是**管家自己**的，带了是那个席位上 bot 的。
+   *
+   * 两者回答的问题不一样，缺一不可：部署失败、升级卡住、配对回拨不通只写在管家的
+   * journal 里；某一轮为什么不结束只写在 bot 的。
+   *
+   * **走审计。** 席位的日志里有员工的对话正文和 bot 执行过的命令——这和「看别人的
+   * 屏幕」是同一类动作，那条已经在审计里了，这条没有理由例外。
+   *
+   * seatId 必须是**这台机器上**的：它会进 systemd 单元名，不能拿别处的值来拼。
+   */
+  router.get('/platform/orgs/:id/machines/:machineId/logs', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const company = await db.company(req.params.id)
+    if (!company) throw new HttpError(404, '公司不存在')
+    const machine = await machineOfOrg(db, company.id, req.params.machineId)
+    if (!machine?.host) throw new HttpError(503, INSTANCE_DOWN)
+    const seatId = (req.query.get('seatId') || '').trim()
+    if (seatId) {
+      const rows = await db.seatRuntimesOfMachine(machine.id)
+      if (!rows.some((r) => r.seatId === seatId)) throw new HttpError(404, '这台机器上没有这个席位')
+    }
+    const lines = Math.min(2000, Math.max(1, Math.trunc(Number(req.query.get('lines')) || 200)))
+    const follow = req.query.get('follow') === '1'
+    const base = machineBase(machine.host)
+    const path = seatId ? `/seats/${encodeURIComponent(seatId)}/logs` : '/logs'
+    await db.audit({
+      companyId: company.id,
+      accountId: account.id,
+      action: 'machine.logs',
+      detail: { machineId: machine.id, seatId: seatId || null, follow },
+    })
+    const url = `${base}${path}?lines=${lines}${follow ? '&follow=1' : ''}`
+    if (follow) await proxySse(req, res, url, undefined, machine.token || undefined)
+    else await proxyJson(res, 'GET', url, undefined, undefined, machine.token || undefined)
+  })
+
+  /**
    * 移除一台机器的登记。
    *
    * **只是从 Gateway 上抹掉这条记录**，不碰机器本身——那上面的管家还跑着，要停得
@@ -3937,22 +4012,31 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
    */
   router.get('/runtime/diag', async (req, res) => {
     const account = await requireUser(req, db, keys)
-    requireSeat(account)
-    const botId = (req.query.get('botId') || '').trim()
-    if (!botId) throw new HttpError(400, 'botId 不能为空')
-    const runtime = await db.seatRuntime(account.id, botId)
-    if (!runtime) throw new HttpError(404, '还没有部署')
-    const target = await seatTargetFor(db, account, botId)
+    const t = await managerTargetFor(db, account, (req.query.get('botId') || '').trim())
     const lines = Number(req.query.get('lines') || 40)
     const q = Number.isFinite(lines) ? `?lines=${Math.min(200, Math.max(1, Math.trunc(lines)))}` : ''
-    await proxyJson(
-      res,
-      'GET',
-      `${target.host}/seats/${encodeURIComponent(runtime.seatId)}/diag${q}`,
-      undefined,
-      undefined,
-      target.machineToken,
-    )
+    await proxyJson(res, 'GET', `${t.base}/seats/${encodeURIComponent(t.seatId)}/diag${q}`, undefined, undefined, t.machineToken)
+  })
+
+  /**
+   * 席位 bot 的运行日志。`follow=1` 跟着滚（SSE），否则给最近 N 行。
+   *
+   * 和 diag 是一对：那条回答「它活着吗」，这条回答「它卡在哪一步」。这一层最贵的
+   * 故障恰恰都不报错——单元 active、端口有人听，只是那一轮永远不结束——不看日志
+   * 就只能靠猜，而没有 SSH 的时候连猜的依据都没有。
+   *
+   * 只看**自己席位**的：seatRuntime 按 (account.id, botId) 查，管理员也调不出别人的。
+   * 日志里有对话正文和 bash 跑过的命令，这条线不该松。机器票留在 Gateway，浏览器
+   * 只拿自己的席位票——它是管家的 root 控制面凭据，一步都不能往下放。
+   */
+  router.get('/runtime/logs', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const t = await managerTargetFor(db, account, (req.query.get('botId') || '').trim())
+    const lines = Math.min(2000, Math.max(1, Math.trunc(Number(req.query.get('lines')) || 200)))
+    const follow = req.query.get('follow') === '1'
+    const url = `${t.base}/seats/${encodeURIComponent(t.seatId)}/logs?lines=${lines}${follow ? '&follow=1' : ''}`
+    if (follow) await proxySse(req, res, url, undefined, t.machineToken)
+    else await proxyJson(res, 'GET', url, undefined, undefined, t.machineToken)
   })
 
   router.post('/runtime/deploy', async (req, res) => {
@@ -4044,11 +4128,37 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     const account = await requireUser(req, db, keys)
     const target = await seatTargetForSession(db, account, req.params.id)
     const after = req.query.get('after')
-    const q = after != null && after !== '' ? `?after=${encodeURIComponent(after)}` : ''
+    // tail：头一次连上只要最近几轮，别把整段历史推一遍（见 bot 的 replay.ts）。
+    const tail = Math.min(50, Math.max(0, Math.trunc(Number(req.query.get('tail')) || 0)))
+    const parts: string[] = []
+    if (after != null && after !== '') parts.push(`after=${encodeURIComponent(after)}`)
+    if (tail > 0) parts.push(`tail=${tail}`)
+    const q = parts.length ? `?${parts.join('&')}` : ''
     await proxySse(
       req,
       res,
       `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/events${q}`,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
+  /**
+   * 再往前翻一页历史。游标是上一页最靠前那条的 seq。
+   *
+   * 和那条流分开走：翻页是人点出来的一次性动作，塞进流里既要发明请求帧，又会让
+   * 重连的游标语义变浑。
+   */
+  router.get('/runtime/sessions/:id/history', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    const before = Math.max(0, Math.trunc(Number(req.query.get('before')) || 0))
+    const turns = Math.min(50, Math.max(1, Math.trunc(Number(req.query.get('turns')) || 20)))
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/history?turns=${turns}${before ? `&before=${before}` : ''}`,
+      undefined,
       await seatBearer(db, account.id),
       target.machineToken,
     )
