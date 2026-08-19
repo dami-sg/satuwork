@@ -256,10 +256,15 @@ async function consumeOpenAI(
       const reason = choice.finish_reason === 'tool_calls' ? 'toolUse' : choice.finish_reason === 'length' ? 'length' : 'stop'
       const u = chunk.usage
       if (u) {
+        // Gateway 报的 prompt_tokens 是**整个提示词**，命中缓存的那截在
+        // prompt_tokens_details.cached_tokens 里单列。pi 的 input 按约定不含缓存，
+        // 所以要减掉——不减的话「上下文占了多少」那条会把缓存部分算两遍。
+        const cacheRead = Math.max(0, Number(u.prompt_tokens_details?.cached_tokens ?? 0) || 0)
+        const prompt = Math.max(0, Number(u.prompt_tokens ?? 0) || 0)
         partial.usage = {
-          input: u.prompt_tokens ?? 0,
+          input: Math.max(0, prompt - cacheRead),
           output: u.completion_tokens ?? 0,
-          cacheRead: 0,
+          cacheRead,
           cacheWrite: 0,
           totalTokens: u.total_tokens ?? 0,
           cost: { ...EMPTY_USAGE.cost },
@@ -356,12 +361,16 @@ async function consumeAnthropic(
       else partial.stopReason = 'stop'
       const u = chunk.usage
       if (u) {
+        // Anthropic 的 input_tokens **不含**缓存的两项，各自单列，直接照搬即可。
+        const input = u.input_tokens ?? 0
+        const cacheRead = u.cache_read_input_tokens ?? 0
+        const cacheWrite = u.cache_creation_input_tokens ?? 0
         partial.usage = {
-          input: u.input_tokens ?? 0,
+          input,
           output: u.output_tokens ?? 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0),
+          cacheRead,
+          cacheWrite,
+          totalTokens: input + cacheRead + cacheWrite + (u.output_tokens ?? 0),
           cost: { ...EMPTY_USAGE.cost },
         }
       }

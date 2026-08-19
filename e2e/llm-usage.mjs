@@ -46,9 +46,29 @@ function startFakeUpstream() {
     res.writeHead(200, { 'content-type': 'text/event-stream' })
     const frames = req.url.includes('/v1/messages')
       ? [
-          { type: 'message_start', message: { id: 'm1', usage: { input_tokens: 900, output_tokens: 1 } } },
+          // Anthropic 的 input_tokens **不含**缓存那两项，各自单列。只读 input_tokens
+          // 的话，命中缓存越多、账面上的提示词越小——这里给足三项，让记账把它们加齐。
+          {
+            type: 'message_start',
+            message: {
+              id: 'm1',
+              usage: {
+                input_tokens: 900,
+                output_tokens: 1,
+                cache_read_input_tokens: 400,
+                cache_creation_input_tokens: 100,
+              },
+            },
+          },
           { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ANTHROPIC_TEXT } },
-          { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 15 } },
+          // message_delta 再回传一次累计 input_tokens，但**不重复缓存那两项**——
+          // Anthropic 部分版本就是这个行为。记账要是「后来居上」，这一帧就会把
+          // message_start 合出来的 1400 覆盖成 900，缓存那 400 又漏了。
+          {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { input_tokens: 900, output_tokens: 15 },
+          },
           { type: 'message_stop' },
         ]
       : [
@@ -120,7 +140,7 @@ export async function runLlmUsage({ gwRoot, test, req, start, waitHttp, assert, 
       return { prompt: statOf(u, '输入 Tokens'), completion: statOf(u, '输出 Tokens') }
     }
 
-    await test('/v1/messages 流式：输入 token 在 message_start 里也要记上', async () => {
+    await test('/v1/messages 流式：输入 token 在 message_start 里，缓存那两项也要加进提示词', async () => {
       const r = await req(gwBase, 'POST', '/v1/messages', {
         token,
         body: {
@@ -133,7 +153,8 @@ export async function runLlmUsage({ gwRoot, test, req, start, waitHttp, assert, 
       assert(r.status === 200, `messages ${r.status} ${r.text.slice(0, 200)}`)
       assert(r.text.includes(ANTHROPIC_TEXT), '转发的中文被切坏了')
       const u = await readUsage()
-      assert(u.prompt === 900, `输入 tokens ${u.prompt}，应为 900`)
+      // 900 未命中 + 400 命中缓存 + 100 写缓存。只记 900 就是把命中的那截白送。
+      assert(u.prompt === 1400, `输入 tokens ${u.prompt}，应为 1400`)
       assert(u.completion === 15, `输出 tokens ${u.completion}，应为 15`)
     })
 
@@ -145,7 +166,7 @@ export async function runLlmUsage({ gwRoot, test, req, start, waitHttp, assert, 
       assert(r.status === 200, `responses ${r.status} ${r.text.slice(0, 200)}`)
       assert(r.text.includes(OPENAI_TEXT), '转发的中文被切坏了')
       const u = await readUsage()
-      assert(u.prompt === 1600, `累计输入 tokens ${u.prompt}，应为 1600`)
+      assert(u.prompt === 2100, `累计输入 tokens ${u.prompt}，应为 2100`)
       assert(u.completion === 40, `累计输出 tokens ${u.completion}，应为 40`)
     })
 
@@ -164,7 +185,7 @@ export async function runLlmUsage({ gwRoot, test, req, start, waitHttp, assert, 
       assert(still.status === 200, `公司不该被删掉，实际 ${still.status}`)
       // 用量也确实还在
       const u2 = await readUsage()
-      assert(u2.prompt === 1600, `删除被拒之后用量不该变，实际 ${u2.prompt}`)
+      assert(u2.prompt === 2100, `删除被拒之后用量不该变，实际 ${u2.prompt}`)
     })
 
     await test('上游中途断流：已经收到的 token 仍要记上账', async () => {
