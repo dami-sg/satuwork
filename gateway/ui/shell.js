@@ -141,7 +141,17 @@ function navItem(item) {
 function chatRosterNav() {
   const bots = state.runtimeBots || []
   if (!bots.length) return ''
-  const selected = chatBotIdOf(state.path) || state.chatBotId
+  /**
+   * **只有真的在对话页上，名单里才有「选中的那一行」。**
+   *
+   * `state.chatBotId` 是「上一次聊的是谁」，切到 Bot 配置、账单这些页面之后它照样留
+   * 着——光看它的话，名单上那一行会一直亮着，和当前页面的菜单项一起构成两处高亮，
+   * 而左栏同一时刻只该有一个「你在这儿」。
+   *
+   * 用 onChatPage() 而不是自己再判一次路径：顶栏换不换成会话身份行、右栏开不开，用
+   * 的都是它，三处共用一个判断才不会各自漂移。
+   */
+  const selected = onChatPage() ? chatBotIdOf(state.path) || state.chatBotId : ''
   return bots
     .map((b) => {
       const sum = (botStreams.get(b.id) || {}).sum || { state: 'idle', lastAt: 0, lastText: '' }
