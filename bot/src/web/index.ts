@@ -130,7 +130,7 @@ export function apply(ctx: Context, _config: Config = {}) {
       res.json({ error: 'text 不能为空' })
       return
     }
-    if (ctx.agents.steer(req.params.id, body.text ?? '', images)) {
+    if (await ctx.agents.steer(req.params.id, body.text ?? '', images)) {
       res.json({ steered: true })
       return
     }

@@ -75,22 +75,21 @@ export class AgentService extends Service {
   /**
    * 跑到一半插话。agent 不在跑时返回 false，由调用方决定改成普通消息。
    *
-   * 带图时读盘是异步的，而这里必须同步给出「接住了没有」——那是调用方用来决定
-   * 走 steer 还是走 send 的分支。所以返回值只承诺「这条归我了」，真正投递晚几毫秒。
+   * **读盘要排在取 agent 之前。** 带图时得先把字节读出来，而那是个 await；若先取
+   * agent 再去读盘，这一轮完全可能在读盘期间跑完（runTurn 结束时会 `live.delete`），
+   * 等回过神来投递，消息就交给了一个已经收口的 agent——安静地丢掉，而调用方那边
+   * 早就回了「接住了」。先读后取，取和投递落在同一个 tick 里，这个窗口就不存在：
+   * 轮次结束了就是 `live.get` 拿不到，如实返回 false，调用方改走 send 开新一轮。
    */
-  steer(sessionId: string, text: string, images: ImageRef[] = []): boolean {
+  async steer(sessionId: string, text: string, images: ImageRef[] = []): Promise<boolean> {
+    // 先探一下，省得为一个根本没在跑的会话白读一遍图。
+    if (!this.live.has(sessionId)) return false
+    const content = images.length
+      ? await userContentFor({ id: '', role: 'user', content: userBlocks(text, images) }, this.ctx)
+      : text
     const agent = this.live.get(sessionId)
     if (!agent) return false
-    if (!images.length) {
-      agent.steer({ role: 'user', content: text, timestamp: Date.now() } as AgentMessage)
-      return true
-    }
-    void (async () => {
-      const content = await userContentFor({ id: '', role: 'user', content: userBlocks(text, images) }, this.ctx)
-      agent.steer({ role: 'user', content, timestamp: Date.now() } as AgentMessage)
-    })().catch((e: Error) => {
-      this.ctx.logger?.warn?.(`agents: 插话时读图失败：${e.message}`)
-    })
+    agent.steer({ role: 'user', content, timestamp: Date.now() } as AgentMessage)
     return true
   }
 
@@ -515,7 +514,7 @@ function fromAgentContent(content: any[]): ContentBlock[] {
  * provider 会拒绝——「role 'tool' 必须紧跟在带 tool_calls 的消息之后」。
  * 这里把每个 step 的工具结果挂到该 step 助手消息的后面。
  */
-async function toAgentMessages(
+export async function toAgentMessages(
   events: Awaited<ReturnType<Context['sessions']['events']>>,
   model: { api?: string; provider?: string; id?: string } = {},
   ctx?: Context,
@@ -531,6 +530,23 @@ async function toAgentMessages(
     }
   }
 
+  /**
+   * 哪几张图这一轮真的要带上字节。
+   *
+   * 不加这道闸，历史里每一张图每一轮都会被重新读盘、重新 base64、重新发给模型——
+   * 开销随图片数线性涨，而且**只增不减**：十张 3 MB 的图就是每轮 30 MB 磁盘读、
+   * 约 40 MB 字符串同时驻留、外加一两万 token。人真正在问的几乎总是最近那几张，
+   * 更早的换成一句说明就够。
+   */
+  const imageKeys: string[] = []
+  for (const e of events) {
+    if (e.type !== 'user/message') continue
+    e.data.message.content.forEach((c, i) => {
+      if (c.type === 'image') imageKeys.push(`${e.seq}:${i}`)
+    })
+  }
+  const liveImages = new Set(imageKeys.slice(-MAX_LIVE_IMAGES))
+
   const entries: { order: number; message: AgentMessage }[] = []
   let resultIndex = 0
 
@@ -538,7 +554,11 @@ async function toAgentMessages(
     if (e.type === 'user/message') {
       entries.push({
         order: e.seq,
-        message: { role: 'user', content: await userContentFor(e.data.message, ctx), timestamp: ts } as AgentMessage,
+        message: {
+          role: 'user',
+          content: await userContentFor(e.data.message, ctx, (i) => liveImages.has(`${e.seq}:${i}`)),
+          timestamp: ts,
+        } as AgentMessage,
       })
     } else if (e.type === 'assistant/message') {
       const content = e.data.message.content
@@ -609,6 +629,38 @@ function userBlocks(text: string, images: ImageRef[]): ContentBlock[] {
 }
 
 /**
+ * 一轮里最多带几张真图。再往前的换成一句说明。
+ *
+ * 每张图大约值一两千 token，而人问的几乎总是最近那几张。这个数字是「上下文里同时
+ * 摆得下几张图」，不是「一条消息最多几张」——一条消息带十张图，也只有最后几张进得去。
+ */
+const MAX_LIVE_IMAGES = 4
+
+/**
+ * 已经读过的图。键里带 mtime 和 size，文件被改过自然不命中。
+ *
+ * 一轮之内同一张图只读一次，多轮之间也复用——没有它，每发一句话都要把上下文里那几张
+ * 图整个重新读一遍盘、重新 base64 一遍。
+ */
+const IMAGE_CACHE = new Map<string, string>()
+const IMAGE_CACHE_MAX = 8
+
+function imageCacheGet(key: string): string | undefined {
+  const hit = IMAGE_CACHE.get(key)
+  // 命中就挪到末尾，砍的总是最久没用的那份。
+  if (hit !== undefined) {
+    IMAGE_CACHE.delete(key)
+    IMAGE_CACHE.set(key, hit)
+  }
+  return hit
+}
+
+function imageCachePut(key: string, data: string) {
+  IMAGE_CACHE.set(key, data)
+  while (IMAGE_CACHE.size > IMAGE_CACHE_MAX) IMAGE_CACHE.delete(IMAGE_CACHE.keys().next().value as string)
+}
+
+/**
  * 日志里的用户消息 → 喂给 pi 的内容。
  *
  * 没有图片时返回**字符串**，跟以前一模一样——绝大多数消息走的是这条路，没必要为了
@@ -616,18 +668,27 @@ function userBlocks(text: string, images: ImageRef[]): ContentBlock[] {
  *
  * 有图片时现读现转 base64：日志里存的是路径（见 session/types.ts 的 image 块）。
  * 读不到就退化成一句说明，不让整轮对话因为一张图没了而失败。
+ *
+ * `isLive` 决定这一张要不要真的带字节（见 MAX_LIVE_IMAGES）。不给就全带——steer
+ * 那条路只有当下这一条消息，没有「太靠前」可言。
  */
-async function userContentFor(m: Message, ctx?: Context): Promise<any> {
-  const images = m.content.filter((c) => c.type === 'image') as { type: 'image'; path: string; mime: string }[]
-  if (!images.length) return textFrom(m)
+async function userContentFor(m: Message, ctx?: Context, isLive?: (index: number) => boolean): Promise<any> {
+  const picked = m.content
+    .map((c, i) => ({ c, i }))
+    .filter(({ c }) => c.type === 'image') as { c: { type: 'image'; path: string; mime: string }; i: number }[]
+  if (!picked.length) return textFrom(m)
   const out: any[] = []
-  for (const img of images) {
-    const loaded = await loadImage(img, ctx)
-    out.push(loaded)
+  for (const { c, i } of picked) {
+    out.push(isLive && !isLive(i) ? stale(c) : await loadImage(c, ctx))
   }
   const text = textFrom(m)
   if (text) out.push({ type: 'text', text })
   return out
+}
+
+/** 太靠前、这一轮不带字节的图。说清楚它存在过，模型才不会以为自己漏看了什么。 */
+function stale(img: { path: string }) {
+  return { type: 'text', text: `（前面有一张图 ${img.path}，离现在太远，这一轮没有放进上下文。）` }
 }
 
 async function loadImage(img: { path: string; mime: string }, ctx?: Context) {
@@ -640,7 +701,13 @@ async function loadImage(img: { path: string; mime: string }, ctx?: Context) {
     if (info.size > MAX_IMAGE_BYTES) {
       return miss(`它有 ${(info.size / 1024 / 1024).toFixed(1)} MB，超过了能直接看的大小`)
     }
-    return { type: 'image', data: (await readFile(file)).toString('base64'), mimeType: img.mime }
+    const key = `${file}|${info.mtimeMs}|${info.size}`
+    let data = imageCacheGet(key)
+    if (data === undefined) {
+      data = (await readFile(file)).toString('base64')
+      imageCachePut(key, data)
+    }
+    return { type: 'image', data, mimeType: img.mime }
   } catch (e) {
     return miss(`读不出来：${(e as Error).message}`)
   }

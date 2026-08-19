@@ -47,6 +47,18 @@ const MAX_PAGES = 300
 const MAX_ROWS = 5000
 
 /**
+ * 肯提取的文件大小上限。
+ *
+ * 这三个库都是**整个文件读进内存再解析**，而 exceljs 把工作簿摊成对象图之后常常是
+ * 原文件的五到十倍。上传上限默认 100 MiB，也就是说不设这道闸，任何人传一个 90 MB 的
+ * xlsx 再让 Bot read 一下，就能把这个席位的进程撑爆——而 MAX_PAGES / MAX_ROWS 是解析
+ * 完才生效的，拦不住这一步。
+ *
+ * 超限不是「读不了」，只是「不给自动转」：原文件还在，模型仍可以用 bash 自己处理。
+ */
+const MAX_DOC_BYTES = 25 * 1024 * 1024
+
+/**
  * 提取结果的小缓存。
  *
  * 模型读一份长 PDF 会分好几次（offset 一页页往后翻），每次都重新解析一遍整个文件既慢
@@ -72,6 +84,17 @@ function cachePut(key: string, value: Extracted) {
 
 export async function extractDocument(file: string, kind: DocKind): Promise<Extracted> {
   const info = await stat(file)
+  if (info.size > MAX_DOC_BYTES) {
+    return {
+      text:
+        `这个文件有 ${(info.size / 1024 / 1024).toFixed(1)} MB，超过了自动转文本的上限` +
+        `（${MAX_DOC_BYTES / 1024 / 1024} MB），没有解析。\n` +
+        '文件本身还在，可以用 bash 里的命令行工具挑需要的部分出来。',
+      parts: 0,
+      unit: '段',
+      truncated: true,
+    }
+  }
   const key = `${kind}|${file}|${info.mtimeMs}|${info.size}`
   const hit = cacheGet(key)
   if (hit) return hit
@@ -192,8 +215,12 @@ async function fromXlsx(file: string): Promise<Extracted> {
   wb.eachSheet((sheet) => {
     const rows: string[] = []
     // CSV 而不是别的表示法：模型见得最多，而且一行一条记录，行号和 read 的分页对得上。
-    sheet.eachRow({ includeEmpty: false }, (row, n) => {
-      if (n > MAX_ROWS) {
+    //
+    // 上限按**已经收了多少行**算，不能按回调里的 `n`——那是工作表里的行号，会跳号。
+    // 一张数据从第 8000 行才开始的稀疏表，按 n 判断的话第一行就超限，整表被丢空，
+    // 输出成「0 行 + 已截断」，而模型会据此回答「这个表是空的」。
+    sheet.eachRow({ includeEmpty: false }, (row) => {
+      if (rows.length >= MAX_ROWS) {
         truncated = true
         return
       }

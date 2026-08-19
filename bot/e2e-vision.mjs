@@ -12,6 +12,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { toAnthropic, toOpenAI } from './src/llm/gateway.ts'
 import { userContent as gatewayUserContent } from '../gateway/src/v1.ts'
 import { WorkspaceService } from './src/workspace/index.ts'
+import { toAgentMessages } from './src/agent/index.ts'
 import { SESSION_FORMAT_VERSION } from './src/session/types.ts'
 
 const out = {}
@@ -111,6 +112,53 @@ const B64 = PNG.toString('base64')
     对比_如果存字节的长度: JSON.stringify({ data: B64 }).length,
   }
   out.formatVersion = SESSION_FORMAT_VERSION
+}
+
+// ── 5. 历史里的图：只有最近几张真的带字节 ─────────────────────────────
+{
+  const root = mkdtempSync(join(tmpdir(), 'satu-win-'))
+  const ctx = new Context()
+  ctx.plugin(WorkspaceService, { root })
+  await new Promise((r) => setTimeout(r, 50))
+
+  // 造 6 张图、6 条带图的用户消息。
+  const paths = []
+  for (let i = 0; i < 6; i++) {
+    const saved = await ctx.workspace.saveUpload('s', `p${i}.png`, new ReadableStream({
+      start(c) {
+        c.enqueue(PNG)
+        c.close()
+      },
+    }))
+    paths.push(saved.path)
+  }
+  let seq = 0
+  const events = [{ seq: ++seq, time: 1, type: 'session', data: { version: 4, id: 's', createdAt: 1, botId: 'b' } }]
+  for (const p of paths) {
+    events.push({
+      seq: ++seq,
+      time: 1,
+      type: 'user/message',
+      data: { message: { id: 'm', role: 'user', content: [{ type: 'image', path: p, mime: 'image/png' }, { type: 'text', text: '看这个' }] }, source: { kind: 'user' } },
+    })
+  }
+
+  const msgs = await toAgentMessages(events, {}, ctx)
+  const users = msgs.filter((m) => m.role === 'user')
+  const withBytes = users.filter((m) => Array.isArray(m.content) && m.content.some((c) => c.type === 'image'))
+  const stale = users.filter(
+    (m) => Array.isArray(m.content) && m.content.some((c) => c.type === 'text' && c.text.includes('离现在太远')),
+  )
+  out.window = {
+    用户消息数: users.length,
+    带字节的: withBytes.length,
+    降级成说明的: stale.length,
+    // 带字节的必须是**最后**那几条，不能是最早的。
+    最后一条带字节: Array.isArray(users[users.length - 1].content)
+      && users[users.length - 1].content.some((c) => c.type === 'image'),
+    第一条已降级: Array.isArray(users[0].content)
+      && !users[0].content.some((c) => c.type === 'image'),
+  }
 }
 
 console.log('__RESULT__' + JSON.stringify(out))

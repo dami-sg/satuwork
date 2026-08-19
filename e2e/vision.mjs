@@ -77,6 +77,17 @@ export async function runVision({ root, test, assert, log }) {
     assert(r.gatewayV1Plain.还是字符串, 'Gateway 纯文本被改形状了')
   })
 
+  await test('历史里的图只有最近几张带字节，更早的降级成说明', () => {
+    // 不加这道闸，历史里每张图每轮都要重新读盘、重新 base64、重新发给模型——开销随
+    // 图片数线性涨且只增不减：十张 3 MB 的图就是每轮 30 MB 磁盘读加一两万 token。
+    assert(r.window.用户消息数 === 6, `消息数不对：${r.window.用户消息数}`)
+    assert(r.window.带字节的 === 4, `带字节的应为 4 张，实为 ${r.window.带字节的}`)
+    assert(r.window.降级成说明的 === 2, `降级的应为 2 张，实为 ${r.window.降级成说明的}`)
+    // 窗口必须开在**末尾**：人问的几乎总是刚发的那张。
+    assert(r.window.最后一条带字节, '最近那张图反而没带字节')
+    assert(r.window.第一条已降级, '最早那张图仍然带着字节')
+  })
+
   await test('会话日志里存路径，不存 base64', () => {
     assert(r.logShape.存了路径, '事件里没有图片路径')
     // 一张 2 MB 的图 base64 之后是 2.7 MB。直接落进 JSONL，这一行就没法 grep、没法

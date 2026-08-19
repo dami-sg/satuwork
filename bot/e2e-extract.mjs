@@ -181,6 +181,36 @@ out.xlsx = {
   正文: xlsx.text,
 }
 
+// ── 5b. 稀疏工作表：数据从很靠后的行才开始 ───────────────────────────
+// 行号会跳号，把它当成「已经收了几行」的话，整张表会被当成超限丢空。
+const sparsePath = join(dir, 'sparse.xlsx')
+{
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet('稀疏')
+  // 直接往第 8000 行写：中间那些行根本不存在（不是空行，是没有）。
+  ws.getRow(8000).values = ['甲', 1]
+  ws.getRow(8001).values = ['乙', 2]
+  await wb.xlsx.writeFile(sparsePath)
+}
+const sparse = await extractDocument(sparsePath, 'xlsx')
+out.sparse = {
+  两行都在: sparse.text.includes('甲,1') && sparse.text.includes('乙,2'),
+  没谎报截断: sparse.truncated === false,
+  行数对: sparse.text.includes('（2 行）'),
+  正文: sparse.text,
+}
+
+// ── 5c. 太大的文件不解析，但要说清楚 ─────────────────────────────────
+const hugePath = join(dir, 'huge.xlsx')
+// 26 MB 的假 xlsx：这一关在 stat 之后、解析之前，所以内容是不是真 xlsx 无所谓。
+writeFileSync(hugePath, Buffer.alloc(26 * 1024 * 1024, 0x41))
+const huge = await extractDocument(hugePath, 'xlsx')
+out.huge = {
+  没去解析: huge.text.includes('超过了自动转文本的上限'),
+  说了多大: huge.text.includes('26.0 MB'),
+  指了条别的路: huge.text.includes('bash'),
+}
+
 // ── 6. 认哪些后缀 ─────────────────────────────────────────────────────
 out.kinds = {
   pdf: docKindOf('a.pdf'),

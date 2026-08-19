@@ -840,9 +840,24 @@ function shotCachePut(path, url) {
     const oldest = SHOT_CACHE.keys().next().value
     const dead = SHOT_CACHE.get(oldest)
     SHOT_CACHE.delete(oldest)
-    // blob: 不撤销就一直占着内存，直到刷新页面。
-    if (dead) setTimeout(() => URL.revokeObjectURL(dead), 0)
+    /**
+     * **只吊销没人再看的那份。**
+     *
+     * 被挤出缓存不等于没人用：那张图多半还挂在上面某条消息的 <img> 上。吊销掉，
+     * 那个节点下次重绘（往前翻一页历史、或者这一行的 data-sig 变了）就会拿着一个
+     * 已经作废的 blob: 去取图，显示成永久破图——而缓存里已经没有它，fillShots 也
+     * 只认带 data-shot 的占位元素，不会再去补。
+     */
+    if (dead && !shotInUse(dead)) setTimeout(() => URL.revokeObjectURL(dead), 0)
   }
+}
+
+/** 这个 blob URL 还挂在页面上吗。遍历而不是拼属性选择器——省掉一层转义的坑。 */
+function shotInUse(url) {
+  for (const img of document.querySelectorAll('.sw-shot img')) {
+    if (img.src === url) return true
+  }
+  return false
 }
 
 /** 把占位换成真图。失败就留占位——一张图没取到，不该让整条消息看起来出了错。 */
@@ -862,8 +877,16 @@ async function fillShots(host) {
     try {
       const url = '/runtime/sessions/' + encodeURIComponent(sessionId) + '/files?path=' + encodeURIComponent(path)
       const res = await fetch(url, { headers: authHeaders() })
-      if (!res.ok) continue
-      if (Number(res.headers.get('content-length') || 0) > SHOT_AUTO_MAX) continue
+      // 不读的响应体要显式收掉，否则连接和缓冲会一直挂着——一屏十张大图就是十条，
+      // 正好是下面那道大小闸想省下的开销。
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {})
+        continue
+      }
+      if (Number(res.headers.get('content-length') || 0) > SHOT_AUTO_MAX) {
+        await res.body?.cancel().catch(() => {})
+        continue
+      }
       const blob = await res.blob()
       const objectUrl = URL.createObjectURL(blob)
       shotCachePut(path, objectUrl)

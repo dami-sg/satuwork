@@ -80,6 +80,22 @@ export async function runDocExtract({ root, test, assert, log }) {
     assert(r.xlsx.日期不是对象, `日期没摊平：${r.xlsx.正文}`)
   })
 
+  await test('稀疏工作表：行号会跳号，不能当成行数', () => {
+    // eachRow 回调里的 n 是**工作表行号**。拿它去和上限比，一张数据从第 8000 行才
+    // 开始的表第一行就「超限」，整表被丢空，输出成「0 行 + 已截断」——而模型会据此
+    // 回答「这个表是空的」。
+    assert(r.sparse.两行都在, `稀疏表的数据丢了：${r.sparse.正文}`)
+    assert(r.sparse.行数对, `行数报错了：${r.sparse.正文}`)
+    assert(r.sparse.没谎报截断, '只有两行却报了截断')
+  })
+
+  await test('太大的文件不解析，并且说清楚为什么', () => {
+    // 这几个库都是整个文件读进内存再解析，exceljs 摊成对象图之后常是原文件的五到十倍。
+    // 上传上限默认 100 MiB，不设这道闸，传个大 xlsx 再 read 一下就能把席位进程撑爆。
+    assert(r.huge.没去解析, '超大文件仍然被解析了')
+    assert(r.huge.说了多大 && r.huge.指了条别的路, `拒绝得不清不楚：${JSON.stringify(r.huge)}`)
+  })
+
   await test('只认这套库真能读的后缀', () => {
     assert(r.kinds.pdf === 'pdf' && r.kinds.docx === 'docx' && r.kinds.xlsm === 'xlsx', '该认的没认出来')
     assert(r.kinds.xlsx === 'xlsx', '大写后缀没认出来')
