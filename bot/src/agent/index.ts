@@ -237,7 +237,25 @@ export class AgentService extends Service {
     this.ctx.logger?.info?.(`agents: 会话 ${sessionId} 第 ${turn} 轮开始（${provider}/${modelId}）`)
     try {
       // 盖时间的是**送进模型的那份**，不是落盘的那份：日志里存原文，信封上已经有 time。
-      await agent.prompt(stampUser(text, Date.now()))
+      //
+      // **这一轮的图片必须从这里进去。** 上面那份 `messages` 是从 `history` 重建的，
+      // 而 `history` 是在 append 这条用户消息**之前**取的快照（sessions.events() 返回
+      // 的是 state.events.slice()），所以这一轮的消息根本不在里面——它是靠这行
+      // prompt() 送进去的。只传文本的话，图就要等到下一轮重建历史时才被读出来，
+      // 表现成「问第一遍它没看见，再问一句就看见了」。
+      const now = Date.now()
+      if (images.length) {
+        // 走 userContentFor 而不是自己拼：base64 缓存、单张大小上限、读不到时降级成
+        // 一句说明，这些都在那儿，重写一遍迟早会漂。时间戳也复用 stampContent，
+        // 跟 steer 那条路盖成同一个形状。
+        const content = await userContentFor(
+          { id: '', role: 'user', content: userBlocks(text, images) },
+          this.ctx,
+        )
+        await agent.prompt({ role: 'user', content: stampContent(content, now), timestamp: now } as AgentMessage)
+      } else {
+        await agent.prompt(stampUser(text, now))
+      }
       // pi-agent **不抛**模型侧错误，它落在 state.errorMessage / 最终消息的
       // stopReason 上。不显式检查的话，一个失败的 turn 会被记成 completed，
       // 而对话里只剩一条空的助手消息。
