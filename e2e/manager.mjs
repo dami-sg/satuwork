@@ -380,6 +380,23 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       assert(pw && !('content' in pw), 'vnc-passwd 只能报存在与时间，不能报内容')
     })
 
+    await test('运行日志：无票 401，未知席位 404，有票给得出结构', async () => {
+      // diag 回答「它活着吗」，这条回答「它卡在哪一步」——这一层最贵的故障都不报错：
+      // 单元 active、端口有人听，只是那一轮永远不结束。
+      const anon = await fetch(`${mgrBase}/seats/seat-1/logs`)
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+
+      // unit 名是拿 seatId 拼的，所以只让名册里有的席位过去。
+      const nope = await req(mgrBase, 'GET', '/seats/seat-nope/logs', { token: machineTok })
+      assert(nope.status === 404, `未知席位该 404，实际 ${nope.status} ${nope.text}`)
+
+      const r = await req(mgrBase, 'GET', '/seats/seat-1/logs?lines=5', { token: machineTok })
+      assert(r.status === 200, `logs ${r.status} ${r.text}`)
+      // 开发机上没有 journalctl，取不到就是空数组——但字段必须在，不能整条塌掉。
+      assert(Array.isArray(r.json.lines), `lines 该是数组：${r.text.slice(0, 200)}`)
+      assert(r.json.seatId === 'seat-1', `seatId=${r.json.seatId}`)
+    })
+
     await test('席位诊断：不认识的席位给结论，不是 500', async () => {
       const r = await req(mgrBase, 'GET', '/seats/seat-nope/diag', { token: machineTok })
       assert(r.status === 200, `未知席位也该正常回，实际 ${r.status} ${r.text}`)
@@ -515,6 +532,43 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         await client.query('delete from machines where id = $1', [fake]).catch(() => {})
         await client.end().catch(() => {})
       }
+    })
+
+    await test('管家自己的日志：无票 401，有票给得出结构', async () => {
+      // 部署失败、升级卡住、配对回拨不通，全写在管家的 journal 里——席位的日志里
+      // 一个字都没有。平台端排查「这台机器怎么了」看的是这条。
+      const anon = await fetch(`${mgrBase}/logs`)
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+      const r = await req(mgrBase, 'GET', '/logs?lines=5', { token: machineTok })
+      assert(r.status === 200, `logs ${r.status} ${r.text}`)
+      assert(Array.isArray(r.json.lines), `lines 该是数组：${r.text.slice(0, 200)}`)
+      assert(/satuwork-manager/.test(r.json.unit || ''), `unit 不对：${r.json.unit}`)
+    })
+
+    await test('平台端看机器日志：只有 owner，席位必须是这台机器上的，且留审计', async () => {
+      const machineId = await machineIdOf(req, gwBase, ownerTok, orgId)
+      const base = `/platform/orgs/${orgId}/machines/${machineId}/logs`
+
+      const anon = await req(gwBase, 'GET', base)
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+
+      const ok = await req(gwBase, 'GET', `${base}?lines=5`, { token: ownerTok })
+      assert(ok.status === 200, `管家日志 ${ok.status} ${ok.text}`)
+      assert(Array.isArray(ok.json.lines), `lines 该是数组：${ok.text.slice(0, 200)}`)
+
+      // seatId 会进 systemd 单元名，只认这台机器上的——别处的值一律挡掉。
+      const bad = await req(gwBase, 'GET', `${base}?seatId=seat-not-here`, { token: ownerTok })
+      assert(bad.status === 404, `外来 seatId 该 404，实际 ${bad.status} ${bad.text}`)
+
+      // 席位日志里有员工的对话正文和执行过的命令。这和「看别人的屏幕」是同一类
+      // 动作，必须留痕。
+      const audit = await req(gwBase, 'GET', `/orgs/${orgId}/audit`, { token: ownerTok })
+      assert(audit.status === 200, `audit ${audit.status} ${audit.text}`)
+      const rows = audit.json.events || audit.json.rows || []
+      assert(
+        rows.some((e) => e.action === 'machine.logs'),
+        `审计里没有 machine.logs：${JSON.stringify(rows.map((e) => e.action)).slice(0, 300)}`,
+      )
     })
 
     await test('管家自报机器时区，答得上「现在是什么时区」', async () => {

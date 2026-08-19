@@ -111,7 +111,10 @@ function toAnthropic(context: any, model: { id: string }) {
   }
 }
 
-async function* readSse(res: Response): AsyncGenerator<{ event?: string; data: string }> {
+async function* readSse(
+  res: Response,
+  kick: (bytes?: number) => void = () => {},
+): AsyncGenerator<{ event?: string; data: string }> {
   const reader = res.body?.getReader()
   if (!reader) return
   const decoder = new TextDecoder()
@@ -119,6 +122,9 @@ async function* readSse(res: Response): AsyncGenerator<{ event?: string; data: s
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
+    // 判据是**收到字节**，不是收到事件：SSE 的心跳注释（`:` 开头）解析不出事件，
+    // 但它恰恰是「这条连接还活着」最本分的证据。
+    kick(value?.length ?? 0)
     buf += decoder.decode(value, { stream: true })
     buf = buf.replace(/\r\n/g, '\n')
     let idx
@@ -142,7 +148,12 @@ function fail(stream: AssistantMessageEventStream, model: any, message: string) 
   stream.push({ type: 'error', reason: 'error', error })
 }
 
-async function consumeOpenAI(res: Response, stream: AssistantMessageEventStream, model: any) {
+async function consumeOpenAI(
+  res: Response,
+  stream: AssistantMessageEventStream,
+  model: any,
+  kick: (bytes?: number) => void = () => {},
+) {
   let partial: any = emptyAssistant(model)
   let started = false
   let textIndex = -1
@@ -151,7 +162,7 @@ async function consumeOpenAI(res: Response, stream: AssistantMessageEventStream,
     started = true
     stream.push({ type: 'start', partial })
   }
-  for await (const ev of readSse(res)) {
+  for await (const ev of readSse(res, kick)) {
     if (ev.data === '[DONE]') break
     let chunk: any
     try {
@@ -235,7 +246,12 @@ async function consumeOpenAI(res: Response, stream: AssistantMessageEventStream,
   stream.push({ type: 'done', reason: 'stop', message: partial })
 }
 
-async function consumeAnthropic(res: Response, stream: AssistantMessageEventStream, model: any) {
+async function consumeAnthropic(
+  res: Response,
+  stream: AssistantMessageEventStream,
+  model: any,
+  kick: (bytes?: number) => void = () => {},
+) {
   let partial: any = emptyAssistant(model)
   let started = false
   const start = () => {
@@ -243,7 +259,7 @@ async function consumeAnthropic(res: Response, stream: AssistantMessageEventStre
     started = true
     stream.push({ type: 'start', partial })
   }
-  for await (const ev of readSse(res)) {
+  for await (const ev of readSse(res, kick)) {
     if (!ev.data || ev.data === '[DONE]') continue
     let chunk: any
     try {
@@ -334,8 +350,75 @@ async function consumeAnthropic(res: Response, stream: AssistantMessageEventStre
   else stream.push({ type: 'done', reason: 'stop', message: partial })
 }
 
+/**
+ * 一条模型流「多久没动静就判死」。
+ *
+ * 原来一个超时都没有：fetch 不带 timeout，读循环是 `for await (readSse(res))`，也没有
+ * 空闲上限。上游静默断掉时——中间那一跳掐了连接却不发 FIN，长连接上很常见——这个
+ * 循环**永远不会返回**，往下是一串多米诺：
+ *
+ *   stream.end() 不会被调 → agent.prompt() 不返回 → runTurn 的 finally 不跑
+ *   → 没有 turn/end 写进日志、live 表里那条也不删
+ *   → isRunning() 永远是真 → 界面上永远挂着「正在处理」，等多久都不变。
+ *
+ * 而且这个死法最难查：进程活着、端口听着、systemd 说 active，什么都没报错。
+ *
+ * 判据是「多久没收到**任何字节**」，不是「一共跑了多久」——一轮长回答可以正当地跑
+ * 很久，但正当的流不会两分钟一个字节都不吐。推理模型出第一个 token 前的静默也在这
+ * 个量级之内。要调就改 SATUWORK_LLM_IDLE_MS。
+ */
+const LLM_IDLE_MS = Math.max(1_000, Number(process.env.SATUWORK_LLM_IDLE_MS) || 120_000)
+
 export async function streamViaGateway(model: any, context: any, options?: { signal?: AbortSignal }) {
   const stream = new AssistantMessageEventStream()
+  // 计时从**建连之前**就开始：连不上、或者连上了迟迟不给响应头，一样得有人叫停。
+  const idle = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * 超时到了就**自己收口**，不等连接真断。
+   *
+   * 只 abort 是不够的：实测上游静默时，abort 之后那个 `reader.read()` 还要等到对端
+   * keep-alive 到期（5 秒）才真的醒过来——而「等 socket 自己死掉」恰恰就是这个 bug
+   * 本身。要保的是「这一轮一定会结束」，不是「连接一定关得掉」，所以先把流收了，
+   * abort 只是顺手把资源放掉。
+   *
+   * push 之后 EventStream 就 done 了，之后迟到的事件和 end() 都会被它自己忽略。
+   */
+  let closed = false
+  let bytes = 0
+  const at = Date.now()
+  const giveUp = () => {
+    if (closed) return
+    closed = true
+    // **这一行要显眼**：它说的是「有一轮本来会永远卡住，被我掐了」。没有它，
+    // 界面上只会看到一句莫名其妙的错误，谁也不会想到是上游静默断开。
+    console.error(
+      `[WARN] llm: ${model?.provider}/${model?.id} 静默 ${Math.round(LLM_IDLE_MS / 1000)}s 判定断开` +
+        `（已收 ${bytes} 字节，起于 ${Math.round((Date.now() - at) / 1000)}s 前）`,
+    )
+    fail(stream, model, `模型流 ${Math.round(LLM_IDLE_MS / 1000)} 秒没有任何数据，判定上游已断开`)
+    stream.end()
+    idle.abort()
+  }
+  const kick = (n = 0) => {
+    bytes += n
+    clearTimeout(timer)
+    timer = setTimeout(giveUp, LLM_IDLE_MS)
+  }
+  /**
+   * 失败原因。自己叫停的一律说成超时。
+   *
+   * 静默有两种，落点不一样：连上了迟迟不给响应头，abort 落在 fetch 的 catch 里；
+   * 头给了、正文半路不来了，落在读循环。两条路都得说清是「上游没了」——原样报
+   * abort 的话，界面上只有一句「This operation was aborted」，看不出是超时还是
+   * 人点了停止。
+   */
+  const reasonOf = (e: unknown, prefix = '') =>
+    idle.signal.aborted
+      ? `模型流 ${Math.round(LLM_IDLE_MS / 1000)} 秒没有任何数据，判定上游已断开`
+      : prefix + (e as Error).message
+  kick()
+  const signal = options?.signal ? AbortSignal.any([options.signal, idle.signal]) : idle.signal
   const run = async () => {
     const base = gatewayUrl()
     if (!base) {
@@ -361,10 +444,10 @@ export async function streamViaGateway(model: any, context: any, options?: { sig
         method: 'POST',
         headers,
         body: JSON.stringify(body),
-        signal: options?.signal,
+        signal,
       })
     } catch (e) {
-      fail(stream, model, `Gateway 不可达：${(e as Error).message}`)
+      fail(stream, model, reasonOf(e, 'Gateway 不可达：'))
       return
     }
     const ctype = res.headers.get('content-type') || ''
@@ -378,12 +461,16 @@ export async function streamViaGateway(model: any, context: any, options?: { sig
       fail(stream, model, typeof msg === 'string' ? msg : JSON.stringify(msg))
       return
     }
-    if (path === '/v1/messages') await consumeAnthropic(res, stream, model)
-    else await consumeOpenAI(res, stream, model)
+    if (path === '/v1/messages') await consumeAnthropic(res, stream, model, kick)
+    else await consumeOpenAI(res, stream, model, kick)
+    console.log(`[INFO] llm: ${model?.provider}/${model?.id} 收流结束（${bytes} 字节，${Date.now() - at}ms）`)
   }
   void run()
-    .catch((e) => fail(stream, model, (e as Error).message))
-    .finally(() => stream.end())
+    .catch((e) => fail(stream, model, reasonOf(e)))
+    .finally(() => {
+      clearTimeout(timer)
+      stream.end()
+    })
   return stream
 }
 

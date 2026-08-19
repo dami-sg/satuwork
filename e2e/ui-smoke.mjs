@@ -14,6 +14,7 @@ import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { el, fakeSse } from './ui-dom.mjs'
+import { readFileSync } from 'node:fs'
 
 const APP = 'gateway/ui/app.js'
 
@@ -49,6 +50,21 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
   }
 
   try {
+    await test('index.html 列出的每个前端分片都真的取得到', async () => {
+      // 前端拆成了一串普通脚本，多一个分片就要在 http.ts 的 ROOT_FILES 里也加一行。
+      // 漏了的表现很坏：本地开 index.html 一切正常，线上那一个 404，整个界面白屏。
+      const html = readFileSync(join(root, 'gateway/ui/index.html'), 'utf8')
+      const parts = [...html.matchAll(/<script src="\/([^"]+)"[^>]*\bdata-app-part\b/g)].map((m) => m[1])
+      assert(parts.length > 1, `index.html 里没找到 data-app-part 脚本`)
+      for (const f of parts) {
+        const r = await req(gwBase, 'GET', '/' + f)
+        assert(r.status === 200, `GET /${f} → ${r.status}，八成是 ROOT_FILES 白名单漏了它`)
+      }
+      // 最后一个分片必须是带 boot() 的那个，否则整串脚本加载完谁也不启动。
+      const last = readFileSync(join(root, 'gateway/ui', parts[parts.length - 1]), 'utf8')
+      assert(/\nboot\(\)\s*$/.test(last), `最后一个分片 ${parts[parts.length - 1]} 末尾没有 boot()`)
+    })
+
     await test('空库 + 没有票 → 画「创建系统管理员」，不是登录页', async () => {
       const ui = await boot()
       const html = ui.html()
@@ -695,6 +711,193 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.stopChatStream()
     })
 
+    await test('bot 说了没在跑，就别再挂着「正在处理」', async () => {
+      // 历史被截断在 turn/start 上时，扫事件扫出来的结论一定是「在跑」——而它可能几
+      // 小时前就结束了。两条路都会走到这儿，而且都很常见：流断在重放中途（尾巴那条
+      // turn/end 没到），或者进程半路没了、日志里那条 turn/end 根本没写成。
+      const sse = fakeSse()
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => (path.includes('/events') ? sse.response : fetch(gwBase + path)),
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-live'
+      const run = ui.startChatStream('s-live')
+      sse.push({ seq: 1, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '嗨' }] }, source: { kind: 'user' } } })
+      sse.push({ seq: 2, time: 1, type: 'turn/start', data: { turn: 1 } })
+      sse.push({ type: 'replay/done', live: false })
+      for (let i = 0; i < 100 && ui.state.chatReplaying; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(
+        ui.state.chatStatus === '',
+        `bot 说了没在跑，界面还挂着「正在处理」：${JSON.stringify(ui.state.chatStatus)}`,
+      )
+
+      // 之后由实时的 turn 事件接着维护：真开跑了就得点亮。
+      sse.push({ seq: 3, time: 1, type: 'turn/start', data: { turn: 2 } })
+      for (let i = 0; i < 100 && ui.state.chatStatus === ''; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(ui.state.chatStatus === 'running', '真开跑了却没点亮')
+      sse.push({ seq: 4, time: 1, type: 'turn/end', data: { turn: 2, reason: 'completed' } })
+      for (let i = 0; i < 100 && ui.state.chatStatus !== ''; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(ui.state.chatStatus === '', '跑完了没灭')
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
+    await test('闸已经自己开过了，replay/done 的结论照样要画出来', async () => {
+      // 这条抓的是线上那个真实故障：一段 988 条的历史，重放必然撞上 4 秒硬上限（或
+      // 120ms 静默兜底），闸提前开了。等 replay/done 带着 live=false 到达时，endReplay
+      // 第一行就是「闸开过了就 return」——结论存进了 chatLive，一帧都没画。而这之后
+      // 不会再有任何事件来触发重绘（它说的就是「没在跑」），界面于是永远停在开闸那
+      // 一刻：一个悬着的 turn/start，一句「正在处理」。
+      const sse = fakeSse()
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => (path.includes('/events') ? sse.response : fetch(gwBase + path)),
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-late'
+      const run = ui.startChatStream('s-late')
+      sse.push({ seq: 1, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '嗨' }] }, source: { kind: 'user' } } })
+      sse.push({ seq: 2, time: 1, type: 'turn/start', data: { turn: 1 } })
+
+      // **先让闸自己开**——这正是长历史下必然发生的事，也是这条用例的前提。
+      for (let i = 0; i < 200 && ui.state.chatReplaying; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(!ui.state.chatReplaying, '前置没成立：闸还没自己开')
+      assert(ui.state.chatStatus === 'running', `前置没成立：此刻按扫描该是忙的，实际 ${JSON.stringify(ui.state.chatStatus)}`)
+
+      // 现在 bot 才说「没在跑」。晚到不等于不算数。
+      sse.push({ type: 'replay/done', live: false })
+      for (let i = 0; i < 200 && ui.state.chatStatus !== ''; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(
+        ui.state.chatStatus === '',
+        `bot 说了没在跑，界面却还挂着——结论没被画出来：${JSON.stringify(ui.state.chatStatus)}`,
+      )
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
+    await test('重放停在半路：带着游标自己重连，把缺的那截补回来', async () => {
+      // 线上实测：bot 报「重放 1078 条」，客户端只收到 1054 条，replay/done 从没到达，
+      // 连接还开着也不会重连。原因是 bot 那边 enqueue 不阻塞，尾巴压在下游的缓冲里，
+      // 而一条安静的会话再也不会有新字节把它顶出去。表现是历史缺一截 + 永远「正在处理」。
+      const first = fakeSse()
+      const second = fakeSse()
+      const urls = []
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (!path.includes('/events')) return fetch(gwBase + path)
+          urls.push(path)
+          return urls.length === 1 ? first.response : second.response
+        },
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-stall'
+      void ui.startChatStream('s-stall', 0, 'bot-stall')
+
+      // 收了两条就断供，且**不发** replay/done——正是卡住的样子。
+      first.push({ seq: 1, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '嗨' }] }, source: { kind: 'user' } } })
+      first.push({ seq: 2, time: 1, type: 'turn/start', data: { turn: 1 } })
+      for (let i = 0; i < 200 && urls.length < 1; i++) await new Promise((r) => setTimeout(r, 5))
+
+      // 看门狗到点应该带着游标重连，而不是干等下去。
+      for (let i = 0; i < 300 && urls.length < 2; i++) await new Promise((r) => setTimeout(r, 50))
+      assert(urls.length === 2, `没有重连——重放卡住就一直卡着了：${JSON.stringify(urls)}`)
+      assert(
+        /after=2(&|$)/.test(urls[1]),
+        `重连没带游标，会从 0 再放一遍（缓冲边界照样卡同一处）：${urls[1]}`,
+      )
+
+      // 补上剩下的一截 + replay/done，界面该收敛。
+      second.push({ seq: 3, time: 1, type: 'turn/end', data: { turn: 1, reason: 'completed' } })
+      second.push({ type: 'replay/done', live: false })
+      for (let i = 0; i < 300 && ui.state.chatStatus !== ''; i++) await new Promise((r) => setTimeout(r, 20))
+      assert(ui.state.chatStatus === '', `补齐之后还挂着：${JSON.stringify(ui.state.chatStatus)}`)
+      first.close()
+      second.close()
+      ui.stopChatStream()
+    })
+
+    await test('打开对话只要最近几轮，往前翻再一页页取', async () => {
+      // 以前是整段推：实测 1078 条，每次刷新都从头灌一遍。慢，而且尾巴容易压在下游
+      // 缓冲里出不来——「历史缺一截 + 永远正在处理」就是这么来的。
+      const sse = fakeSse()
+      const urls = []
+      const older = [
+        { seq: 5, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '很早以前' }] }, source: { kind: 'user' } } },
+        { seq: 6, time: 1, type: 'assistant/message', data: { turn: 1, step: 0, message: { content: [{ type: 'text', text: '很早的回答' }] } } },
+      ]
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          urls.push(path)
+          if (path.includes('/history')) {
+            return { ok: true, status: 200, text: async () => JSON.stringify({ events: older, firstSeq: 5, hasMore: false }) }
+          }
+          if (path.includes('/events')) return sse.response
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-page'
+      void ui.startChatStream('s-page')
+      for (let i = 0; i < 200 && !urls.some((u) => u.includes('/events')); i++) await new Promise((r) => setTimeout(r, 5))
+      const open = urls.find((u) => u.includes('/events'))
+      assert(/[?&]tail=\d+/.test(open), `头一次连没带 tail，还是会把整段历史推一遍：${open}`)
+
+      sse.push({ seq: 10, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '最近的' }] }, source: { kind: 'user' } } })
+      sse.push({ seq: 11, time: 1, type: 'assistant/message', data: { turn: 2, step: 0, message: { content: [{ type: 'text', text: '最近的回答' }] } } })
+      sse.push({ type: 'replay/done', live: false, firstSeq: 10, hasMore: true })
+      for (let i = 0; i < 200 && ui.state.chatEvents.length < 2; i++) await new Promise((r) => setTimeout(r, 5))
+
+      // 前面还有，顶上就该有一行入口。
+      const rows = ui.threadRows(ui.fold(ui.state.chatEvents), 's-page')
+      assert(rows[0] && rows[0].kind === 'more', `顶上没有「加载更早」：${JSON.stringify(rows.map((r) => r.kind))}`)
+
+      await ui.loadOlderChat('s-page')
+      const page = urls.find((u) => u.includes('/history'))
+      assert(page && /before=10/.test(page), `翻页没带游标，会把同一段再取一遍：${page}`)
+      // 旧的要插在**开头**，顺序不能乱。
+      assert(ui.state.chatEvents[0].seq === 5, `旧消息没插到开头：${ui.state.chatEvents.map((e) => e.seq).join(',')}`)
+      const after = ui.threadRows(ui.fold(ui.state.chatEvents), 's-page')
+      assert(!after.some((r) => r.kind === 'more'), '翻到头了还挂着「加载更早」')
+      assert(after.filter((r) => r.kind === 'msg').length === 4, `四条消息该都在：${after.filter((r) => r.kind === 'msg').length}`)
+      sse.close()
+      ui.stopChatStream()
+    })
+
+    await test('老 bot 不带 live 字段：照旧按事件扫，不改行为', async () => {
+      // 席位上的 bot 比 Gateway 旧一步是常态（要重新部署才换版本）。它发的 replay/done
+      // 上没有 live，这时候只能回落到扫描——可以不如新版准，但不能比以前更差。
+      const sse = fakeSse()
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => (path.includes('/events') ? sse.response : fetch(gwBase + path)),
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-old'
+      const run = ui.startChatStream('s-old')
+      sse.push({ seq: 1, time: 1, type: 'turn/start', data: { turn: 1 } })
+      sse.push({ type: 'replay/done' })
+      for (let i = 0; i < 100 && ui.state.chatReplaying; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(ui.state.chatStatus === 'running', `老 bot 那条路被改坏了：${JSON.stringify(ui.state.chatStatus)}`)
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
     await test('换 Bot：席位没起来时也不能留着上一个 Bot 的对话', async () => {
       // 原来是等新会话拿回来、比对出 sessionId 变了才清正文。新 Bot 的席位没上线时那步
       // 走不到（503 就地 return），于是切过去之后屏幕上还挂着**上一个 Bot 的聊天记录**，
@@ -758,6 +961,52 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       sseA.close()
       await run
       ui.stopChatStream()
+    })
+
+    await test('侧栏预热流先到：认领它，别让正文空着', async () => {
+      const sse = fakeSse()
+      let release = null
+      const held = new Promise((r) => {
+        release = r
+      })
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/events')) return sse.response
+          if (path.includes('/session')) {
+            await held
+            return { ok: true, status: 200, text: async () => JSON.stringify({ sessionId: 's-a' }) }
+          }
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+
+      // loadPage 里那句 `void warmBotStreams()` 跑在 loadChatPage 前面，正在打开的这个
+      // Bot 也在名单里。于是同一条会话有两个人去开流：预热那边先建上（那会儿它还只是
+      // 后台流，chatStreamId 没设），ensureChatSession 随后才把这条会话认成当前的。
+      const pending = ui.ensureChatSession('bot-a')
+      await new Promise((r) => setTimeout(r, 10))
+      void ui.startChatStream('s-a', 0, 'bot-a')
+      await new Promise((r) => setTimeout(r, 10))
+      release()
+      await pending
+
+      // 认领没做的话，这条流在读循环里会同时满足「是当前会话」和「chatStreamId 对不上」
+      // ——那正是「人已经切走了」的判据，它自己收摊，重放到一半的历史再也回不来：正文
+      // 空白，切走再切回来还是空白，只能刷新整页。
+      sse.push({
+        type: 'assistant/message',
+        seq: 1,
+        time: Date.now(),
+        data: { message: { content: [{ type: 'text', text: '历史第一条' }] } },
+      })
+      for (let i = 0; i < 100 && ui.state.chatEvents.length < 1; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(ui.state.chatEvents.length === 1, `预热流把自己判成「已经切走」收摊了，正文空白`)
+      ui.stopChatStream()
+      sse.close()
     })
 
     await test('换 Bot：没发出去的草稿跟着各自的 Bot 走', async () => {

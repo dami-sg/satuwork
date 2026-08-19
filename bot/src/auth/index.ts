@@ -566,7 +566,7 @@ export function apply(ctx: Context) {
     /** 当前状态。**公开**：没登录的浏览器要靠它决定画登录页还是初始化页。 */
     ctx.server.get('/api/auth/state', async (req, res) => {
       const user = ctx.auth.userOfToken(tokenOf(req))
-      return res.json({
+      res.json({
         needsSetup: ctx.auth.needsSetup(),
         user: user ? AuthService.publicOf(user) : null,
       })
@@ -582,10 +582,10 @@ export function apply(ctx: Context) {
           password: body.password ?? '',
         })
         setCookie(res, ctx.auth.startSession(user.id, req.headers.get('user-agent') ?? undefined), isSecure(req))
-        return res.json({ user: AuthService.publicOf(user) })
+        res.json({ user: AuthService.publicOf(user) })
       } catch (e) {
         res.status = 400
-        return res.json({ error: (e as Error).message })
+        res.json({ error: (e as Error).message })
       }
     })
 
@@ -596,31 +596,34 @@ export function apply(ctx: Context) {
       const wait = ctx.auth.throttle(email)
       if (wait) {
         res.status = 429
-        return res.json({ error: `尝试太频繁，请 ${wait} 秒后再试` })
+        res.json({ error: `尝试太频繁，请 ${wait} 秒后再试` })
+        return
       }
 
       const user = await ctx.auth.verify(email, body.password ?? '')
       if (user && user.status === 'disabled') {
         res.status = 403
-        return res.json({ error: '这个账号已被停用，请联系管理员' })
+        res.json({ error: '这个账号已被停用，请联系管理员' })
+        return
       }
       if (!user) {
         ctx.auth.noteFailure(email)
         res.status = 401
         // 不说是「没这个人」还是「口令不对」——那等于一个查号台。
-        return res.json({ error: '邮箱或口令不对' })
+        res.json({ error: '邮箱或口令不对' })
+        return
       }
 
       ctx.auth.clearFailures(email)
       ctx.auth.noteLogin(user.id)
       setCookie(res, ctx.auth.startSession(user.id, req.headers.get('user-agent') ?? undefined), isSecure(req))
-      return res.json({ user: AuthService.publicOf(user) })
+      res.json({ user: AuthService.publicOf(user) })
     })
 
     ctx.server.post('/api/auth/logout', async (req, res) => {
       ctx.auth.endSession(tokenOf(req))
       setCookie(res, null, isSecure(req))
-      return res.json({ ok: true })
+      res.json({ ok: true })
     })
 
     /**
@@ -631,8 +634,11 @@ export function apply(ctx: Context) {
      */
     ctx.server.get('/api/invites/:token', async (req, res) => {
       const found = ctx.auth.inviteeOf(req.params.token)
-      if (!found) return res.json({ valid: false })
-      return res.json({
+      if (!found) {
+        res.json({ valid: false })
+        return
+      }
+      res.json({
         valid: true,
         email: found.user.email,
         name: found.user.name,
@@ -650,17 +656,17 @@ export function apply(ctx: Context) {
         })
         ctx.auth.noteLogin(user.id)
         setCookie(res, ctx.auth.startSession(user.id, req.headers.get('user-agent') ?? undefined), isSecure(req))
-        return res.json({ user: AuthService.publicOf(user) })
+        res.json({ user: AuthService.publicOf(user) })
       } catch (e) {
         res.status = 400
-        return res.json({ error: (e as Error).message })
+        res.json({ error: (e as Error).message })
       }
     })
 
     /** 当前登录的人。走守卫，所以到这里一定有会话。 */
     ctx.server.get('/api/me', async (req, res) => {
       const user = ctx.auth.userOfToken(tokenOf(req))!
-      return res.json({ user: AuthService.publicOf(user) })
+      res.json({ user: AuthService.publicOf(user) })
     })
 
     /** 改自己的资料。邮箱不在这里——它是登录身份，改它要另一套验证。 */
@@ -668,10 +674,10 @@ export function apply(ctx: Context) {
       const me = ctx.auth.userOfToken(tokenOf(req))!
       const body = (await req.json().catch(() => ({}))) as Record<string, string>
       try {
-        return res.json({ user: AuthService.publicOf(ctx.auth.updateProfile(me.id, body)) })
+        res.json({ user: AuthService.publicOf(ctx.auth.updateProfile(me.id, body)) })
       } catch (e) {
         res.status = 400
-        return res.json({ error: (e as Error).message })
+        res.json({ error: (e as Error).message })
       }
     })
 
@@ -682,27 +688,27 @@ export function apply(ctx: Context) {
       try {
         await ctx.auth.changePassword(me.id, body.current ?? '', body.next ?? '')
         setCookie(res, ctx.auth.startSession(me.id, req.headers.get('user-agent') ?? undefined), isSecure(req))
-        return res.json({ ok: true })
+        res.json({ ok: true })
       } catch (e) {
         res.status = 400
-        return res.json({ error: (e as Error).message })
+        res.json({ error: (e as Error).message })
       }
     })
 
     /** 自己的登录设备。 */
     ctx.server.get('/api/me/sessions', async (req, res) => {
       const me = ctx.auth.userOfToken(tokenOf(req))!
-      return res.json({ sessions: ctx.auth.sessionsOf(me.id, tokenOf(req)) })
+      res.json({ sessions: ctx.auth.sessionsOf(me.id, tokenOf(req)) })
     })
 
     ctx.server.delete('/api/me/sessions/:id', async (req, res) => {
       const me = ctx.auth.userOfToken(tokenOf(req))!
       try {
         ctx.auth.revokeSession(me.id, req.params.id)
-        return res.json({ ok: true })
+        res.json({ ok: true })
       } catch (e) {
         res.status = 400
-        return res.json({ error: (e as Error).message })
+        res.json({ error: (e as Error).message })
       }
     })
   })

@@ -42,7 +42,7 @@ export const DEFAULT_PROVIDER = 'deepseek'
 export const DEFAULT_MODEL = 'deepseek-v4-flash'
 
 const DEFAULT_PROMPT =
-  '你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间或精确计算时调用工具，不要凭猜测。'
+  '你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间、查看或修改文件、执行命令时调用工具，不要凭猜测。'
 
 /**
  * 本机 Bot 名册。
@@ -248,7 +248,7 @@ export function apply(ctx: Context) {
       return { error }
     }
 
-    ctx.server.get('/api/bots', async (req, res) =>
+    ctx.server.get('/api/bots', async (req, res) => {
       res.json({
         bots: roster.list().map((b) => ({
           ...b,
@@ -256,25 +256,25 @@ export function apply(ctx: Context) {
           mcpCount: (b.mcps ?? []).length,
           usage: '—',
         })),
-      }),
-    )
+      })
+    })
 
     // 配置后台在 Gateway。本机只读名册、钉公司 Bot、开长会话。
     ctx.server.get('/api/bots/options', async (req, res) => {
       res.status = 410
-      return res.json({ error: 'Bot 配置在 Gateway' })
+      res.json({ error: 'Bot 配置在 Gateway' })
     })
 
     ctx.server.post('/api/bots', async (req, res) => {
       res.status = 410
-      return res.json({ error: 'Bot 配置在 Gateway' })
+      res.json({ error: 'Bot 配置在 Gateway' })
     })
 
     ctx.server.get('/api/bots/:id/session', async (req, res) => {
       try {
-        return res.json(await roster.ensureSession(req.params.id))
+        res.json(await roster.ensureSession(req.params.id))
       } catch (e) {
-        return res.json(fail(res, 404, (e as Error).message))
+        res.json(fail(res, 404, (e as Error).message))
       }
     })
 
@@ -282,13 +282,16 @@ export function apply(ctx: Context) {
       // options / pin 留给别的插件。:id 不能把它们吞掉。
       if (req.params.id === 'options' || req.params.id === 'pin') return next()
       const bot = roster.get(req.params.id)
-      if (!bot) return res.json(fail(res, 404, `没有这个助理：${req.params.id}`))
-      return res.json({ bot })
+      if (!bot) {
+        res.json(fail(res, 404, `没有这个助理：${req.params.id}`))
+        return
+      }
+      res.json({ bot })
     })
 
     ctx.server.patch('/api/bots/:id', async (req, res) => {
       res.status = 410
-      return res.json({ error: 'Bot 配置在 Gateway' })
+      res.json({ error: 'Bot 配置在 Gateway' })
     })
   })
 }

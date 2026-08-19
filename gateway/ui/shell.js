@@ -1,0 +1,226 @@
+/** 外壳：登录页、初始化页、侧栏导航、Bot 名单。进得了门之前只有这些。 */
+function mark(text, alt) {
+  const style = alt
+    ? 'background: var(--color-accent-2-100); color: var(--color-accent-2-800);'
+    : 'background: var(--color-accent-100); color: var(--color-accent-800);'
+  return `<span class="satu-providermark" style="${style}">${esc(String(text || '?').slice(0, 2).toUpperCase())}</span>`
+}
+
+/** 登录页和创建页共用左半边，只有右半边那张卡不一样。 */
+function authAside() {
+  return `
+    <div class="satu-authside">
+      <div style="position: absolute; top: -60px; right: -60px; width: 220px; height: 220px; border-radius: 50%; background: var(--color-accent-2-200); opacity: 0.6;"></div>
+      <div style="position: relative; display: flex; align-items: center; gap: var(--space-2);">
+        <img src="/assets/satuwork-logo.png" alt="Satuwork" style="width: 34px; height: 34px; border-radius: 999px;">
+        <span style="font-family: var(--font-heading); font-size: 20px;">Satuwork</span>
+      </div>
+      <div style="position: relative; display: flex; flex-direction: column; gap: var(--space-4); max-width: 440px;">
+        <div style="width: 100%; aspect-ratio: 4/3; border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-lg);">
+          <img src="/assets/login-hero.png" alt="" style="width: 100%; height: 100%; object-fit: cover;">
+        </div>
+        <p style="font-family: var(--font-heading); font-size: 26px; line-height: 1.2; margin: 0;">${t('Satuwork 控制面。按账号角色进入系统控制台或公司后台。')}</p>
+        <p style="margin: 0; color: color-mix(in srgb, var(--color-text) 65%, transparent); font-size: 14px; line-height: 1.6;">${t('日常任务模型和 utility 模型由系统管理员配置。供应商密钥保存后不会回显，也不会下发到 Bot。')}</p>
+      </div>
+      <div style="position: relative; display: flex; gap: var(--space-4); font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent);">
+        <span>© 2026 Satuwork</span>
+      </div>
+    </div>`
+}
+
+/**
+ * 系统里一个 owner 都没有时的第一屏。
+ *
+ * 不是登录页上的一个链接——没有管理员时登录页没有任何可用的入口，让人对着一个
+ * 永远填不对的表单猜，不如直接把该做的事摆出来。建完当场就是登录态。
+ */
+function setupView() {
+  return `
+  <div class="gw-login">
+    ${authAside()}
+    <div style="position: relative; display: flex; align-items: center; justify-content: center; padding: var(--space-8);">
+      <div style="width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: var(--space-6);">
+        <div>
+          <h1 style="font-size: 30px; margin: 0 0 var(--space-2);">${t('创建系统管理员')}</h1>
+          <p style="margin: 0; color: color-mix(in srgb, var(--color-text) 60%, transparent); font-size: 14px;">${t('这台 Gateway 还没有系统管理员。第一个账号由你在这里创建，之后这一屏不会再出现。')}</p>
+        </div>
+        ${state.setupError ? `<div class="gw-flash gw-flash-err">${esc(state.setupError)}</div>` : ''}
+        <form id="setup-form" style="display: flex; flex-direction: column; gap: var(--space-4);">
+          <div class="field">
+            <label for="setup-email">${t('邮箱')}</label>
+            <input class="input satu-input" id="setup-email" name="email" type="email" autocomplete="username" placeholder="you@company.com" value="${esc(state.setupEmail)}" required>
+          </div>
+          <div class="field">
+            <label for="setup-name">${t('姓名')}<span style="color: var(--muted-foreground); font-weight: 400;">${t('（可留空）')}</span></label>
+            <input class="input satu-input" id="setup-name" name="name" type="text" autocomplete="name" placeholder="${esc(t('张三'))}" value="${esc(state.setupName)}">
+          </div>
+          <div class="field">
+            <label for="setup-pw">${t('口令')}</label>
+            <input class="input satu-input" id="setup-pw" name="password" type="password" autocomplete="new-password" placeholder="${esc(t('至少 10 位'))}" required minlength="10">
+          </div>
+          <div class="field">
+            <label for="setup-pw2">${t('再输一遍')}</label>
+            <input class="input satu-input" id="setup-pw2" name="confirm" type="password" autocomplete="new-password" placeholder="${esc(t('再输一遍口令'))}" required minlength="10">
+          </div>
+          <button type="submit" class="btn btn-primary btn-block" ${state.busy ? 'disabled' : ''}>
+            ${state.busy ? t('创建中…') : t('创建并进入')}
+            ${state.busy ? '' : svg(['M5 12h14', 'm12 5 7 7-7 7'], 14)}
+          </button>
+        </form>
+        <p style="text-align: center; margin: 0; font-size: 14px; color: color-mix(in srgb, var(--color-text) 60%, transparent);">${t('系统管理员不属于任何公司，负责分配席位、配置模型和供应商密钥。')}</p>
+      </div>
+    </div>
+  </div>`
+}
+
+function loginView() {
+  return `
+  <div class="gw-login">
+    ${authAside()}
+    <div style="position: relative; display: flex; align-items: center; justify-content: center; padding: var(--space-8);">
+      <div style="width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: var(--space-6);">
+        <div>
+          <h1 style="font-size: 30px; margin: 0 0 var(--space-2);">${t('登录 Satuwork')}</h1>
+          <p style="margin: 0; color: color-mix(in srgb, var(--color-text) 60%, transparent); font-size: 14px;">${t('进入控制台，管理你的 AI 员工')}</p>
+        </div>
+        ${state.loginError ? `<div class="gw-flash gw-flash-err">${esc(state.loginError)}</div>` : ''}
+        <form id="login-form" style="display: flex; flex-direction: column; gap: var(--space-4);">
+          <div class="field">
+            <label for="login-email">${t('邮箱')}</label>
+            <input class="input satu-input" id="login-email" name="email" type="email" autocomplete="username" placeholder="you@company.com" value="${esc(state.loginEmail)}" required>
+          </div>
+          <div class="field">
+            <div style="display: flex; justify-content: space-between; align-items: baseline;">
+              <label for="login-pw" style="margin: 0;">${t('口令')}</label>
+              <span style="font-size: 12px; color: var(--muted-foreground);">${t('忘记口令？联系管理员')}</span>
+            </div>
+            <input class="input satu-input" id="login-pw" name="password" type="password" autocomplete="current-password" placeholder="${esc(t('输入口令'))}" required>
+          </div>
+          <button type="submit" class="btn btn-primary btn-block" ${state.busy ? 'disabled' : ''}>
+            ${state.busy ? t('登录中…') : t('登录')}
+            ${state.busy ? '' : svg(['M5 12h14', 'm12 5 7 7-7 7'], 14)}
+          </button>
+        </form>
+        <p style="text-align: center; margin: 0; font-size: 14px; color: color-mix(in srgb, var(--color-text) 60%, transparent);">${t('还没有账号？联系管理员开通。')}</p>
+      </div>
+    </div>
+  </div>`
+}
+
+function navItem(item) {
+  const current =
+    state.path === item.href ||
+    (item.href !== '/' && state.path.startsWith(item.href + '/')) ||
+    (item.href === '/chat' && state.path.startsWith('/a/')) ||
+    (item.href === '/' && memberChatHome() && state.path.startsWith('/a/'))
+  return `<button type="button" class="satu-nav" data-act="go" data-href="${esc(item.href)}" aria-current="${current}">
+    ${svg(ICONS[item.icon])}
+    <span class="satu-label">${esc(t(item.label))}</span>
+  </button>`
+}
+
+/**
+ * 「对话」下面挂着的 Bot 名册。
+ *
+ * 挪到主导航里，是因为它本来就是**在一群人之间切换**——和左边那些页面入口是同一种
+ * 动作，没理由在内容区里再占一栏。名册进来之后对话页只剩两栏：正文和运行环境。
+ *
+ * 只在对话相关的页面上展开：别的页面挂一串 Bot 是噪音。
+ */
+/**
+ * 侧栏顶层的 Bot 名单。
+ *
+ * **不再挂在「对话」下面。** 这些 Bot 就是这个产品的主体——一个人管着几个 AI 员工，
+ * 天天要看的是「谁在干活、谁刚回了话」。把它们藏在一个还要先点开的导航项里，等于
+ * 把主角放进抽屉。所以提到顶层，做成聊天列表的样子：头像、名字、最近回复的时间、
+ * 一行摘要，正在跑的转圈。
+ *
+ * 时间和摘要留空位不留内容：它们来自各自的事件流，每帧都在变（见 paintRoster），
+ * 靠重绘整页去更新的话，一边打字一边就把侧栏刷没了。
+ */
+function chatRosterNav() {
+  const bots = state.runtimeBots || []
+  if (!bots.length) return ''
+  const selected = chatBotIdOf(state.path) || state.chatBotId
+  return bots
+    .map((b) => {
+      const sum = (botStreams.get(b.id) || {}).sum || { state: 'idle', lastAt: 0, lastText: '' }
+      return `<button type="button" class="satu-botrow" data-act="chat-open" data-id="${esc(b.id)}" data-bot-row="${esc(b.id)}" aria-current="${b.id === selected}">
+        ${/* 头像占满两行：名字和摘要并排在它右边，整行才像一条会话，而不是一个
+             带小图标的菜单项。34 是 botAvatar 的默认尺寸，也正好等于两行的高度。 */ ''}
+        <span class="satu-botavatar">${botAvatar(b.icon, 34, b.origin)}</span>
+        <span class="satu-botmain">
+          <span class="satu-botline">
+            ${/* 状态点在名字**前面**：一列对齐的点，扫一眼就知道哪几个在动，
+                 不用把视线甩到行尾去找。 */ ''}
+            <span class="satu-botdot" data-state="${sum.state}" title="${esc(botStateLabel(sum.state))}" aria-label="${esc(botStateLabel(sum.state))}"></span>
+            <span class="satu-botname">${esc(b.name || b.id)}</span>
+            <time class="satu-bottime">${esc(sum.lastAt ? chatClock(sum.lastAt) : '')}</time>
+          </span>
+          ${/* 没有消息就不留这一行——空着一道灰边比少一行更碍眼。 */ ''}
+          <span class="satu-botsnip"${sum.lastText ? '' : ' hidden'}>${esc(sum.lastText)}</span>
+        </span>
+      </button>`
+    })
+    .join('')
+}
+
+let rosterPaintQueued = false
+
+/** 名单每帧都可能变（时间、摘要、转圈），跟正文一样合并到一帧里画。 */
+function scheduleRosterPaint() {
+  if (rosterPaintQueued) return
+  rosterPaintQueued = true
+  const run = () => {
+    rosterPaintQueued = false
+    paintRoster()
+  }
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run)
+  else setTimeout(run, 16)
+}
+
+function botStateLabel(state) {
+  if (state === 'busy') return t('正在执行')
+  if (state === 'review') return t('待人工处理')
+  return t('空闲')
+}
+
+/** 就地更新名单的状态点/时间/摘要。不重绘整页——那会把正在打字的输入框一起换掉。 */
+function paintRoster() {
+  for (const row of document.querySelectorAll('[data-bot-row]')) {
+    const id = row.getAttribute('data-bot-row')
+    const sum = (botStreams.get(id) || {}).sum
+    if (!sum) continue
+    const dot = row.querySelector('.satu-botdot')
+    if (dot && dot.getAttribute('data-state') !== sum.state) {
+      dot.setAttribute('data-state', sum.state)
+      dot.title = botStateLabel(sum.state)
+      dot.setAttribute('aria-label', botStateLabel(sum.state))
+    }
+    const time = row.querySelector('.satu-bottime')
+    if (time) time.textContent = sum.lastAt ? chatClock(sum.lastAt) : ''
+    const snip = row.querySelector('.satu-botsnip')
+    if (snip) {
+      snip.textContent = sum.lastText
+      snip.hidden = !sum.lastText
+    }
+  }
+}
+
+function flashes() {
+  return `${state.error ? `<div class="gw-flash gw-flash-err">${esc(state.error)}</div>` : ''}
+    ${state.notice ? `<div class="gw-flash gw-flash-ok">${esc(state.notice)}</div>` : ''}`
+}
+
+function placeholderPage(title, body) {
+  return `
+    <div class="gw-page">
+      <div class="gw-page-inner">
+        <div>
+          <h1 style="font-size: 24px; margin: 0 0 4px;">${esc(title)}</h1>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(body)}</p>
+        </div>
+        ${flashes()}
+      </div>
+    </div>`
+}

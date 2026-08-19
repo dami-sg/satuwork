@@ -19,8 +19,11 @@ import { runMachineDeploy } from './machine-deploy.mjs'
 import { runLlmUsage } from './llm-usage.mjs'
 import { runMarkdown } from './markdown.mjs'
 import { runSessionStore } from './session-store.mjs'
+import { runLlmIdle } from './llm-idle.mjs'
+import { runReplaySlice } from './replay-slice.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
+import { uiSource } from './ui-dom.mjs'
 import { runCustomProvider } from './custom-provider.mjs'
 import { runStats } from './stats.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
@@ -821,7 +824,7 @@ async function runGateway() {
     const spaDetail = await req(base, 'GET', `/users/${adminId}`)
     assert(spaDetail.status === 200, `spa /users/:id ${spaDetail.status}`)
     assert(String(spaDetail.text).includes('<!doctype html>') || String(spaDetail.text).includes('Satuwork'), 'spa detail html')
-    const appJs = readFileSync(join(gwRoot, 'ui/app.js'), 'utf8')
+    const appJs = uiSource(join(gwRoot, 'ui'))
     assert(appJs.includes('function userDetailPage'), '缺 userDetailPage')
   })
 
@@ -1460,7 +1463,7 @@ async function runGateway() {
   })
 
   await test('owner 公司列表弹窗 + 详情 SPA；成员/订阅 API 按 path id', async () => {
-    const appJs = readFileSync(join(gwRoot, 'ui/app.js'), 'utf8')
+    const appJs = uiSource(join(gwRoot, 'ui'))
     assert(appJs.includes('data-act="org-create-open"'), '缺 新建公司 按钮')
     assert(appJs.includes('orgCreateOpen'), '缺 orgCreateOpen')
     assert(appJs.includes('function companyDetailPage'), '缺 companyDetailPage')
@@ -2592,6 +2595,8 @@ async function main() {
     await runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runMarkdown({ root, test, assert, log })
     await runSessionStore({ root, test, assert, log })
+    await runLlmIdle({ root, test, assert, log })
+    await runReplaySlice({ root, test, assert, log })
   } finally {
     killAll()
     try {

@@ -92,7 +92,10 @@ const MIME: Record<string, string> = {
 }
 
 const SPA_PATHS = new Set(['/', '/index.html', '/ui', '/ui/', '/models', '/providers', '/company', '/accounts', '/audit', '/companies', '/users', '/plans', '/orders', '/stats', '/costs', '/billing', '/usage', '/catalog', '/profile', '/bots', '/skills', '/chat', '/releases'])
-const ROOT_FILES = new Set(['theme.css', 'shell.css', 'app.css', 'chat.css', 'app.js', 'i18n.js', 'markdown.js', 'index.html', 'unzip.js'])
+// 前端脚本拆成了一串（见 gateway/ui/index.html 里那组 data-app-part），
+// 加一个新的分片就要在这里也加一行，否则线上直接 404，而本地跑 index.html 是好的。
+const UI_PARTS = ['prefs.js', 'state.js', 'data.js', 'shell.js', 'pages-admin.js', 'pages-audit.js', 'pages-account.js', 'pages-bots.js', 'chat.js', 'render.js', 'app.js']
+const ROOT_FILES = new Set(['theme.css', 'shell.css', 'app.css', 'chat.css', ...UI_PARTS, 'i18n.js', 'markdown.js', 'index.html', 'unzip.js'])
 
 /** GET / 与各管理屏、GET /ui/*、/theme.css、/assets/* 从 gateway/ui 出。路径不得逃出该目录。 */
 function serveUi(pathname: string, res: ServerResponse): boolean {

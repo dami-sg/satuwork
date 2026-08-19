@@ -10,6 +10,7 @@
  * new Function 里执行；顶层那些 document.getElementById('app') 由垫片接住。
  */
 import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 function makeStorage() {
   const map = new Map()
@@ -128,13 +129,28 @@ function makeDom(stubIds = []) {
 }
 
 /**
- * 载入 app.js。
+ * 前端源码，按**线上真正的加载顺序**拼成一份。
  *
- * 末尾那句 boot() 去掉，由调用方决定什么时候起——否则一 import 就开始打网络，
- * 断言没法安排在它前面。
+ * 顺序不能在这里另写一份：那样它迟早和 index.html 漂开，而漂开的表现是「测试全绿、
+ * 浏览器里白屏」。所以直接读 index.html 里那组 `data-app-part`——它就是线上那串
+ * <script>，改了哪儿、加了哪个分片，垫片自动跟上。
+ */
+export function uiSource(uiDir) {
+  const html = readFileSync(join(uiDir, 'index.html'), 'utf8')
+  const parts = [...html.matchAll(/<script src="\/([^"]+)"[^>]*\bdata-app-part\b/g)].map((m) => m[1])
+  if (!parts.length) throw new Error(`在 ${uiDir}/index.html 里找不到 data-app-part 脚本`)
+  return parts.map((f) => readFileSync(join(uiDir, f), 'utf8')).join('\n')
+}
+
+/**
+ * 载入前端。
+ *
+ * appPath 指的是分片里的任意一个（一般是 app.js），真正装进来的是它旁边那一整串——
+ * 见 uiSource。末尾那句 boot() 去掉，由调用方决定什么时候起，否则一 import 就开始打
+ * 网络，断言没法安排在它前面。
  */
 export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
-  const raw = readFileSync(appPath, 'utf8')
+  const raw = uiSource(dirname(appPath))
   const src = raw.replace(/\nboot\(\)\s*$/, '\n')
   const { document, app, page, listeners, stubs } = makeDom(stubIds)
   const sessionStorage = makeStorage()
@@ -170,7 +186,7 @@ export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
     'HTMLSelectElement',
     'HTMLTextAreaElement',
     'HTMLFormElement',
-    `${src}\n;return { boot, render, state, api, auditTranscript, messageText, setToken, clearToken, token, onSetup, testLlm, saveSettings, savePriceMultiplier, saveCustomProvider, saveCustomModel, loadCustomProviders, runConfirm, statsWindow, loadStats, catalogBase, pathAllowed, machineHead, readOnlyItem, startChatStream, stopChatStream, paintChat, ensureChatSession, fold, threadRows, CHAT_RETRY_MAX }`,
+    `${src}\n;return { boot, render, state, api, auditTranscript, messageText, setToken, clearToken, token, onSetup, testLlm, saveSettings, savePriceMultiplier, saveCustomProvider, saveCustomModel, loadCustomProviders, runConfirm, statsWindow, loadStats, catalogBase, pathAllowed, machineHead, readOnlyItem, startChatStream, stopChatStream, paintChat, ensureChatSession, fold, threadRows, loadOlderChat, CHAT_RETRY_MAX }`,
   )
 
   const windowStub = { addEventListener() {}, satuUnzip: null, location, history }
@@ -253,10 +269,9 @@ export function fakeSse() {
   }
 }
 
-/** app.js 里读 token 的那个 key，垫片要和它对上。写死会悄悄失效，所以从源码里取。 */
+/** 前端读 token 的那个 key，垫片要和它对上。写死会悄悄失效，所以从源码里取。 */
 export function tokenKey(appPath) {
-  const raw = readFileSync(appPath, 'utf8')
-  const m = raw.match(/const TOKEN_KEY = '([^']+)'/)
-  if (!m) throw new Error('在 app.js 里找不到 TOKEN_KEY')
+  const m = uiSource(dirname(appPath)).match(/const TOKEN_KEY = '([^']+)'/)
+  if (!m) throw new Error('在前端源码里找不到 TOKEN_KEY')
   return m[1]
 }
