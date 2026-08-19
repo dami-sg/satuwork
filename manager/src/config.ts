@@ -15,7 +15,14 @@ import { fileURLToPath } from 'node:url'
  * 目录可以用 `SATUWORK_MANAGER_HOME` 整体挪走——e2e 靠它在 /tmp 里跑，不碰 /etc。
  */
 
-export const PROTOCOL = 1
+/**
+ * 管家协议版本。**加了 Gateway 那侧要依赖的能力就 +1。**
+ *
+ * 2：`/seats/:id/vnc/*` 认机器票，桌面因此能从 Gateway 同域反代出去。1 号管家在这
+ * 条路上只认票和 cookie，而反代过来的请求两样都没有——表现是浏览器上一句
+ * 「桌面票无效或已过期」，跟票真的过期长得一模一样。Gateway 拿这个号数把两者分开。
+ */
+export const PROTOCOL = 2
 
 export interface ManagerState {
   machineId: string

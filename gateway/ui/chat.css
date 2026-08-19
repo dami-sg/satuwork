@@ -699,7 +699,10 @@
   border: 1px solid var(--border);
   /* 见 .sw-desk-slot：宽高是照槽的 border-box 给的，这里必须同口径。 */
   box-sizing: border-box;
-  background: var(--color-neutral-900, #111);
+  /* **这几块不跟主题翻。** 它们是「看画面」的表面：底下一块黑屏，上面压白字。
+     用 --color-neutral-900 的话，深色主题里它是近白色（#f5f3ee），标题条就成了
+     白底白字，什么都看不见。 */
+  background: #111;
   box-shadow: var(--shadow-sm);
   /* 列：全屏时标题条占一行、屏占剩下的。**不叠在屏上面**——叠上去挡掉的正好是
      桌面顶栏那一条，而那是要点的地方。 */
@@ -730,7 +733,7 @@
 }
 .sw-deskl.is-full .sw-deskl-shield { display: none; }
 .sw-deskl-shield:hover, .sw-deskl-shield:focus-visible {
-  background: color-mix(in srgb, var(--color-neutral-900) 42%, transparent);
+  background: rgba(0, 0, 0, 0.42);
 }
 .sw-deskl-open {
   display: inline-flex;
@@ -765,7 +768,7 @@
   justify-content: space-between;
   gap: var(--space-3);
   padding: 6px 8px 6px var(--space-4);
-  background: var(--color-neutral-900, #111);
+  background: #111;
   color: #fff;
   font-size: 12.5px;
 }
@@ -791,7 +794,7 @@
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: color-mix(in srgb, var(--color-neutral-900) 62%, transparent);
+  background: rgba(0, 0, 0, 0.62);
   opacity: 0;
   pointer-events: none;
   transition: opacity 200ms ease;

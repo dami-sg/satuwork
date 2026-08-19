@@ -798,6 +798,24 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         assert(q.get('autoconnect') === '1', `autoconnect ${loc}`)
         assert(q.get('password') === rt.json.vncPassword, '口令没随票转过去')
 
+        /**
+         * 管家还是 1 号协议时，这条路要**明确说「去升级管家」**，不能把管家那句
+         * 「桌面票无效或已过期」原样递出去——那句话和票真的过期一字不差，人会去反复
+         * 重开桌面，而那永远不会好。上面的心跳把这台机器报成了 protocol 1。
+         */
+        const old = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`, { headers: { cookie } })
+        assert(old.status === 409, `旧管家应 409：${old.status}`)
+        assert(String((await old.json()).error).includes('升级管家'), '没说清楚要升级管家')
+
+        // 管家升上来（心跳自报 protocol 2）之后，同一条路就该通了。
+        const machineId = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json
+          .machine.id
+        const hb2 = await req(gwBase, 'POST', `/internal/machines/${machineId}/heartbeat`, {
+          token: machineTok,
+          body: { managerVersion: 'e2e', protocol: 2, arch: 'arm64', seats: [] },
+        })
+        assert(hb2.status === 200, `heartbeat2 ${hb2.status} ${hb2.text}`)
+
         const page = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`, { headers: { cookie } })
         assert(page.status === 200, `静态 ${page.status}`)
         assert((await page.text()) === 'VNC-PAGE', '字节没原样带回来')

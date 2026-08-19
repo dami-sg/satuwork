@@ -7,6 +7,13 @@ import { botReleaseFile } from './releases.ts'
 /** 管家握手协议。低于这个数的机器不给下发部署——字段对不上会失败得很难看。 */
 export const MIN_MANAGER_PROTOCOL = 1
 
+/**
+ * 桌面反代要求的管家协议。**和 MIN_MANAGER_PROTOCOL 分开**：管家旧一点，部署、聊天、
+ * 日志都还照常能用，只有「从 Gateway 同域看桌面」这一件事做不了。把总门槛抬到 2
+ * 会把那些功能一起停掉，代价远大于收益。
+ */
+export const MIN_DESKTOP_PROTOCOL = 2
+
 export interface SeatPorts {
   display: number
   vncPort: number

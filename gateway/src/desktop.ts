@@ -2,6 +2,7 @@ import { request as httpRequest, type IncomingMessage, type Server, type ServerR
 import type { Duplex } from 'node:stream'
 import { verifyDesktopTicket, type JwtKeys } from './crypto.ts'
 import type { Db } from './db.ts'
+import { MIN_DESKTOP_PROTOCOL } from './deploy.ts'
 import { json } from './http.ts'
 
 /**
@@ -63,15 +64,28 @@ function viewParams(url: URL): string {
   return out
 }
 
-/** 这块屏在哪台机器上、拿什么认。查不到就是没有。 */
-async function upstreamOf(db: Db, seatId: string): Promise<{ base: string; token: string } | undefined> {
+/** 这块屏在哪台机器上、拿什么认、那台管家多新。查不到就是没有。 */
+async function upstreamOf(
+  db: Db,
+  seatId: string,
+): Promise<{ base: string; token: string; protocol: number } | undefined> {
   const row = await db.seatRuntimeBySeatId(seatId)
   if (!row) return
   const machine = await db.machine(row.machineId)
   const base = (machine?.host || '').trim().replace(/\/$/, '')
   if (!base || !machine?.token) return
-  return { base, token: machine.token }
+  return { base, token: machine.token, protocol: machine.protocol ?? 0 }
 }
+
+/**
+ * 管家太旧时的说法。
+ *
+ * **这句话是这次改动欠下的债。** 1 号管家在 `/seats/:id/vnc/*` 上只认票和 cookie，
+ * 而反代过来的请求两样都没有，于是它回一句「桌面票无效或已过期」——和票真的过期
+ * 一字不差。人在浏览器上看到的是同一句话，却要做完全不同的两件事。所以这里先按协议
+ * 号把它拦下来，说清楚该干什么。
+ */
+const TOO_OLD = '这台机器的管家版本过旧，还不会从 Gateway 反代桌面。去「机器配置」里升级管家（升完不用重新部署 Bot）'
 
 /** 认这张 cookie 认不认。认不过的一律当没认，不区分原因。 */
 function seatOfCookie(req: IncomingMessage, keys: JwtKeys, seatId: string): boolean {
@@ -118,6 +132,14 @@ function pipeUpstream(
       headers,
     },
     (up) => {
+      // 我们带的是机器票。管家还回 401，那不是「票过期」——它压根不认这条路上的机器
+      // 票，也就是版本太旧。原样透传的话，浏览器上显示的是管家那句和票过期一字不差
+      // 的话，人会去反复重开桌面，而那永远不会好。
+      if (up.statusCode === 401) {
+        up.resume()
+        json(res, 409, { error: TOO_OLD })
+        return
+      }
       res.writeHead(up.statusCode ?? 502, up.headers as Record<string, string | string[]>)
       up.pipe(res)
     },
@@ -151,7 +173,7 @@ export function desktopIntercept(db: Db, keys: JwtKeys) {
        */
       const ok = verifyDesktopTicket(keys, ticket)
       if (!ok || ok.seatId !== seatId) {
-        json(res, 401, { error: '桌面票无效或已过期' })
+        json(res, 401, { error: '桌面票无效或已过期（Gateway 验的）。回对话页重新打开这块屏' })
         return true
       }
       const base = `/desktop/${encodeURIComponent(seatId)}`
@@ -177,12 +199,16 @@ export function desktopIntercept(db: Db, keys: JwtKeys) {
       return true
     }
     if (!seatOfCookie(req, keys, seatId)) {
-      json(res, 401, { error: '桌面票无效或已过期' })
+      json(res, 401, { error: '这块屏的凭据过期了（Gateway 验的）。回对话页重新打开它' })
       return true
     }
     const target = await upstreamOf(db, seatId)
     if (!target) {
       json(res, 404, { error: '没有这个席位' })
+      return true
+    }
+    if (target.protocol < MIN_DESKTOP_PROTOCOL) {
+      json(res, 409, { error: TOO_OLD })
       return true
     }
     pipeUpstream(req, res, target, upstreamPath(seatId, rest, url.search))
