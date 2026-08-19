@@ -121,13 +121,20 @@ function machineDetailPage() {
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
-        <div>
+        ${/* 刷新摆在标题这一行的最右边：这一整页——心跳、席位、版本、容量——都是一次
+              拉回来的快照，会过期的是整页，不是某一块，所以按钮属于页头而不是某个面板。 */ ''}
+        <div style="display: flex; align-items: flex-start; gap: var(--space-4);">
+        <div style="min-width: 0; flex: 1;">
           <h1 style="font-size: 24px; margin: 0 0 4px; word-break: break-all;">${esc(machineTitleOf(card) || t('机器详情'))}</h1>
           <p style="margin: 0; font-size: 14px; color: var(--muted-foreground); display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
             ${machineLinkCell(m)}
             ${m.lastHeartbeatAt ? `· ${esc(sinceMs(m.heartbeatAge))}` : ''}
             ${card.company ? `· <button type="button" class="satu-linkbtn" data-act="go" data-href="/companies/${esc(card.company.id)}">${esc(card.company.name)}</button>` : `· ${t('未分配给任何公司')}`}
           </p>
+        </div>
+        <button type="button" class="btn btn-secondary" style="flex: none;" data-act="machine-refresh"
+          data-scope="platform" data-machine="${esc(m.id)}" data-id="${esc(m.id)}" ${state.busy ? 'disabled' : ''}
+          title="${esc(t('重新拉一遍这台机器的信息'))}">${state.busy ? t('载入中…') : t('刷新')}</button>
         </div>
         ${flashes()}
         ${m.lastError ? `<div class="gw-flash gw-flash-err">${esc(m.lastError)}</div>` : ''}

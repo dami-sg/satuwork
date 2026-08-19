@@ -298,7 +298,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'machine-refresh') {
-    await refreshMachine(btn.getAttribute('data-id'))
+    await refreshMachine(btn.getAttribute('data-id'), btn.getAttribute('data-scope') || '')
     return
   }
   if (act === 'seat-open') {

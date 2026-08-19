@@ -778,12 +778,21 @@ async function saveManagerVersion(e) {
  * 路子——这颗按钮能做的就是把 Gateway 手上这一份再取一次。所以刚下完指令马上点，
  * 大概率还是旧值，得等机器自己下一轮心跳。
  */
-async function refreshMachine(id) {
+/**
+ * 重新拉一遍这台机器。
+ *
+ * 两个入口两份数据源，按 `scope` 分：公司详情页那张卡片是**按公司**拉的
+ * （`loadMachines(orgId)`），平台侧的机器详情页是**按机器**拉的
+ * （`loadMachineDetail(machineId)`）。`data-id` 在两处分别是这两个 id——和
+ * machineCardOf 的分法一致，别在这儿另造一套。
+ */
+async function refreshMachine(id, scope) {
   if (!id) return
   state.busy = true
   render()
   try {
-    await loadMachines(id)
+    if (scope === 'platform') await loadMachineDetail(id)
+    else await loadMachines(id)
     flash('ok', t('已刷新'))
   } catch (err) {
     flash('err', err.message)
