@@ -3546,26 +3546,44 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   })
 
   /**
-   * 移除一台机器的登记。**只是从 Gateway 上抹掉这条记录**，不碰机器本身——上面的
-   * 管家还跑着，要停得上去停。有席位就拒绝：删掉之后那些席位会指向一台不存在的
-   * 机器，聊天和桌面都会打到空处，而且再也查不出是哪一台。
+   * 移除一台机器的登记。
+   *
+   * **只是从 Gateway 上抹掉记录，不碰机器本身**：那台 Debian 上的管家、systemd 单元、
+   * `~/work` 里的文件一样不动，要停得上去停。机器票随行没了而失效，管家下一轮心跳
+   * 会拿到 401。
+   *
+   * **上面的席位登记一起抹掉，有席位也照删。** 这两件事必须同进同出——只删机器的话，
+   * 席位行会留着一个指向不存在机器的 machineId，而 `machineTokenFor` 查不到就回落到
+   * 这家公司的另一台机器，聊天请求于是带着别的机器的票发出去，静默打到错的地方。
+   *
+   * 代价说在前面，界面上也是这么写的：那些席位的进程还在原机器上跑着，员工再进来
+   * 时是「未部署」，重新部署会落到别的机器上（`~/work` 不会跟过去）。而这台机器
+   * **将来重新配对回来时，老单元还占着 3200+N / 6081+N 那组端口**，新席位从 slot 0
+   * 重新分配就会撞上——所以重新配对之前得先上去把旧席位清干净。
    */
   router.delete('/platform/machines/:id', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireOwner(account)
     const machine = await machineOr404(req.params.id)
     const seats = await db.seatRuntimesOfMachine(machine.id)
-    if (seats.length) throw new HttpError(409, `这台机器上还有 ${seats.length} 个席位，先把它们拆掉`)
-    await db.deleteMachine(machine.id)
-    if (machine.companyId) {
-      const company = await db.company(machine.companyId)
-      if (company?.machineId === machine.id) {
-        const rest = await db.machinesOfCompany(company.id)
-        await db.updateCompany(company.id, { machineId: rest[0]?.id ?? null })
+    await db.tx(async () => {
+      await db.deleteSeatRuntimesOfMachine(machine.id)
+      await db.deleteMachine(machine.id)
+      if (machine.companyId) {
+        const company = await db.company(machine.companyId)
+        if (company?.machineId === machine.id) {
+          const rest = await db.machinesOfCompany(company.id)
+          await db.updateCompany(company.id, { machineId: rest[0]?.id ?? null })
+        }
       }
-    }
-    await auditMachine(machine, account.id, 'machine.remove', { machineId: machine.id, host: machine.host })
-    send(res, 200, { ok: true })
+    })
+    // 席位数进审计：这条记录事后要能回答「那几个人的席位是哪一次没的」。
+    await auditMachine(machine, account.id, 'machine.remove', {
+      machineId: machine.id,
+      host: machine.host,
+      seats: seats.length,
+    })
+    send(res, 200, { ok: true, seats: seats.length })
   })
 
   // 读发布列表跟上传同一套凭证：CI 传完要能回查，人在发布页看的是同一份数据。

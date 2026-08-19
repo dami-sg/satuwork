@@ -853,7 +853,9 @@ function machineCard(orgId, card) {
     ${machineHead(orgId, card, m)}
     <div class="satu-kv"><span>${t('地址')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; word-break: break-all;">
       ${esc(m.host || '—')}
-      ${card.seats ? '' : `<button type="button" class="satu-linkbtn" data-act="machine-remove" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('移除')}</button>`}
+      ${/* 有席位也给点：席位的登记会跟着一起没，点下去先弹确认（见 removeMachine）。
+           以前有席位就整个不画这颗按钮，结果是人只会以为功能没做。 */ ''}
+      <button type="button" class="satu-linkbtn" data-act="machine-remove" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('移除')}</button>
     </span></div>
     <div class="satu-kv"><span>${t('账号位')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
       ${m.paired ? `${card.accounts} / ${card.maxAccounts}` : `<span style="color: var(--muted-foreground);">${t('未配对，不提供账号位')}</span>`}${full ? ` <span class="tag">${t('已满')}</span>` : ''} · ${t('席位')} ${card.seats}

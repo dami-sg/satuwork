@@ -2451,9 +2451,29 @@ export class Db {
     return r ? machineOf(r) : undefined
   }
 
-  /** 只删登记，不碰机器。调用方要先确认它上面没有席位。 */
+  /** 只删登记，不碰机器。上面还有席位的话，先走 deleteSeatRuntimesOfMachine。 */
   async deleteMachine(id: string): Promise<void> {
     await this.run('delete from machines where id = ?', [id])
+  }
+
+  /**
+   * 抹掉这台机器上所有席位的**登记**（不碰机器上的进程）。
+   *
+   * 跟 deleteMachine 是一对，必须同进同出：只删机器不删席位的话，那些行会留着一个
+   * 指向不存在机器的 machineId，而 machineTokenFor 查不到就会**回落到这家公司的另
+   * 一台机器**——聊天请求于是带着别的机器的票发出去，静默打到错的地方。
+   *
+   * instances 要一起删，而且**得在 seat_runtimes 之前**：那张表没有 machineId，只能
+   * 顺着席位行去找；先删席位就没法定位了。它存的是 bot 的反代前缀，留着同样是一个
+   * 指向已移除机器的旧地址。
+   */
+  async deleteSeatRuntimesOfMachine(machineId: string): Promise<number> {
+    if (!machineId) return 0
+    await this.run(
+      'delete from instances i using seat_runtimes s where s."machineId" = ? and i."accountId" = s."accountId" and i."botId" = s."botId"',
+      [machineId],
+    )
+    return this.run('delete from seat_runtimes where "machineId" = ?', [machineId])
   }
 
   async updateMachine(
