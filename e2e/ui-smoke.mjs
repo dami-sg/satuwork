@@ -620,8 +620,10 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(detail.includes('tag-accent-2">运行中'), 'ready 该是安静的那一档')
       assert(detail.includes('data-form="machine-capacity"'), '改容量的表单没接上')
       assert(detail.includes('data-form="machine-company"'), '改归属的表单没接上')
-      // 有席位时移除按钮必须是禁的：删掉之后那些席位会指向一台不存在的机器。
-      assert(/data-act="machine-remove"[^>]*disabled/.test(detail), '这台机器上还有席位，移除按钮不该点得动')
+      // 有席位也删得掉（席位登记跟着一起没），所以按钮**不该**是禁的——以前禁掉的
+      // 结果是人对着一颗灰按钮猜为什么。代价改由确认框来说。
+      assert(!/data-act="machine-remove"[^>]*disabled/.test(detail), '有席位不该把移除按钮禁掉')
+      assert(detail.includes('席位登记会一起抹掉'), '没告诉人席位的登记会跟着一起没')
       // scope 决定接口前缀。漏了它，平台页上的每个动作都会打到公司那条路上去，
       // 而那条路要 orgId——没归属的机器上一个动作都做不了。
       assert(detail.includes('data-scope="platform"'), '动作没标 scope，会打到公司那条接口上')

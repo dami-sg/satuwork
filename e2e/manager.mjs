@@ -818,6 +818,54 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       })
       assert(badOrg.status === 404, `不存在的公司该 404，实际 ${badOrg.status}`)
 
+      // 移除：有席位也删得掉，席位的登记跟着一起没。造一台带席位的假机器来验——真管家
+      // 那台后面还要用。**不能只删机器**：留下的席位行会指向一条不存在的机器记录，而
+      // machineTokenFor 查不到就回落到这家公司的另一台，聊天请求会带着别的机器的票发出去。
+      {
+        const { createRequire } = await import('node:module')
+        const require = createRequire(new URL('../gateway/package.json', import.meta.url))
+        const pg = require('pg')
+        const client = new pg.Client({ connectionString: PG_URL })
+        await client.connect()
+        const doomed = '00000000-0000-4000-8000-0000000000de'
+        try {
+          await client.query('set search_path to e2e_manager')
+          await client.query(
+            `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token)
+             values ($1, 'http://10.0.0.77:8443', $2, $3, $3, $3, 1, 10, 'smt_e2e-doomed')`,
+            [doomed, orgId, Date.now()],
+          )
+          const who = (await req(gwBase, 'GET', `/orgs/${orgId}/accounts`, { token: ownerTok })).json
+          const member = (who.members || who.accounts || [])[0]
+          await client.query(
+            `insert into seat_runtimes ("accountId","botId","companyId","linuxUser","seatId","machineId",slot,display,"vncPort","novncPort","botPort","vncPassword",status,"deployedAt","updatedAt","botVersion")
+             values ($1,'bot-doomed',$2,'sw_doomed','seat-doomed',$3,7,17,5917,6088,3207,'pw','ready',$4,$4,'0.9.0+x')`,
+            [member.id, orgId, doomed, Date.now()],
+          )
+          await client.query(
+            `insert into instances ("accountId","botId","companyId",host,"lastReadyAt") values ($1,'bot-doomed',$2,'http://10.0.0.77:8443/seats/seat-doomed/bot',$3)`,
+            [member.id, orgId, Date.now()],
+          )
+
+          const del = await req(gwBase, 'DELETE', `/platform/machines/${doomed}`, { token: ownerTok })
+          assert(del.status === 200, `有席位也该删得掉，实际 ${del.status} ${del.text}`)
+          assert(del.json.seats === 1, `该报出连带删了几个席位，实际 ${JSON.stringify(del.json.seats)}`)
+
+          const seatRows = await client.query('select 1 from seat_runtimes where "machineId" = $1', [doomed])
+          assert(seatRows.rowCount === 0, `席位登记没跟着删：还剩 ${seatRows.rowCount} 行`)
+          // instances 一起清掉：它存的是 bot 的反代前缀，留着同样是个指向已移除机器的旧地址。
+          const inst = await client.query(`select 1 from instances where "botId" = 'bot-doomed'`)
+          assert(inst.rowCount === 0, `instances 没跟着删：还剩 ${inst.rowCount} 行`)
+
+          const gone = await req(gwBase, 'GET', `/platform/machines/${doomed}`, { token: ownerTok })
+          assert(gone.status === 404, `删完还查得到，实际 ${gone.status}`)
+        } finally {
+          await client.query('delete from seat_runtimes where "machineId" = $1', [doomed]).catch(() => {})
+          await client.query('delete from machines where id = $1', [doomed]).catch(() => {})
+          await client.end().catch(() => {})
+        }
+      }
+
       const back = await req(gwBase, 'PUT', `/platform/machines/${machineId}/company`, { token: ownerTok, body: { companyId: orgId } })
       assert(back.status === 200, `派回 ${back.status} ${back.text}`)
       const again = await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })

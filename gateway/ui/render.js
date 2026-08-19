@@ -619,9 +619,18 @@ async function createOrg(e) {
  * 没写 `data-scope` 的一律当公司侧：公司详情页那些元素是先有的，不该为这件事全部改一遍。
  */
 function machineScope(el) {
-  const scope = el.getAttribute('data-scope') === 'platform' ? 'platform' : 'org'
-  const machineId = el.getAttribute('data-machine') || ''
-  const orgId = el.getAttribute('data-id') || ''
+  return machineTarget(
+    el.getAttribute('data-scope') === 'platform' ? 'platform' : 'org',
+    el.getAttribute('data-id') || '',
+    el.getAttribute('data-machine') || '',
+  )
+}
+
+/**
+ * 接口前缀 + 改完刷新谁。**只有这一份**——确认框那条路手上没有元素（弹窗关了之后
+ * 才真去删），照着抄一遍的话，两边迟早对不上。
+ */
+function machineTarget(scope, orgId, machineId) {
   return {
     scope,
     orgId,
@@ -784,18 +793,49 @@ async function refreshMachine(id) {
   }
 }
 
+/** 这台机器上有几个席位。确认框要说出这个数，两边各从自己那份 state 里数。 */
+function machineSeatCount(s) {
+  const card =
+    s.scope === 'platform'
+      ? state.machineDetail
+      : (state.machines || []).find((m) => m.machine && m.machine.id === s.machineId)
+  return (card && card.seats) || 0
+}
+
 /**
- * 移除一台机器的登记。**只是从 Gateway 上抹掉这条记录**，不碰机器本身。
+ * 移除一台机器的登记。**只是从 Gateway 上抹掉记录**，不碰机器本身。
  *
  * 公司侧和平台侧共用它，靠元素上的 data-scope 分流（见 machineScope）。
+ *
+ * 上面还有席位时先问一句：席位的登记会跟着一起没，那几位员工要重新部署，而这件事
+ * 从按钮上看不出来。空机器不问——那一下没有任何人会受影响。
  */
-async function removeMachine(el) {
+function removeMachine(el) {
   const s = machineScope(el)
   if (!s.machineId || (s.scope === 'org' && !s.orgId)) return
+  const seats = machineSeatCount(s)
+  if (!seats) return doRemoveMachine(s)
+  state.confirm = {
+    title: t('移除这台机器的登记？'),
+    body: t(
+      `这台机器上的 ${seats} 个席位登记会一起抹掉，那几位员工再进来是「未部署」，重新部署会落到别的机器上（~/work 里的文件不会跟过去）。机器本身不动：管家和席位进程还在上面跑着，要停得上去停。`,
+      `The ${seats} seat registrations on this machine are erased with it. Those members will see "not deployed" and a redeploy lands on another machine (files in ~/work do not follow). The machine itself is untouched — its manager and seat processes keep running and must be stopped there.`,
+    ),
+    label: '移除',
+    kind: 'remove-machine',
+    scope: s.scope,
+    orgId: s.orgId,
+    machineId: s.machineId,
+  }
+  render()
+}
+
+/** 真去删。确认框和「空机器直接删」两条路都走它。 */
+async function doRemoveMachine(s) {
   state.busy = true
   render()
   try {
-    await api('DELETE', s.base)
+    const data = await api('DELETE', s.base)
     // 平台侧删的就是当前这一页——它已经不存在了，留在原地会去拉一条 404。回列表。
     if (s.scope === 'platform') {
       state.machineDetail = null
@@ -803,7 +843,16 @@ async function removeMachine(el) {
     } else {
       await s.reload()
     }
-    flash('ok', '已移除这台机器的登记（机器本身没动）')
+    const seats = (data && data.seats) || 0
+    flash(
+      'ok',
+      seats
+        ? t(
+            `已移除这台机器的登记，连同 ${seats} 个席位（机器本身没动）`,
+            `Machine registration removed along with ${seats} seats (the machine itself is untouched)`,
+          )
+        : '已移除这台机器的登记（机器本身没动）',
+    )
   } catch (err) {
     flash('err', err.message)
   } finally {

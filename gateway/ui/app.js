@@ -24,6 +24,9 @@ async function runConfirm() {
       // 而它恰恰是机器上出了问题时唯一的自助手段。
       await deployMyRuntime(c.id, { force: true })
       return
+    } else if (c.kind === 'remove-machine') {
+      await doRemoveMachine(machineTarget(c.scope, c.orgId, c.machineId))
+      return
     } else if (c.kind === 'delete-bot') {
       const base = catalogBase()
       await api('DELETE', `${base}/bots/${encodeURIComponent(c.id)}`)
@@ -283,7 +286,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'machine-remove') {
-    await removeMachine(btn)
+    removeMachine(btn)
     return
   }
   if (act === 'upgrade-manager') {

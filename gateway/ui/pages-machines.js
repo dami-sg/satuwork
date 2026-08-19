@@ -308,16 +308,20 @@ function machineSeatsPanel(card) {
 /**
  * 移除登记。
  *
- * 说清楚它**不碰机器本身**：管家还在那台 Debian 上跑着，要停得上去停。有席位时按钮
- * 直接禁掉——删掉之后那些席位会指向一台不存在的机器，聊天和桌面都会打到空处。
+ * 说清楚它**不碰机器本身**：管家还在那台 Debian 上跑着，要停得上去停。
+ *
+ * **有席位也删得掉**，席位的登记跟着一起没（后端是同一个事务，见 DELETE
+ * /platform/machines/:id）。只删机器不删席位的话，那些行会指向一台不存在的机器，
+ * 聊天请求会带着别的机器的票发出去。所以不再禁按钮，改成点下去先问一句——代价
+ * 摆在确认框里，而不是让人对着一颗灰按钮猜为什么。
  */
 function machineDangerPanel(card) {
   const m = card.machine
-  const blocked = Boolean(card.seats)
+  const seats = card.seats || 0
   return `<div class="satu-panel" style="border-color: var(--destructive);">
     <span class="satu-panel-title">${t('移除登记')}</span>
     <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('只从 Gateway 上抹掉这条记录，不碰机器本身——上面的机器管家还跑着，要停得上去停。要让它重新回来，在机器上重跑一次配对。')}</p>
-    <div><button type="button" class="btn btn-secondary" data-act="machine-remove" data-scope="platform" data-machine="${esc(m.id)}" ${state.busy || blocked ? 'disabled' : ''}>${t('移除这台机器的登记')}</button></div>
-    ${blocked ? `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t(`这台机器上还有 ${card.seats} 个席位，先把它们拆掉。`, `${card.seats} seats are still on this machine; remove them first.`)}</p>` : ''}
+    <div><button type="button" class="btn btn-secondary" data-act="machine-remove" data-scope="platform" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('移除这台机器的登记')}</button></div>
+    ${seats ? `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t(`这台机器上的 ${seats} 个席位登记会一起抹掉，那几位员工要重新部署。`, `The ${seats} seat registrations on this machine go with it; those members will need to redeploy.`)}</p>` : ''}
   </div>`
 }
