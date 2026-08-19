@@ -89,12 +89,12 @@ function machinesPage() {
           ${machineStat(t('在线'), `${totals.online} / ${totals.machines}`, t('台'))}
           ${machineStat(t('已配对'), String(totals.paired), t('台'))}
           ${machineStat(t('账号位'), `${totals.accounts} / ${totals.max}`, '')}
-          ${machineStat(t('席位'), String(totals.seats), t('个'))}
+          ${machineStat(t('已部署 Bot'), String(totals.seats), t('个'))}
         </div>
         <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">${tabs}</div>
         <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
           <div class="satu-memberhead" style="grid-template-columns: ${cols};">
-            <span>${t('状态')}</span><span>${t('机器')}</span><span>${t('归属公司')}</span><span>${t('账号位')}</span><span>${t('席位')}</span><span>${t('管家版本')}</span><span>${t('最近心跳')}</span>
+            <span>${t('状态')}</span><span>${t('机器')}</span><span>${t('归属公司')}</span><span>${t('账号位')}</span><span>${t('已部署 Bot')}</span><span>${t('管家版本')}</span><span>${t('最近心跳')}</span>
           </div>
           ${body || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${all.length ? t('这一档下没有机器') : t('还没有机器配对进来。到某家公司的详情页生成配对码，在那台 Debian 上跑一条命令即可。')}</div>`}
         </div>
@@ -190,7 +190,7 @@ function machineInfoPanel(card) {
     </form>
     <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${
       card.seats
-        ? t('这台机器上还有席位，改不了归属——席位是按公司建的账号和目录，换个东家不会把它们搬走。先把席位拆掉。')
+        ? t('这台机器上还有部署好的 Bot，改不了归属——它们的账号和目录是按公司建的，换个东家不会把它们搬走。先把这些 Bot 拆掉。')
         : t('留空 = 收回，变成一台待分配的机器。新东家一台都没有时，它会成为那家的默认机器。')
     }</p>
   </div>`
@@ -214,7 +214,10 @@ function machineCapacityPanel(card) {
         <button type="submit" class="satu-linkbtn" ${state.busy ? 'disabled' : ''}>${t('改容量')}</button>
       </form>
     </span></div>
-    <div class="satu-kv"><span>${t('席位')}</span><span>${esc(String(card.seats))}</span></div>
+    ${/* 这个数原先叫「席位」，摆在讲容量的这一栏里，谁也对不上它和 2/3 的关系——它其实
+          是**这台机器上部署了几个 Bot**：两名员工各两个 Bot 就是 4。名字改对了，两行放
+          在一起才读得通：2 个人、4 个 Bot。 */ ''}
+    <div class="satu-kv"><span>${t('已部署 Bot')}</span><span>${esc(String(card.seats))}</span></div>
     <div class="satu-kv"><span>${t('时区')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
       ${esc(cur)}${note}
       <form data-form="machine-timezone" data-scope="platform" data-machine="${esc(m.id)}" style="display: inline-flex; gap: 6px; align-items: center;">
@@ -222,7 +225,7 @@ function machineCapacityPanel(card) {
         <button type="submit" class="satu-linkbtn" ${state.busy ? 'disabled' : ''}>${t('改时区')}</button>
       </form>
     </span></div>
-    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('账号位算的是激活账号数，不是席位数——一个员工的多个 Bot 落在同一台机器上，只占一个账号位。容量调小到低于当前占用不会赶人，只是不再往上放。')}</p>
+    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('账号位算的是激活账号数，不是 Bot 数——一个员工的多个 Bot 落在同一台机器上，只占一个账号位。容量调小到低于当前占用不会赶人，只是不再往上放。')}</p>
   </div>`
 }
 
@@ -238,7 +241,7 @@ function machineVersionPanel(card) {
   const list = card.botVersions || []
   const botText = list.length
     ? list.map((v) => `${esc(v.version || t('未部署'))} × ${v.seats}`).join('、')
-    : t('还没有部署席位')
+    : t('还没有部署 Bot')
   const mgrNote = card.managerPending
     ? ` · ${t('已下指令，等机器换版')} → ${esc(card.managerDesired || '')}`
     : m.protocolTooOld
@@ -257,7 +260,7 @@ function machineVersionPanel(card) {
     <div class="satu-kv"><span>${t('管家版本')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${esc(m.managerVersion || '—')}${mgrNote}${mgrBtn}</span></div>
     <div class="satu-kv"><span>${t('期望版本')}</span><span>${esc(card.managerDesired || t('跟平台的最新发布走'))}</span></div>
     <div class="satu-kv"><span>${t('Bot 运行时')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${botText}${card.botOutdated ? ` · ${t('最新')} ${esc(state.botLatest || '')}` : ''}${botBtn}</span></div>
-    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('一台机器上同时躺着几个 Bot 版本不是错误——有的席位部署得早。「全部升级」把这台机器上的席位逐个重铺到最新版，正在进行的对话会断。')}</p>
+    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('一台机器上同时躺着几个 Bot 版本不是错误——有的部署得早。「全部升级」把这台机器上的 Bot 逐个重铺到最新版，正在进行的对话会断。')}</p>
   </div>`
 }
 
@@ -302,12 +305,12 @@ function machineSeatsPanel(card) {
     })
     .join('')
   return `<div style="display: flex; flex-direction: column; gap: var(--space-3);">
-    <h2 style="font-size: 18px; margin: 0;">${t('席位')} <span style="font-size: 13px; font-weight: 400; color: var(--muted-foreground);">${seats.length}</span></h2>
+    <h2 style="font-size: 18px; margin: 0;">${t('部署的 Bot')} <span style="font-size: 13px; font-weight: 400; color: var(--muted-foreground);">${seats.length}</span></h2>
     <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
       <div class="satu-memberhead" style="grid-template-columns: ${cols};">
-        <span>${t('成员 / 席位')}</span><span>Bot</span><span>${t('状态')}</span><span>${t('槽位')}</span><span>${t('版本 / 错误')}</span><span></span>
+        <span>${t('成员 / 实例 ID')}</span><span>Bot</span><span>${t('状态')}</span><span>${t('槽位')}</span><span>${t('版本 / 错误')}</span><span></span>
       </div>
-      ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('这台机器上还没有席位')}</div>`}
+      ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('这台机器上还没有部署 Bot')}</div>`}
     </div>
   </div>`
 }
@@ -327,8 +330,8 @@ function machineDangerPanel(card) {
   const seats = card.seats || 0
   return `<div class="satu-panel" style="border-color: var(--destructive);">
     <span class="satu-panel-title">${t('移除登记')}</span>
-    <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('机器在线的话，它会在下一轮心跳收到通知，自己停掉席位、取消开机自启并退出；~/work 里的文件留在机器上。不在线的收不到通知，上面的东西要停得上去停。要让它重新回来，在机器上重跑一次配对。')}</p>
+    <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('机器在线的话，它会在下一轮心跳收到通知，自己停掉这些 Bot、取消开机自启并退出；~/work 里的文件留在机器上。不在线的收不到通知，上面的东西要停得上去停。要让它重新回来，在机器上重跑一次配对。')}</p>
     <div><button type="button" class="btn btn-secondary" data-act="machine-remove" data-scope="platform" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('移除这台机器的登记')}</button></div>
-    ${seats ? `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t(`这台机器上的 ${seats} 个席位登记会一起抹掉，那几位员工要重新部署。`, `The ${seats} seat registrations on this machine go with it; those members will need to redeploy.`)}</p>` : ''}
+    ${seats ? `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t(`这台机器上的 ${seats} 个 Bot 登记会一起抹掉，那几位员工要重新部署。`, `The ${seats} bot registrations on this machine go with it; those members will need to redeploy.`)}</p>` : ''}
   </div>`
 }

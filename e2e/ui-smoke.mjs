@@ -614,16 +614,16 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(!detail.includes('[object Object]'), '有字段被当成对象直接拼进 HTML 了')
       // Bot 名要用接口给的那个。回落到 state.bots 的话，直接打开这个地址时整列是 uuid
       // ——而 state.bots 只有逛过别的页面才会有内容。
-      assert(detail.includes('UI-SMOKE-助理'), '席位表没用接口给的 Bot 名')
-      // 出错的席位要比正常的显眼：这一页就是用来找坏掉那个的。
-      assert(/tag-accent">运行中/.test(detail) === false, '正常席位不该占着最扎眼的那档标签')
+      assert(detail.includes('UI-SMOKE-助理'), '列表没用接口给的 Bot 名')
+      // 出错的那个要比正常的显眼：这一页就是用来找坏掉那个的。
+      assert(/tag-accent">运行中/.test(detail) === false, '正常的不该占着最扎眼的那档标签')
       assert(detail.includes('tag-accent-2">运行中'), 'ready 该是安静的那一档')
       assert(detail.includes('data-form="machine-capacity"'), '改容量的表单没接上')
       assert(detail.includes('data-form="machine-company"'), '改归属的表单没接上')
-      // 有席位也删得掉（席位登记跟着一起没），所以按钮**不该**是禁的——以前禁掉的
+      // 上面有 Bot 也删得掉（登记跟着一起没），所以按钮**不该**是禁的——以前禁掉的
       // 结果是人对着一颗灰按钮猜为什么。代价改由确认框来说。
-      assert(!/data-act="machine-remove"[^>]*disabled/.test(detail), '有席位不该把移除按钮禁掉')
-      assert(detail.includes('席位登记会一起抹掉'), '没告诉人席位的登记会跟着一起没')
+      assert(!/data-act="machine-remove"[^>]*disabled/.test(detail), '上面有 Bot 不该把移除按钮禁掉')
+      assert(detail.includes('Bot 登记会一起抹掉'), '没告诉人这些 Bot 的登记会跟着一起没')
       // scope 决定接口前缀。漏了它，平台页上的每个动作都会打到公司那条路上去，
       // 而那条路要 orgId——没归属的机器上一个动作都做不了。
       assert(detail.includes('data-scope="platform"'), '动作没标 scope，会打到公司那条接口上')

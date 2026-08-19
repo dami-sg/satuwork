@@ -104,6 +104,8 @@ window.SATU_I18N = {
   完成: 'Done',
   网站: 'Website',
   席位: 'Seats',
+  '已部署 Bot': 'Deployed bots',
+  '部署的 Bot': 'Deployed bots',
   显示: 'Show',
   详情: 'Details',
   销售: 'Sales',
@@ -413,7 +415,7 @@ window.SATU_I18N = {
   '装上机器管家并配对之后，建账号、装包、起桌面全归它——Gateway 不保存任何登录这台机器的凭据。':
     'Once the machine manager is installed and paired it handles accounts, packages and desktops — the Gateway keeps no credentials that can log into the machine.',
   全部升级: 'Upgrade all',
-  '还没有部署席位': 'No seats deployed yet',
+  '还没有部署 Bot': 'No bots deployed yet',
   '已下指令，等机器换版': 'Requested; waiting for the machine to swap',
   机器: 'Machine',
   心跳迟了: 'Heartbeat overdue',
@@ -453,8 +455,8 @@ window.SATU_I18N = {
   // ── 平台机器管理页 ────────────────────────────────────────────────
   '移除这台机器的登记？': 'Remove this machine?',
   移除: 'Remove',
-  '机器在线的话，它会在下一轮心跳收到通知，自己停掉席位、取消开机自启并退出；~/work 里的文件留在机器上。不在线的收不到通知，上面的东西要停得上去停。要让它重新回来，在机器上重跑一次配对。':
-    'If the machine is online it gets the notice on its next heartbeat, stops its seats, disables its own autostart and exits; files in ~/work stay on the box. An offline machine never gets the notice — stop things there yourself. To bring it back, re-run pairing on the machine.',
+  '机器在线的话，它会在下一轮心跳收到通知，自己停掉这些 Bot、取消开机自启并退出；~/work 里的文件留在机器上。不在线的收不到通知，上面的东西要停得上去停。要让它重新回来，在机器上重跑一次配对。':
+    'If the machine is online it gets the notice on its next heartbeat, stops those bots, disables its own autostart and exits; files in ~/work stay on the box. An offline machine never gets the notice — stop things there yourself. To bring it back, re-run pairing on the machine.',
   运行中: 'Running',
   出错: 'Failed',
   部署中: 'Deploying',
@@ -470,7 +472,7 @@ window.SATU_I18N = {
   保存并探活: 'Save and probe',
   改归属: 'Reassign',
   升级管家: 'Upgrade manager',
-  '成员 / 席位': 'Member / seat',
+  '成员 / 实例 ID': 'Member / instance ID',
   槽位: 'Slot',
   '版本 / 错误': 'Version / error',
   日志: 'Logs',
@@ -480,7 +482,7 @@ window.SATU_I18N = {
   这一档下没有机器: 'No machines in this state',
   等第一次心跳自报: 'Reported on first heartbeat',
   跟平台的最新发布走: 'Follows the latest release',
-  这台机器上还没有席位: 'No seats on this machine yet',
+  '这台机器上还没有部署 Bot': 'No bots deployed on this machine yet',
   台: '',
   个: '',
   '连到这台 Gateway 上的所有运行机器，包括还没派给公司的那些。点进去看详情、改配置、下指令。':
@@ -491,14 +493,14 @@ window.SATU_I18N = {
     'Machines pair in under a company: to add one, generate a pairing code on that company detail page. This page manages the ones already here.',
   '只改地址，没有任何凭据字段——机器的身份是配对时签发的机器票。换 IP、换端口用它；换机器请重新配对。':
     'Address only — no credential fields. A machine identity is the token issued at pairing. Use this for a new IP or port; for a different machine, pair again.',
-  '这台机器上还有席位，改不了归属——席位是按公司建的账号和目录，换个东家不会把它们搬走。先把席位拆掉。':
-    'Seats are still on this machine, so it cannot be reassigned — seats are accounts and directories created per company, and reassigning does not move them. Remove the seats first.',
+  '这台机器上还有部署好的 Bot，改不了归属——它们的账号和目录是按公司建的，换个东家不会把它们搬走。先把这些 Bot 拆掉。':
+    'This machine still has bots deployed on it, so it cannot be reassigned — their accounts and directories were created per company and do not move with it. Tear those bots down first.',
   '留空 = 收回，变成一台待分配的机器。新东家一台都没有时，它会成为那家的默认机器。':
     'Empty = take it back as an unassigned machine. If the new company has none, this becomes its default machine.',
-  '账号位算的是激活账号数，不是席位数——一个员工的多个 Bot 落在同一台机器上，只占一个账号位。容量调小到低于当前占用不会赶人，只是不再往上放。':
-    'Account slots count active accounts, not seats — one member running several bots lands on one machine and takes a single slot. Lowering the cap below current usage evicts nobody; it only stops new placements.',
-  '一台机器上同时躺着几个 Bot 版本不是错误——有的席位部署得早。「全部升级」把这台机器上的席位逐个重铺到最新版，正在进行的对话会断。':
-    'Several bot versions on one machine is not an error — some seats were deployed earlier. "Upgrade all" reinstalls every seat on this machine to the latest version; ongoing conversations drop.',
+  '账号位算的是激活账号数，不是 Bot 数——一个员工的多个 Bot 落在同一台机器上，只占一个账号位。容量调小到低于当前占用不会赶人，只是不再往上放。':
+    'Account slots count active accounts, not bots — one member running several bots on the same machine takes a single slot. Lowering the cap below current usage evicts nobody; it only stops new placements.',
+  '一台机器上同时躺着几个 Bot 版本不是错误——有的部署得早。「全部升级」把这台机器上的 Bot 逐个重铺到最新版，正在进行的对话会断。':
+    'Several bot versions on one machine is not an error — some were deployed earlier. "Upgrade all" reinstalls each bot on this machine to the latest version; ongoing conversations drop.',
   '只从 Gateway 上抹掉这条记录，不碰机器本身——上面的机器管家还跑着，要停得上去停。要让它重新回来，在机器上重跑一次配对。':
     'This only erases the record from the Gateway. The machine itself is untouched — its manager keeps running and must be stopped there. To bring it back, re-run pairing on the machine.',
   有效期至: 'Valid until',
