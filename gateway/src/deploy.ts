@@ -109,6 +109,13 @@ export function novncUrlOf(managerHost: string | null, seatId: string, ticket?: 
   return ticket ? `${url}?ticket=${encodeURIComponent(ticket)}` : url
 }
 
+/**
+ * 单个席位的部署超时。第一次部署要 apt 装一整套桌面栈，十五分钟是给它的。
+ *
+ * 重铺一个已经 ready 的席位用不了这么久，批量那条路自己传一个短的（见 managerDeploy）。
+ */
+export const DEPLOY_TIMEOUT_MS = 900_000
+
 /** Gateway 反代聊天时打的地址。管家按 seatId 转到本机的 bot 口。 */
 export function botBaseOf(managerHost: string | null, seatId: string): string {
   const base = (managerHost || '').trim().replace(/\/$/, '')
@@ -433,7 +440,7 @@ export async function deploySeat(
   db: Db,
   keys: JwtKeys,
   account: Account,
-  opts: { botId: string; version?: string; update?: boolean; force?: boolean },
+  opts: { botId: string; version?: string; update?: boolean; force?: boolean; timeoutMs?: number },
 ): Promise<
   | { ok: true; result: DeployResult }
   | { ok: false; status: number; error: string; runtime: SeatRuntime | undefined }
@@ -442,7 +449,8 @@ export async function deploySeat(
   if (!companyId) return { ok: false, status: 403, error: '没有公司席位', runtime: undefined }
   const botId = (opts.botId || '').trim()
   if (!botId) return { ok: false, status: 400, error: 'botId 不能为空', runtime: undefined }
-  const visible = await db.visibleCatalog('bot', companyId)
+  // 按**主人**取名册：员工自己建的 Bot 只有他自己部署得了，别人拿到 id 也不行。
+  const visible = await db.botsFor(companyId, account.id)
   if (!visible.some((b) => b.id === botId)) {
     return { ok: false, status: 404, error: '没有这个 Bot', runtime: undefined }
   }
@@ -591,7 +599,7 @@ export async function deploySeat(
     ports: portsOf(row.slot),
   }
   try {
-    await managerDeploy(machine, spec)
+    await managerDeploy(machine, spec, opts.timeoutMs)
   } catch (e) {
     const message = sanitizeError(e, [machine.token, secrets.accessToken, secrets.apiKey, vncPassword])
     const failed = await db.upsertSeatRuntime({
@@ -645,8 +653,11 @@ export interface SeatSpec {
  * `authorization` 分开——两层鉴权互不干扰。
  *
  * 15 分钟超时：第一次部署要 apt 装一整套桌面栈，慢是正常的。
+ *
+ * 批量重铺那条路（模版的「立即下发」）会传一个**短得多**的超时：那些席位都已经
+ * ready，桌面栈早装好了，不该让一台卡住的机器把整条请求拖到十五分钟。
  */
-async function managerDeploy(machine: Machine, spec: SeatSpec): Promise<void> {
+async function managerDeploy(machine: Machine, spec: SeatSpec, timeoutMs = DEPLOY_TIMEOUT_MS): Promise<void> {
   const url = `${machine.host!.replace(/\/$/, '')}/seats/${encodeURIComponent(spec.seatId)}`
   let res: Response
   try {
@@ -660,7 +671,7 @@ async function managerDeploy(machine: Machine, spec: SeatSpec): Promise<void> {
         authorization: 'Bearer ' + machine.token,
       },
       body: JSON.stringify(spec),
-      signal: AbortSignal.timeout(900_000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (e) {
     throw new Error('联系不上机器管家: ' + (e instanceof Error ? e.message : String(e)))

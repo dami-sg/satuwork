@@ -6,30 +6,44 @@ function pickLabel(o) {
   return typeof o === 'string' ? o : o && typeof o === 'object' ? String(o.name ?? o.id ?? '') : String(o ?? '')
 }
 
-function botPicks(key, options, selected, hint) {
+/** `ro` = 只读：药丸连 disabled 一起给上，不然它看着还能按，按了改的是一份存不下去的草稿。 */
+function botPicks(key, options, selected, hint, ro = false) {
   const sel = Array.isArray(selected) ? selected : []
   const buttons = (options || [])
     .map((o) => {
       const id = pickId(o)
       const on = sel.includes(id)
-      return `<button type="button" class="satu-assignee" style="padding: 5px 12px;" aria-pressed="${String(on)}" data-act="bot-pick" data-key="${esc(key)}" data-value="${esc(id)}">${esc(pickLabel(o))}</button>`
+      const act = ro ? 'disabled' : `data-act="bot-pick" data-key="${esc(key)}" data-value="${esc(id)}"`
+      return `<button type="button" class="satu-assignee" style="padding: 5px 12px;" aria-pressed="${String(on)}" ${act}>${esc(pickLabel(o))}</button>`
     })
     .join('')
   const empty = options && options.length ? '' : `<span style="font-size: 12px; color: var(--muted-foreground);">${esc(hint || t('没有可选项'))}</span>`
   return `<div style="display: flex; flex-wrap: wrap; gap: var(--space-2);">${buttons}${empty}</div>`
 }
 
+/** `act` 传空串 = 只读：开关连 disabled 一起给上，不然它看着还能按，按了没反应。 */
 function botToggle(title, desc, on, act, extra = '') {
   return `<div class="satu-toggleRow">
     <div style="min-width: 0;">
       <div style="font-size: 13.5px; font-weight: 600;">${esc(title)}</div>
       <div style="font-size: 12px; color: var(--muted-foreground);">${esc(desc)}</div>
     </div>
-    <button type="button" class="satu-switch" aria-pressed="${String(!!on)}" aria-label="${esc(title)}" data-act="${esc(act)}" ${extra}><span></span></button>
+    <button type="button" class="satu-switch" aria-pressed="${String(!!on)}" aria-label="${esc(title)}" ${act ? `data-act="${esc(act)}"` : 'disabled'} ${extra}><span></span></button>
   </div>`
 }
 
+/**
+ * `/bots` 有两副面孔。
+ *
+ * owner 那边是**全局 Bot 名录**：他建的那几个所有公司都看得见，还是列表 + 详情。
+ * 公司管理员那边是**一份 Bot 模版**——公司这一层不再有「一批共享的 Bot」，员工自己
+ * 建的每个 Bot 都长在这份底座上（见 gateway/src/lib/catalog.ts 的 publicBot）。
+ */
 function botsPage() {
+  return isOwner() ? globalBotsPage() : botTemplatePage()
+}
+
+function globalBotsPage() {
   const rows = (state.bots || [])
     .map((a) => {
       const on = a.enabled !== false
@@ -61,8 +75,8 @@ function botsPage() {
       <div class="gw-page-inner">
         <div style="display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4);">
           <div>
-            <h1 style="font-size: 24px; margin: 0 0 4px;">${isOwner() ? t('全局 Bot') : t('Bot 配置')}</h1>
-            <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${isOwner() ? t('这里建的 Bot 所有公司都能用。公司自己建的只在自己公司里可见。', 'Bots created here are available to every company. Company-created bots stay inside that company.') : t('管理 AI 员工的人设、能力与可访问范围。带「全局」标的由系统管理员维护，只能查看。', 'Manage personas, capabilities and access. Items tagged 全局 are maintained by the system owner and are read-only.')}</p>
+            <h1 style="font-size: 24px; margin: 0 0 4px;">${t('全局 Bot')}</h1>
+            <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('这里建的 Bot 所有公司都能用。公司自己的 Bot 由员工按本公司模版创建。', 'Bots created here are available to every company. Inside a company, members create their own from the company template.')}</p>
           </div>
           <button type="button" class="btn btn-primary" style="flex: none;" data-act="bot-create">
             ${svg(['M12 5v14', 'M5 12h14'], 15)} ${t('新建 Bot', 'New bot')}
@@ -79,30 +93,134 @@ function botsPage() {
     </div>`
 }
 
-function botDetailPage() {
-  const bot = state.bot
-  const a = state.botDraft
-  if (!bot || !a) {
+/** 名字长长的一段：这一页改的是全公司的底座，得先把这件事说清楚再让人动手。 */
+function botTemplatePage() {
+  const tpl = state.template
+  const a = state.templateDraft
+  if (!tpl || !a) {
     return `<div class="gw-page"><div class="gw-page-inner" style="max-width: 820px;">${flashes()}<p style="color: var(--muted-foreground);">${t('载入中…')}</p></div></div>`
   }
-  // 公司管理员打开的是全局 Bot：能看，不能存也不能删。
-  const ro = readOnlyItem(bot)
-  const opts = state.botOptions || { skills: [], mcps: [], groups: [], kbs: [] }
-  const iconPick = avatarKeysFor(bot.origin).map((key) => {
-    const on = a.icon === key
-    const label = t(BOT_AVATARS[key]?.label || key)
-    return `<button type="button" class="satu-iconpick" aria-pressed="${String(on)}" aria-label="${esc(label)}" title="${esc(label)}" data-act="bot-icon" data-icon="${esc(key)}" ${ro ? 'disabled' : ''}>${botAvatar(key, 30, bot.origin)}</button>`
-  }).join('')
-  const guards = (a.guards || [])
-    .map((g) => botToggle(g.title, g.desc, g.on, 'bot-guard', `data-id="${esc(g.id)}"`))
-    .join('')
+  const opts = state.templateOptions || { skills: [], mcps: [] }
+  const others = (state.bots || []).filter((b) => b.scope !== 'user')
+  return `
+    <div class="gw-page">
+      <div class="gw-page-inner" style="max-width: 820px; gap: var(--space-4);">
+        <div>
+          <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
+            <h1 style="font-size: 24px; margin: 0;">${t('Bot 模版')}</h1>
+            <span class="tag tag-accent-2">v${esc(String(tpl.version))}</span>
+          </div>
+          <p style="margin: 4px 0 0; font-size: 14px; color: var(--muted-foreground);">
+            ${t('公司里每个人自己建的 Bot 都长在这份底座上：人设、行为边界、记忆策略、能用哪些 Skill 和 MCP。保存即生效——版本号加一，各人的 Bot 一分钟内自己跟上，不用挨个改。', 'Every bot your members create sits on this base: persona, guardrails, memory policy, and which skills and MCP servers it may use. Saving takes effect immediately — the version bumps and each seat picks it up within a minute.')}
+          </p>
+        </div>
+        ${flashes()}
+
+        <div class="satu-panel">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);">
+            <span class="satu-panel-title" style="text-transform: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; letter-spacing: 0;">soul.md</span>
+            <span style="font-size: 12px; color: var(--muted-foreground);" data-bot-prompt-len>${t(`${esc(String(a.prompt.length))} 字 · 每轮随上下文注入`, `${esc(String(a.prompt.length))} chars · injected each turn`)}</span>
+          </div>
+          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('这份文件定义全公司 Bot 的身份、语气与工作原则。员工可以在自己的 Bot 上追加一段补充说明，接在这段后面，不会替掉它。', 'This defines the identity, tone and working principles shared by every bot in the company. Members can append their own note on their bot; it goes after this text and never replaces it.')}</p>
+          <textarea class="input satu-code" rows="12" data-bot="prompt">${esc(a.prompt)}</textarea>
+        </div>
+
+        ${guardsPanel(a, false)}
+        ${capabilityPanel(a, opts, false)}
+        ${memoryPanel(a, false)}
+
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap;">
+          <button type="button" class="satu-linkbtn" style="text-align: left;" data-act="template-redeploy" ${state.busy ? 'disabled' : ''}>${t('立即下发到全部席位')}</button>
+          <button type="button" class="btn btn-primary" data-act="template-save" ${state.busy ? 'disabled' : ''}>${state.busy ? t('保存中…') : t('保存模版')}</button>
+        </div>
+        <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">
+          ${t('「立即下发」会把公司已部署的席位挨个重铺一遍，正在进行的对话会断。平时不用按它：席位自己在盯着版本号。', 'Force-push reinstalls every deployed seat and drops ongoing conversations. You normally do not need it — seats watch the version themselves.')}
+        </p>
+
+        ${others.length ? `<div style="margin-top: var(--space-4);">
+          <h2 style="font-size: 16px; margin: 0 0 4px;">${t('其它 Bot')}</h2>
+          <p style="margin: 0 0 var(--space-2); font-size: 13px; color: var(--muted-foreground);">
+            ${t('平台维护的全局 Bot，以及改版前建的公司 Bot（已停用，可以删掉）。员工自己建的不在这里——那些只有本人看得见。', 'Global bots maintained by the platform, plus company bots created before the template (now disabled; safe to delete). Bots your members created are not listed here — only they can see those.')}
+          </p>
+          <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+            ${others.map(legacyBotRow).join('')}
+          </div>
+        </div>` : ''}
+      </div>
+    </div>`
+}
+
+function legacyBotRow(b) {
+  const tag = b.legacy
+    ? `<span class="tag tag-neutral">${t('已停用')}</span>`
+    : `<span class="tag tag-accent-2">${t('全局')}</span>`
+  return `<div class="satu-agentrow" style="grid-template-columns: 1fr auto auto;">
+    <button type="button" class="satu-tasklink" data-act="go" data-href="/bots/${esc(b.id)}">
+      <span style="display: flex; align-items: center; gap: var(--space-3); min-width: 0;">
+        ${botAvatar(b.icon, 30, b.origin)}
+        <span style="min-width: 0; display: flex; flex-direction: column; gap: 1px; text-align: left;">
+          <span style="font-size: 14px; font-weight: 600;">${esc(b.name)}</span>
+          <span style="font-size: 12px; color: var(--muted-foreground);">${esc(b.description || '')}</span>
+        </span>
+      </span>
+    </button>
+    ${tag}
+    <div style="display: flex; align-items: center; gap: var(--space-2); justify-content: flex-end;">
+      ${b.legacy ? `<button type="button" class="satu-linkbtn" data-act="legacy-bot-delete" data-id="${esc(b.id)}" data-name="${esc(b.name)}">${t('删除')}</button>` : ''}
+      <button type="button" class="satu-linkbtn" data-act="go" data-href="/bots/${esc(b.id)}">${t('查看')}</button>
+    </div>
+  </div>`
+}
+
+// ── 模版页和 Bot 详情页共用的那几块。──────────────────────────────────
+//
+// 行为边界、记忆、能力这三块在两页上长得一模一样，改的只是哪一份草稿（见 state.js
+// 的 editingDraft）。抄成两份的话，下次给记忆加一个选项就会只加在其中一页上。
+
+function guardsPanel(a, ro) {
+  const guards = (a.guards || []).map((g) => botToggle(g.title, g.desc, g.on, ro ? '' : 'bot-guard', `data-id="${esc(g.id)}"`)).join('')
+  return `<div class="satu-panel">
+    <span class="satu-panel-title">${t('行为边界')}</span>
+    ${guards}
+    <div class="field">
+      <label for="bot-escalate">${t('升级人工的条件')}</label>
+      <input class="input" id="bot-escalate" type="text" data-bot="escalate" value="${esc(a.escalate || '')}" ${ro ? 'disabled' : ''}>
+    </div>
+    <span style="font-size: 12px; color: var(--muted-foreground);">${t('这几条最终落在工具执行前的拦截上（tools/pre-execute），不是提示词里的一句话——现在还没接。')}</span>
+  </div>`
+}
+
+function capabilityPanel(a, opts, ro) {
+  if (ro) {
+    const names = (ids, list) => (ids || []).map((id) => (list || []).find((o) => pickId(o) === id)).filter(Boolean).map(pickLabel)
+    const chips = (labels) =>
+      labels.length
+        ? labels.map((n) => `<span class="tag tag-neutral">${esc(n)}</span>`).join(' ')
+        : `<span style="font-size: 12px; color: var(--muted-foreground);">${t('没有')}</span>`
+    return `<div class="satu-panel">
+      <span class="satu-panel-title">${t('可用 Skill')}</span>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px;">${chips(names(a.skills, opts.skills))}</div>
+      <span class="satu-panel-title" style="margin-top: var(--space-2);">${t('可用 MCP 服务器')}</span>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px;">${chips(names(a.mcps, opts.mcps))}</div>
+    </div>`
+  }
+  return `<div class="satu-panel">
+    <span class="satu-panel-title">${t('可用 Skill')}</span>
+    ${botPicks('skills', opts.skills, a.skills, t('没有可选项'))}
+    <span class="satu-panel-title" style="margin-top: var(--space-2);">${t('可用 MCP 服务器')}</span>
+    ${botPicks('mcps', opts.mcps, a.mcps, t('没有可选项'))}
+    <span style="font-size: 12px; color: var(--muted-foreground);">${t('未勾选的能力，Agent 在任务中不可调用。')}</span>
+  </div>`
+}
+
+function memoryPanel(a, ro) {
   const scopePills = MEMORY_SCOPES.map(
     (sc) =>
-      `<button type="button" class="satu-assignee" style="padding: 5px 14px;" aria-pressed="${String(a.scope === sc)}" data-act="bot-scope" data-value="${esc(sc)}">${esc(t(sc))}</button>`,
+      `<button type="button" class="satu-assignee" style="padding: 5px 14px;" aria-pressed="${String(a.scope === sc)}" ${ro ? 'disabled' : `data-act="bot-scope" data-value="${esc(sc)}"`}>${esc(t(sc))}</button>`,
   ).join('')
   // value 用中文原串当键（存的就是它），只翻显示的那一份。
   const ttlOpts = MEMORY_TTLS.map((ttl) => `<option value="${esc(ttl)}" ${ttl === a.ttl ? 'selected' : ''}>${esc(t(ttl))}</option>`).join('')
-  const memoryBody = a.memoryOn
+  const body = a.memoryOn
     ? `<div style="display: flex; flex-direction: column; gap: var(--space-4);">
         <div class="field">
           <label>${t('记忆范围')}</label>
@@ -111,21 +229,21 @@ function botDetailPage() {
         <div class="field">
           <label>${t('记录哪些内容')}</label>
           ${/* id 保持中文原串（存的是它），只翻显示的 label；botPicks 也喂用户数据，不能整体翻。 */ ''}
-          ${botPicks('kinds', MEMORY_KINDS.map((k) => ({ id: k, name: t(k) })), a.kinds)}
+          ${botPicks('kinds', MEMORY_KINDS.map((k) => ({ id: k, name: t(k) })), a.kinds, '', ro)}
         </div>
         <div class="satu-agentpair">
           <div class="field">
             <label for="bot-ttl">${t('保留时长')}</label>
-            <select class="input" id="bot-ttl" data-act="bot-ttl">${ttlOpts}</select>
+            <select class="input" id="bot-ttl" data-act="bot-ttl" ${ro ? 'disabled' : ''}>${ttlOpts}</select>
           </div>
           <div class="field">
             <label for="bot-cap" data-bot-cap-label>${t(`注入上限 · ${esc(a.cap)} 条`, `Injection cap · ${esc(a.cap)}`)}</label>
-            <input class="input" id="bot-cap" type="range" min="5" max="50" step="5" value="${esc(a.cap)}" data-bot="cap" style="padding: 0; border: 0; background: transparent; accent-color: var(--color-accent);">
+            <input class="input" id="bot-cap" type="range" min="5" max="50" step="5" value="${esc(a.cap)}" data-bot="cap" ${ro ? 'disabled' : ''} style="padding: 0; border: 0; background: transparent; accent-color: var(--color-accent);">
             <span style="font-size: 12px; color: var(--muted-foreground);">${t('每次对话最多注入的记忆条数')}</span>
           </div>
         </div>
-        ${botToggle(t('写入前需用户确认'), t('Agent 提议记住某条信息时先征求同意'), a.confirmOn, 'bot-confirm')}
-        ${botToggle(t('不记录敏感信息'), t('手机号、证件号、银行卡等自动跳过'), a.piiOn, 'bot-pii')}
+        ${botToggle(t('写入前需用户确认'), t('Agent 提议记住某条信息时先征求同意'), a.confirmOn, ro ? '' : 'bot-confirm')}
+        ${botToggle(t('不记录敏感信息'), t('手机号、证件号、银行卡等自动跳过'), a.piiOn, ro ? '' : 'bot-pii')}
         <div style="display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-md);">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);">
             <span style="font-size: 13.5px; font-weight: 600;">${t('已存记忆')}</span>
@@ -135,22 +253,55 @@ function botDetailPage() {
         </div>
       </div>`
     : ''
+  return `<div class="satu-panel">
+    <span class="satu-panel-title">${t('记忆')}</span>
+    <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('决定这个 Agent 能记住什么、记多久，以及记忆如何参与后续对话。')}</p>
+    ${botToggle(t('启用长期记忆'), t('关闭后每次对话都从空白上下文开始'), a.memoryOn, ro ? '' : 'bot-memory')}
+    ${body}
+  </div>`
+}
+
+function botDetailPage() {
+  const bot = state.bot
+  const a = state.botDraft
+  if (!bot || !a) {
+    return `<div class="gw-page"><div class="gw-page-inner" style="max-width: 820px;">${flashes()}<p style="color: var(--muted-foreground);">${t('载入中…')}</p></div></div>`
+  }
+  // 自己建的那种：能改的只有身份和一段补充说明，底座在公司模版里。
+  if (isMyBot(bot)) return myBotPage(bot, a)
+  return fullBotPage(bot, a)
+}
+
+/**
+ * 「我的 Bot」。
+ *
+ * 这一页故意不给提示词、行为边界、Skill 勾选——它们来自公司模版，在这儿摆一份能改的
+ * 副本，人改完却不生效（服务端不收），比不摆更糟。所以底座在下面**只读**地列出来，
+ * 旁边写清楚它归谁管。
+ */
+function myBotPage(bot, a) {
+  const tplVersion = bot.templateVersion || state.template?.version || 1
+  const opts = state.botOptions || { skills: [], mcps: [] }
+  const iconPick = avatarKeysFor('company').map((key) => {
+    const on = a.icon === key
+    const label = t(BOT_AVATARS[key]?.label || key)
+    return `<button type="button" class="satu-iconpick" aria-pressed="${String(on)}" aria-label="${esc(label)}" title="${esc(label)}" data-act="bot-icon" data-icon="${esc(key)}">${botAvatar(key, 30, 'company')}</button>`
+  }).join('')
+  const base = { ...a, prompt: state.template?.prompt || '', skills: state.template?.skills || [], mcps: state.template?.mcps || [] }
   return `
     <div class="gw-page">
       <div class="gw-page-inner" style="max-width: 820px; gap: var(--space-4);">
-        ${/* 「已保存」画在最下面那排按钮旁边——保存键在页尾，结论也该在那儿。 */ ''}
         <div class="satu-panel">
           <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap;">
             <div style="display: flex; align-items: flex-start; gap: var(--space-3); min-width: 0; flex: 1;">
-              ${botAvatar(a.icon, 42, bot.origin)}
+              ${botAvatar(a.icon, 42, 'company')}
               <div style="min-width: 0; flex: 1; display: flex; flex-direction: column; gap: var(--space-2);">
                 <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
                   <input class="input" style="max-width: 280px; font-family: var(--font-heading); font-size: 16px; font-weight: 600;" data-bot="name" value="${esc(a.name)}" placeholder="${esc(t('助理名字'))}">
                   <span class="tag ${a.enabled ? 'tag-accent-2' : 'tag-neutral'}">${a.enabled ? t('已上线') : t('未上线')}</span>
                 </div>
                 <input class="input" data-bot="description" value="${esc(a.description)}" placeholder="${esc(t('简介'))}">
-                ${/* 模型不给挑：平台在「模型配置」里定的那一个，所有 Bot 都用它。 */ ''}
-                <div style="font-size: 12.5px; color: var(--muted-foreground);">${t(`本月执行 ${esc(bot.usage || '—')}`, `${esc(bot.usage || '—')} this month`)} · ${t(`模型 ${esc(a.model || '—')}（平台指定）`, `model ${esc(a.model || '—')} (set by the platform)`)}</div>
+                <div style="font-size: 12.5px; color: var(--muted-foreground);">${t(`模型 ${esc(a.model || '—')}（平台指定）`, `model ${esc(a.model || '—')} (set by the platform)`)}</div>
                 <div style="display: flex; flex-wrap: wrap; gap: 6px;">${iconPick}</div>
               </div>
             </div>
@@ -161,44 +312,95 @@ function botDetailPage() {
         </div>
 
         <div class="satu-panel">
-          <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);">
-            <span class="satu-panel-title" style="text-transform: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; letter-spacing: 0;">soul.md</span>
-            <span style="font-size: 12px; color: var(--muted-foreground);" data-bot-prompt-len>${t(`${esc(String(a.prompt.length))} 字 · 每轮随上下文注入`, `${esc(String(a.prompt.length))} chars · injected each turn`)}</span>
-          </div>
-          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('这份文件定义 Agent 的身份、语气与工作原则，每次对话都会随上下文一起注入。')}</p>
-          <textarea class="input satu-code" rows="12" data-bot="prompt">${esc(a.prompt)}</textarea>
+          <span class="satu-panel-title">${t('这个 Bot 的补充说明')}</span>
+          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">
+            ${t('写它专门负责什么、有什么习惯。这段接在公司模版的人设<b>后面</b>，不会替掉它——公司改了模版，你这段还在。', 'Say what this one is for and how it should behave. It is appended <b>after</b> the company persona, never replaces it — when the template changes, your note stays.')}
+          </p>
+          <textarea class="input satu-code" rows="6" data-bot="extraPrompt" placeholder="${esc(t('例如：你专门跟进华东区的客户回访，回复里带上客户名和上次联系时间。'))}">${esc(a.extraPrompt || '')}</textarea>
           <div class="field">
             <label for="bot-greeting">${t('开场问候')}</label>
             <input class="input" id="bot-greeting" type="text" data-bot="greeting" value="${esc(a.greeting)}">
           </div>
         </div>
 
+        <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-2);">
+          <h2 style="font-size: 16px; margin: 0;">${t('继承自公司模版')}</h2>
+          <span class="tag tag-accent-2">v${esc(String(tplVersion))}</span>
+          <span style="font-size: 12.5px; color: var(--muted-foreground);">${t('由公司管理员统一维护，改了这里所有人的 Bot 一起变。', 'Maintained by your company admin; a change here moves everyone at once.')}</span>
+        </div>
         <div class="satu-panel">
-          <span class="satu-panel-title">${t('行为边界')}</span>
-          ${guards}
-          <div class="field">
-            <label for="bot-escalate">${t('升级人工的条件')}</label>
-            <input class="input" id="bot-escalate" type="text" data-bot="escalate" value="${esc(a.escalate)}">
+          <span class="satu-panel-title" style="text-transform: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; letter-spacing: 0;">soul.md</span>
+          <textarea class="input satu-code" rows="8" disabled>${esc(base.prompt)}</textarea>
+        </div>
+        ${guardsPanel(base, true)}
+        ${capabilityPanel(base, opts, true)}
+
+        ${flashes()}
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);">
+          <button type="button" class="satu-linkbtn" style="text-align: left;" data-act="bot-delete">${t('删除这个 Bot')}</button>
+          <button type="button" class="btn btn-primary" data-act="bot-save" ${state.busy ? 'disabled' : ''}>${state.busy ? t('保存中…') : t('保存配置')}</button>
+        </div>
+        <p style="margin: 0 0 var(--space-4); font-size: 12px; color: var(--muted-foreground);">${t('删除会连它的席位一起拆掉，机器上那块屏和这个 Bot 的会话都不再保留。', 'Deleting also tears down its seat — that screen and this bot\'s conversations are gone.')}</p>
+      </div>
+    </div>`
+}
+
+/** 全局 Bot（owner 编辑 / 公司侧只读），以及改版前留下的公司 Bot。 */
+function fullBotPage(bot, a) {
+  const ro = readOnlyItem(bot)
+  const opts = state.botOptions || { skills: [], mcps: [], groups: [], kbs: [] }
+  const iconPick = avatarKeysFor(bot.origin).map((key) => {
+    const on = a.icon === key
+    const label = t(BOT_AVATARS[key]?.label || key)
+    return `<button type="button" class="satu-iconpick" aria-pressed="${String(on)}" aria-label="${esc(label)}" title="${esc(label)}" data-act="bot-icon" data-icon="${esc(key)}" ${ro ? 'disabled' : ''}>${botAvatar(key, 30, bot.origin)}</button>`
+  }).join('')
+  const roNote = bot.legacy
+    ? t('这个 Bot 建于 Bot 模版之前，已经停用。公司的底座现在在「Bot 模版」那一页。', 'This bot predates the company template and is disabled. The company base now lives on the Bot template page.')
+    : t('全局 Bot 由系统管理员维护')
+  return `
+    <div class="gw-page">
+      <div class="gw-page-inner" style="max-width: 820px; gap: var(--space-4);">
+        ${/* 「已保存」画在最下面那排按钮旁边——保存键在页尾，结论也该在那儿。 */ ''}
+        <div class="satu-panel">
+          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap;">
+            <div style="display: flex; align-items: flex-start; gap: var(--space-3); min-width: 0; flex: 1;">
+              ${botAvatar(a.icon, 42, bot.origin)}
+              <div style="min-width: 0; flex: 1; display: flex; flex-direction: column; gap: var(--space-2);">
+                <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
+                  <input class="input" style="max-width: 280px; font-family: var(--font-heading); font-size: 16px; font-weight: 600;" data-bot="name" value="${esc(a.name)}" placeholder="${esc(t('助理名字'))}" ${ro ? 'disabled' : ''}>
+                  <span class="tag ${a.enabled ? 'tag-accent-2' : 'tag-neutral'}">${a.enabled ? t('已上线') : t('未上线')}</span>
+                  ${bot.legacy ? `<span class="tag tag-neutral">${t('已停用')}</span>` : ''}
+                </div>
+                <input class="input" data-bot="description" value="${esc(a.description)}" placeholder="${esc(t('简介'))}" ${ro ? 'disabled' : ''}>
+                ${/* 模型不给挑：平台在「模型配置」里定的那一个，所有 Bot 都用它。 */ ''}
+                <div style="font-size: 12.5px; color: var(--muted-foreground);">${t(`本月执行 ${esc(bot.usage || '—')}`, `${esc(bot.usage || '—')} this month`)} · ${t(`模型 ${esc(a.model || '—')}（平台指定）`, `model ${esc(a.model || '—')} (set by the platform)`)}</div>
+                <div style="display: flex; flex-wrap: wrap; gap: 6px;">${iconPick}</div>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: var(--space-2); flex: none;">
+              <button type="button" class="satu-switch" aria-pressed="${String(!!a.enabled)}" aria-label="${esc(t('上线'))}" data-act="bot-enabled" ${ro ? 'disabled' : ''}><span></span></button>
+            </div>
           </div>
-          <span style="font-size: 12px; color: var(--muted-foreground);">${t('这几条最终落在工具执行前的拦截上（tools/pre-execute），不是提示词里的一句话——现在还没接。')}</span>
         </div>
 
         <div class="satu-panel">
-          <span class="satu-panel-title">${t('可用 Skill')}</span>
-          ${botPicks('skills', opts.skills, a.skills, t('没有可选项'))}
-          <span class="satu-panel-title" style="margin-top: var(--space-2);">${t('可用 MCP 服务器')}</span>
-          ${botPicks('mcps', opts.mcps, a.mcps, t('没有可选项'))}
-          <span style="font-size: 12px; color: var(--muted-foreground);">${t('未勾选的能力，Agent 在任务中不可调用。')}</span>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);">
+            <span class="satu-panel-title" style="text-transform: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; letter-spacing: 0;">soul.md</span>
+            <span style="font-size: 12px; color: var(--muted-foreground);" data-bot-prompt-len>${t(`${esc(String(a.prompt.length))} 字 · 每轮随上下文注入`, `${esc(String(a.prompt.length))} chars · injected each turn`)}</span>
+          </div>
+          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('这份文件定义 Agent 的身份、语气与工作原则，每次对话都会随上下文一起注入。')}</p>
+          <textarea class="input satu-code" rows="12" data-bot="prompt" ${ro ? 'disabled' : ''}>${esc(a.prompt)}</textarea>
+          <div class="field">
+            <label for="bot-greeting">${t('开场问候')}</label>
+            <input class="input" id="bot-greeting" type="text" data-bot="greeting" value="${esc(a.greeting)}" ${ro ? 'disabled' : ''}>
+          </div>
         </div>
 
-        <div class="satu-panel">
-          <span class="satu-panel-title">${t('记忆')}</span>
-          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('决定这个 Agent 能记住什么、记多久，以及记忆如何参与后续对话。')}</p>
-          ${botToggle(t('启用长期记忆'), t('关闭后每次对话都从空白上下文开始'), a.memoryOn, 'bot-memory')}
-          ${memoryBody}
-        </div>
+        ${guardsPanel(a, ro)}
+        ${capabilityPanel(a, opts, ro)}
+        ${memoryPanel(a, ro)}
 
-        <div class="satu-panel">
+        ${ro ? '' : `<div class="satu-panel">
           <span class="satu-panel-title">${t('可访问范围')}</span>
           <div class="field">
             <label>${t('可使用该 Agent 的分组')}</label>
@@ -208,18 +410,64 @@ function botDetailPage() {
             <label>${t('知识库')}</label>
             ${botPicks('kbs', opts.kbs, a.kbs, t('没有可选项'))}
           </div>
-        </div>
+        </div>`}
 
         ${flashes()}
         <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);">
-          ${ro ? '' : `<button type="button" class="satu-linkbtn" style="text-align: left;" data-act="bot-delete">${t('删除这个 Bot')}</button>`}
+          ${ro && !bot.legacy ? '' : `<button type="button" class="satu-linkbtn" style="text-align: left;" data-act="${bot.legacy ? 'legacy-bot-delete' : 'bot-delete'}" data-id="${esc(bot.id)}" data-name="${esc(bot.name)}">${t('删除这个 Bot')}</button>`}
           <div style="display: flex; gap: var(--space-2);">
-            <button type="button" class="btn btn-primary" data-act="bot-save" ${state.busy || ro ? 'disabled' : ''} ${ro ? 'title="' + esc(t('全局 Bot 由系统管理员维护')) + '"' : ''}>${state.busy ? t('保存中…') : ro ? t('只读') : t('保存配置')}</button>
+            <button type="button" class="btn btn-primary" data-act="bot-save" ${state.busy || ro ? 'disabled' : ''} ${ro ? 'title="' + esc(roNote) + '"' : ''}>${state.busy ? t('保存中…') : ro ? t('只读') : t('保存配置')}</button>
           </div>
         </div>
-        <p style="margin: 0 0 var(--space-4); font-size: 12px; color: var(--muted-foreground);">${t('这一页的设置都会写回目录。行为边界与记忆现在只是存下来：拦截和注入还没接到 Bot 上。分组与知识库也还没有落点。', 'Everything here is persisted to the catalog. Guardrails and memory are stored only — enforcement and injection are not wired into the bot yet. Groups and knowledge bases have no home yet either.')}</p>
+        <p style="margin: 0 0 var(--space-4); font-size: 12px; color: var(--muted-foreground);">${ro ? esc(roNote) : t('这一页的设置都会写回目录。行为边界与记忆现在只是存下来：拦截和注入还没接到 Bot 上。分组与知识库也还没有落点。', 'Everything here is persisted to the catalog. Guardrails and memory are stored only — enforcement and injection are not wired into the bot yet. Groups and knowledge bases have no home yet either.')}</p>
       </div>
     </div>`
+}
+
+/**
+ * 「新建 Bot」弹窗。员工自己建，建完还没有席位——要真的能聊，得在对话页上再点一次部署。
+ *
+ * 只问身份：名字、头像、简介、一段补充说明。其余的来自公司模版，这里不问也不给改。
+ */
+function newBotModal() {
+  const f = state.newBot
+  if (!f) return ''
+  const icons = avatarKeysFor('company').map((key) => {
+    const label = t(BOT_AVATARS[key]?.label || key)
+    return `<button type="button" class="satu-iconpick" aria-pressed="${String(f.icon === key)}" aria-label="${esc(label)}" title="${esc(label)}" data-act="new-bot-icon" data-icon="${esc(key)}">${botAvatar(key, 30, 'company')}</button>`
+  }).join('')
+  const version = state.template?.version
+  return `<div class="gw-modal-backdrop" data-act="new-bot-close">
+    <div class="gw-modal" data-stop style="max-width: 520px;">
+      <div>
+        <h2 style="font-size: 20px; margin: 0 0 4px;">${t('新建 Bot')}</h2>
+        <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">
+          ${t(`它会用公司的 Bot 模版${version ? ` v${version}` : ''} 当底座——人设、能用的 Skill 和 MCP 都在那儿。这里只填它是谁。`, `It runs on your company's bot template${version ? ` v${version}` : ''} — persona, skills and MCP servers all come from there. Here you just say who it is.`)}
+        </p>
+      </div>
+      <div class="field">
+        <label for="nb-name">${t('名字')}</label>
+        <input class="input" id="nb-name" data-newbot="name" value="${esc(f.name)}" placeholder="${esc(t('例如：回访助手'))}" autofocus>
+      </div>
+      <div class="field">
+        <label for="nb-desc">${t('简介')}</label>
+        <input class="input" id="nb-desc" data-newbot="description" value="${esc(f.description)}" placeholder="${esc(t('一句话说清它管什么'))}">
+      </div>
+      <div class="field">
+        <label>${t('头像')}</label>
+        <div style="display: flex; flex-wrap: wrap; gap: 6px;">${icons}</div>
+      </div>
+      <div class="field">
+        <label for="nb-extra">${t('补充说明')}</label>
+        <textarea class="input satu-code" id="nb-extra" rows="4" data-newbot="extraPrompt" placeholder="${esc(t('可留空。写了就接在公司人设后面。'))}">${esc(f.extraPrompt)}</textarea>
+      </div>
+      ${state.newBotError ? `<p style="margin: 0; font-size: 13px; color: var(--color-danger, #d33);">${esc(state.newBotError)}</p>` : ''}
+      <div style="display: flex; justify-content: flex-end; gap: var(--space-2);">
+        <button type="button" class="btn btn-secondary" data-act="new-bot-close">${t('取消')}</button>
+        <button type="button" class="btn btn-primary" data-act="new-bot-save" ${state.busy ? 'disabled' : ''}>${state.busy ? t('创建中…') : t('创建')}</button>
+      </div>
+    </div>
+  </div>`
 }
 
 function dayISO(ts) {

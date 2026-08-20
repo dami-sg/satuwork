@@ -302,6 +302,7 @@ export function catalogOf(r: Row): CatalogItem {
     kind: str(r.kind) as CatalogKind,
     scope: str(r.scope) as Scope,
     companyId: strOrNull(r.companyId),
+    accountId: strOrNull(r.accountId),
     name: str(r.name),
     definition: jsonOf(r.definition),
     createdAt: num(r.createdAt),

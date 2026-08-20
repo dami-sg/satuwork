@@ -113,6 +113,28 @@ body { margin: 0; background: var(--color-bg); color: var(--color-text); font-fa
    不该藏在一个还要先点开的导航项底下。 */
 /* 名单占满剩余高度、自己滚。Bot 多的时候滚的是名单，而不是把下面的入口顶出屏幕。 */
 .satu-botlist { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+/* 「新建 Bot」。贴在名单下沿、跟名单一样宽——它是名单的动作，不是又一个导航项，
+   所以用虚线边框跟上面那些实心的行区分开。收成窄栏（.satu-rail）时只剩那个加号。 */
+.satu-newbot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  padding: 8px var(--space-3);
+  border: 1px dashed var(--color-divider);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.satu-newbot:hover { color: var(--color-text); border-color: var(--color-text); }
+.satu-rail .satu-newbot { justify-content: center; }
+.satu-rail .satu-newbot span { display: none; }
 /* 页面入口沉在底部，不跟着名单滚。 */
 .satu-navfoot { flex: none; display: flex; flex-direction: column; gap: 2px; padding-top: 2px; }
 .satu-botrow {

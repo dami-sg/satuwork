@@ -7,8 +7,16 @@
  */
 
 export type Role = 'owner' | 'admin' | 'member'
-export type Scope = 'global' | 'company'
-export type CatalogKind = 'model' | 'skill' | 'mcp' | 'bot' | 'provider'
+
+/**
+ * 目录项的层级。
+ *
+ * `user` 是第三层：员工自己建的 Bot，只有他自己看得见（`accountId` 就是他）。
+ * 它没有自己的一整份配置——底座来自本公司那份 **Bot 模版**，这一层只存身份
+ * （名字、头像、简介、开场白、一段追加提示词）。
+ */
+export type Scope = 'global' | 'company' | 'user'
+export type CatalogKind = 'model' | 'skill' | 'mcp' | 'bot' | 'bot-template' | 'provider'
 
 export type CompanyStatus = 'active' | 'disabled'
 
@@ -341,6 +349,8 @@ export interface CatalogItem {
   kind: CatalogKind
   scope: Scope
   companyId: string | null
+  /** `scope: 'user'` 时是这条的主人。别的层级为 null。 */
+  accountId: string | null
   name: string
   definition: unknown
   createdAt: number

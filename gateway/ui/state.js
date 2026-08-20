@@ -107,6 +107,13 @@ const state = {
   bot: null,
   botDraft: null,
   botOptions: { skills: [], mcps: [], groups: [], kbs: [] },
+  /** 公司的 Bot 模版（已生效的那一版）与手上这份草稿。 */
+  template: null,
+  templateDraft: null,
+  templateOptions: { skills: [], mcps: [] },
+  /** 「新建 Bot」弹窗那份表单；null 表示没开。 */
+  newBot: null,
+  newBotError: '',
   skills: [],
   mcpServers: [],
   skillTags: [],
@@ -278,9 +285,38 @@ function catalogBase() {
   return id ? `/orgs/${encodeURIComponent(id)}` : ''
 }
 
-/** 全局项在公司侧只能看不能改。owner 自己在平台页面里管的就是全局项，不受这条限制。 */
+/**
+ * 这一条能不能改。
+ *
+ * 公司侧只有**自己建的** Bot 改得动：全局 Bot 由平台维护，公司那一批是模版改版时
+ * 停用掉的老条目（只能看和删）。Skill / MCP 没有 scope 这一维，还是按 origin 判。
+ * owner 在平台页面里管的就是全局项，不受这条限制。
+ */
 function readOnlyItem(item) {
-  return !isOwner() && item?.origin === 'global'
+  if (isOwner() || !item) return false
+  if (item.scope) return item.scope !== 'user'
+  return item.origin === 'global'
+}
+
+/** 自己建的那种 Bot。它是唯一一种员工自己编辑得了的。 */
+function isMyBot(bot) {
+  return bot?.scope === 'user'
+}
+
+/**
+ * 那几个开关和输入框改的是哪一份草稿。
+ *
+ * Bot 详情页改的是这个 Bot（`botDraft`），模版页改的是公司模版（`templateDraft`）。
+ * 两页共用同一套控件和 data-act——行为边界、记忆、Skill 勾选在两处长得一模一样，
+ * 抄一套出来只会开始漂。由路径来选是哪一份，控件本身不必知道自己在谁的页面上。
+ */
+function editingDraft() {
+  return state.path === '/bots' ? state.templateDraft : state.botDraft
+}
+
+function setEditingDraft(next) {
+  if (state.path === '/bots') state.templateDraft = next
+  else state.botDraft = next
 }
 
 function currentRole() {
@@ -336,7 +372,8 @@ function pathAllowed(p) {
   if (p === '/costs') p = '/billing'
   if (allowedHrefs().has(p)) return true
   // /bots/:id 跟 /profile 一样不在侧栏，但管理员能进。
-  if (p.startsWith('/bots/') && allowedHrefs().has('/bots')) return true
+  // 员工进不了 /bots（那是管理员的模版页），但进得了自己那个 Bot 的详情页。
+  if (p.startsWith('/bots/') && (allowedHrefs().has('/bots') || !isOwner())) return true
   if (p.startsWith('/companies/') && allowedHrefs().has('/companies')) return true
   if (p.startsWith('/users/') && allowedHrefs().has('/users')) return true
   if (p.startsWith('/machines/') && allowedHrefs().has('/machines')) return true
@@ -391,7 +428,9 @@ function pageTitle(path) {
 function crumbsOf(path) {
   if (path.startsWith('/bots/')) {
     const bot = state.bot && state.bot.id === botIdOfPath(path) ? state.bot : null
-    return { href: '/bots', parent: isOwner() ? t('全局 Bot') : t('Bot 配置'), current: bot?.name || t('Bot 详情') }
+    // 员工没有 Bot 列表页可回——他的落点是对话，返回就该回那儿。
+    if (!isOwner() && !isAdmin()) return { href: '/', parent: t('对话'), current: bot?.name || t('Bot 详情') }
+    return { href: '/bots', parent: isOwner() ? t('全局 Bot') : t('Bot 模版'), current: bot?.name || t('Bot 详情') }
   }
   if (path.startsWith('/companies/') && path !== '/companies') {
     const org = state.org && state.org.id === companyIdOfPath(path) ? state.org : null

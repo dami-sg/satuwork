@@ -489,6 +489,9 @@ export class Db {
       // 同上：删员工也不销毁他的用量记录。少了它，公司的历史用量会凭空缺一块，而
       // 「谁烧了多少」正是要留档的东西。accountId 变成悬空引用，统计里按 id 显示。
       await this.run('delete from account_secrets where "accountId" = ?', [id])
+      // 他自己建的 Bot 跟着他走。catalog_items."accountId" 是真外键，留着这几行的话
+      // 最后那句 delete from accounts 会直接外键报错，删员工整条路走不通。
+      await this.run('delete from catalog_items where scope = \'user\' and "accountId" = ?', [id])
       if (cur?.companyId) {
         for (const g of await this.groupsOf(cur.companyId)) {
           if (!g.members.includes(id)) continue
@@ -1415,6 +1418,18 @@ export class Db {
     return rows.map(seatRuntimeOf)
   }
 
+  /**
+   * 部署了这一颗 Bot 的全部席位，**不分公司**。
+   *
+   * 删目录项之前要按它把机器上的东西拆干净。全局 Bot 可能被好几家公司各自部署过，
+   * 按公司查会漏掉别家的那些——漏下的席位仍占着 slot 和端口，而库里再没有任何东西
+   * 指向它们（理由见 deploy.ts 的 releaseSeats）。
+   */
+  async seatRuntimesOfBot(botId: string): Promise<SeatRuntime[]> {
+    const rows = await this.many('select * from seat_runtimes where "botId" = ?', [botId])
+    return rows.map(seatRuntimeOf)
+  }
+
   async seatRuntimesOfAccount(accountId: string): Promise<SeatRuntime[]> {
     const rows = await this.many('select * from seat_runtimes where "accountId" = ? order by slot', [accountId])
     return rows.map(seatRuntimeOf)
@@ -1467,6 +1482,24 @@ export class Db {
 
   async deleteSeatRuntime(accountId: string): Promise<void> {
     await this.run('delete from seat_runtimes where "accountId" = ?', [accountId])
+  }
+
+  /**
+   * 拆掉**一个** Bot 的席位，连同它的实例地址和会话索引。
+   *
+   * 员工删自己建的 Bot 走这条：他名下别的 Bot 还在跑，上面那条按账号删的会把它们
+   * 一起抹掉——slot 立刻能被下一个人分走，而机器上那几套 systemd 单元还占着端口
+   * （理由见 deploy.ts 的 releaseSeats）。
+   *
+   * 会话索引一起删：全文本来就在席位目录里，管家拆席位时跟着没了，留着索引只会让
+   * 管理员点进一条永远打不开的会话。
+   */
+  async deleteSeatRuntimeOf(accountId: string, botId: string): Promise<void> {
+    await this.tx(async () => {
+      await this.run('delete from seat_runtimes where "accountId" = ? and "botId" = ?', [accountId, botId])
+      await this.run('delete from instances where "accountId" = ? and "botId" = ?', [accountId, botId])
+      await this.run('delete from session_index where "accountId" = ? and "botId" = ?', [accountId, botId])
+    })
   }
 
   // ── Bot 发布包。只存元数据，tarball 在 $SATUWORK_GATEWAY_HOME/releases。──
@@ -1530,6 +1563,8 @@ export class Db {
     kind: CatalogKind
     scope: Scope
     companyId: string | null
+    /** 只有 `scope: 'user'` 用得上：这条归谁。别的层级传不传都存 null。 */
+    accountId?: string | null
     name: string
     definition?: unknown
   }): Promise<CatalogItem> {
@@ -1539,14 +1574,15 @@ export class Db {
       kind: input.kind,
       scope: input.scope,
       companyId: input.scope === 'global' ? null : input.companyId,
+      accountId: input.scope === 'user' ? (input.accountId ?? null) : null,
       name: input.name,
       definition: input.definition ?? {},
       createdAt: now,
       updatedAt: now,
     }
     await this.run(
-      'insert into catalog_items (id, kind, scope, "companyId", name, definition, "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?)',
-      [row.id, row.kind, row.scope, row.companyId, row.name, JSON.stringify(row.definition), row.createdAt, row.updatedAt],
+      'insert into catalog_items (id, kind, scope, "companyId", "accountId", name, definition, "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?)',
+      [row.id, row.kind, row.scope, row.companyId, row.accountId, row.name, JSON.stringify(row.definition), row.createdAt, row.updatedAt],
     )
     return row
   }
@@ -1592,6 +1628,67 @@ export class Db {
       id,
     ])
     return next
+  }
+
+  /**
+   * 这家公司那份 Bot 模版。一家公司恰好一条（0002 上有唯一索引）。
+   *
+   * 查不到不代表出错：公司是在 0003 之后建的，模版由第一次读它的人懒创建
+   * （见 lib/catalog.ts 的 ensureBotTemplate）。
+   */
+  async botTemplate(companyId: string): Promise<CatalogItem | undefined> {
+    const r = await this.one(
+      'select * from catalog_items where kind = \'bot-template\' and "companyId" = ? limit 1',
+      [companyId],
+    )
+    return r ? catalogOf(r) : undefined
+  }
+
+  /**
+   * 某个员工的名册：全局 Bot ∪ 本公司的（都是 0003 停用掉的老条目）∪ **他自己建的**。
+   *
+   * 别人建的 Bot 一律不在里面——用户 Bot 只有主人看得见，这条线由这里的 where 保证，
+   * 而不是靠每个调用点自己过滤。
+   */
+  async botsFor(companyId: string | null, accountId: string): Promise<CatalogItem[]> {
+    if (!companyId) {
+      const rows = await this.many("select * from catalog_items where kind = 'bot' and scope = 'global' order by name")
+      return rows.map(catalogOf)
+    }
+    const rows = await this.many(
+      `select * from catalog_items where kind = 'bot' and (
+         scope = 'global'
+         or (scope = 'company' and "companyId" = ?)
+         or (scope = 'user' and "accountId" = ?)
+       ) order by scope, name`,
+      [companyId, accountId],
+    )
+    return rows.map(catalogOf)
+  }
+
+  /**
+   * 这家公司里的全部 Bot，**不分主人**：全局 + 公司 + 每个员工自己建的。
+   *
+   * 只给「按 id 换个名字」这类展示用（会话索引、审计）。要判「这个人能不能用它」
+   * 一律走 botsFor——那条才带主人这一维。
+   */
+  async companyBots(companyId: string): Promise<CatalogItem[]> {
+    const rows = await this.many(
+      `select * from catalog_items where kind = 'bot' and (
+         scope = 'global' or "companyId" = ?
+       ) order by scope, name`,
+      [companyId],
+    )
+    return rows.map(catalogOf)
+  }
+
+  /** 某个员工自己建了几个。配额挡在建之前，见 routes/runtime.ts。 */
+  async countUserBots(accountId: string): Promise<number> {
+    const r = await this.one(
+      'select count(*)::int as n from catalog_items where kind = \'bot\' and scope = \'user\' and "accountId" = ?',
+      [accountId],
+    )
+    return Number((r as { n?: number } | undefined)?.n ?? 0)
   }
 
   async deleteCatalog(id: string): Promise<void> {

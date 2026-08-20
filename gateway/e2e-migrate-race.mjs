@@ -10,6 +10,7 @@
  */
 import { createRequire } from 'node:module'
 import { migrate } from './src/db/migrate.ts'
+import { MIGRATIONS } from './src/db/migrations/index.ts'
 
 const require = createRequire(import.meta.url)
 const pg = require('pg')
@@ -39,12 +40,16 @@ try {
   const [ra, rb] = await Promise.all([migrate(a, schema), migrate(b, schema)])
   out.applied = [ra.applied, rb.applied]
   // 恰好一边跑了、另一边看到已经跑过了。谁先谁后不重要。
-  out.exactlyOneApplied = ra.applied.length + rb.applied.length === 1
+  // 一边把**全部**迁移跑了，另一边一条都没跑。谁先谁后不重要，数字跟着迁移条数走。
+  out.exactlyOneApplied =
+    ra.applied.length + rb.applied.length === MIGRATIONS.length &&
+    (ra.applied.length === 0 || rb.applied.length === 0)
   out.current = ra.current
 
   const rows = await setup.query(`select id from ${schema}.schema_migrations`)
   out.ledgerRows = rows.rows.length
-  out.noDuplicate = rows.rows.length === 1
+  out.expectedRows = MIGRATIONS.length
+  out.noDuplicate = rows.rows.length === MIGRATIONS.length
 
   const tables = await setup.query(
     'select count(*)::int as n from information_schema.tables where table_schema = $1',

@@ -135,11 +135,15 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
     const seatAccess = seat.json.accessToken
     const seatApiKey = seat.json.apiKey
 
-    const createdBot = await req(gwBase, 'POST', `/orgs/${orgId}/bots`, {
-      token: adminTok,
+    /**
+     * 用**全局 Bot**：下面几条要验的是「同一颗 Bot 在管理员和员工两边都在名册里」，
+     * 而员工自己建的 Bot 只有本人看得见（公司这一层现在是一份模版，不再有共享 Bot）。
+     */
+    const createdBot = await req(gwBase, 'POST', '/platform/bots', {
+      token: ownerTok,
       body: { name: '对话 Bot' },
     })
-    assert(createdBot.status === 201, `company bot ${createdBot.status} ${createdBot.text}`)
+    assert(createdBot.status === 201, `global bot ${createdBot.status} ${createdBot.text}`)
     const catalogBotId = createdBot.json.bot.id
     let machineTok
 
@@ -153,7 +157,7 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(r.status === 200, `member ${r.status} ${r.text}`)
       assert(Array.isArray(r.json.bots), 'bots array')
       const hit = (r.json.bots || []).find((b) => b.id === catalogBotId)
-      assert(hit, '名册没有公司 Bot')
+      assert(hit, '名册没有那颗全局 Bot')
       assert(hit.runtime == null, 'member runtime 应为空')
     })
 
