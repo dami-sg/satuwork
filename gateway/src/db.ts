@@ -409,6 +409,21 @@ export interface LlmCall {
   createdAt: number
 }
 
+export type WebCallKind = 'search' | 'extract'
+
+export interface WebCall {
+  id: string
+  accountId: string
+  companyId: string | null
+  kind: WebCallKind
+  backend: string
+  /** search 恒为 1；extract 记**抓成功**的 URL 条数——失败那条没花后端的钱。 */
+  units: number
+  /** 写行那一刻的报价，整数「厘」。 */
+  mils: number
+  createdAt: number
+}
+
 export interface LlmUsageByAccount {
   accountId: string
   calls: number
@@ -458,6 +473,61 @@ export interface PlatformSettings {
    * 下一轮心跳各台机器自己退回去。
    */
   managerVersion?: string
+  /** 网页搜索/提取的后端与价目。密钥不在这里，在 platform_credentials。 */
+  webTools?: WebToolsSettings
+}
+
+/** 能挂网页工具的后端。`firecrawl` 只占位，还没接。 */
+export const WEB_BACKENDS = ['tavily', 'searxng', 'duckduckgo', 'firecrawl'] as const
+export type WebBackendId = (typeof WEB_BACKENDS)[number]
+
+/** 单价，整数「厘」（千分之一美元），每次调用。和账单那套的单位一致。 */
+export interface WebToolPrice {
+  search: number
+  extract: number
+}
+
+export interface WebToolsSettings {
+  /** 空 = 没配。**不做自动检测**：配了哪把密钥就悄悄换一家后端，界面和实际会对不上。 */
+  searchBackend: WebBackendId | ''
+  extractBackend: WebBackendId | ''
+  /** 自托管 SearXNG 的实例地址。不是密文，所以不进凭证表。 */
+  searxngUrl: string
+  pricing: Record<string, WebToolPrice>
+  /** 一家公司一天最多几次调用。0 = 不限。防的是跑飞，不是精确计费。 */
+  dailyLimit: number
+}
+
+export function emptyWebTools(): WebToolsSettings {
+  return { searchBackend: '', extractBackend: '', searxngUrl: '', pricing: {}, dailyLimit: 0 }
+}
+
+function parseWebPrice(raw: unknown): WebToolPrice {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const mils = (v: unknown) => {
+    const n = Math.round(Number(v))
+    return Number.isFinite(n) && n >= 0 ? n : 0
+  }
+  return { search: mils(o.search), extract: mils(o.extract) }
+}
+
+export function parseWebTools(raw: unknown): WebToolsSettings {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const backend = (v: unknown): WebBackendId | '' =>
+    WEB_BACKENDS.includes(v as WebBackendId) ? (v as WebBackendId) : ''
+  const pricing: Record<string, WebToolPrice> = {}
+  const rawPricing = (o.pricing && typeof o.pricing === 'object' ? o.pricing : {}) as Record<string, unknown>
+  for (const id of WEB_BACKENDS) {
+    if (rawPricing[id] != null) pricing[id] = parseWebPrice(rawPricing[id])
+  }
+  const limit = Math.round(Number(o.dailyLimit))
+  return {
+    searchBackend: backend(o.searchBackend),
+    extractBackend: backend(o.extractBackend),
+    searxngUrl: typeof o.searxngUrl === 'string' ? o.searxngUrl.trim() : '',
+    pricing,
+    dailyLimit: Number.isFinite(limit) && limit > 0 ? limit : 0,
+  }
 }
 
 /** 倍率的合法区间。0 会把报价抹平成免费，上限挡住一个手滑多打的零。 */
@@ -475,7 +545,7 @@ export function emptySettings(): CompanySettings {
 }
 
 export function emptyPlatformSettings(): PlatformSettings {
-  return { daily: { provider: '', model: '' }, utility: { provider: '', model: '' }, enabledModels: [], priceMultiplier: 1, managerVersion: '' }
+  return { daily: { provider: '', model: '' }, utility: { provider: '', model: '' }, enabledModels: [], priceMultiplier: 1, managerVersion: '', webTools: emptyWebTools() }
 }
 
 type Row = Record<string, unknown>
@@ -587,6 +657,7 @@ function parsePlatformPayload(raw: unknown): PlatformSettings {
     priceMultiplier: parsePriceMultiplier(o.priceMultiplier),
     // 空字符串 = 没钉，跟最新发布走。写端和这里必须成对，少一边这个开关就是死的。
     managerVersion: typeof o.managerVersion === 'string' ? o.managerVersion.trim() : '',
+    webTools: parseWebTools(o.webTools),
   }
 }
 function planOf(r: Row): Plan {
@@ -1363,6 +1434,21 @@ export class Db {
       alter table llm_calls add column if not exists "cachedTokens" bigint not null default 0;
       create index if not exists llm_calls_company on llm_calls ("companyId", "createdAt" desc);
       create index if not exists llm_calls_account on llm_calls ("accountId");
+      -- 网页工具按**次**计价，不按 token，所以不能挤进 llm_calls。
+      -- mils 是写行那一刻的报价快照（单价 × 条数 × 倍率），不是回头重算的：
+      -- 搜索单价是人在配置屏里手填的，管理员一改价，重算会把上个月的账单也改掉。
+      create table if not exists web_calls (
+        id          text primary key,
+        "accountId" text not null,
+        "companyId" text,
+        kind        text not null,
+        backend     text not null,
+        units       int  not null default 1,
+        mils        int  not null default 0,
+        "createdAt" bigint not null
+      );
+      create index if not exists web_calls_company on web_calls ("companyId", "createdAt" desc);
+      create index if not exists web_calls_account on web_calls ("accountId");
     `)
   }
 
@@ -1848,6 +1934,81 @@ export class Db {
       usage.cached_tokens ?? 0,
       id,
     ])
+  }
+
+  async insertWebCall(input: {
+    accountId: string
+    companyId?: string | null
+    kind: WebCallKind
+    backend: string
+    units: number
+    mils: number
+  }): Promise<WebCall> {
+    const row: WebCall = {
+      id: randomUUID(),
+      accountId: input.accountId,
+      companyId: input.companyId ?? null,
+      kind: input.kind,
+      backend: input.backend,
+      units: input.units,
+      mils: input.mils,
+      createdAt: Date.now(),
+    }
+    await this.run(
+      'insert into web_calls (id, "accountId", "companyId", kind, backend, units, mils, "createdAt") values (?,?,?,?,?,?,?,?)',
+      [row.id, row.accountId, row.companyId, row.kind, row.backend, row.units, row.mils, row.createdAt],
+    )
+    return row
+  }
+
+  /** 按公司 × 后端 × 类型汇总。金额直接求和——它已经是当时的报价，不重算。 */
+  async webUsageByCompanyBackend(
+    range?: { from?: number; to?: number },
+    companyId?: string,
+  ): Promise<{ companyId: string | null; backend: string; kind: string; calls: number; units: number; mils: number; lastAt: number | null }[]> {
+    const r = this.llmRangeSql(range)
+    const args: unknown[] = [...r.args]
+    let where = `where 1=1${r.sql}`
+    if (companyId) {
+      where += ' and "companyId" = ?'
+      args.push(companyId)
+    }
+    const rows = await this.many(
+      `select "companyId", backend, kind, count(*) as calls, coalesce(sum(units), 0) as units, coalesce(sum(mils), 0) as mils, max("createdAt") as "lastAt" from web_calls ${where} group by "companyId", backend, kind`,
+      args,
+    )
+    return rows.map((row) => ({
+      companyId: strOrNull(row.companyId),
+      backend: str(row.backend),
+      kind: str(row.kind),
+      calls: num(row.calls),
+      units: num(row.units),
+      mils: num(row.mils),
+      lastAt: row.lastAt == null ? null : num(row.lastAt),
+    }))
+  }
+
+  /** 这家公司从某个时刻起用了多少次。配额闸用它，所以只数条数不取行。 */
+  async webCallCountSince(companyId: string, since: number): Promise<number> {
+    const r = await this.one('select count(*)::int as n from web_calls where "companyId" = ? and "createdAt" >= ?', [
+      companyId,
+      since,
+    ])
+    return num(r?.n ?? 0)
+  }
+
+  async webCallsOfCompany(companyId: string): Promise<WebCall[]> {
+    const rows = await this.many('select * from web_calls where "companyId" = ? order by "createdAt" desc', [companyId])
+    return rows.map((r) => ({
+      id: str(r.id),
+      accountId: str(r.accountId),
+      companyId: strOrNull(r.companyId),
+      kind: str(r.kind) as WebCallKind,
+      backend: str(r.backend),
+      units: num(r.units),
+      mils: num(r.mils),
+      createdAt: num(r.createdAt),
+    }))
   }
 
   async llmCallsOfCompany(companyId: string): Promise<LlmCall[]> {
@@ -3115,6 +3276,8 @@ export class Db {
       // 后果是「全机队钉版本」这一级完全失效：传一个包上去，所有没有逐台钉过的机器
       // 都会在下一次心跳自己升上去，而唯一能拦住它的开关，看起来能设、其实存不进去。
       managerVersion: String(next.managerVersion ?? '').trim(),
+      // 同上：这一行漏了，工具配置那一屏就是「能填、回 200、读出来永远是空」。
+      webTools: parseWebTools(next.webTools),
     })
     await this.run(
       "insert into platform_settings (id, payload, \"updatedAt\") values ('platform', ?, ?) on conflict (id) do update set payload=excluded.payload, \"updatedAt\"=excluded.\"updatedAt\"",
@@ -3141,6 +3304,7 @@ export class Db {
             utility: s.utility,
             enabledModels: cur.enabledModels,
             priceMultiplier: cur.priceMultiplier,
+            webTools: cur.webTools,
           })
           lifted.settings = true
           break

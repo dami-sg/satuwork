@@ -57,6 +57,9 @@ const state = {
   planSkuEdit: null,
   planSkuError: '',
   tests: {},
+  /** 平台工具配置（/platform/tools/web 的整份响应）。null = 还没拉。 */
+  webTools: null,
+  toolsTab: 'web',
   savingMultiplier: false,
   /** 统计页：窗口口径、选中的公司、选中的月份，以及接口回来的那份数据。 */
   statsRange: 'today',

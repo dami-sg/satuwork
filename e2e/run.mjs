@@ -24,6 +24,7 @@ import { runLlmIdle } from './llm-idle.mjs'
 import { runReplaySlice } from './replay-slice.mjs'
 import { runWorkspaceFiles } from './workspace-files.mjs'
 import { runDocExtract } from './doc-extract.mjs'
+import { runWebBot } from './web-bot.mjs'
 import { runVision } from './vision.mjs'
 import { runTurnImages } from './turn-images.mjs'
 import { runHistoryTime } from './history-time.mjs'
@@ -33,6 +34,7 @@ import { runUiSmoke } from './ui-smoke.mjs'
 import { uiSource } from './ui-dom.mjs'
 import { runCustomProvider } from './custom-provider.mjs'
 import { runStats } from './stats.mjs'
+import { runWebTools } from './web-tools.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
@@ -2783,6 +2785,7 @@ async function main() {
     await runSetup({ gwRoot, test, req, start, waitHttp, assert, log })
     await runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log })
     await runStats({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runWebTools({ gwRoot, test, req, start, waitHttp, assert, log })
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runManagerConfirm({ root, test, assert, log })
@@ -2793,6 +2796,7 @@ async function main() {
     await runReplaySlice({ root, test, assert, log })
     await runWorkspaceFiles({ root, test, assert, log })
     await runDocExtract({ root, test, assert, log })
+    await runWebBot({ root, test, assert, log })
     await runVision({ root, test, assert, log })
     await runTurnImages({ root, test, assert, log })
     await runHistoryTime({ root, test, assert, log })

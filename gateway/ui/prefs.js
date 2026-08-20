@@ -104,6 +104,7 @@ applyPrefs()
 const PATHS = {
   '/': { title: '概览' },
   '/models': { title: '模型配置' },
+  '/tools': { title: '工具配置' },
   '/providers': { title: '供应商' },
   '/company': { title: '公司/席位' },
   '/accounts': { title: '员工' },
@@ -137,6 +138,8 @@ const ICONS = {
   ],
   providers: ['M21 2l-2 2', 'M7 14a5 5 0 1 0 0 0.01', 'M12.5 8.5 21 2', 'M16 7l3 3'],
   company: ['M3 21h18', 'M5 21V7l7-4 7 4v14', 'M9 21v-6h6v6'],
+  // 扳手：工具配置。和 providers 那把钥匙区分得开，都是单色描边。
+  tools: ['M14.7 6.3a4 4 0 0 0 5.3 5.2l-8.5 8.5a2.1 2.1 0 0 1-3-3l8.5-8.5a4 4 0 0 0-2.3-2.2z', 'M15 4.5 19.5 9'],
   accounts: ['M2 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2', 'M8 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z', 'M19 8v6', 'M22 11h-6'],
   audit: ['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3 6h.01', 'M3 12h.01', 'M3 18h.01'],
   plans: ['M4 7h16', 'M4 12h16', 'M4 17h10'],
@@ -272,6 +275,8 @@ const OWNER_NAV = [
   { href: '/users', label: '用户', icon: 'accounts' },
   { href: '/providers', label: '供应商', icon: 'providers' },
   { href: '/models', label: '模型配置', icon: 'models' },
+  // 工具配置紧跟模型配置：两者都是「Bot 能用什么」，只是一个是脑子一个是手。
+  { href: '/tools', label: '工具配置', icon: 'tools' },
   { href: '/plans', label: '套餐', icon: 'plans' },
   { href: '/orders', label: '购买与充值', icon: 'billing' },
   { href: '/stats', label: '统计', icon: 'stats' },

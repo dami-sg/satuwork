@@ -19,6 +19,8 @@ function pageView() {
       return modelsPage()
     case '/providers':
       return providersPage()
+    case '/tools':
+      return toolsPage()
     case '/company':
       return companyPage()
     case '/accounts':
@@ -411,6 +413,104 @@ async function testLlm(kind, payload) {
     }
   } catch (err) {
     state.tests[key] = { status: 'err', text: err.message }
+    flash('err', err.message)
+  }
+  render()
+}
+
+/**
+ * 工具配置：每改一处就整份 PUT 回去。
+ *
+ * 整份而不是打补丁，是因为这一屏上的东西彼此有约束（提取后端必须支持提取），
+ * 服务端要能一次看全再判——分片提交的话，中间那一刻的组合是不合法的。
+ */
+async function saveWebTools(patch) {
+  const cur = webCfg()
+  const next = { ...cur, ...patch }
+  state.webTools = { ...state.webTools, web: next }
+  render()
+  try {
+    state.webTools = await api('PUT', '/platform/tools/web', next)
+    // 换了后端，上一次自检测的是上一家。
+    delete state.tests['web:search']
+    delete state.tests['web:extract']
+    flash('ok', '已保存')
+  } catch (err) {
+    state.webTools = { ...state.webTools, web: cur }
+    flash('err', err.message)
+  }
+  render()
+}
+
+/** 单价按美元填、按整数「厘」存。四舍五入到厘，不让 0.0005 这种数字进库。 */
+async function saveWebPrice(backend, kind, raw) {
+  const n = Number(String(raw).trim())
+  if (!Number.isFinite(n) || n < 0) {
+    flash('err', '单价只能是不小于 0 的数字')
+    render()
+    return
+  }
+  const mils = Math.round(n * 1000)
+  const pricing = { ...(webCfg().pricing || {}) }
+  const one = { search: 0, extract: 0, ...(pricing[backend] || {}) }
+  if (one[kind] === mils) return
+  pricing[backend] = { ...one, [kind]: mils }
+  await saveWebTools({ pricing })
+}
+
+/** 配额：0 和空都当「不限」，负数打回。 */
+async function saveWebLimit(raw) {
+  const n = Math.round(Number(String(raw).trim() || 0))
+  if (!Number.isFinite(n) || n < 0) {
+    flash('err', '上限只能是不小于 0 的整数')
+    render()
+    return
+  }
+  if (n === (webCfg().dailyLimit ?? 0)) return
+  await saveWebTools({ dailyLimit: n })
+}
+
+async function saveWebSecret(provider, secret) {
+  if (!secret) {
+    flash('err', '密钥不能为空')
+    render()
+    return
+  }
+  state.busy = true
+  render()
+  try {
+    const exists = webBackend(provider)?.configured
+    if (exists) await api('PUT', `/platform/credentials/${encodeURIComponent(provider)}`, { secret })
+    else await api('POST', '/platform/credentials', { provider, secret })
+    await loadWebTools()
+    delete state.tests['web:search']
+    delete state.tests['web:extract']
+    flash('ok', '已保存密钥')
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
+/** 自检。失败是这一屏的正常结果，所以红字写在按钮旁边，而不是抛出去。 */
+async function testWebBackend(kind) {
+  state.tests[`web:${kind}`] = { status: 'busy', text: '自检中…' }
+  render()
+  try {
+    const data = await api('POST', '/platform/tools/web/test', { kind })
+    if (data.ok) {
+      const detail = kind === 'search' ? t(`返回 ${data.count} 条`, `${data.count} results`) : t(`取到 ${data.count} 字符`, `${data.count} chars`)
+      const text = t(`通了 ${data.elapsedMs}ms · ${data.backend} · ${detail}`, `OK ${data.elapsedMs}ms · ${data.backend} · ${detail}`)
+      state.tests[`web:${kind}`] = { status: 'ok', text }
+      flash('ok', text)
+    } else {
+      state.tests[`web:${kind}`] = { status: 'err', text: data.error || '不通' }
+      flash('err', data.error || '不通')
+    }
+  } catch (err) {
+    state.tests[`web:${kind}`] = { status: 'err', text: err.message }
     flash('err', err.message)
   }
   render()

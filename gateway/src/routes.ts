@@ -32,10 +32,15 @@ import {
   type Topup,
   PRICE_MULTIPLIER_MAX,
   PRICE_MULTIPLIER_MIN,
+  WEB_BACKENDS,
+  emptyWebTools,
   parsePriceMultiplier,
+  parseWebTools,
   releaseArch,
   sessionPageLimit,
 } from './db.ts'
+import { WebToolError, canExtract, canSearch, needsSecret } from './web-tools.ts'
+import { runExtract, runSearch, testBackend } from './web-service.ts'
 import { desktopIntercept } from './desktop.ts'
 import {
   type MachineLoad,
@@ -2279,6 +2284,9 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
       priceMultiplier: priceMultiplierOf(body.priceMultiplier, parsePriceMultiplier(cur.priceMultiplier)),
       managerVersion:
         'managerVersion' in body ? String(body.managerVersion ?? '').trim() : (cur.managerVersion ?? ''),
+      // 这一屏不管网页工具，但 next 是整份覆盖上去的——不带着它，去模型配置页存一次
+      // 就把工具配置抹了。
+      webTools: cur.webTools ?? emptyWebTools(),
     }
     const saved = await db.putPlatformSettings(next)
     await db.audit({ companyId: 'platform', accountId: account.id, action: 'platform.settings.update', detail: publicSettings(saved) })
@@ -2329,6 +2337,86 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     send(res, 200, { deleted: true, provider })
   })
 
+  // ── 工具配置 → 网页与搜索 ─────────────────────────────────────────────
+  //
+  // 只在平台层配一次，公司不配、也看不见：搜索后端是平台采购、平台计价、转售给各家
+  // 的能力。公司那层留一个开关，「这家用的是哪个后端、按哪个价结算」当场变糊涂账。
+
+  /** 密钥永不回显，只报「配没配 + 什么时候改的」，和模型供应商那屏同一条规矩。 */
+  async function webToolsView() {
+    const s = await db.platformSettings()
+    const web = s.webTools ?? emptyWebTools()
+    const creds = new Map((await db.platformCredentials()).map((c) => [c.provider, c]))
+    return {
+      web,
+      priceMultiplier: parsePriceMultiplier(s.priceMultiplier),
+      backends: WEB_BACKENDS.map((id) => ({
+        id,
+        search: canSearch(id),
+        extract: canExtract(id),
+        needsSecret: needsSecret(id),
+        // firecrawl 在名单里但没实现：界面上要能看见它「未接入」，而不是凭空少一项。
+        implemented: canSearch(id) || canExtract(id),
+        configured: needsSecret(id) ? creds.has(id) : true,
+        updatedAt: creds.get(id)?.updatedAt ?? null,
+      })),
+    }
+  }
+
+  router.get('/platform/tools/web', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    send(res, 200, await webToolsView())
+  })
+
+  router.put('/platform/tools/web', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const body = bodyOf(req)
+    const cur = await db.platformSettings()
+    const web = parseWebTools({ ...(cur.webTools ?? emptyWebTools()), ...body })
+    // 配得出来的组合必须是能跑的：把只会搜索的后端设成提取后端，等于让人配出一个
+    // 必然报错的组合，然后到席位那边才发现。
+    if (web.searchBackend && !canSearch(web.searchBackend)) {
+      throw new HttpError(400, `${web.searchBackend} 不支持搜索`)
+    }
+    if (web.extractBackend && !canExtract(web.extractBackend)) {
+      throw new HttpError(400, `${web.extractBackend} 不支持提取`)
+    }
+    if (web.searxngUrl) {
+      let u: URL | undefined
+      try {
+        u = new URL(web.searxngUrl)
+      } catch {
+        throw new HttpError(400, 'SearXNG 地址必须是完整的 http/https 地址')
+      }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new HttpError(400, 'SearXNG 地址必须是 http/https')
+    }
+    await db.putPlatformSettings({ ...cur, webTools: web })
+    await db.audit({
+      companyId: 'platform',
+      accountId: account.id,
+      action: 'platform.tools.web.update',
+      // **不带密钥**：审计里躺一份密钥，等于把它复制到了第二个地方。
+      detail: { searchBackend: web.searchBackend, extractBackend: web.extractBackend, searxngUrl: web.searxngUrl, pricing: web.pricing },
+    })
+    send(res, 200, await webToolsView())
+  })
+
+  /** 自检：拿固定查询词打一次选中的后端。不记 web_calls——这是验配置，不是用。 */
+  router.post('/platform/tools/web/test', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const kind = strField(bodyOf(req), 'kind') === 'extract' ? 'extract' : 'search'
+    try {
+      const out = await testBackend(db, kind)
+      send(res, 200, { ok: true, kind, ...out })
+    } catch (e) {
+      // 自检失败是这一屏的正常结果，不是接口故障：要让管理员看见原因，而不是一个红叉。
+      send(res, 200, { ok: false, kind, error: e instanceof WebToolError ? e.hint : sanitizeError(e) })
+    }
+  })
+
   /**
    * 平台用量统计：按公司汇总 token，并按模型单价折成金额。
    *
@@ -2346,6 +2434,7 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
     if (companyId && !(await db.company(companyId))) throw new HttpError(404, '公司不存在')
 
     const rows = await db.llmUsageByCompanyModel(range, companyId || undefined)
+    const webRows = await db.webUsageByCompanyBackend(range, companyId || undefined)
     const multiplier = parsePriceMultiplier((await db.platformSettings()).priceMultiplier)
     const rates = new Map<string, { input: number; output: number }>()
     for (const m of await llm.catalog(null)) {
@@ -2441,8 +2530,55 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
       totals,
       // 前端要据此提示「有模型没单价，金额不完整」，不能让 $0.00 被读成免费。
       unpricedModels: [...unpricedModels],
+      // 网页工具按次算钱，跟 token 不是一个量纲，所以单开一块，不混进上面的合计。
+      // 金额直接求和：那已经是**写行那一刻的报价**，不重算（重算会让改价追溯改账）。
+      web: webStats(webRows, companies),
     })
   })
+
+  /** 网页调用的汇总：按公司一行、按后端一行，外加一个合计。 */
+  function webStats(
+    rows: { companyId: string | null; backend: string; kind: string; calls: number; units: number; mils: number; lastAt: number | null }[],
+    companies: Map<string, Company>,
+  ) {
+    const byCompany = new Map<string, { companyId: string | null; name: string; calls: number; units: number; mils: number; lastAt: number | null }>()
+    const byBackend = new Map<string, { backend: string; search: number; extract: number; units: number; mils: number }>()
+    for (const row of rows) {
+      const key = row.companyId ?? ''
+      let c = byCompany.get(key)
+      if (!c) {
+        c = {
+          companyId: row.companyId,
+          name: row.companyId ? companies.get(row.companyId)?.name ?? row.companyId : '平台（系统管理员）',
+          calls: 0, units: 0, mils: 0, lastAt: null,
+        }
+        byCompany.set(key, c)
+      }
+      c.calls += row.calls
+      c.units += row.units
+      c.mils += row.mils
+      if (row.lastAt != null && (c.lastAt == null || row.lastAt > c.lastAt)) c.lastAt = row.lastAt
+
+      let b = byBackend.get(row.backend)
+      if (!b) {
+        b = { backend: row.backend, search: 0, extract: 0, units: 0, mils: 0 }
+        byBackend.set(row.backend, b)
+      }
+      if (row.kind === 'search') b.search += row.calls
+      else b.extract += row.calls
+      b.units += row.units
+      b.mils += row.mils
+    }
+    const list = [...byCompany.values()].sort((a, b) => b.mils - a.mils)
+    return {
+      byCompany: list,
+      byBackend: [...byBackend.values()].sort((a, b) => b.mils - a.mils),
+      totals: list.reduce(
+        (acc, x) => ({ calls: acc.calls + x.calls, units: acc.units + x.units, mils: acc.mils + x.mils }),
+        { calls: 0, units: 0, mils: 0 },
+      ),
+    }
+  }
 
   // ── 自定义供应商（pi-ai 的 createProvider 形状）──────────────────────
 
@@ -4515,11 +4651,50 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
       bots = [hit]
     }
     const pinned = await defaultBotModel(db)
+    const s = await db.platformSettings()
     send(res, 200, {
       bots: bots.map((b) => publicBot(b, pinned)),
       skills: (await db.visibleCatalog('skill', companyId)).map(publicSkill),
       servers: (await db.visibleCatalog('mcp', companyId)).map(runtimeServer),
+      // 席位要知道 utility 是谁：网页提取的摘要走它。挑模型是平台的事，所以是下发的，
+      // 不是席位自己在 cordis.yml 里配的——那等于给了一条绕过平台配置的暗路。
+      models: { daily: s.daily, utility: s.utility },
     })
+  })
+
+  // ── 网页工具。密钥在平台，所以抓取也在这里做完，席位只拿结果。 ─────────
+  //
+  // 走 /runtime/* 而不是 /v1/*：那一面是 OpenAI/Anthropic 兼容面，明确拒 sat_；
+  // 搜索是席位运行时的能力，和 /runtime/catalog 同类。用席位票还顺带把
+  // (accountId, companyId) 带了出来——计量不用 body 自报家门，自报的不作数。
+
+  /** 业务失败要成为**结果**，不是 4xx：席位那头要把它原样说给模型听。 */
+  async function webCall(res: ServerResponse, run: () => Promise<unknown>) {
+    try {
+      send(res, 200, { ok: true, ...(await run() as object) })
+    } catch (e) {
+      if (e instanceof WebToolError) return send(res, 200, { ok: false, error: e.hint })
+      throw e
+    }
+  }
+
+  router.post('/runtime/web/search', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const body = bodyOf(req)
+    await webCall(res, () =>
+      runSearch(db, account, {
+        query: String(body.query ?? ''),
+        count: body.count == null ? undefined : Number(body.count),
+        domains: Array.isArray(body.domains) ? body.domains.map(String) : [],
+        exclude: Array.isArray(body.exclude) ? body.exclude.map(String) : [],
+        freshness: String(body.freshness ?? ''),
+      }),
+    )
+  })
+
+  router.post('/runtime/web/extract', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    await webCall(res, () => runExtract(db, account, bodyOf(req).urls))
   })
 
   router.get('/runtime/desktop', async (req, res) => {

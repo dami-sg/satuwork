@@ -23,6 +23,18 @@ interface RemoteBot {
   mcps?: string[]
 }
 
+export interface ModelRole {
+  provider: string
+  model: string
+}
+
+const EMPTY_ROLE: ModelRole = { provider: '', model: '' }
+
+/** 老 Gateway 不带 models 字段，回落成空——空就由调用方自己回退，不在这里瞎猜。 */
+function roleOf(raw: ModelRole | undefined): ModelRole {
+  return { provider: String(raw?.provider ?? ''), model: String(raw?.model ?? '') }
+}
+
 interface RemoteSkill {
   id: string
   name: string
@@ -93,6 +105,12 @@ export class CatalogService extends Service {
   pulledAt: number | null = null
   lastError: string | null = null
   servers: ServerStatus[] = []
+  /**
+   * 平台钉的两个模型角色。**下发的，不是本机配的**：挑模型是平台的事，让席位的
+   * cordis.yml 也能改，等于给了一条绕过平台配置的暗路。
+   * 网页提取的摘要走 utility——廉价、大批量、不面对用户，正是它的定义。
+   */
+  models: { daily: ModelRole; utility: ModelRole } = { daily: EMPTY_ROLE, utility: EMPTY_ROLE }
   private remoteBots: RemoteBot[] = []
   private mcpEffects: Dispose[] = []
   /** 工具名 → 所属服务器 id，用来按 Bot 的 mcps 过滤。 */
@@ -169,7 +187,12 @@ export class CatalogService extends Service {
     }
     const base = gatewayUrl()
     const token = gatewayToken()
-    let body: { bots?: RemoteBot[]; skills?: RemoteSkill[]; servers?: RemoteServer[] }
+    let body: {
+      bots?: RemoteBot[]
+      skills?: RemoteSkill[]
+      servers?: RemoteServer[]
+      models?: { daily?: ModelRole; utility?: ModelRole }
+    }
     const pinId = (process.env.SATUWORK_BOT_ID || '').trim()
     const catalogUrl = pinId
       ? `${base}/runtime/catalog?botId=${encodeURIComponent(pinId)}`
@@ -190,6 +213,10 @@ export class CatalogService extends Service {
       return false
     }
     this.remoteBots = Array.isArray(body.bots) ? body.bots : []
+    this.models = {
+      daily: roleOf(body.models?.daily),
+      utility: roleOf(body.models?.utility),
+    }
     this.syncSkills(Array.isArray(body.skills) ? body.skills : [])
     this.syncServers(Array.isArray(body.servers) ? body.servers : [])
     const pinned = this.pinBots(this.remoteBots)

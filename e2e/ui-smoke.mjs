@@ -187,6 +187,48 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(!html.includes('$0.000'), '没有价的模型画成了 $0.000')
     })
 
+    await test('工具配置页：后端、密钥框、单价都画得出来，改动走真的派发', async () => {
+      const ui = await boot(ownerToken)
+      ui.state.path = '/tools'
+      await ui.loadWebTools()
+      ui.render()
+      let html = ui.html()
+      assert(html.includes('网页与搜索'), '没画那个 tab')
+      assert(html.includes('搜索后端') && html.includes('提取后端'), '两个下拉缺一个')
+      // 只会搜索的后端不能出现在提取那个下拉里——配得出来的组合必须是能跑的。
+      // 只截那个 select，不能截「提取后端」往后的整段：单价表里每个后端都要有一行。
+      const at = html.indexOf('data-cap="extract"')
+      assert(at > 0, '没找到提取后端的下拉')
+      const extractSelect = html.slice(at, html.indexOf('</select>', at))
+      assert(!extractSelect.includes('>DuckDuckGo<'), `提取下拉里列了只会搜索的后端：${extractSelect}`)
+      assert(extractSelect.includes('>Tavily<'), '提取下拉里没有能提取的后端')
+
+      // 走真的 change 派发，不是直接调函数：这个分支要排在「只收 select」那道关卡
+      // 前面，接错了位置的话函数是好的、点了没反应（倍率输入框就栽过这一次）。
+      await ui.fire('change', el('select', { 'data-act': 'web-backend', 'data-cap': 'search' }, 'duckduckgo'))
+      assert(ui.state.webTools.web.searchBackend === 'duckduckgo', `没存下：${JSON.stringify(ui.state.webTools.web)}`)
+      const back = await ui.api('GET', '/platform/tools/web')
+      assert(back.web.searchBackend === 'duckduckgo', `库里是 ${back.web.searchBackend}`)
+      ui.render()
+      html = ui.html()
+      assert(html.includes('封 IP'), 'DuckDuckGo 那句「无保障」的提醒没画出来')
+
+      // 单价：界面按美元填，库里按整数「厘」存。
+      await ui.fire('change', el('input', { 'data-act': 'web-price', 'data-backend': 'tavily', 'data-kind': 'search' }, '0.008'))
+      assert(ui.state.webTools.web.pricing.tavily.search === 8, `单价没按厘存：${JSON.stringify(ui.state.webTools.web.pricing)}`)
+      const back2 = await ui.api('GET', '/platform/tools/web')
+      assert(back2.web.pricing.tavily.search === 8, `库里单价是 ${JSON.stringify(back2.web.pricing)}`)
+    })
+
+    await test('工具配置页：非 owner 进不去这条路径', async () => {
+      const ui = await boot(ownerToken)
+      // pathAllowed 是侧栏和路由共用的那道门。公司管理员不该有工具配置。
+      ui.state.me = { account: { role: 'admin' }, company: { id: 'c1' } }
+      assert(ui.pathAllowed('/tools') === false, '公司管理员被放进了工具配置')
+      ui.state.me = { account: { role: 'owner' } }
+      assert(ui.pathAllowed('/tools') === true, 'owner 反倒进不去')
+    })
+
     await test('角色面板选了供应商，下面那张表跟着换', async () => {
       const ui = await boot(ownerToken)
       ui.state.path = '/models'
