@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, SessionIndex, Theme, Topup, emptyPlatformSettings, parsePriceMultiplier } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, SessionIndex, Theme, Topup, emptyPlatformSettings, parseConnectorPricing, parsePriceMultiplier } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -114,6 +114,7 @@ export function parsePlatformPayload(raw: unknown): PlatformSettings {
     enabledModels: enabled,
     // 老库里没有这个字段，回落成 1——按原价，等于没开倍率。
     priceMultiplier: parsePriceMultiplier(o.priceMultiplier),
+    connectorPricing: parseConnectorPricing(o.connectorPricing),
     // 空字符串 = 没钉，跟最新发布走。写端和这里必须成对，少一边这个开关就是死的。
     managerVersion: typeof o.managerVersion === 'string' ? o.managerVersion.trim() : '',
   }
@@ -296,6 +297,66 @@ export function botReleaseOf(r: Row): BotRelease {
     url: str(r.url || ''),
   }
 }
+/** jsonb 的字符串数组。脏数据（不是数组、混了别的类型）一律当空，不让它往下传。 */
+export function strListOf(v: unknown): string[] {
+  const parsed = jsonOf(v)
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter((x): x is string => typeof x === 'string')
+}
+
+export function connectorInstallOf(r: Row): ConnectorInstall {
+  return {
+    id: str(r.id),
+    connectorId: str(r.connectorId),
+    accountId: str(r.accountId),
+    companyId: str(r.companyId),
+    enabledTools: strListOf(r.enabledTools),
+    createdAt: num(r.createdAt),
+    updatedAt: num(r.updatedAt),
+  }
+}
+
+export function connectorConnectionOf(r: Row): ConnectorConnection {
+  return {
+    id: str(r.id),
+    connectorId: str(r.connectorId),
+    vendor: str(r.vendor),
+    scope: str(r.scope) as ConnectionScope,
+    label: str(r.label),
+    accountId: strOrNull(r.accountId),
+    companyId: str(r.companyId),
+    externalUserId: str(r.externalUserId),
+    externalId: strOrNull(r.externalId),
+    status: str(r.status) as ConnectionStatus,
+    mentionOnly: r.mentionOnly === true,
+    lastError: strOrNull(r.lastError),
+    connectedAt: numOrNull(r.connectedAt),
+    createdAt: num(r.createdAt),
+    updatedAt: num(r.updatedAt),
+  }
+}
+
+export function connectorCallOf(r: Row): ConnectorCall {
+  return {
+    id: str(r.id),
+    companyId: strOrNull(r.companyId),
+    accountId: str(r.accountId),
+    connectionId: strOrNull(r.connectionId),
+    botId: strOrNull(r.botId),
+    sessionId: strOrNull(r.sessionId),
+    vendor: str(r.vendor),
+    connector: str(r.connector),
+    label: str(r.label || ''),
+    tool: str(r.tool),
+    status: str(r.status) as ConnectorCallStatus,
+    amountMicros: num(r.amountMicros),
+    bonusMicros: num(r.bonusMicros),
+    latencyMs: num(r.latencyMs),
+    viaMention: r.viaMention === true,
+    createdAt: num(r.createdAt),
+  }
+}
+
 export function catalogOf(r: Row): CatalogItem {
   return {
     id: str(r.id),

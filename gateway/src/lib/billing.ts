@@ -22,6 +22,13 @@ export async function balanceOf(db: Db, companyId: string) {
     // 套餐赠送：跟着套餐有效期，到期清零。
     planBonusMils: active?.bonusMils ?? 0,
     planBonusExpiresAt: active?.endAt ?? null,
+    /**
+     * 当前账期的起点。null = 没有生效的套餐。
+     *
+     * 算「赠送还剩多少」必须有它：赠送只被**本账期内**的消耗吃掉，上一期花掉的那部分
+     * 跟着套餐一起作废，不能再扣一遍。
+     */
+    planBonusStartAt: active?.startAt ?? null,
     // 充值：不过期。
     topupMils: await db.topupTotal(companyId),
   }

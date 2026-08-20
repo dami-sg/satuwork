@@ -1,0 +1,212 @@
+/**
+ * Composio 这一家。
+ *
+ * **裸 fetch，不引 `@composio/core`。** 我们只用到六个动作（见 types.ts），而那个 SDK
+ * 会把一整套「agent 跑在你自己进程里」的 provider 适配层拖进控制面——我们的 agent 跑在
+ * 席位机器上，那些东西一行都用不上。
+ *
+ * 响应解析一律**防御式**：字段名在两版之间改过（`items` / `data`、`successful` /
+ * `successfull`），少一个字段不该让整条路挂掉。
+ */
+import { ProviderError, type ConnectorProvider, type ExecuteInput, type ExecuteResult, type InitiateInput, type InitiateResult, type ProviderCaps, type StatusResult, type ToolDef, type Toolkit } from './types.ts'
+
+const DEFAULT_BASE = 'https://backend.composio.dev/api/v3'
+/** 列目录这类只读请求的超时。慢过这个数，界面上等着也没意义。 */
+const LIST_TIMEOUT_MS = 20_000
+
+type Json = Record<string, unknown>
+
+function obj(v: unknown): Json {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Json) : {}
+}
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v : v == null ? '' : String(v)
+}
+
+/** 列表接口的外壳在不同版本里叫过 `items` 和 `data`，两个都认。 */
+function listOf(body: unknown): Json[] {
+  const o = obj(body)
+  for (const key of ['items', 'data', 'results']) {
+    const v = o[key]
+    if (Array.isArray(v)) return v.map(obj)
+  }
+  return Array.isArray(body) ? (body as unknown[]).map(obj) : []
+}
+
+/**
+ * 授权地址在响应里出现过好几个位置。挨个找，找不到就是真的没有——那时抛错，
+ * 不要把一个空字符串交给浏览器去跳转。
+ */
+function redirectOf(body: Json): string {
+  const direct = str(body.redirect_url || body.redirectUrl || body.redirect_uri)
+  if (direct) return direct
+  const nested = obj(obj(body.connectionData).val)
+  return str(nested.redirectUrl || nested.redirect_url || nested.authUri)
+}
+
+export class ComposioProvider implements ConnectorProvider {
+  readonly vendor = 'composio'
+  readonly caps: ProviderCaps = { mcpUrl: true, search: true, multiAccount: true }
+
+  constructor(
+    private readonly apiKey: string,
+    private readonly base = (process.env.COMPOSIO_BASE_URL || DEFAULT_BASE).replace(/\/$/, ''),
+  ) {}
+
+  configured(): boolean {
+    return Boolean(this.apiKey)
+  }
+
+  private async call(
+    method: string,
+    path: string,
+    init: { body?: unknown; signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<unknown> {
+    if (!this.apiKey) throw new ProviderError('没有 Composio 的密钥', 0)
+    const signal = init.signal ?? AbortSignal.timeout(init.timeoutMs ?? LIST_TIMEOUT_MS)
+    let res: Response
+    try {
+      res = await fetch(`${this.base}${path}`, {
+        method,
+        headers: {
+          'x-api-key': this.apiKey,
+          'content-type': 'application/json',
+          accept: 'application/json',
+        },
+        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+        signal,
+      })
+    } catch (e) {
+      // 超时和连不上在这里是同一类：我们没拿到任何上游结果。计费那边据此判定不收钱。
+      throw new ProviderError(`连不上 Composio：${(e as Error).message}`, 0)
+    }
+    const text = await res.text().catch(() => '')
+    let parsed: unknown
+    try {
+      parsed = text.trim() ? JSON.parse(text) : {}
+    } catch {
+      parsed = { raw: text }
+    }
+    if (!res.ok) {
+      const err = obj(obj(parsed).error)
+      const msg = str(err.message) || str(obj(parsed).message) || text.slice(0, 200) || `HTTP ${res.status}`
+      throw new ProviderError(msg, res.status)
+    }
+    return parsed
+  }
+
+  async ping(): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await this.call('GET', '/toolkits?limit=1')
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
+  }
+
+  async listToolkits(): Promise<Toolkit[]> {
+    const body = await this.call('GET', '/toolkits?limit=500')
+    return listOf(body)
+      .map((t) => {
+        const meta = obj(t.meta)
+        const categories = Array.isArray(meta.categories)
+          ? (meta.categories as unknown[]).map((c) => str(obj(c).name || c)).filter(Boolean)
+          : []
+        const schemes = Array.isArray(t.auth_schemes)
+          ? (t.auth_schemes as unknown[]).map((x) => str(obj(x).mode || obj(x).auth_scheme || x)).filter(Boolean)
+          : []
+        return {
+          slug: str(t.slug || t.key || t.name).toLowerCase(),
+          name: str(t.name || t.slug),
+          description: str(meta.description || t.description),
+          logo: str(meta.logo || t.logo),
+          categories,
+          authSchemes: [...new Set(schemes)],
+        }
+      })
+      .filter((t) => t.slug)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  async listTools(toolkit: string): Promise<ToolDef[]> {
+    const body = await this.call('GET', `/tools?toolkit_slug=${encodeURIComponent(toolkit)}&limit=500`)
+    return listOf(body)
+      .map((t) => ({
+        slug: str(t.slug || t.name),
+        name: str(t.name || t.slug),
+        description: str(t.description),
+        inputSchema: obj(t.input_parameters || t.inputParameters || t.parameters),
+      }))
+      .filter((t) => t.slug)
+      .sort((a, b) => a.slug.localeCompare(b.slug))
+  }
+
+  async initiate(input: InitiateInput): Promise<InitiateResult> {
+    const body = obj(
+      await this.call('POST', '/connected_accounts', {
+        body: {
+          auth_config: { id: input.authConfigId },
+          connection: {
+            user_id: input.externalUserId,
+            callback_url: input.callbackUrl,
+          },
+        },
+      }),
+    )
+    const externalId = str(body.id || obj(body.connectedAccount).id)
+    if (!externalId) throw new ProviderError('Composio 没有返回连接 id', 0)
+    const redirectUrl = redirectOf(body)
+    if (!redirectUrl) throw new ProviderError('Composio 没有返回授权地址', 0)
+    return { externalId, redirectUrl }
+  }
+
+  async status(externalId: string): Promise<StatusResult> {
+    const body = obj(await this.call('GET', `/connected_accounts/${encodeURIComponent(externalId)}`))
+    const raw = str(body.status || obj(body.connectedAccount).status).toUpperCase()
+    if (raw === 'ACTIVE') return { status: 'active' }
+    // INITIATED / INITIALIZING 都是「还在走」。别的一律当失败，并把原文带出去——
+    // 供应商将来加一个新状态时，界面上要能看见它叫什么，而不是永远转圈。
+    if (raw === 'INITIATED' || raw === 'INITIALIZING' || raw === 'PENDING' || !raw) return { status: 'pending' }
+    return { status: 'failed', error: str(body.status_reason || body.error) || raw }
+  }
+
+  async disconnect(externalId: string): Promise<void> {
+    try {
+      await this.call('DELETE', `/connected_accounts/${encodeURIComponent(externalId)}`)
+    } catch (e) {
+      // 上游已经没有这条了（404）就算断开成功：我们的目的是「它不再能用」，而不是
+      // 「一定要由我们来删」。别的错原样抛出去。
+      if (e instanceof ProviderError && e.status === 404) return
+      throw e
+    }
+  }
+
+  /**
+   * **异常一律往上抛，不在这里吞。**
+   *
+   * 吞成 `{ ok:false }` 的话，上面那层就分不出「超时」和「参数写错了」——而超时要收钱
+   * （发出去的邮件不会因为我们没等到响应就退回来），参数错不收。判定超时靠的是调用方
+   * 手里那个 AbortSignal，不是错误文案，所以只能由调用方来做。
+   */
+  async execute(input: ExecuteInput): Promise<ExecuteResult> {
+    const body = obj(
+      await this.call('POST', `/tools/execute/${encodeURIComponent(input.tool)}`, {
+        body: {
+          user_id: input.externalUserId,
+          connected_account_id: input.externalId,
+          arguments: input.args ?? {},
+        },
+        signal: input.signal,
+      }),
+    )
+    // 拼写在两版之间变过（`successful` / `successfull`），两个都认；都没有就看有没有 error。
+    const okField = body.successful ?? body.successfull
+    const errText = str(body.error)
+    const ok = typeof okField === 'boolean' ? okField : !errText
+    const data = body.data ?? body.response ?? body
+    const text = ok ? JSON.stringify(data) : errText || JSON.stringify(data)
+    // 走到这里说明上游回了 2xx——它真的跑了一遍，哪怕工具自己说失败（「邮箱不存在」）。
+    return { ok, text }
+  }
+}

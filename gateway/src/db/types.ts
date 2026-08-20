@@ -16,7 +16,7 @@ export type Role = 'owner' | 'admin' | 'member'
  * （名字、头像、简介、开场白、一段追加提示词）。
  */
 export type Scope = 'global' | 'company' | 'user'
-export type CatalogKind = 'model' | 'skill' | 'mcp' | 'bot' | 'bot-template' | 'provider'
+export type CatalogKind = 'model' | 'skill' | 'mcp' | 'bot' | 'bot-template' | 'provider' | 'connector'
 
 export type CompanyStatus = 'active' | 'disabled'
 
@@ -405,6 +405,111 @@ export interface AccountSecrets {
   createdAt: number
 }
 
+/**
+ * 连接器：上架的那一条（`catalog_items` `kind='connector'`）的定义形状。
+ *
+ * **工具子集不在这里。** 开哪几个工具是**安装**上的选择——同一个 Gmail，行政要发邮件，
+ * 研发只想读。放在上架定义里等于让 owner 替全平台所有人做这个决定。
+ */
+export interface ConnectorDef {
+  vendor: string
+  /** 供应商侧的 toolkit slug。上架之后会进流水表，不能改。 */
+  toolkit: string
+  /** 供应商侧的 auth config id。owner 配，公司和员工都看不见。 */
+  authConfigId: string
+  name: string
+  description: string
+  logo: string
+  category: string
+  multiAccount: boolean
+  /** 沿用 MCP 的三档，只标注不拦截（和现有 MCP 的现状一致，不新造半成品）。 */
+  perm: string
+  enabled: boolean
+}
+
+/**
+ * 公司那一层只存**否定**：默认放行，admin 可以禁。
+ *
+ * `connectorId` 指向全局那一条。**不靠 `name` 认亲**——名字是给人看的，会被改。
+ */
+export interface ConnectorBlockDef {
+  connectorId: string
+  blocked: boolean
+  reason: string
+}
+
+export type ConnectionScope = 'user' | 'company'
+export type ConnectionStatus = 'pending' | 'active' | 'failed' | 'revoked'
+
+/** label 会进工具名前缀，所以限长限字符集。 */
+export const CONNECTION_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/
+export const DEFAULT_CONNECTION_LABEL = 'default'
+/** 公司共用那把的 label 固定，不可改、不可断（只能由 admin 删）。 */
+export const COMPANY_CONNECTION_LABEL = 'company'
+
+export interface ConnectorInstall {
+  id: string
+  connectorId: string
+  accountId: string
+  companyId: string
+  /** 空数组 = 全开。存开着的那些，不是关掉的那些。 */
+  enabledTools: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ConnectorConnection {
+  id: string
+  connectorId: string
+  vendor: string
+  scope: ConnectionScope
+  label: string
+  accountId: string | null
+  companyId: string
+  externalUserId: string
+  externalId: string | null
+  status: ConnectionStatus
+  /** 打开 = 不进默认工具表，只有本轮被 @ 点名才注入。 */
+  mentionOnly: boolean
+  lastError: string | null
+  connectedAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export type ConnectorCallStatus = 'ok' | 'failed' | 'timeout' | 'denied' | 'error'
+
+export interface ConnectorCall {
+  id: string
+  companyId: string | null
+  accountId: string
+  connectionId: string | null
+  botId: string | null
+  sessionId: string | null
+  vendor: string
+  connector: string
+  label: string
+  tool: string
+  status: ConnectorCallStatus
+  /** 微元（百万分之一美元）。这一笔一共收了多少。 */
+  amountMicros: number
+  /**
+   * `amountMicros` 里由**套餐赠送**承担的部分，剩下的算充值。
+   *
+   * 分开记是因为赠送有账期、充值没有：合成一个数的话，套餐一到期，它已经花掉的部分
+   * 会从充值余额上再被扣一遍（见迁移 0005）。
+   */
+  bonusMicros: number
+  latencyMs: number
+  viaMention: boolean
+  createdAt: number
+}
+
+/** 我们这边的用户标识。**不用邮箱**：会变，而且是 PII，进了供应商侧就删不掉了。 */
+export function externalUserIdOf(scope: ConnectionScope, id: string): string {
+  return scope === 'company' ? `swc_${id}` : `sw_${id}`
+}
+
 export interface LlmCall {
   id: string
   accountId: string
@@ -465,6 +570,18 @@ export interface PlatformSettings {
   /** 对外报价相对模型原价的倍率。1 就是按原价，1.2 就是加两成。 */
   priceMultiplier?: number
   /**
+   * 连接器的按次单价。
+   *
+   * 单位是**微元**（百万分之一美元）整数，不是别处那个厘（`amountMils`）——一次调用值
+   * 半厘、三分之一厘都很正常，用厘存会被舍成 0，一整年的调用加起来收零块钱。
+   * 换算只有一处：1 mil = 1000 micros。
+   *
+   * **这里没有倍率。** 模型那边有 `priceMultiplier`，是因为模型有原价（目录里的每百万
+   * token 多少钱）可以加成；连接器没有——供应商收我们的是按席位按月的订阅，不是按次。
+   * 硬套一个倍率只会让人以为存在一个不存在的成本基准。
+   */
+  connectorPricing?: { defaultMicros: number; byToolkit: Record<string, number> }
+  /**
    * 全机队期望的管家版本。留空 = 跟最新发布走。
    *
    * 灰度就靠改这一个数字：心跳时下发，机器自己去换。回滚同理——把它改回上一版，
@@ -488,5 +605,33 @@ export function emptySettings(): CompanySettings {
 }
 
 export function emptyPlatformSettings(): PlatformSettings {
-  return { daily: { provider: '', model: '' }, utility: { provider: '', model: '' }, enabledModels: [], priceMultiplier: 1, managerVersion: '' }
+  return {
+    daily: { provider: '', model: '' },
+    utility: { provider: '', model: '' },
+    enabledModels: [],
+    priceMultiplier: 1,
+    connectorPricing: emptyConnectorPricing(),
+    managerVersion: '',
+  }
+}
+
+/** 默认不收钱。定价是商务决定，代码不替它拍一个数。 */
+export function emptyConnectorPricing(): { defaultMicros: number; byToolkit: Record<string, number> } {
+  return { defaultMicros: 0, byToolkit: {} }
+}
+
+/** 单价一律收成非负整数微元。负价和小数都不是价，是手滑。 */
+export function parseConnectorPricing(v: unknown): { defaultMicros: number; byToolkit: Record<string, number> } {
+  const o = v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+  const micros = (x: unknown) => {
+    const n = Number(x)
+    return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : 0
+  }
+  const raw = o.byToolkit && typeof o.byToolkit === 'object' && !Array.isArray(o.byToolkit) ? (o.byToolkit as Record<string, unknown>) : {}
+  const byToolkit: Record<string, number> = {}
+  for (const [k, val] of Object.entries(raw)) {
+    const key = String(k).trim().toLowerCase()
+    if (key) byToolkit[key] = micros(val)
+  }
+  return { defaultMicros: micros(o.defaultMicros), byToolkit }
 }
