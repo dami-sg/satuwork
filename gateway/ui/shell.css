@@ -1,6 +1,6 @@
-/* 设计稿 design/Satuwork Dashboard.dc.html 的样式表，原样搬过来——
-   各屏是照着那份稿子移植的，类名对不上就得一边改稿一边改代码。
-   设计令牌（颜色、间距、圆角、阴影）在 theme.css，那份两边共用。 */
+/* 各屏的样式表。类名沿用最初那份 Dashboard 设计稿（稿子本身已不在仓库里，
+   它是 2.4MB 的 .dc.html，运行时一个字节都不读）——改类名要连着 pages-*.js 一起改。
+   设计令牌（颜色、间距、圆角、阴影）在 theme.css。 */
 body { margin: 0; background: var(--color-bg); }
 a { color: var(--color-accent-700); }
 a:hover { color: var(--color-accent-600); }

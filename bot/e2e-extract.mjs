@@ -224,9 +224,24 @@ out.kinds = {
 }
 
 // ── 7. 缓存：同一个文件读两次不重新解析 ──────────────────────────────
-const t0 = process.hrtime.bigint()
-await extractDocument(pdfPath, 'pdf')
-const warm = Number(process.hrtime.bigint() - t0) / 1e6
-out.cache = { 第二次毫秒: warm, 明显更快: warm < 5 }
+//
+// **比冷热两次，不卡绝对毫秒数。** 原来是 `warm < 5`——那条断言在开发机上稳，在
+// CI 的共享 runner 上会随机挂（实测 5.1ms 就红了），而挂的原因和缓存没关系。
+// 缓存命中是一次 Map 查找，冷读要把整个 PDF 解析一遍，两者差着数量级；
+// 按倍数比才是在测「缓存生效了吗」，按毫秒比是在测「这台机器今天忙不忙」。
+const freshPath = join(dir, 'cache-probe.pdf')
+writeFileSync(freshPath, buildPdf(['Cache probe page one.', 'Cache probe page two.']))
+const c0 = process.hrtime.bigint()
+await extractDocument(freshPath, 'pdf')
+const cold = Number(process.hrtime.bigint() - c0) / 1e6
+const w0 = process.hrtime.bigint()
+await extractDocument(freshPath, 'pdf')
+const warm = Number(process.hrtime.bigint() - w0) / 1e6
+out.cache = {
+  冷读毫秒: cold,
+  第二次毫秒: warm,
+  // 4 倍是很宽的门槛：真命中时通常差三个数量级，没命中时两次几乎一样快。
+  明显更快: warm * 4 < cold,
+}
 
 console.log('__RESULT__' + JSON.stringify(out))

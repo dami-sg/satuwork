@@ -12,6 +12,7 @@
  */
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { createCompany } from './org.mjs'
 import { PG_URL } from './pg.mjs'
 import { el, fakeSse } from './ui-dom.mjs'
 import { readFileSync } from 'node:fs'
@@ -481,11 +482,15 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       // 登出以前只清了账号相关的字段，聊天正文、草稿、助理名册都原样留在内存里。
       // 同一台电脑换个人登录，上一个人的对话会直接画在他面前——SSE 要是还连着，
       // 新的事件也照样往里落。
-      const reg = await req(gwBase, 'POST', '/auth/register', {
-        body: { email: 'admin@ui.test', password: 'correct-horse-2', companyName: 'UI', slug: 'ui-co', seats: 2 },
+      const reg = await createCompany(req, gwBase, {
+        ownerToken,
+        email: 'admin@ui.test',
+        password: 'correct-horse-2',
+        companyName: 'UI',
+        slug: 'ui-co',
+        seats: 2,
       })
-      assert(reg.status === 201, `register ${reg.status} ${reg.text}`)
-      adminToken = reg.json.token
+      adminToken = reg.token
 
       const ui = await boot(adminToken)
       ui.state.chatBotId = 'bot-x'

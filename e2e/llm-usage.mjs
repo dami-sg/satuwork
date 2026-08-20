@@ -12,6 +12,7 @@ import { createServer } from 'node:http'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { createCompany } from './org.mjs'
 
 /** 按 7 字节一刀切，几乎必然把 3 字节的汉字切断。 */
 function sseChunks(frames) {
@@ -118,12 +119,17 @@ export async function runLlmUsage({ gwRoot, test, req, start, waitHttp, assert, 
   await waitHttp(`${gwBase}/health`, gw, 'usage gateway')
 
   try {
-    const reg = await req(gwBase, 'POST', '/auth/register', {
-      body: { email: 'admin@usage.test', password: 'correct-horse-1', companyName: 'Usage', slug: 'usage', seats: 2 },
+    const reg = await createCompany(req, gwBase, {
+      ownerEmail: 'owner@usage.test',
+      ownerPassword: 'test-owner-usage',
+      email: 'admin@usage.test',
+      password: 'correct-horse-1',
+      companyName: 'Usage',
+      slug: 'usage',
+      seats: 2,
     })
-    assert(reg.status === 201, `register ${reg.status} ${reg.text}`)
-    const token = reg.json.token
-    const orgId = reg.json.company.id
+    const token = reg.token
+    const orgId = reg.company.id
 
     const models = await req(gwBase, 'GET', '/v1/models', { token })
     assert(models.status === 200, `models ${models.status}`)

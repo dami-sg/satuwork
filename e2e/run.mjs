@@ -35,10 +35,12 @@ import { uiSource } from './ui-dom.mjs'
 import { runCustomProvider } from './custom-provider.mjs'
 import { runStats } from './stats.mjs'
 import { runWebTools } from './web-tools.mjs'
+import { runMigrate } from './migrate.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
 import { PG_URL, requirePg } from './pg.mjs'
+import { createCompany } from './org.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const gwRoot = join(root, 'gateway')
@@ -149,13 +151,12 @@ async function waitHttp(url, { timeout = 30000 } = {}) {
   throw new Error(`等不到 ${url}：${last}`)
 }
 
-async function req(base, method, path, { token, cookie, body, raw, headers: extra } = {}) {
+async function req(base, method, path, { token, body, raw, headers: extra } = {}) {
   const headers = { ...(extra || {}) }
   // raw：直接发字节（上传发布包），不套 JSON。
   if (raw !== undefined) headers['content-type'] = headers['content-type'] || 'application/gzip'
   else if (body !== undefined) headers['content-type'] = 'application/json'
   if (token) headers.authorization = 'Bearer ' + token
-  if (cookie) headers.cookie = cookie
   const r = await fetch(base + path, {
     method,
     headers,
@@ -169,14 +170,6 @@ async function req(base, method, path, { token, cookie, body, raw, headers: extr
     json = text
   }
   return { status: r.status, json, text, headers: r.headers, res: r }
-}
-
-function cookieOf(r) {
-  const list = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : []
-  const raw = list.find((c) => c.startsWith('satu_session=')) || r.headers.get('set-cookie') || ''
-  const m = String(raw).match(/satu_session=([^;]+)/)
-  if (!m) throw new Error('没有 satu_session cookie')
-  return `satu_session=${m[1]}`
 }
 
 function dumpHas(obj, needle) {
@@ -256,24 +249,30 @@ async function runGateway() {
   let orgMachineTok
   const secret = 'sk-e2e-never-leak'
 
-  await test('POST /auth/register → company + admin + plan', async () => {
-    const r = await req(base, 'POST', '/auth/register', {
-      body: {
-        email: 'admin@acme.test',
-        password: 'correct-horse',
-        companyName: 'Acme',
-        slug: 'acme',
-        seats: 2,
-      },
+  await test('建公司走 owner 那条路：公司 + 管理员 + 席位', async () => {
+    // 以前这条打的是 `POST /auth/register`——一次无鉴权请求建出公司加 admin。
+    // 那条路没有任何产品入口用，却默认开着，已经删了；这里走界面真正走的那条。
+    const made = await createCompany(req, base, {
+      ownerEmail: 'owner@satuwork.test',
+      ownerPassword: 'test-owner-3080',
+      email: 'admin@acme.test',
+      password: 'correct-horse',
+      companyName: 'Acme',
+      slug: 'acme',
+      seats: 2,
     })
-    assert(r.status === 201, `register ${r.status} ${r.text}`)
-    assert(typeof r.json.token === 'string' && r.json.token.split('.').length === 3, 'jwt')
-    assert(r.json.account.role === 'admin', 'admin')
-    assert(r.json.company.slug === 'acme', 'company')
-    assert(r.json.account.email === 'admin@acme.test', 'email')
-    assert(!dumpHas(r.json, 'passwordHash'), '口令哈希不得出现')
-    token = r.json.token
-    orgId = r.json.company.id
+    assert(typeof made.token === 'string' && made.token.split('.').length === 3, 'jwt')
+    assert(made.account.role === 'admin', 'admin')
+    assert(made.company.slug === 'acme', 'company')
+    assert(made.account.email === 'admin@acme.test', 'email')
+    assert(!dumpHas(made.account, 'passwordHash'), '口令哈希不得出现')
+    token = made.token
+    orgId = made.company.id
+    ownerTok = made.ownerToken
+
+    // 没票打不开这家公司——建公司这条本来就是 owner-only 的。
+    const anon = await req(base, 'GET', `/orgs/${orgId}`)
+    assert(anon.status === 401, `无票读公司应 401，得到 ${anon.status}`)
   })
 
   await test('POST /auth/login → JWT', async () => {
@@ -461,8 +460,6 @@ async function runGateway() {
     assert(b.status === 401, `heartbeat ${b.status}`)
     const c = await req(base, 'POST', '/internal/sessions/index', { body: {} })
     assert(c.status === 401, `sessions ${c.status}`)
-    const d = await req(base, 'POST', '/internal/usage', { body: {} })
-    assert(d.status === 401, `usage ${d.status}`)
   })
 
   await test('登记机器时 host 要是干净的 http/https 地址', async () => {
@@ -509,11 +506,6 @@ async function runGateway() {
       body: { host: 'http://127.0.0.1:9', botId: 'b' },
     })
     assert(readyBoot.status === 401, `bootstrap ready ${readyBoot.status}`)
-    const useBoot = await req(base, 'POST', '/internal/usage', {
-      token: MACHINE_TOK,
-      body: { accountId: 'x', provider: 'deepseek', model: 'm', promptTokens: 1, completionTokens: 1 },
-    })
-    assert(useBoot.status === 401, `bootstrap usage ${useBoot.status}`)
 
     const bind = await req(base, 'POST', `/orgs/${orgId}/machine`, { token, body: { id: mid } })
     assert(bind.status === 201, `bind ${bind.status} ${bind.text}`)
@@ -532,7 +524,7 @@ async function runGateway() {
     const r = await req(base, 'GET', `/orgs/${orgId}/audit`, { token })
     assert(r.status === 200, `audit ${r.status} ${r.text}`)
     assert(Array.isArray(r.json.events) && r.json.events.length > 0, '空操作记录')
-    assert(r.json.events.some((e) => e.action === 'auth.register' || e.action === 'auth.login' || e.action === 'machine.assign'), '缺已知事件')
+    assert(r.json.events.some((e) => e.action === 'platform.org.create' || e.action === 'auth.login' || e.action === 'machine.assign'), '缺已知事件')
   })
 
   await test('对话审计：索引上报、筛选、成员 403、离线拉全文、不落正文', async () => {
@@ -910,18 +902,16 @@ async function runGateway() {
     assert(never.status === 404, `never deployed ${never.status} ${never.text}`)
     assert(String(never.json.error || never.text).includes('还没有部署'), '404 文案')
 
-    const other = await req(base, 'POST', '/auth/register', {
-      body: {
-        email: 'admin@other.test',
-        password: 'correct-horse',
-        companyName: 'OtherCo',
-        slug: 'otherco',
-        seats: 1,
-      },
+    const other = await createCompany(req, base, {
+      ownerEmail: 'owner@satuwork.test',
+      ownerPassword: 'test-owner-3080',
+      email: 'admin@other.test',
+      password: 'correct-horse',
+      companyName: 'OtherCo',
+      slug: 'otherco',
     })
-    assert(other.status === 201, `other org ${other.status} ${other.text}`)
-    const otherOrg = other.json.company.id
-    const otherAdminTok = other.json.token
+    const otherOrg = other.company.id
+    const otherAdminTok = other.token
     const otherMach = await req(base, 'POST', '/internal/machines', { token: MACHINE_TOK, body: {} })
     assert(otherMach.status === 201, `other machine ${otherMach.status}`)
     const otherSmt = otherMach.json.machine.token
@@ -943,27 +933,20 @@ async function runGateway() {
     })
     assert(crossIdx.status === 403, `cross index ${crossIdx.status} ${crossIdx.text}`)
 
-    const crossUse = await req(base, 'POST', '/internal/usage', {
-      token: otherSmt,
-      body: { accountId: adminId, provider: 'deepseek', model: 'm', promptTokens: 1, completionTokens: 1 },
-    })
-    assert(crossUse.status === 403, `cross usage ${crossUse.status} ${crossUse.text}`)
-
-    // `/internal/usage` **收下但不记账**。记账那一份在 /v1 代理侧（见 llm-usage 那套），
-    // bot 每轮再报一次就是同一次调用记两遍——账面直接翻倍。端点保留只为了让线上还没
-    // 升级的旧 bot 能把本地队列排空，所以这里断言的是「调了也不涨」。
+    // 用量**只在 /v1 代理那一侧记一次**（见 llm-usage 那套）。`/internal/usage` 是
+    // 旧版 bot 每轮再报一遍的入口，同一次调用记两遍、账面直接翻倍；它先被改成
+    // 「收下不写库」，现在整条拆掉了。这里钉的是「端点真的没了，而且用量不受影响」。
     const before = await req(base, 'GET', `/orgs/${orgId}/usage`, { token })
-    assert(before.status === 200, `org usage before ingest ${before.status}`)
+    assert(before.status === 200, `org usage before ${before.status}`)
     const callsOf = (r) => Number((r.json.stats || []).find((x) => x.label === '任务执行')?.value ?? 0)
     const promptOf = (r) => Number((r.json.stats || []).find((x) => x.label === '输入 Tokens')?.value ?? 0)
     const usage = await req(base, 'POST', '/internal/usage', {
       token: orgMachineTok,
       body: { accountId: adminId, provider: 'deepseek', model: 'deepseek-v4-flash', promptTokens: 11, completionTokens: 7 },
     })
-    assert(usage.status === 200 && usage.json.ok === true, `usage ingest ${usage.status} ${usage.text}`)
-    assert(usage.json.recorded === false, `usage 不该记账 ${usage.text}`)
+    assert(usage.status === 404, `/internal/usage 应该已经没了，得到 ${usage.status} ${usage.text}`)
     const stats = await req(base, 'GET', `/orgs/${orgId}/usage`, { token })
-    assert(stats.status === 200, `org usage after ingest ${stats.status}`)
+    assert(stats.status === 200, `org usage after ${stats.status}`)
     assert(callsOf(stats) === callsOf(before), `调用数不该变：${callsOf(before)} → ${callsOf(stats)}`)
     assert(promptOf(stats) === promptOf(before), `输入 tokens 不该变：${promptOf(before)} → ${promptOf(stats)}`)
   })
@@ -1563,19 +1546,18 @@ async function runGateway() {
   let invitedTok
 
   await test('邀请成员：建号为 invited，返回一次性链接', async () => {
-    const reg = await req(base, 'POST', '/auth/register', {
-      body: {
-        email: 'boss@invite.test',
-        password: 'correct-horse',
-        companyName: 'InviteCo',
-        slug: 'inviteco',
-        seats: 5,
-      },
+    const reg = await createCompany(req, base, {
+      ownerEmail: 'owner@satuwork.test',
+      ownerPassword: 'test-owner-3080',
+      email: 'boss@invite.test',
+      password: 'correct-horse',
+      companyName: 'InviteCo',
+      slug: 'inviteco',
+      seats: 5,
     })
-    assert(reg.status === 201, `register ${reg.status} ${reg.text}`)
-    inviteOrg = reg.json.company.id
-    inviteAdminTok = reg.json.token
-    inviteAdminId = reg.json.account.id
+    inviteOrg = reg.company.id
+    inviteAdminTok = reg.token
+    inviteAdminId = reg.account.id
 
     const list = await req(base, 'GET', `/orgs/${inviteOrg}/accounts`, { token: inviteAdminTok })
     assert(list.status === 200, `list ${list.status} ${list.text}`)
@@ -2360,7 +2342,6 @@ async function runBot() {
   await waitHttp(base + '/api/health', { timeout: 45000 })
   assert(!child._exited, 'bot 启动后就退出了')
 
-  let cookie
   let botId
   let sessionId
 
@@ -2376,7 +2357,7 @@ async function runBot() {
     assert(!String(r.text).toLowerCase().includes('<html'), '仍发 html')
   })
 
-  await test('席位凭证 GET /api/bots 不走 cookie', async () => {
+  await test('席位票 GET /api/bots', async () => {
     const r = await req(base, 'GET', '/api/bots', { token: SEAT_TOK })
     assert(r.status === 200, `machine ${r.status} ${r.text}`)
     assert(Array.isArray(r.json.bots) && r.json.bots.length >= 1, 'empty')
@@ -2394,19 +2375,33 @@ async function runBot() {
     }
   })
 
-  await test('POST /api/auth/setup 拿会话 cookie', async () => {
-    const state = await req(base, 'GET', '/api/auth/state')
-    assert(state.status === 200 && state.json.needsSetup === true, 'needsSetup')
-    const r = await req(base, 'POST', '/api/auth/setup', {
-      body: { email: 'admin@bot.test', name: '管理员', password: 'correct-horse' },
-    })
-    assert(r.status === 200, `setup ${r.status} ${r.text}`)
-    assert(r.json.user.role === 'admin', 'admin')
-    cookie = cookieOf(r)
+  await test('bot 里没有账号体系：/api/auth/* 与 /api/me* 一律不通', async () => {
+    // 这套东西（用户、邀请、cookie 会话、口令重置）是 Gateway 出现之前那一版的。
+    // 它一个调用方都没有，却仍然在监听：`/api/auth/setup` 当时在公开白名单里，
+    // 一个用户都没有时谁都能建出第一个 admin——而席位上的员工在 noVNC 桌面里
+    // 正好打得到 127.0.0.1:<botPort>，建完就绕开了席位票。
+    //
+    // 没票时守卫先答 401，带票时路由不存在答 404。两种都行，唯独不能是 200。
+    for (const [method, path] of [
+      ['GET', '/api/auth/state'],
+      ['POST', '/api/auth/setup'],
+      ['POST', '/api/auth/login'],
+      ['GET', '/api/me'],
+      ['GET', '/api/me/sessions'],
+      ['GET', '/api/invites/whatever'],
+    ]) {
+      const anon = await req(base, method, path, { body: method === 'POST' ? {} : undefined })
+      assert(anon.status === 401 || anon.status === 404, `${path} 无票应 401/404，得到 ${anon.status}`)
+      const withTok = await req(base, method, path, {
+        token: SEAT_TOK,
+        body: method === 'POST' ? {} : undefined,
+      })
+      assert(withTok.status === 404, `${path} 带票应 404（路由已删），得到 ${withTok.status} ${withTok.text}`)
+    }
   })
 
   await test('GET /api/bots 无 mock:true，默认 bot 带 provider+model', async () => {
-    const r = await req(base, 'GET', '/api/bots', { cookie })
+    const r = await req(base, 'GET', '/api/bots', { token: SEAT_TOK })
     assert(r.status === 200, `bots ${r.status} ${r.text}`)
     assert(r.json.mock !== true, '顶层 mock:true')
     assert(Array.isArray(r.json.bots) && r.json.bots.length >= 1, '空名册')
@@ -2423,7 +2418,7 @@ async function runBot() {
 
   await test('POST /api/bots → 410（Bot 配置在 Gateway）', async () => {
     const r = await req(base, 'POST', '/api/bots', {
-      cookie,
+      token: SEAT_TOK,
       body: { name: '测试助理', description: 'e2e', prompt: '只说好' },
     })
     assert(r.status === 410 || r.status === 404, `create ${r.status} ${r.text}`)
@@ -2431,17 +2426,17 @@ async function runBot() {
   })
 
   await test('GET /api/bots/:id/session 二次调用同一 sessionId', async () => {
-    const a = await req(base, 'GET', `/api/bots/${botId}/session`, { cookie })
+    const a = await req(base, 'GET', `/api/bots/${botId}/session`, { token: SEAT_TOK })
     assert(a.status === 200, `session1 ${a.status} ${a.text}`)
     assert(typeof a.json.sessionId === 'string' && a.json.sessionId, 'sessionId')
-    const b = await req(base, 'GET', `/api/bots/${botId}/session`, { cookie })
+    const b = await req(base, 'GET', `/api/bots/${botId}/session`, { token: SEAT_TOK })
     assert(b.status === 200, `session2 ${b.status}`)
     assert(b.json.sessionId === a.json.sessionId, 'sessionId 变了')
     sessionId = a.json.sessionId
   })
 
   await test('POST /api/sessions 缺 botId → 400', async () => {
-    const r = await req(base, 'POST', '/api/sessions', { cookie, body: { title: '无主' } })
+    const r = await req(base, 'POST', '/api/sessions', { token: SEAT_TOK, body: { title: '无主' } })
     assert(r.status === 400, `sessions ${r.status} ${r.text}`)
   })
 
@@ -2453,7 +2448,7 @@ async function runBot() {
   await test('上传附件：落进工作区，返回相对路径', async () => {
     const bytes = Buffer.from('列,值\n甲,1\n乙,2\n', 'utf8')
     const r = await req(base, 'POST', `/api/sessions/${sessionId}/files`, {
-      cookie,
+      token: SEAT_TOK,
       raw: bytes,
       headers: { 'content-type': 'application/octet-stream', 'x-filename': encodeURIComponent('二季度.csv') },
     })
@@ -2470,7 +2465,7 @@ async function runBot() {
 
   await test('上传到不存在的会话 → 404', async () => {
     const r = await req(base, 'POST', '/api/sessions/no-such-session/files', {
-      cookie,
+      token: SEAT_TOK,
       raw: Buffer.from('x'),
       headers: { 'content-type': 'application/octet-stream', 'x-filename': 'a.txt' },
     })
@@ -2478,7 +2473,7 @@ async function runBot() {
   })
 
   await test('预览：字节一个不差，响应头挡住嗅探', async () => {
-    const r = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(uploadedPath)}`, { cookie })
+    const r = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(uploadedPath)}`, { token: SEAT_TOK })
     assert(r.status === 200, `preview ${r.status} ${r.text}`)
     assert(r.text === '列,值\n甲,1\n乙,2\n', `内容对不上：${JSON.stringify(r.text)}`)
     assert(String(r.headers.get('content-type')).startsWith('text/plain'), `类型不对：${r.headers.get('content-type')}`)
@@ -2490,19 +2485,19 @@ async function runBot() {
   })
 
   await test('预览：?download=1 强制另存', async () => {
-    const r = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(uploadedPath)}&download=1`, { cookie })
+    const r = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(uploadedPath)}&download=1`, { token: SEAT_TOK })
     assert(r.status === 200, `download ${r.status}`)
     assert(String(r.headers.get('content-disposition')).startsWith('attachment'), '没强制另存')
   })
 
   await test('预览：能带脚本的类型一律另存，不给内联', async () => {
     const r = await req(base, 'POST', `/api/sessions/${sessionId}/files`, {
-      cookie,
+      token: SEAT_TOK,
       raw: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
       headers: { 'content-type': 'application/octet-stream', 'x-filename': 'evil.svg' },
     })
     assert(r.status === 200, `upload svg ${r.status} ${r.text}`)
-    const g = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(r.json.path)}`, { cookie })
+    const g = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent(r.json.path)}`, { token: SEAT_TOK })
     assert(g.status === 200, `get svg ${g.status}`)
     // 内联一个带 <script> 的 SVG，等于让上传者在这个源上执行代码。
     assert(String(g.headers.get('content-disposition')).startsWith('attachment'), 'SVG 被允许内联了')
@@ -2510,11 +2505,11 @@ async function runBot() {
   })
 
   await test('预览：路径越界 → 400，文件不存在 → 404', async () => {
-    const bad = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent('../../../etc/passwd')}`, { cookie })
+    const bad = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent('../../../etc/passwd')}`, { token: SEAT_TOK })
     assert(bad.status === 400, `越界应该 400，实为 ${bad.status} ${bad.text}`)
-    const missing = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent('nope.txt')}`, { cookie })
+    const missing = await req(base, 'GET', `/api/workspace/file?path=${encodeURIComponent('nope.txt')}`, { token: SEAT_TOK })
     assert(missing.status === 404, `不存在应该 404，实为 ${missing.status} ${missing.text}`)
-    const empty = await req(base, 'GET', '/api/workspace/file', { cookie })
+    const empty = await req(base, 'GET', '/api/workspace/file', { token: SEAT_TOK })
     assert(empty.status === 400, `缺 path 应该 400，实为 ${empty.status}`)
   })
 
@@ -2537,7 +2532,7 @@ async function runBot() {
       'hex',
     )
     const up = await req(base, 'POST', `/api/sessions/${sessionId}/files`, {
-      cookie,
+      token: SEAT_TOK,
       raw: png,
       headers: { 'content-type': 'application/octet-stream', 'x-filename': 'shot.png' },
     })
@@ -2545,7 +2540,7 @@ async function runBot() {
     shotPath = up.json.path
 
     const r = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
-      cookie,
+      token: SEAT_TOK,
       body: { text: '这张图里是什么', images: [{ path: shotPath, mime: 'image/png' }] },
     })
     assert(r.status === 200, `带图发消息 ${r.status} ${r.text}`)
@@ -2574,13 +2569,13 @@ async function runBot() {
   await test('图片路径逃不出工作区，也不能指一个不存在的文件', async () => {
     // 路径是浏览器传上来的。这一层不挡，工作区边界就等于没有。
     const escape = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
-      cookie,
+      token: SEAT_TOK,
       body: { text: 'x', images: [{ path: '../../../etc/passwd', mime: 'image/png' }] },
     })
     assert(escape.status === 400, `越界路径应该 400，实为 ${escape.status} ${escape.text}`)
 
     const missing = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
-      cookie,
+      token: SEAT_TOK,
       body: { text: 'x', images: [{ path: 'nope.png', mime: 'image/png' }] },
     })
     assert(missing.status === 400, `不存在的图应该 400，实为 ${missing.status} ${missing.text}`)
@@ -2590,12 +2585,12 @@ async function runBot() {
     // 不在白名单里的（TIFF、SVG、HEIC）各家 provider 支持不一，发过去多半换回一个
     // 400——而那个 400 长得像我们自己的 bug，查起来要绕一大圈。
     const bad = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
-      cookie,
+      token: SEAT_TOK,
       body: { text: 'x', images: [{ path: shotPath, mime: 'image/svg+xml' }] },
     })
     assert(bad.status === 400, `svg 应该 400，实为 ${bad.status} ${bad.text}`)
     const nomime = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
-      cookie,
+      token: SEAT_TOK,
       body: { text: 'x', images: [{ path: shotPath }] },
     })
     assert(nomime.status === 400, `缺 mime 应该 400，实为 ${nomime.status}`)
@@ -2604,18 +2599,18 @@ async function runBot() {
   await test('只有图、没有正文也能发', async () => {
     // 「这张图什么意思」本来就常常只有一张图。
     const r = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
-      cookie,
+      token: SEAT_TOK,
       body: { images: [{ path: shotPath, mime: 'image/png' }] },
     })
     assert(r.status === 200, `只带图 ${r.status} ${r.text}`)
     // 但两样都没有仍然要拒——那是一条空消息。
-    const empty = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, { cookie, body: {} })
+    const empty = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, { token: SEAT_TOK, body: {} })
     assert(empty.status === 400, `空消息应该 400，实为 ${empty.status}`)
   })
 
   await test('发消息：无 Gateway 密钥也不准把进程打挂；JSONL 根有 botId+origin', async () => {
     const r = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
-      cookie,
+      token: SEAT_TOK,
       body: { text: 'ping' },
     })
     assert(r.status >= 200 && r.status < 500, `message ${r.status} ${r.text}`)
@@ -2639,22 +2634,22 @@ async function runBot() {
   })
 
   await test('GET /api/billing → 404（账单已挪到 Gateway）', async () => {
-    const r = await req(base, 'GET', '/api/billing', { cookie })
+    const r = await req(base, 'GET', '/api/billing', { token: SEAT_TOK })
     assert(r.status === 404 || r.status === 410, `billing ${r.status} ${r.text}`)
   })
 
   await test('GET /api/usage → 404（用量统计已挪到 Gateway）', async () => {
-    const r = await req(base, 'GET', '/api/usage', { cookie })
+    const r = await req(base, 'GET', '/api/usage', { token: SEAT_TOK })
     assert(r.status === 404 || r.status === 410, `usage ${r.status} ${r.text}`)
   })
 
   await test('GET /api/skills → 404（Skill 配置在 Gateway）', async () => {
-    const r = await req(base, 'GET', '/api/skills', { cookie })
+    const r = await req(base, 'GET', '/api/skills', { token: SEAT_TOK })
     assert(r.status === 404 || r.status === 410, `skills ${r.status} ${r.text}`)
   })
 
   await test('GET /api/accounts → 404（账号管理在 Gateway）', async () => {
-    const r = await req(base, 'GET', '/api/accounts', { cookie })
+    const r = await req(base, 'GET', '/api/accounts', { token: SEAT_TOK })
     assert(r.status === 404 || r.status === 410, `accounts ${r.status} ${r.text}`)
   })
 
@@ -2715,7 +2710,7 @@ async function runBot() {
   })
 
   await test('本机无 GATEWAY_URL 仍有 default bot', async () => {
-    const r = await req(base, 'GET', '/api/bots', { cookie })
+    const r = await req(base, 'GET', '/api/bots', { token: SEAT_TOK })
     assert(r.status === 200, `bots ${r.status} ${r.text}`)
     assert((r.json.bots || []).some((b) => b.id === 'default'), '缺 default')
   })
@@ -2748,7 +2743,6 @@ async function main() {
       req,
       start,
       waitHttp,
-      cookieOf,
       assert,
       log,
     })
@@ -2786,6 +2780,7 @@ async function main() {
     await runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log })
     await runStats({ gwRoot, test, req, start, waitHttp, assert, log })
     await runWebTools({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runMigrate({ gwRoot, test, start, waitHttp, assert, log })
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runManagerConfirm({ root, test, assert, log })

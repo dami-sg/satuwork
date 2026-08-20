@@ -12,13 +12,18 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v : v == null ? '' : String(v)
 }
 
+/**
+ * `Authorization: Bearer` 或 `x-api-key`。后者是 Anthropic SDK 的写法，
+ * `/v1/messages` 的调用方基本都这么发。
+ *
+ * Node 把重复出现的非 set-cookie 头合成一个逗号分隔的字符串，所以这里只需要处理
+ * string——以前那条 `Array.isArray` 分支永远到不了。
+ */
 function callerToken(req: Req): string | undefined {
   const b = bearer(req)
   if (b) return b
   const x = req.headers['x-api-key']
   if (typeof x === 'string' && x.trim()) return x.trim()
-  const arr = req.headers['x-api-key']
-  if (Array.isArray(arr) && arr[0]?.trim()) return arr[0].trim()
 }
 
 async function requireUser(req: Req, db: Db, keys: JwtKeys): Promise<Account> {

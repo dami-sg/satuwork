@@ -1,0 +1,65 @@
+# 每个 PR 和每次推 main 都跑一遍：类型 + 全量端到端。
+#
+# 之前这个仓库的 CI 只有两条 tag 触发的发布流水线——`pnpm typecheck` 和
+# `node e2e/run.mjs` 从来没在任何地方自动跑过。6 万行、三个包、零单测，
+# 全部信心押在一条要先起 PostgreSQL 的 e2e 上，而它只在有人想起来的时候跑。
+#
+# e2e 自己会起 Gateway 和 Bot 子进程，所以这里只需要给它一个库。
+# 端口用 5432 而不是本地那个 5434（5434 是为了躲开开发机上已有的实例，
+# service container 里没这个问题），地址走 E2E_DATABASE_URL 覆盖。
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 同一个 PR 连推几次，只跑最后一次。
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: satuwork
+          POSTGRES_PASSWORD: satuwork
+          POSTGRES_DB: satuwork
+        ports:
+          - 5432:5432
+        # e2e 起来第一件事就是建表，库没就绪会直接炸在那儿。
+        options: >-
+          --health-cmd "pg_isready -U satuwork -d satuwork"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      E2E_DATABASE_URL: postgres://satuwork:satuwork@127.0.0.1:5432/satuwork
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本由根 package.json 的 packageManager 字段给。
+      # 不写在这儿：bot-release / manager-release 也用这个 action，三处各写一遍必然会漂。
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 席位机器上的下限也是 24（gateway/src/routes.ts 的 MIN_MANAGER_NODE）。
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: typecheck
+        run: pnpm typecheck
+
+      - name: e2e
+        run: node e2e/run.mjs

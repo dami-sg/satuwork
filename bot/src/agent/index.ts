@@ -138,6 +138,50 @@ export class AgentService extends Service {
     }
   }
 
+  /**
+   * turn/start 已经写下了才挂：补一条「出错了」再收口。
+   *
+   * 少了这一对，日志里留下的是一个永不结束的轮次——界面上那一轮一直转着，链路视图里
+   * 是一段空白，而进程这边其实早就放弃了。
+   */
+  private async failAfterTurnStart(sessionId: string, turn: number, e: Error): Promise<void> {
+    const { sessions } = this.ctx
+    await sessions.append(sessionId, 'assistant/message', {
+      turn,
+      step: 0,
+      message: {
+        id: randomUUID(),
+        role: 'assistant',
+        content: [{ type: 'text', text: `出错了：${e.message}` }],
+      },
+      usage: EMPTY_USAGE,
+    })
+    await sessions.append(sessionId, 'turn/end', { turn, reason: 'error' })
+  }
+
+  /**
+   * 这一轮还什么都没落盘就挂了：把用户那句话补进日志，再按上面那条收口。
+   *
+   * 不补的话，用户的消息只存在于那次 HTTP 请求里——而请求早就回了 accepted:true。
+   * 界面上是一片空白，日志里什么都没有，事后连「他到底发没发」都查不出来。
+   */
+  private async failBeforeTurn(
+    sessionId: string,
+    history: Awaited<ReturnType<Context['sessions']['events']>>,
+    text: string,
+    images: ImageRef[],
+    e: Error,
+  ): Promise<void> {
+    const { sessions } = this.ctx
+    const turn = history.filter((ev) => ev.type === 'turn/start').length + 1
+    await sessions.append(sessionId, 'user/message', {
+      message: { id: randomUUID(), role: 'user', content: userBlocks(text, images) },
+      source: { kind: 'user' },
+    })
+    await sessions.append(sessionId, 'turn/start', { turn })
+    await this.failAfterTurnStart(sessionId, turn, e)
+  }
+
   private async runTurn(sessionId: string, text: string, images: ImageRef[] = []): Promise<void> {
     const { sessions, llm } = this.ctx
     let history = await sessions.events(sessionId)
@@ -154,43 +198,33 @@ export class AgentService extends Service {
       model = llm.modelOf(provider, modelId)
       toolSchemas = this.toolSchemasFor(bot)
     } catch (e) {
-      const turn = history.filter((ev) => ev.type === 'turn/start').length + 1
-      await sessions.append(sessionId, 'user/message', {
-        message: { id: randomUUID(), role: 'user', content: userBlocks(text, images) },
-        source: { kind: 'user' },
-      })
-      await sessions.append(sessionId, 'turn/start', { turn })
-      await sessions.append(sessionId, 'assistant/message', {
-        turn,
-        step: 0,
-        message: {
-          id: randomUUID(),
-          role: 'assistant',
-          content: [{ type: 'text', text: `出错了：${(e as Error).message}` }],
-        },
-        usage: EMPTY_USAGE,
-      })
-      await sessions.append(sessionId, 'turn/end', { turn, reason: 'error' })
+      await this.failBeforeTurn(sessionId, history, text, images, e as Error)
       throw e
     }
 
     // 兜底：轮末那次压缩可能失败了、也可能上个进程根本没跑到那一步。已经顶到硬顶
     // 还往上游发，换来的是一个 400，用户看到的是「出错了」。宁可这一轮多等几秒。
+    //
+    // **这一整段都不能连累这一轮**，判断条件也算在内。此刻 user/message 和 turn/start
+    // 都还没落盘：异常从这里穿出去，用户那句话就既不在日志里、也不在 SSE 上，界面什么
+    // 都不显示——而 HTTP 早就回了 accepted:true。
+    //
+    // 以前 try 只圈住了 maybeCompact，条件里那次 `await toAgentMessages` 露在外面。
+    // 它不是纯计算：要读图、要碰 ctx.workspace。workspace 一度没进这个插件的 inject，
+    // 于是**一条会话只要带过一次图，之后每条消息都在这一行静默消失**——注释写着「压缩
+    // 失败不能连累这一轮」，实际连累的恰恰是这一行。inject 已经补上，这个 try 是它的
+    // 第二道保险：估算上下文长度是优化，不是正确性的一部分，失败了就带着原上下文往下走。
     const hard = (this.windowOf(provider, modelId) ?? this.config.contextWindowFallback ?? 128_000) *
       (this.config.compactHard ?? 0.9)
-    if (estMessages(await toAgentMessages(history, model, this.ctx)) > hard) {
-      this.ctx.logger?.warn?.(`agents: ${sessionId} 已顶到上下文硬顶，先同步压一次`)
-      // **压缩失败不能连累这一轮。** 这段在上面那个 try/catch 之外，而此刻 user/message
-      // 和 turn/start 都还没落盘：让异常穿出去，用户那句话就既不在日志里、也不在 SSE 上，
-      // 界面什么都不显示——HTTP 早就回了 accepted:true。压缩是优化，不是正确性的一部分，
-      // 失败了就带着原上下文往下走，大不了被上游拒一次，那至少看得见。
-      try {
+    try {
+      if (estMessages(await toAgentMessages(history, model, this.ctx)) > hard) {
+        this.ctx.logger?.warn?.(`agents: ${sessionId} 已顶到上下文硬顶，先同步压一次`)
         if (await this.maybeCompact(sessionId, provider, modelId, true)) {
           history = await sessions.events(sessionId)
         }
-      } catch (e) {
-        this.ctx.logger?.warn?.(`agents: ${sessionId} 同步压缩失败，带原上下文继续：${(e as Error).message}`)
       }
+    } catch (e) {
+      this.ctx.logger?.warn?.(`agents: ${sessionId} 硬顶检查/同步压缩失败，带原上下文继续：${(e as Error).message}`)
     }
 
     const turn = history.filter((e) => e.type === 'turn/start').length + 1
@@ -201,11 +235,31 @@ export class AgentService extends Service {
     })
     await sessions.append(sessionId, 'turn/start', { turn })
 
+    // 重建历史从 new Agent 的参数位上抽了出来，但**仍然排在上面两次 append 之后**。
+    //
+    // 抽出来是因为它会抛（要读图、要碰 ctx.workspace），留在参数位上一抛就是
+    // turn/start 已经写下、turn/end 永远不来——日志里一个永不收口的轮次，界面上那一轮
+    // 一直转着。现在失败走 failAfterTurnStart，补一条「出错了」再收口。
+    //
+    // 不再往前挪是因为它**慢**：最多 4 张（MAX_LIVE_IMAGES）× 3.5 MB（MAX_IMAGE_BYTES）
+    // 的读盘加 base64。排在 append 前面的话，进程要是在这段窗口里硬死（OOM、systemd
+    // 重启、SIGKILL），用户那句话就一个字都没留下。先落盘，慢活儿在后面。
+    //
+    // history 是 append 之前的快照（sessions.events() 返回 state.events.slice()），
+    // 所以这两次 append 不会进 messages——这一轮的消息是靠下面 prompt() 送进去的。
+    let messages: AgentMessage[]
+    try {
+      messages = await toAgentMessages(history, model, this.ctx)
+    } catch (e) {
+      await this.failAfterTurnStart(sessionId, turn, e as Error)
+      throw e
+    }
+
     const agent = new Agent({
       initialState: {
         systemPrompt: system.text,
         model,
-        messages: await toAgentMessages(history, model, this.ctx),
+        messages,
         tools: this.bridgeTools(sessionId, new Set(toolSchemas.map((t) => t.name))),
       },
       streamFn: llm.streamFn,
@@ -1047,9 +1101,24 @@ function stale(img: { path: string }) {
 
 async function loadImage(img: { path: string; mime: string }, ctx?: Context) {
   const miss = (why: string) => ({ type: 'text', text: `（附了一张图 ${img.path}，但${why}。）` })
-  if (!ctx?.workspace) return miss('这个运行时读不到工作区')
+  // ctx 缺席才走这条路：ctx 本身是可选参数（userContentFor / toAgentMessages 都声明成
+  // `ctx?`），给不出上下文的调用方——测试里手搓一份历史、以后可能有的离线重放——
+  // 应该看到一句说明，而不是崩掉。
+  if (!ctx) return miss('这个运行时读不到工作区')
   try {
-    const file = ctx.workspace.resolve(img.path)
+    // 取工作区的两种失败**都得在 try 里面**，因为 cordis 对这两种的反应不一样：
+    //
+    // - 插件上下文（fiber.runtime 有值）没 inject 这个服务：读属性直接**抛**
+    //   `cannot get property "workspace" without inject`。曾经的 `!ctx?.workspace`
+    //   就是栽在这儿——它写在 try 外面，一次都没兜住，反而把异常带出整轮。
+    // - 裸的根上下文（`new Context()`，探针在造的那种）：cordis 走
+    //   `reflect.get(prop, false)`，服务没注册就是 **undefined**，不抛。
+    //
+    // 所以抛的那支交给下面的 catch，undefined 那支自己判一次——不判的话就是一个
+    // `Cannot read properties of undefined (reading 'resolve')` 冒充「读不出来」。
+    const ws = ctx.workspace
+    if (!ws) return miss('这个运行时读不到工作区')
+    const file = ws.resolve(img.path)
     const { readFile, stat } = await import('node:fs/promises')
     const info = await stat(file)
     if (info.size > MAX_IMAGE_BYTES) {
@@ -1176,7 +1245,13 @@ function safeParse(s: string): unknown {
 }
 
 export const name = 'satu-agent'
-export const inject = ['sessions', 'llm', 'tools', 'storage', 'catalog']
+// 'workspace' 是给 loadImage 用的：日志里的 image 块存的是路径，重建历史时要靠
+// ctx.workspace.resolve 把它变成绝对路径再读字节。**不列在这里不是「拿到 undefined」**
+// ——cordis 的上下文代理对没 inject 的服务是直接抛 `cannot get property "workspace"
+// without inject`，于是任何一条带图的历史都会让 toAgentMessages 抛，整轮静默丢掉。
+// 装载顺序不看 cordis.yml 的行序、只看 inject（见那份文件开头的说明），所以这一行
+// 就是「workspace 必须排在我前面」的全部声明，不用再动 yml。
+export const inject = ['sessions', 'llm', 'tools', 'storage', 'catalog', 'workspace']
 
 export function apply(ctx: Context, config: Config = {}) {
   ctx.plugin(AgentService, config)

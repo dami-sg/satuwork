@@ -4,9 +4,11 @@
 import { createHash } from 'node:crypto'
 import { existsSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { createRequire } from 'node:module'
 import { connect } from 'node:net'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { createCompany } from './org.mjs'
 import { publishRelease, sha256Of, tarGz } from './release.mjs'
 
 /** 一个员工一个 Linux 账号——名下所有 bot 共用它。和 gateway/src/deploy.ts 保持一致。 */
@@ -92,18 +94,16 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
     assert(ownerLogin.status === 200, `owner ${ownerLogin.status} ${ownerLogin.text}`)
     const ownerTok = ownerLogin.json.token
 
-    const reg = await req(gwBase, 'POST', '/auth/register', {
-      body: {
-        email: 'admin@machine.test',
-        password: 'correct-horse',
-        companyName: 'MachineCo',
-        slug: 'machineco',
-        seats: 3,
-      },
+    const reg = await createCompany(req, gwBase, {
+      ownerToken: ownerTok,
+      email: 'admin@machine.test',
+      password: 'correct-horse',
+      companyName: 'MachineCo',
+      slug: 'machineco',
+      seats: 3,
     })
-    assert(reg.status === 201, `register ${reg.status} ${reg.text}`)
-    const adminTok = reg.json.token
-    const orgId = reg.json.company.id
+    const adminTok = reg.token
+    const orgId = reg.company.id
 
     const m1 = await req(gwBase, 'POST', `/orgs/${orgId}/accounts`, {
       token: adminTok,
@@ -868,6 +868,119 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         await guard(new Promise((r) => fake.close(() => r())), 'fake close', 5000).catch(() => {})
       }
     })
+
+    /**
+     * 粘住机器是不变量，不是优化。
+     *
+     * 以前 machineForAccount 找到这个账号的机器、发现它此刻不可用（没配对好、换过
+     * 地址、token 轮换失败、正在重装），会直接往下走「填满一台再用下一台」，把这个
+     * 人的新 bot 部署到**另一台机器**上。同一员工的多个 bot 共享 ~/work 靠的是同一个
+     * uid 在同一台机器上，劈开之后这条就不成立了，而且没有任何告警——人只是从此
+     * 看不见自己在另一台机器上的文件。
+     *
+     * 这里直接把那台机器的 pairedAt 抹掉来造现场：HTTP 面上没有「把一台带席位的机器
+     * 变成未配对」的入口（那是好事），但库里出现这种行是完全可能的。
+     */
+    await test('粘住的机器坏了要报出来，不能悄悄换一台', async () => {
+      const require = createRequire(`${gwRoot}/package.json`)
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      try {
+        await client.query('set search_path to e2e_machine')
+        const mine = await client.query(
+          'select distinct "machineId" from seat_runtimes where "accountId" = (select id from accounts where email = $1)',
+          ['member1@machine.test'],
+        )
+        assert(mine.rows.length === 1, `member1 应只在一台机器上，实际 ${mine.rows.length} 台`)
+        const stuck = mine.rows[0].machineId
+
+        const before = await client.query('select "pairedAt" from machines where id = $1', [stuck])
+        await client.query('update machines set "pairedAt" = null where id = $1', [stuck])
+        try {
+          const r = await req(gwBase, 'POST', '/runtime/deploy', {
+            token: memberTok,
+            body: { botId: botB, update: true },
+          })
+          assert(r.status === 409, `粘住的机器坏了应 409，得到 ${r.status} ${r.text}`)
+          assert(String(r.json.error).includes('还没配对好'), `报错要说清楚是哪一步：${r.text}`)
+          // 而且**不能**把他挪到别的机器上。
+          const after = await client.query(
+            'select distinct "machineId" from seat_runtimes where "accountId" = (select id from accounts where email = $1)',
+            ['member1@machine.test'],
+          )
+          assert(after.rows.length === 1 && after.rows[0].machineId === stuck, '人被挪到别的机器上了')
+        } finally {
+          await client.query('update machines set "pairedAt" = $2 where id = $1', [stuck, before.rows[0].pairedAt])
+        }
+      } finally {
+        await client.end().catch(() => {})
+      }
+    })
+
+    /**
+     * 删公司要把机器上的席位一起拆掉。
+     *
+     * deleteCompany 只是 `delete from seat_runtimes`，机器上那套 systemd 单元、noVNC、
+     * 以及 3200+N / 6081+N 那组端口会继续跑，而库里再也没有指针能找回它们——机器改派
+     * 给别的公司之后，allocateSlot 扫的是空表，会把同一批槽位再分出去，新席位起不来。
+     *
+     * 用一家**新公司**做，免得动到上面那套已经铺好的现场。部署走 stub（不联系管家），
+     * 所以假管家只需要答 DELETE 那一下。
+     */
+    await test('删公司会把机器上的席位拆掉，不是只删库里的行', async () => {
+      const seen = []
+      const fake = createServer((r, res) => {
+        seen.push(`${r.method} ${r.url}`)
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
+      })
+      await new Promise((ok, bad) => {
+        fake.once('error', bad)
+        fake.listen(8544, '127.0.0.1', ok)
+      })
+      try {
+        const co = await createCompany(req, gwBase, {
+          ownerToken: ownerTok,
+          email: 'admin@doomed.test',
+          password: 'correct-horse',
+          companyName: 'Doomed',
+          slug: 'doomed',
+        })
+        const code = await req(gwBase, 'POST', `/platform/orgs/${co.company.id}/pairing-code`, { token: ownerTok })
+        assert(code.status === 201, `配对码 ${code.status} ${code.text}`)
+        const paired = await req(gwBase, 'POST', '/machines/pair', {
+          body: { code: code.json.code, managerPort: 8544, managerVersion: '1.0.0', protocol: 1 },
+        })
+        assert(paired.status === 201, `配对 ${paired.status} ${paired.text}`)
+
+        const bot = await req(gwBase, 'POST', `/orgs/${co.company.id}/bots`, {
+          token: co.token,
+          body: { name: '注定被删的 Bot' },
+        })
+        assert(bot.status === 201, `建 bot ${bot.status} ${bot.text}`)
+        const deployed = await req(gwBase, 'POST', '/runtime/deploy', {
+          token: co.token,
+          body: { botId: bot.json.bot.id },
+        })
+        assert(deployed.status === 200, `部署 ${deployed.status} ${deployed.text}`)
+        const seatId = deployed.json.seatId
+        assert(seatId, `部署结果里没有 seatId：${deployed.text}`)
+
+        seen.length = 0
+        const gone = await req(gwBase, 'DELETE', `/orgs/${co.company.id}`, { token: ownerTok })
+        assert(gone.status === 200, `删公司 ${gone.status} ${gone.text}`)
+        assert(
+          seen.some((x) => x === `DELETE /seats/${seatId}`),
+          `管家没收到拆席位的请求，只看到 ${JSON.stringify(seen)}`,
+        )
+        const after = await req(gwBase, 'GET', `/orgs/${co.company.id}`, { token: ownerTok })
+        assert(after.status === 404, `公司应该删掉了，得到 ${after.status}`)
+      } finally {
+        fake.closeAllConnections?.()
+        await new Promise((r) => fake.close(() => r()))
+      }
+    })
+
   } finally {
     if (gw && !gw._exited) {
       try {
