@@ -69,6 +69,28 @@ bot 那条**原样透传 `authorization`**——bot 自己要验席位票（`sat
 /opt/satuwork/releases/      bot 发布包，按版本全机共享
 ```
 
+## 还原
+
+平台上「移除机器」是自动的（[src/standdown.ts](src/standdown.ts)）：管家收到心跳里的 `removed: true`
+就自己拆席位、清配对状态、停掉自己。**先走这条**。
+
+管家已经起不来、或者机器早就失联，就上去手动跑包里那份：
+
+```
+sudo /opt/satuwork/manager/current/src/seat/purge-machine.sh --dry-run
+sudo /opt/satuwork/manager/current/src/seat/purge-machine.sh
+```
+
+默认只删 satuwork 自己放上去的东西。账号（连 `work/`）、桌面栈、Node 都是装机时顺带
+装的、机器上别的东西也可能在用，各要一个显式的开关：`--accounts` / `--packages` /
+`--node`。
+
+席位从四个地方找并集——`seats.json`、systemd 单元、drop-in 目录、`/home/*/.satuwork/*`。
+任何一处都可能残缺，而**漏认一个席位就会留下一个还占着端口的 x11vnc**，那正是
+`deploy-seat.sh` 里 `verify_seat_listener` 后来要挡的那种故障。
+
+Gateway 那侧的机器记录不会因此消失，要在控制台单独移除。
+
 ## 时区
 
 Gateway 在心跳响应里带一个期望时区（IANA 名），管家发现和本机不一样就
