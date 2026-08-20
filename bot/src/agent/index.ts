@@ -259,9 +259,19 @@ export class AgentService extends Service {
     return true
   }
 
+  /**
+   * 记住「这条会话是被人喊停的」。
+   *
+   * 不靠 agent.signal 判断：那个信号在一轮结束后就没了，而这里要在 finally 里回答
+   * 「刚才那一轮是跑完的还是被掐的」。turn/end 的 reason 原来永远写 completed——
+   * 连被中止的那一轮也是，于是日志里根本看不出人按过停止。
+   */
+  private aborting = new Set<string>()
+
   abort(sessionId: string): boolean {
     const agent = this.live.get(sessionId)
     if (!agent) return false
+    this.aborting.add(sessionId)
     agent.abort()
     return true
   }
@@ -458,7 +468,7 @@ export class AgentService extends Service {
       // pi-agent **不抛**模型侧错误，它落在 state.errorMessage / 最终消息的
       // stopReason 上。不显式检查的话，一个失败的 turn 会被记成 completed，
       // 而对话里只剩一条空的助手消息。
-      const failure = (agent.state as any)?.errorMessage
+      const failure = this.aborting.has(sessionId) ? '' : (agent.state as any)?.errorMessage
       if (failure) {
         reason = 'error'
         await sessions.append(sessionId, 'assistant/message', {
@@ -474,20 +484,28 @@ export class AgentService extends Service {
       }
     } catch (e) {
       reason = 'error'
-      // 失败也要留在日志里，否则这个 turn 在链路视图上就是一段空白。
-      await sessions.append(sessionId, 'assistant/message', {
-        turn,
-        step: 0,
-        message: {
-          id: randomUUID(),
-          role: 'assistant',
-          content: [{ type: 'text', text: `出错了：${(e as Error).message}` }],
-        },
-        usage: EMPTY_USAGE,
-      })
+      // 人按了停止：pi-agent 会把这一轮抛出来，但那不是「出错」。照下面那样写一条
+      // 「出错了：…」进对话，等于把用户自己的操作反诬成故障。turn/end 的 reason
+      // 已经说清楚了，这里什么都不用留。
+      if (this.aborting.has(sessionId)) {
+        reason = 'aborted'
+      } else {
+        // 失败也要留在日志里，否则这个 turn 在链路视图上就是一段空白。
+        await sessions.append(sessionId, 'assistant/message', {
+          turn,
+          step: 0,
+          message: {
+            id: randomUUID(),
+            role: 'assistant',
+            content: [{ type: 'text', text: `出错了：${(e as Error).message}` }],
+          },
+          usage: EMPTY_USAGE,
+        })
+      }
     } finally {
       off()
       this.live.delete(sessionId)
+      if (this.aborting.delete(sessionId)) reason = 'aborted'
       await sessions.append(sessionId, 'turn/end', { turn, reason })
       // 有这一行，「那一轮到底结束没有」就不用再猜了。
       this.ctx.logger?.info?.(
@@ -625,6 +643,13 @@ export class AgentService extends Service {
           name: schema.name,
           arguments: JSON.stringify(params ?? {}),
           sessionId,
+          // **这一条不能省。** pi-agent 的文档写得明白：钩子拿到中止信号，要自己负责
+          // 响应它。不往下传的话，agent.abort() 只掐得掉模型那条流，已经开跑的 bash
+          // 会一直跑到自己的超时上限（十分钟）——那期间界面上的停止按钮按下去毫无动静。
+          //
+          // 现取而不是构造时闭包：signal 是**每一轮**新的，bridgeTools 在建 agent 时
+          // 就跑了，那时候还没有 agent，更没有这一轮的信号。
+          signal: this.live.get(sessionId)?.signal,
         })
         if (result.failed) throw new Error(result.text)
         // files 走 details 而不是 content：content 是给模型的，它已经从 text 里知道
