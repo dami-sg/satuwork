@@ -9,24 +9,18 @@
  * 那份源码，所以自动是关的），省得改一行 bot 代码就得推一趟 CI。
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
 import {
   createReadStream,
   createWriteStream,
   existsSync,
   mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { fileURLToPath } from 'node:url'
 import { createGunzip } from 'node:zlib'
 import type { BotRelease, Db, ReleaseKind } from './db.ts'
 import { gatewayHome } from './home.ts'
@@ -34,7 +28,6 @@ import { HttpError } from './http.ts'
 
 const VERSION_RE = /^[A-Za-z0-9._+-]+$/
 const SHA256_RE = /^[0-9a-f]{64}$/
-const gatewayRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * 每种包里必须有的入口。systemd 单元直接跑它，缺了就是个跑不起来的包。
@@ -89,16 +82,6 @@ export function publicBotRelease(row: BotRelease, base = '') {
     createdAt: row.createdAt,
     note: row.note,
   }
-}
-
-function sha256File(path: string): Promise<string> {
-  return new Promise((resolveHash, reject) => {
-    const h = createHash('sha256')
-    const s = createReadStream(path)
-    s.on('data', (d) => h.update(d))
-    s.on('error', reject)
-    s.on('end', () => resolveHash(h.digest('hex')))
-  })
 }
 
 function oneLine(e: unknown): string {

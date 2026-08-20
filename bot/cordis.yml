@@ -31,9 +31,9 @@
 # 本机 Bot 名册。会话属于 Bot。不接 Gateway。
 - name: './src/registry/index.ts'
 
-# 账号与会话。守卫用 server.use（prepend），跑在所有路由之前——没有会话的
-# `/api/*` 在路由之前就被挡住，前端那次跳转只是体验。
-- name: './src/auth/index.ts'
+# 入站闸门。`/api/*` 默认要席位票（sat_），只有 /api/health 例外。
+# 守卫用 server.use（prepend），跑在所有路由之前。
+- name: './src/guard/index.ts'
 
 # 模型接缝：Gateway 的薄客户端（GATEWAY_URL + /v1/*）。密钥不在本机。
 - name: './src/llm/index.ts'

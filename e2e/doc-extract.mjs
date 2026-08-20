@@ -107,6 +107,10 @@ export async function runDocExtract({ root, test, assert, log }) {
 
   await test('同一个文件读第二次走缓存', () => {
     // 模型翻一份长 PDF 会连着调好几次 read，每次重解析一遍整个文件既慢又白烧 CPU。
-    assert(r.cache.明显更快, `第二次仍然花了 ${r.cache.第二次毫秒} ms，缓存没生效`)
+    // 断言比的是冷读和热读的**倍数**，不是绝对毫秒——绝对阈值在 CI 上会随机红。
+    assert(
+      r.cache.明显更快,
+      `冷读 ${r.cache.冷读毫秒} ms、第二次 ${r.cache.第二次毫秒} ms，没看出缓存`,
+    )
   })
 }

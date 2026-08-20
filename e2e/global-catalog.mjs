@@ -235,6 +235,42 @@ export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, ass
       const a = await req(base, 'GET', `/orgs/${orgA}/skills`, { token: adminA })
       assert(!(a.json.tags || []).includes('平台专用'), '平台标签漏进公司标签表了')
     })
+
+    /**
+     * 平台目录和公司目录以前是两份抄出来的实现，已经漂出两个 bug。收成一个工厂之后
+     * 这两条钉的是「两边真的走同一段代码」。
+     */
+    await test('两个作用域的标签规则一样：12 个字的上限两边都有', async () => {
+      const long = '一二三四五六七八九十十一十二十三'
+      for (const [label, path, token] of [
+        ['平台', '/platform/skills/tags', owner],
+        ['公司', `/orgs/${orgA}/skills/tags`, adminA],
+      ]) {
+        const r = await req(base, 'POST', path, { token, body: { name: long } })
+        assert(r.status === 400, `${label}侧超长标签应 400，得到 ${r.status} ${r.text}`)
+        const ok = await req(base, 'POST', path, { token, body: { name: '正好' } })
+        assert(ok.status === 201, `${label}侧建标签 ${ok.status} ${ok.text}`)
+      }
+    })
+
+    await test('标签名里有 % 也删得掉，不会变成 500', async () => {
+      // 路由器已经 decodeURIComponent 过一次了（见 http.ts 的 Router.match）。
+      // 平台那条以前又解了一次，「5%折扣」二次解码抛 URIError，兜底 catch 变 500。
+      const tag = '5%折扣'
+      for (const [label, path, token] of [
+        ['平台', '/platform/skills/tags', owner],
+        ['公司', `/orgs/${orgA}/skills/tags`, adminA],
+      ]) {
+        const made = await req(base, 'POST', path, { token, body: { name: tag } })
+        assert(made.status === 201, `${label}侧建 ${made.status} ${made.text}`)
+        assert(made.json.tags.includes(tag), `${label}侧没存下：${JSON.stringify(made.json.tags)}`)
+        const gone = await req(base, 'DELETE', `${path}/${encodeURIComponent(tag)}`, { token })
+        assert(gone.status === 200, `${label}侧删 ${gone.status} ${gone.text}`)
+        assert(!gone.json.tags.includes(tag), `${label}侧没删掉：${JSON.stringify(gone.json.tags)}`)
+        // touched 两边都要有——以前只有公司侧返回它。
+        assert(typeof gone.json.touched === 'number', `${label}侧缺 touched：${gone.text}`)
+      }
+    })
   } finally {
     try {
       rmSync(GW_HOME, { recursive: true, force: true })

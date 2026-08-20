@@ -102,7 +102,6 @@ src/tools/        工具注册表与执行管道（ctx.tools），策略挂在�
                   builtin.ts 是 now；workspace.ts 是 read/write/edit/ls/find/grep/bash
 src/agent/        turn/step 循环（ctx.agents）
 src/web/          无头 HTTP API（含 SSE）；不发 SPA
-design/           设计稿（25 个视图），留在仓库备查；pack.mjs 不把它打进发布包
 docs/             事件模型设计参考（仓库根 docs/）
 
 ## API

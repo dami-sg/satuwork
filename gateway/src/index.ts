@@ -21,7 +21,38 @@ console.log(`satuwork-gateway: 数据目录 ${home}${process.env.SATUWORK_GATEWA
 console.log(`satuwork-gateway: 数据库 ${shown}${process.env.GATEWAY_PG_SCHEMA ? `（schema ${process.env.GATEWAY_PG_SCHEMA}）` : ''}`)
 
 const db = new Db({ url })
-await db.init()
+/**
+ * 迁移在对外服务**之前**跑完。
+ *
+ * 日志里要说清楚跑了什么：升级线上库时，「这次动了哪几条」是出事之后唯一能回溯的
+ * 线索。一条都没跑就说一声「已是最新」，别静默——静默的时候人分不清「不用升」和
+ * 「代码没带上新迁移」。
+ */
+let migrated
+try {
+  migrated = await db.init()
+} catch (e) {
+  /**
+   * 迁移失败时**先说清楚库停在哪儿**，再把错抛出去。
+   *
+   * 这是运维当场最想知道的一件事：升级挂了，库现在是升过的还是没升过的？回滚代码
+   * 安不安全？只打一条报错的话，人得自己连进库去 `select * from schema_migrations`，
+   * 而那时候进程正在起停循环里刷屏。
+   */
+  const state = await db.migrations().catch(() => null)
+  if (state) {
+    console.error(
+      `satuwork-gateway: 迁移失败。库停在 ${state.current ?? '（一条都没跑过）'}，` +
+        `代码最新是 ${state.latest ?? '无'}，还差 ${state.pending.length ? state.pending.join(', ') : '无'}`,
+    )
+  }
+  throw e
+}
+if (migrated.applied.length) {
+  console.log(`satuwork-gateway: 已应用 ${migrated.applied.length} 条迁移：${migrated.applied.join(', ')}`)
+} else {
+  console.log(`satuwork-gateway: 数据库已是最新（${migrated.current ?? '空'}）`)
+}
 
 /**
  * 可选的自动播种。**没有它也能起**：一个 owner 都没有时，打开页面就是「创建系统

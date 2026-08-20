@@ -200,7 +200,7 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 ### Bot 框架（本仓库，跑在 pair 实例里）
 
 - 现有能力全部留下：Cordis 根、插件生命周期、会话 JSONL、`ctx.storage`、pi-agent-core、工具管道、SSE、steering
-- **无头**：不发 SPA。产品聊天 UI 在 Gateway。本仓库 `ui/` `design/` 不是产品路径
+- **无头**：不发 SPA。产品聊天 UI 在 Gateway
 - **pi-ai 不在 Bot 进程**。模型目录与上游调用在 Gateway（`/v1/*`）
 - 一个进程恰好一个 Bot。`GET /api/bots` 返回钉住的那一颗（部署时由 `SATUWORK_BOT_ID` 钉目录项）
 - 本地 `$SATUWORK_HOME`：`satuwork.db` + `sessions/*.jsonl`
@@ -473,7 +473,7 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| POST | `/auth/register` `/auth/login` | 注册登录 |
+| POST | `/auth/setup` `/auth/login` | 建第一个系统管理员、登录。**没有自助注册**——公司由 owner 在 `/platform/orgs` 上开 |
 | GET | `/me` | 当前账号、角色；公司账号带公司与访问地址；平台日常/utility 与可用模型 |
 | CRUD | `/platform/orgs` `/platform/accounts` `/platform/plans` `/platform/providers` `/platform/settings` | `owner`：公司、用户、套餐、供应商、日常/utility、可用模型、系统级目录 |
 | GET | `/platform/accounts/:id` | `owner` 账号详情：`apiKey` / `accessToken`（`owner` 账号均为 null）。列表接口永不带这两项 |
@@ -524,7 +524,6 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 | POST | `/internal/machines/:id/heartbeat` | 该机器的 `smt_`；票必须对应 `:id`。**也是自升级和时区的下发通道**：body 带 `managerVersion`/`protocol`/`arch`/`timezone`（实际时区）/`seats`，响应带 `desiredManagerVersion`/`url`/`sha256`/`timezone`（期望时区）/`minNode`/`minProtocol` |
 | POST | `/internal/instances/:accountId/ready` | 该机器的 `smt_`。body `{ host, botId }`，`botId` 必填；pair 必须已部署；机器必须属于该账号的公司 |
 | POST | `/internal/sessions/index` | 该机器的 `smt_`。公司从机器派生，不能替别的公司报索引 |
-| POST | `/internal/usage` | 该机器的 `smt_`。上报真实 token，不编费用 |
 
 ### 实例（`sat_` 或 machine token；Gateway 反代，浏览器不直连）
 
