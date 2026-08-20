@@ -352,6 +352,11 @@ function isChatPath(p) {
   return p === '/chat' || (typeof p === 'string' && p.startsWith('/a/'))
 }
 
+function connectorIdOfPath(p) {
+  if (!p || !p.startsWith('/connectors/')) return ''
+  return decodeURIComponent(p.slice('/connectors/'.length).split('/')[0] || '')
+}
+
 function chatBotIdOf(p) {
   if (!p || !p.startsWith('/a/')) return ''
   return decodeURIComponent(p.slice('/a/'.length).split('/')[0] || '')
@@ -374,6 +379,8 @@ function pathAllowed(p) {
   // /bots/:id 跟 /profile 一样不在侧栏，但管理员能进。
   // 员工进不了 /bots（那是管理员的模版页），但进得了自己那个 Bot 的详情页。
   if (p.startsWith('/bots/') && (allowedHrefs().has('/bots') || !isOwner())) return true
+  // 连接器详情不在侧栏，但装了连接器的人都要进得去。
+  if (p.startsWith('/connectors/') && allowedHrefs().has('/connectors')) return true
   if (p.startsWith('/companies/') && allowedHrefs().has('/companies')) return true
   if (p.startsWith('/users/') && allowedHrefs().has('/users')) return true
   if (p.startsWith('/machines/') && allowedHrefs().has('/machines')) return true
@@ -431,6 +438,11 @@ function crumbsOf(path) {
     // 员工没有 Bot 列表页可回——他的落点是对话，返回就该回那儿。
     if (!isOwner() && !isAdmin()) return { href: '/', parent: t('对话'), current: bot?.name || t('Bot 详情') }
     return { href: '/bots', parent: isOwner() ? t('全局 Bot') : t('Bot 模版'), current: bot?.name || t('Bot 详情') }
+  }
+  if (path.startsWith('/connectors/') && path !== '/connectors') {
+    const d = state.connectorDetail?.connector
+    const one = d && d.id === connectorIdOfPath(path) ? d : null
+    return { href: '/connectors', parent: t('连接器'), current: one?.name || t('连接器详情') }
   }
   if (path.startsWith('/companies/') && path !== '/companies') {
     const org = state.org && state.org.id === companyIdOfPath(path) ? state.org : null

@@ -7,7 +7,7 @@
  */
 
 /** 落盘格式版本。任何破坏性结构变更都要 +1，并同时给出迁移。 */
-export const SESSION_FORMAT_VERSION = 4
+export const SESSION_FORMAT_VERSION = 5
 
 /** 会话根上的 Bot 来源。M1 只有 local；company / global 是物化预留。 */
 export type SessionOrigin = 'local' | 'company' | 'global'
@@ -36,6 +36,18 @@ export type ContentBlock =
    * 组模型请求的时候现读现转就行。
    */
   | { type: 'image'; path: string; mime: string }
+  /**
+   * 用户在输入框里 `@` 出来的一个东西（v5 起）。
+   *
+   * **存结构，不存一句话。** 降级成「用户提到了 Gmail (personal)」的纯文本，进程就
+   * 分不清「用户点名了这把连接」和「用户碰巧打了这几个字」，而这两件事的后果差得很远：
+   * 前者要把那把连接的工具顶到工具表最前，甚至是唯一能让 `mentionOnly` 的连接出现的
+   * 方式。组模型请求时它会被渲染成一行 `[本轮指定：…]`——落盘是结构，进模型是话。
+   *
+   * `kind` 现在只用 `connector`，形状按三类定死（选单里还有 Bot 和 Routine）：三类各造
+   * 一个块，历史会话里就会长出三种彼此不兼容的提及。
+   */
+  | { type: 'mention'; kind: 'connector' | 'bot' | 'routine'; id: string; label: string }
 
 export interface Message {
   id: string

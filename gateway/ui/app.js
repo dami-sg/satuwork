@@ -188,6 +188,9 @@ document.getElementById('app').addEventListener('click', async (e) => {
   if (!btn) return
   if (btn.classList.contains('gw-modal-backdrop') && e.target !== btn) return
   const act = btn.getAttribute('data-act')
+  // 连接器那一屏的动作都在 pages-connectors.js 里。这条 if 链已经六百多行了，
+  // 再往上堆只会让下一个人更难找。
+  if (await connectorAct(act, btn)) return
   if (act === 'go') {
     go(btn.getAttribute('data-href'))
     return
@@ -216,6 +219,20 @@ document.getElementById('app').addEventListener('click', async (e) => {
   if (act === 'chat-attach') {
     const picker = document.getElementById('chat-file')
     if (picker) picker.click()
+    return
+  }
+  if (act === 'chat-mention-pick') {
+    takeMention(btn.getAttribute('data-id'))
+    return
+  }
+  if (act === 'chat-mention-drop') {
+    const i = Number(btn.getAttribute('data-i'))
+    state.chatMentions = (state.chatMentions || []).filter((_, idx) => idx !== i)
+    paintChatMentions()
+    return
+  }
+  if (act === 'chat-queue-cancel') {
+    await cancelQueued(btn.getAttribute('data-id'))
     return
   }
   if (act === 'chat-file-drop') {
@@ -1474,6 +1491,12 @@ document.getElementById('app').addEventListener('input', (e) => {
   const el = e.target
   if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return
   // 两份草稿只存在 state 里，边打边收；不 render，否则每敲一个字都会丢焦点。
+  if (el.getAttribute('data-act') === 'conn-field' && state.connectorDraft) {
+    state.connectorDraft[el.getAttribute('data-field')] = el.value
+    // 搜索只重画候选那一块，不整页 render——否则每敲一个字都会丢焦点。
+    if (el.getAttribute('data-field') === 'q') paintConnectorPicks()
+    return
+  }
   if (el.getAttribute('data-act') === 'prov-field' && state.providerDraft) {
     state.providerDraft[el.getAttribute('data-field')] = el.value
     return
@@ -1630,6 +1653,11 @@ document.getElementById('app').addEventListener('input', (e) => {
   state.chatDraft = el.value
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+  // 光标前面刚打出来的那截 `@xxx` 决定选单开不开。**不 render**：整页重绘会把输入框
+  // 换掉，正在打字的人当场丢焦点。
+  const hit = mentionQueryAt(el)
+  if (hit) void openMentionPick(hit.q)
+  else if (state.mentionPick) closeMentionPick()
 })
 
 /**
@@ -1641,6 +1669,38 @@ document.getElementById('app').addEventListener('input', (e) => {
 document.getElementById('app').addEventListener('keydown', (e) => {
   const el = e.target
   if (!(el instanceof HTMLTextAreaElement) || el.id !== 'chat-input') return
+  /**
+   * `@` 选单开着时，上下键和回车归它——回车是「选中这一个」，不是「把话发出去」。
+   * 这一段必须排在下面的发送之前，否则选到一半按回车就把半句话发走了（和输入法那条
+   * 是同一类问题）。
+   */
+  if (state.mentionPick && state.mentionPick.open) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      closeMentionPick()
+      return
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const box = document.getElementById('chat-mentionpick')
+      const n = box ? box.querySelectorAll('[data-act="chat-mention-pick"]').length : 0
+      if (n) {
+        const cur = state.mentionPick.index || 0
+        state.mentionPick.index = (cur + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
+        paintMentionPick()
+      }
+      return
+    }
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+      const box = document.getElementById('chat-mentionpick')
+      const hit = box && box.querySelectorAll('[data-act="chat-mention-pick"]')[state.mentionPick.index || 0]
+      if (hit) {
+        e.preventDefault()
+        takeMention(hit.getAttribute('data-id'))
+        return
+      }
+    }
+  }
   if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return
   if (e.isComposing || e.keyCode === 229) return
   e.preventDefault()

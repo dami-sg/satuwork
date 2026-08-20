@@ -155,6 +155,13 @@ export async function proxyJson(
   body?: unknown,
   token?: string,
   machineToken?: string,
+  /**
+   * 拼进席位响应里的附加字段。
+   *
+   * 给「Gateway 这一跳做了什么」用——比如剔掉了几个失效的 `@`。席位不知道这件事，
+   * 而界面需要知道，所以由这一跳补上去，**不覆盖**席位已有的字段。
+   */
+  extra?: Record<string, unknown>,
 ) {
   // authorization 上只能是席位票。bot 不认机器票了，回落到 smt_ 只会换回 401，
   // 而且会让人以为「票带了但没生效」，比空着更难查。
@@ -181,6 +188,10 @@ export async function proxyJson(
     parsed = text ? JSON.parse(text) : null
   } catch {
     parsed = { error: text.slice(0, 200) || INSTANCE_DOWN }
+  }
+  if (extra && parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    json(res, r.status, { ...(parsed as Record<string, unknown>), ...extra })
+    return
   }
   json(res, r.status, parsed)
 }

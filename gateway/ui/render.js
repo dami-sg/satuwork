@@ -5,6 +5,7 @@
  */
 function pageView() {
   if (state.path.startsWith('/bots/')) return botDetailPage()
+  if (state.path.startsWith('/connectors/')) return connectorDetailPage()
   if (state.path.startsWith('/companies/') && state.path !== '/companies') return companyDetailPage()
   if (state.path.startsWith('/users/') && state.path !== '/users') return userDetailPage()
   if (state.path.startsWith('/machines/') && state.path !== '/machines') return machineDetailPage()
@@ -19,6 +20,8 @@ function pageView() {
       return modelsPage()
     case '/providers':
       return providersPage()
+    case '/connectors':
+      return connectorsPage()
     case '/company':
       return companyPage()
     case '/accounts':
@@ -210,7 +213,13 @@ function render() {
   root.innerHTML = state.me ? appView() : loginView()
   // 对话页的正文不在 appView 里——chatPage 只搭空壳，消息由 paintChat 增量填。
   // 整页重绘会把那个壳换掉，所以每次 render 之后要补一次。
-  if (document.getElementById('chat-thread')) paintChat()
+  if (document.getElementById('chat-thread')) {
+    paintChat()
+    // 输入框上下那三块（排队 dock、已选的 @ 药丸、选单）同样是空壳 + 增量填。
+    paintChatQueue()
+    paintChatMentions()
+    paintMentionPick()
+  }
   // 日志面板同理：壳在 render 里，内容由 paintLogs 增量填。
   if (document.getElementById('log-body')) paintLogs()
   // 内嵌桌面那块屏活在 #app 外面（重绘换不掉它），但它的位置是照着右栏里的空槽算

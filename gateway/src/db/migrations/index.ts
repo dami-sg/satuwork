@@ -1,6 +1,8 @@
 import { SQL as m0001 } from './0001-initial.ts'
 import { SQL as m0002 } from './0002-bot-template.ts'
 import { SQL as m0003 } from './0003-seed-bot-templates.ts'
+import { SQL as m0004 } from './0004-connectors.ts'
+import { SQL as m0005 } from './0005-connector-bonus-split.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -33,6 +35,8 @@ export const MIGRATIONS: Migration[] = [
   { id: '0001-initial', name: '初始 schema（编号迁移之前那段幂等脚本）', sql: m0001 },
   { id: '0002-bot-template', name: 'Bot 模版层：bot-template 这一种、user 这一层、accountId', sql: m0002 },
   { id: '0003-seed-bot-templates', name: '每家公司种一份 Bot 模版，旧的公司 Bot 停用', sql: m0003 },
+  { id: '0004-connectors', name: '连接器：catalog 的 connector 这一种、安装、连接、调用流水', sql: m0004 },
+  { id: '0005-connector-bonus-split', name: '连接器流水按桶分账：这一笔吃了多少套餐赠送', sql: m0005 },
 ]
 
 /**

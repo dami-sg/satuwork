@@ -2,13 +2,14 @@
  * 可见目录，以及反代到席位实例的那一组：目录下发、桌面、日志、部署、对话。
  */
 import type { RouteCtx } from './ctx.ts'
-import { HttpError, json, type Router } from '../http.ts'
+import { HttpError, bearer, json, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
 import { KIND, bodyOf, deployOptsOf, strField } from '../lib/validate.ts'
 import type { Account, CatalogItem } from '../db.ts'
 import { companyMachineOf, deploySeat, publicSeatRuntime, releaseSeats } from '../deploy.ts'
+import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
 import { LEGACY_BOT_ICONS, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer } from '../lib/catalog.ts'
-import { kindOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
+import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
 import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
 
 /**
@@ -29,9 +30,38 @@ export const MAX_USER_BOTS = Math.max(1, Math.trunc(Number(process.env.GATEWAY_M
  * 条数不能省：只看「最新的那个时间」的话，删掉一条不会让任何时间变小，实例就永远
  * 以为没事。
  */
-function catalogStamp(version: number, bot: CatalogItem | undefined, tools: CatalogItem[]): string {
+/**
+ * 下发给席位的连接器超时。
+ *
+ * `bot/src/catalog/mcp.ts` 默认只等 8 秒——对本地 MCP 够用，对「发一封邮件」「查一遍
+ * CRM」不够。Gateway 自己对上游是 45 秒（见 routes/mcp.ts），必须比这个数**小**：
+ * 我们要先拿到结果再回答，否则席位那边已经断了，这一次调用记不到结果，钱也说不清。
+ */
+const CONNECTOR_TIMEOUT_MS = 60_000
+
+function catalogStamp(
+  version: number,
+  bot: CatalogItem | undefined,
+  tools: CatalogItem[],
+  /**
+   * 连接器那一截：这个账号的安装和连接。
+   *
+   * **不能省。** 员工装一个连接器、连一个新邮箱、关掉几个工具，`catalog_items` 一个
+   * 字节都不会变，只看上面那三样的话探针会一直判「没变」，工具永远不出现——直到有人
+   * 重新部署。
+   */
+  conn: { updatedAt: number; count: number } = { updatedAt: 0, count: 0 },
+): string {
   const toolsAt = tools.reduce((n, i) => Math.max(n, i.updatedAt), 0)
-  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}`
+  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}`
+}
+
+/** 这个账号的连接器状态指纹：安装和连接一起算，删一条也要能看出来。 */
+async function connectorStampOf(db: RouteCtx['db'], accountId: string, companyId: string | null) {
+  const installs = await db.connectorInstalls(accountId)
+  const conns = await db.connectionsFor(accountId, companyId)
+  const updatedAt = [...installs, ...conns].reduce((n, r) => Math.max(n, r.updatedAt), 0)
+  return { updatedAt, count: installs.length + conns.length }
 }
 
 /** 自己建的那一颗。别人的、公司的、全局的都不是——改和删都走它。 */
@@ -103,6 +133,39 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const { pinned, tpl } = await botContext(db, companyId)
     const skills = await db.visibleCatalog('skill', companyId)
     const servers = await db.visibleCatalog('mcp', companyId)
+
+    /**
+     * 连接器合成出来的 MCP 记录：这个账号每一把 `active` 的连接一条。
+     *
+     * `mentionOnly` 的**不进默认表**——它的全部意思就是「只有我 @ 你的时候才用你」，
+     * 进了默认表等于这个开关没打开。它由发消息那一轮按 mentions 单独注入。
+     *
+     * endpoint 指回 Gateway 自己（`/mcp/connectors/:id`），票就用席位这次带来的
+     * `sat_`——同一把票，不用再去库里取一次，也不会取错人。
+     */
+    const connectorItems = await db.visibleCatalog('connector', companyId)
+    const blocked = blockMapOf(connectorItems)
+    const conns = (await db.connectionsFor(account.id, companyId)).filter((c) => c.status === 'active')
+    const synth = conns
+      .map((c) => {
+        const item = connectorItems.find((i) => i.id === c.connectorId && i.scope === 'global')
+        if (!item || blocked.get(item.id)?.blocked) return null
+        return runtimeConnectorServer(c, item, {
+          origin: originOf(req),
+          token: bearer(req) ?? '',
+          botId,
+          timeoutMs: CONNECTOR_TIMEOUT_MS,
+        })
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+    /**
+     * **`mentionOnly` 的也下发**，只是带个标记。
+     *
+     * 席位那边照样连上、照样注册工具，但不进默认工具表——只有这一轮被 `@` 点名才进。
+     * 不下发是不行的：真被点名时再去握手就晚了，那一轮已经在组请求了。
+     */
+    const synthIds = synth.filter((x) => !x.mentionOnly).map((x) => x.id)
+
     json(res, 200, {
       // 实例照着这个数字判断「底座换了没有」。和下面那条探针给的是同一个值。
       templateVersion: tpl.version,
@@ -113,10 +176,17 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
        * 的结果当基线，而在「拉完目录」到「第一次探针」之间落地的改动就永远丢了——
        * 那两件事之间隔着一整轮插件启动，几百毫秒到几十秒都可能。
        */
-      stamp: catalogStamp(tpl.version, botId ? bots[0] : undefined, [...skills, ...servers]),
-      bots: bots.map((b) => publicBot(b, pinned, tpl)),
+      stamp: catalogStamp(tpl.version, botId ? bots[0] : undefined, [...skills, ...servers], await connectorStampOf(db, account.id, companyId)),
+      /**
+       * 连接器绑账号、不绑 Bot：合成出来的那几条挂到**每一颗** Bot 的 `mcps` 上。
+       * 席位那边 `toolSchemasFor()` 照现有逻辑按 `mcps` 过滤，一行都不用改。
+       */
+      bots: bots.map((b) => {
+        const pub = publicBot(b, pinned, tpl)
+        return { ...pub, mcps: [...pub.mcps, ...synthIds] }
+      }),
       skills: skills.map(publicSkill),
-      servers: servers.map(runtimeServer),
+      servers: [...servers.map(runtimeServer), ...synth],
     })
   })
 
@@ -139,7 +209,10 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       ...(await db.visibleCatalog('skill', companyId)),
       ...(await db.visibleCatalog('mcp', companyId)),
     ]
-    json(res, 200, { templateVersion: version, stamp: catalogStamp(version, bot, tools) })
+    json(res, 200, {
+      templateVersion: version,
+      stamp: catalogStamp(version, bot, tools, await connectorStampOf(db, account.id, companyId)),
+    })
   })
 
   router.get('/runtime/desktop', async (req, res) => {
@@ -428,11 +501,77 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
           return { path: String(o.path ?? ''), mime: String(o.mime ?? '') }
         })
       : undefined
+    /**
+     * `@` 点名。**Gateway 必须逐个校验，不能原样透传。**
+     *
+     * 席位那边收到什么就注入什么——它信的是那张 `sat_` 票，票背后是谁由我们说了算。
+     * 不属于这个账号的、断了的、公司禁了的一律**剔掉**，并在响应里说明是哪几条；
+     * 不是让整条消息失败：用户那句话没有错，错的是一个已经失效的点名。
+     */
+    const wanted = Array.isArray(body.mentions) ? body.mentions.slice(0, 10) : []
+    const mentions: { kind: string; id: string; label: string }[] = []
+    const dropped: string[] = []
+    if (wanted.length) {
+      const companyId = account.role === 'owner' ? null : account.companyId
+      const items = await db.visibleCatalog('connector', companyId)
+      const blocks = blockMapOf(items)
+      const defs = new Map(items.filter((i) => i.scope === 'global').map((i) => [i.id, connectorDefOf(i)]))
+      const conns = new Map(
+        (await db.connectionsFor(account.id, companyId)).filter((c) => c.status === 'active').map((c) => [c.id, c]),
+      )
+      for (const raw of wanted) {
+        const o = (raw ?? {}) as Record<string, unknown>
+        const id = String(o.id ?? '').trim()
+        const kind = String(o.kind ?? 'connector')
+        const conn = kind === 'connector' ? conns.get(id) : undefined
+        const def = conn ? defs.get(conn.connectorId) : undefined
+        if (!conn || !def || !def.enabled || blocks.get(conn.connectorId)?.blocked) {
+          if (id) dropped.push(id)
+          continue
+        }
+        mentions.push({ kind: 'connector', id, label: `${def.name} (${conn.label})` })
+      }
+    }
+
     await proxyJson(
       res,
       'POST',
       `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/messages`,
-      images?.length ? { text: strField(body, 'text', false), images } : { text: strField(body, 'text') },
+      {
+        text: strField(body, 'text', images?.length || mentions.length ? false : true),
+        ...(images?.length ? { images } : {}),
+        ...(mentions.length ? { mentions } : {}),
+      },
+      await seatBearer(db, account.id),
+      target.machineToken,
+      // 剔掉了什么要说出来：界面上那几颗药丸得消失，而人要知道为什么。
+      dropped.length ? { droppedMentions: dropped } : undefined,
+    )
+  })
+
+  /** 排着的消息。刷新页面之后 dock 靠它恢复——队列的真相在席位那边，不在浏览器。 */
+  router.get('/runtime/sessions/:id/queue', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/queue`,
+      undefined,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
+  /** 取消一条。已经开跑的席位会回 409，原样透出去——界面据此把那一行改成气泡。 */
+  router.delete('/runtime/sessions/:id/queue/:queueId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    await proxyJson(
+      res,
+      'DELETE',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/queue/${encodeURIComponent(req.params.queueId)}`,
+      undefined,
       await seatBearer(db, account.id),
       target.machineToken,
     )

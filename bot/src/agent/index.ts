@@ -7,6 +7,15 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     agents: AgentService
   }
+  interface Events {
+    /**
+     * 排队的消息有变（进队、出队、被取消）。
+     *
+     * 界面靠它把输入框顶上那一行 dock 画对。**队列的真相在实例这边**，不在浏览器：
+     * 放浏览器最省事，但刷新一次就丢、两个标签页各排各的，而消息其实已经发出去了。
+     */
+    'queue/change'(sessionId: string, queued: QueuedMessage[]): void
+  }
 }
 
 export interface Config {
@@ -93,6 +102,141 @@ export class AgentService extends Service {
     return this.live.has(sessionId) || this.starting.has(sessionId)
   }
 
+  // ── 排队 ──────────────────────────────────────────────────────────
+  //
+  // 带 `@` 的消息不走 steering：steering 是插进正在进行的这一轮，而那一轮的工具表
+  // 早就定了——`@` 的全部意义恰恰是改工具表。两件事天生不兼容，所以它排队等下一轮。
+  // 见 docs/connectors.md §7。
+
+  private queueCol() {
+    return this.ctx.storage.collection<QueuedMessage>('message-queue')
+  }
+
+  /**
+   * 刚从队列里取出来、已经开跑的那几条 id。
+   *
+   * 有它，取消才分得清「这条不存在」和「这条已经开始执行了」——两者对用户是完全不同
+   * 的消息，而出队之后行就没了，光看「找不到」是答不出来的。只留最近几十条：它唯一的
+   * 用途是接住「点取消的同一刻正好被取出」这个窄窗口。
+   */
+  private startedIds: string[] = []
+
+  private markStarted(id: string) {
+    this.startedIds.push(id)
+    if (this.startedIds.length > 50) this.startedIds.shift()
+  }
+
+  /**
+   * 这一轮被 `@` 点名的连接 id。
+   *
+   * 工具执行时要回答「这一次调用是人点名的，还是模型自己挑的」——那是出事后第一个
+   * 要问的问题，事后从会话正文里反推既慢又不一定对得上。只在这一轮里有效，轮末清掉。
+   */
+  private turnMentions = new Map<string, Set<string>>()
+
+  mentionedIn(sessionId: string): Set<string> {
+    return this.turnMentions.get(sessionId) ?? new Set()
+  }
+
+  /** 这条会话排着的，按先来后到。`list()` 是按 updatedAt 倒序的，这里自己排。 */
+  queued(sessionId: string): QueuedMessage[] {
+    return this.queueCol()
+      .list()
+      .map((r) => r.value)
+      .filter((v) => v.sessionId === sessionId)
+      .sort((a, b) => a.createdAt - b.createdAt)
+  }
+
+  /** 队列深度上限。满了就明说，不静默丢——用户以为发出去了才是最糟的。 */
+  get queueMax(): number {
+    return Math.max(1, Math.trunc(Number(process.env.SATUWORK_QUEUE_MAX) || 5))
+  }
+
+  enqueue(sessionId: string, text: string, images: ImageRef[], mentions: Mention[]): QueuedMessage {
+    if (this.queued(sessionId).length >= this.queueMax) {
+      throw new Error(`最多排 ${this.queueMax} 条，等这一轮跑完再发`)
+    }
+    const row: QueuedMessage = {
+      id: randomUUID(),
+      sessionId,
+      text,
+      images,
+      mentions,
+      createdAt: Date.now(),
+    }
+    this.queueCol().put(row.id, row)
+    this.emitQueue(sessionId)
+    return row
+  }
+
+  /**
+   * 取消一条。
+   *
+   * 三种结果分开报：取消成功 / 已经开跑（409）/ 压根没这条（404）。合成一个 false
+   * 的话，两个标签页各点一次取消时，后点的那个会看到「已经开始执行了」——而它其实
+   * 早就被取消了，什么都没在跑。
+   */
+  cancelQueued(sessionId: string, id: string): 'cancelled' | 'started' | 'missing' {
+    const row = this.queueCol().get(id)
+    if (!row || row.sessionId !== sessionId) {
+      return this.startedIds.includes(id) ? 'started' : 'missing'
+    }
+    const gone = this.queueCol().delete(id)
+    if (!gone) return this.startedIds.includes(id) ? 'started' : 'missing'
+    this.emitQueue(sessionId)
+    return 'cancelled'
+  }
+
+  private emitQueue(sessionId: string) {
+    this.ctx.emit('queue/change', sessionId, this.queued(sessionId))
+  }
+
+  /**
+   * 这一轮跑完了，接上队首。
+   *
+   * **一条一条跑，不合并。** 它们是不同的指令，合并会让 `@` 的归属乱掉。
+   * 整段不能抛：它跑在上一轮的收尾里，异常冒出去就是一个未处理的 Promise 拒绝。
+   */
+  private async drainQueue(sessionId: string): Promise<void> {
+    for (;;) {
+      const next = this.queued(sessionId)[0]
+      if (!next) return
+      // **先出队再跑。** 反过来的话，这一条要是每次都在同一处抛，队列就成了死循环。
+      this.queueCol().delete(next.id)
+      this.markStarted(next.id)
+      this.emitQueue(sessionId)
+      try {
+        // **必须走 runGuarded。** 直接调 runTurn 的话，它走到 live.set 之前的那几个
+        // await 期间既不在 live 也不在 starting 里，isRunning() 是 false——这时进来的
+        // 消息会开出第二轮并发 turn，两轮交错写同一份 JSONL。
+        await this.runGuarded(sessionId, next.text, next.images, next.mentions)
+      } catch (e) {
+        // **接着跑下一条，不是就此收工。** 一条失败就 return 的话，后面几条既不跑也不
+        // 清，dock 上一直挂着，而没有任何东西会再来叫醒队列——只能等用户手动再发一条。
+        // 这一条的失败已经由 runTurn 写进会话（failBeforeTurn / failAfterTurnStart）。
+        this.ctx.logger?.warn?.(`agents: 排队消息 ${next.id} 跑失败，跳过：${(e as Error).message}`)
+      }
+    }
+  }
+
+  /**
+   * 占住「这条会话正在跑」再跑一轮。
+   *
+   * `starting` 必须在**第一个 await 之前**同步占上：runTurn 要读日志、要重建历史，
+   * 那几个 await 期间 agent 还没建出来，`live` 里没有它。少了这一层，同一条会话会被
+   * 开出两个并发 agent——事件交错写进同一份 JSONL，用量也记两遍。
+   */
+  private async runGuarded(sessionId: string, text: string, images: ImageRef[], mentions: Mention[]): Promise<void> {
+    this.starting.add(sessionId)
+    this.turnMentions.set(sessionId, new Set(mentions.filter((m) => m.kind === 'connector').map((m) => m.id)))
+    try {
+      await this.runTurn(sessionId, text, images, mentions)
+    } finally {
+      this.starting.delete(sessionId)
+      this.turnMentions.delete(sessionId)
+    }
+  }
+
   /**
    * 跑到一半插话。agent 不在跑时返回 false，由调用方决定改成普通消息。
    *
@@ -122,20 +266,17 @@ export class AgentService extends Service {
     return true
   }
 
-  async send(sessionId: string, text: string, images: ImageRef[] = []): Promise<void> {
+  async send(sessionId: string, text: string, images: ImageRef[] = [], mentions: Mention[] = []): Promise<void> {
     if (this.isRunning(sessionId)) {
       // 这条以前是静默的，而它意味着**用户那句话被丢掉了**——steer 没接住、send 又
       // 拒收。界面上什么都看不出来，日志里也没有。
       this.ctx.logger?.warn?.(`agents: 会话 ${sessionId} 已在运行，这条消息没能进去`)
       throw new Error('agents: 该会话正在运行中')
     }
-    // 同步占位，之后才允许出现 await。
-    this.starting.add(sessionId)
-    try {
-      await this.runTurn(sessionId, text, images)
-    } finally {
-      this.starting.delete(sessionId)
-    }
+    // 同步占位（runGuarded 的第一行），之后才允许出现 await。
+    await this.runGuarded(sessionId, text, images, mentions)
+    // 这一轮收口了，接上排在后面的。
+    await this.drainQueue(sessionId)
   }
 
   /**
@@ -171,18 +312,19 @@ export class AgentService extends Service {
     text: string,
     images: ImageRef[],
     e: Error,
+    mentions: Mention[] = [],
   ): Promise<void> {
     const { sessions } = this.ctx
     const turn = history.filter((ev) => ev.type === 'turn/start').length + 1
     await sessions.append(sessionId, 'user/message', {
-      message: { id: randomUUID(), role: 'user', content: userBlocks(text, images) },
+      message: { id: randomUUID(), role: 'user', content: userBlocks(text, images, mentions) },
       source: { kind: 'user' },
     })
     await sessions.append(sessionId, 'turn/start', { turn })
     await this.failAfterTurnStart(sessionId, turn, e)
   }
 
-  private async runTurn(sessionId: string, text: string, images: ImageRef[] = []): Promise<void> {
+  private async runTurn(sessionId: string, text: string, images: ImageRef[] = [], mentions: Mention[] = []): Promise<void> {
     const { sessions, llm } = this.ctx
     let history = await sessions.events(sessionId)
     let system: { text: string; base: string; skills: string }
@@ -196,9 +338,9 @@ export class AgentService extends Service {
       provider = bot?.provider?.trim() || this.provider
       modelId = bot?.model?.trim() || this.model
       model = llm.modelOf(provider, modelId)
-      toolSchemas = this.toolSchemasFor(bot)
+      toolSchemas = this.toolSchemasFor(bot, mentions)
     } catch (e) {
-      await this.failBeforeTurn(sessionId, history, text, images, e as Error)
+      await this.failBeforeTurn(sessionId, history, text, images, e as Error, mentions)
       throw e
     }
 
@@ -230,7 +372,7 @@ export class AgentService extends Service {
     const turn = history.filter((e) => e.type === 'turn/start').length + 1
 
     await sessions.append(sessionId, 'user/message', {
-      message: { id: randomUUID(), role: 'user', content: userBlocks(text, images) },
+      message: { id: randomUUID(), role: 'user', content: userBlocks(text, images, mentions) },
       source: { kind: 'user' },
     })
     await sessions.append(sessionId, 'turn/start', { turn })
@@ -260,7 +402,7 @@ export class AgentService extends Service {
         systemPrompt: system.text,
         model,
         messages,
-        tools: this.bridgeTools(sessionId, new Set(toolSchemas.map((t) => t.name))),
+        tools: this.bridgeTools(sessionId, toolSchemas),
       },
       streamFn: llm.streamFn,
       steeringMode: 'one-at-a-time',
@@ -298,12 +440,15 @@ export class AgentService extends Service {
       // prompt() 送进去的。只传文本的话，图就要等到下一轮重建历史时才被读出来，
       // 表现成「问第一遍它没看见，再问一句就看见了」。
       const now = Date.now()
-      if (images.length) {
+      if (images.length || mentions.length) {
         // 走 userContentFor 而不是自己拼：base64 缓存、单张大小上限、读不到时降级成
         // 一句说明，这些都在那儿，重写一遍迟早会漂。时间戳也复用 stampContent，
         // 跟 steer 那条路盖成同一个形状。
+        //
+        // **点名也走这条**：它要被渲染成一行 `[本轮指定：…]` 送进模型（textFrom 干的
+        // 活）。只有纯文本才走下面那条快路——那条直接拿 text，看不见任何块。
         const content = await userContentFor(
-          { id: '', role: 'user', content: userBlocks(text, images) },
+          { id: '', role: 'user', content: userBlocks(text, images, mentions) },
           this.ctx,
         )
         await agent.prompt({ role: 'user', content: stampContent(content, now), timestamp: now } as AgentMessage)
@@ -460,10 +605,15 @@ export class AgentService extends Service {
    * pi 要求**失败抛异常**。所以只有管道层失败（`failed`）才抛——业务失败照常作为
    * 内容返回，模型读得到、能自己重试。
    */
-  private bridgeTools(sessionId: string, allowed?: Set<string>) {
-    const schemas = allowed
-      ? this.ctx.tools.schemas().filter((s) => allowed.has(s.name))
-      : this.ctx.tools.schemas()
+  /**
+   * 挑好的工具 → pi 认的形状。
+   *
+   * **收的是有序的清单，不是一个名字集合。** 顺序有意义：被 `@` 点名的排在最前，而
+   * 工具表越长，模型越容易在前几个里选。传集合的话这里会退回 `ctx.tools.schemas()`
+   * 的注册顺序，点名等于白点。
+   */
+  private bridgeTools(sessionId: string, picked?: { name: string; description: string; parameters?: unknown }[]) {
+    const schemas = picked ?? this.ctx.tools.schemas()
     return schemas.map((schema) => ({
       name: schema.name,
       label: schema.name,
@@ -531,18 +681,26 @@ export class AgentService extends Service {
     return typeof found?.contextWindow === 'number' ? found.contextWindow : undefined
   }
 
-  /** 内置工具始终在。MCP 工具只在成功 list 之后才注册，再按 Bot.mcps 过滤。 */
-  private toolSchemasFor(bot: { mcps?: string[] } | undefined) {
+  /**
+   * 内置工具始终在。MCP 工具只在成功 list 之后才注册，再按 Bot.mcps 过滤。
+   *
+   * **点名是「点名」，不是「限定」。** 被 `@` 的那把连接的工具排到最前，但别的工具
+   * 一个都不拿掉——「@Gmail 看看邮件，然后在 Notion 建个页面」是完全正常的一句话，
+   * 硬过滤会把它变成半个功能。点名唯一的**放开**作用是让 `mentionOnly` 的连接这一轮
+   * 出现在表里（平时它不进默认表）。
+   */
+  private toolSchemasFor(bot: { mcps?: string[] } | undefined, mentions: Mention[] = []) {
     const all = this.ctx.tools.schemas()
-    const mcpNames = new Set<string>()
     const catalog = this.ctx.catalog
+    const mentioned = mentions.filter((m) => m.kind === 'connector').map((m) => m.id)
     const assigned = bot?.mcps
-    if (assigned === undefined) {
-      for (const s of catalog.servers) for (const n of s.tools) mcpNames.add(n)
-    } else {
-      for (const n of catalog.toolNamesFor(assigned)) mcpNames.add(n)
-    }
-    return all.filter((t) => !t.name.startsWith('mcp_') || mcpNames.has(t.name))
+    const ids = assigned === undefined ? catalog.servers.map((s) => s.id) : assigned
+    const mcpNames = new Set(catalog.toolNamesFor([...ids, ...mentioned], mentioned))
+    const picked = all.filter((t) => !t.name.startsWith('mcp_') || mcpNames.has(t.name))
+    if (!mentioned.length) return picked
+    // 顶到最前。工具表越长，模型越容易在前几个里选——点名了却排在第 40 位，等于没点。
+    const front = new Set(catalog.toolNamesFor(mentioned, mentioned))
+    return [...picked.filter((t) => front.has(t.name)), ...picked.filter((t) => !front.has(t.name))]
   }
 
   /**
@@ -1009,12 +1167,46 @@ function summaryText(d: SessionEventMap['session/compact']): string {
   ].join('\n')
 }
 
-const textFrom = (m: Message) => m.content.map((c) => (c.type === 'text' ? c.text : '')).join('')
+/**
+ * 消息里给模型看的那段文本。
+ *
+ * `mention` 块在这里渲染成一行 `[本轮指定：…]`——**翻译只在这一处**。落盘的是结构
+ * （谁被点名了、id 是什么），进模型的是话；两边分开，重放才和当时一致（不变量 7），
+ * 而模型也不用认识一种它没见过的块。
+ */
+const textFrom = (m: Message) =>
+  m.content
+    .map((c) => (c.type === 'text' ? c.text : c.type === 'mention' ? `[本轮指定：${c.label}]` : ''))
+    .filter(Boolean)
+    .join('\n')
 
 /** 一张要给模型看的图。路径相对工作区。 */
 export interface ImageRef {
   path: string
   mime: string
+}
+
+/** 输入框里 `@` 出来的一个东西。形状和会话里的 `mention` 块一致。 */
+export interface Mention {
+  kind: 'connector' | 'bot' | 'routine'
+  id: string
+  label: string
+}
+
+/**
+ * 排在队里、还没轮到的一条消息。
+ *
+ * **不写 JSONL。** 被取消的那条从没进过模型，写进去会破坏「进模型的内容必须能从
+ * JSONL 重建」——重放时会凭空多出一条用户消息。真跑起来的那一刻它照常 append 一条
+ * `user/message`，和别的消息没有区别。
+ */
+export interface QueuedMessage {
+  id: string
+  sessionId: string
+  text: string
+  images: ImageRef[]
+  mentions: Mention[]
+  createdAt: number
 }
 
 /**
@@ -1027,8 +1219,10 @@ export interface ImageRef {
 const MAX_IMAGE_BYTES = 3.5 * 1024 * 1024
 
 /** 用户这一条消息的内容块：图片排在正文前面，先给材料再给指令。 */
-function userBlocks(text: string, images: ImageRef[]): ContentBlock[] {
-  const blocks: ContentBlock[] = images.map((img) => ({ type: 'image' as const, path: img.path, mime: img.mime }))
+function userBlocks(text: string, images: ImageRef[], mentions: Mention[] = []): ContentBlock[] {
+  const blocks: ContentBlock[] = mentions.map((m) => ({ type: 'mention' as const, kind: m.kind, id: m.id, label: m.label }))
+  for (const img of images) blocks.push({ type: 'image' as const, path: img.path, mime: img.mime })
+  // 只有图（或只有点名）的消息也成立：「这张图什么意思」本来就常常没有正文。
   if (text || !blocks.length) blocks.push({ type: 'text', text })
   return blocks
 }

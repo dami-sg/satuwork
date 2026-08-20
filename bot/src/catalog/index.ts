@@ -42,6 +42,10 @@ interface RemoteServer {
   perm?: string
   enabled?: boolean
   token?: string
+  /** 目录可以给某一条单独定时限。连接器那几条是 60 秒（发邮件、查 CRM 都不快）。 */
+  timeoutMs?: number
+  /** 「仅 @ 时可用」：连上、也注册工具，但不进默认工具表。 */
+  mentionOnly?: boolean
 }
 
 interface CachedSkill {
@@ -64,6 +68,8 @@ interface CachedServer {
   env: Record<string, string>
   perm: '只读' | '可写' | '需审批'
   enabled: boolean
+  timeoutMs?: number
+  mentionOnly?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -75,6 +81,8 @@ export interface ServerStatus {
   enabled: boolean
   connected: boolean
   tools: string[]
+  /** 「仅 @ 时可用」。连着，但不进默认工具表。 */
+  mentionOnly?: boolean
   error?: string
 }
 
@@ -108,6 +116,8 @@ export class CatalogService extends Service {
   private mcpEffects: Dispose[] = []
   /** 工具名 → 所属服务器 id，用来按 Bot 的 mcps 过滤。 */
   private toolServer = new Map<string, string>()
+  /** 「仅 @ 时可用」的服务器 id。连上了，但平时不进工具表。 */
+  private mentionOnly = new Set<string>()
   private clients = new Map<string, McpHttpClient>()
 
   constructor(ctx: Context) {
@@ -118,11 +128,21 @@ export class CatalogService extends Service {
     return Boolean(gatewayUrl() && gatewayToken())
   }
 
-  toolNamesFor(serverIds: string[]): string[] {
+  /**
+   * 这些服务器上的工具名。
+   *
+   * `mentionOnly` 的那几台**默认不算在内**——它们连着、工具也注册了，但不进工具表，
+   * 除非这一轮被 `@` 点名（`mentioned` 里有它）。「个人邮箱只有我点名了你才能碰」
+   * 就是靠这一层实现的；不连它是不行的：真被点名时再去握手就晚了。
+   */
+  toolNamesFor(serverIds: string[], mentioned: string[] = []): string[] {
     const allow = new Set(serverIds)
+    const named = new Set(mentioned)
     const out: string[] = []
     for (const [name, sid] of this.toolServer) {
-      if (allow.has(sid)) out.push(name)
+      if (!allow.has(sid)) continue
+      if (this.mentionOnly.has(sid) && !named.has(sid)) continue
+      out.push(name)
     }
     return out
   }
@@ -315,6 +335,8 @@ export class CatalogService extends Service {
         env: s.env && typeof s.env === 'object' ? s.env : {},
         perm: s.perm === '可写' || s.perm === '需审批' ? s.perm : '只读',
         enabled: s.enabled !== false,
+        ...(Number.isFinite(Number(s.timeoutMs)) && Number(s.timeoutMs) > 0 ? { timeoutMs: Math.trunc(Number(s.timeoutMs)) } : {}),
+        ...(s.mentionOnly === true ? { mentionOnly: true } : {}),
         createdAt: prev?.createdAt ?? now,
         updatedAt: now,
       })
@@ -372,6 +394,7 @@ export class CatalogService extends Service {
       }
     }
     this.toolServer.clear()
+    this.mentionOnly.clear()
     this.clients.clear()
   }
 
@@ -399,19 +422,25 @@ export class CatalogService extends Service {
         continue
       }
       const token = this.ctx.storage.getSetting<string>(TOKEN_NS, s.id) ?? ''
-      const client = new McpHttpClient(s.endpoint, token)
+      const client = new McpHttpClient(s.endpoint, token, s.timeoutMs)
       try {
         await client.initialize()
         const listed = await client.listTools()
         const names: string[] = []
         for (const tool of listed) {
           const name = mcpToolName(s.name, tool.name)
-          if (this.ctx.tools.has(name)) continue
+          if (this.ctx.tools.has(name)) {
+            // 重名只可能是截断撞了。**要说出来**：静默跳过的表现是「某个工具时有时无」，
+            // 而没有任何一行日志指向原因。
+            this.ctx.logger?.warn?.(`catalog: ${s.name} 的 ${tool.name} 撞名 ${name}，这一个没注册`)
+            continue
+          }
           this.registerMcpTool(s.id, name, tool, client)
           names.push(name)
         }
         this.clients.set(s.id, client)
-        statuses.push({ id: s.id, name: s.name, kind: s.kind, enabled: true, connected: true, tools: names })
+        if (s.mentionOnly) this.mentionOnly.add(s.id)
+        statuses.push({ id: s.id, name: s.name, kind: s.kind, enabled: true, connected: true, tools: names, ...(s.mentionOnly ? { mentionOnly: true } : {}) })
       } catch (e) {
         this.ctx.logger?.warn?.(`catalog: MCP ${s.name} 失败 ${(e as Error).message}`)
         statuses.push({
@@ -438,9 +467,17 @@ export class CatalogService extends Service {
       name,
       description: tool.description || remoteName,
       parameters,
-      async execute(args) {
+      execute: async (args, call) => {
         try {
-          const text = await client.callTool(remoteName, args)
+          /**
+           * 这一次是不是用户 `@` 点名的这台服务器。
+           *
+           * 只有这一侧知道答案（点名决定的是这一轮的工具表），所以由这里带给服务端，
+           * 让流水上记得住「人点的还是模型自己挑的」。`agents` 用可选取法，免得目录
+           * 插件为一个附加信息去 inject 它、绕出一条依赖环。
+           */
+          const viaMention = this.ctx.agents?.mentionedIn?.(call.sessionId ?? '')?.has(serverId) === true
+          const text = await client.callTool(remoteName, args, viaMention ? { viaMention: true } : undefined)
           return { text }
         } catch (e) {
           return { text: `MCP 调用失败：${(e as Error).message}`, failed: true }

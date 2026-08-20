@@ -268,6 +268,27 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(r.json.accepted === true || r.json.steered === true, 'accepted/steered')
     })
 
+    await test('@ 点名：Gateway 把失效的剔掉，不让它进席位', async () => {
+      /**
+       * 这一条守的是不变量：**席位收到什么就注入什么**——它信的是那张 `sat_` 票，
+       * 票背后是谁由 Gateway 说了算。所以浏览器编一个连接 id 上来，必须在这一跳被
+       * 挡掉，而不是让整条消息失败：用户那句话没有错，错的是一个已经失效的点名。
+       */
+      const r = await req(gwBase, 'POST', `/runtime/sessions/${sessionId}/messages`, {
+        token: adminTok,
+        body: {
+          text: `mention ${MARKER}`,
+          mentions: [{ kind: 'connector', id: 'conn-not-mine', label: '别人的 Gmail' }],
+        },
+      })
+      assert(r.status === 200, `message ${r.status} ${r.text}`)
+      assert(Array.isArray(r.json.droppedMentions), `该说明剔掉了什么：${r.text}`)
+      assert(r.json.droppedMentions.includes('conn-not-mine'), `没剔掉伪造的点名：${r.text}`)
+      assert(r.json.accepted === true || r.json.steered === true || r.json.queued === true, `这条消息本身该照发：${r.text}`)
+      // 剔干净了就等于没点名，所以走的是 steering / 新一轮，不是排队。
+      assert(r.json.queued !== true, '点名全被剔掉了还排队，那用户就白等一轮')
+    })
+
     // ── 附件反代。这一跳是 proxyUpload / proxyDownload：字节从浏览器流到席位，
     //    再流回来。前面几组都是直连 bot，只有这里能验「Gateway 中间那段没把它弄坏」。
     let gwPath

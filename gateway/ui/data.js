@@ -176,6 +176,48 @@ async function loadCreds() {
   state.creds = data.credentials || []
 }
 
+/**
+ * 连接器：供应商、上架清单、市场。
+ *
+ * 市场（`/connectors`）是公司里所有人都读得到的那一份；上架清单（`/platform/connectors`）
+ * 只有 owner 读得到。两份分开，是因为员工那一份**不带 authConfigId**。
+ */
+async function loadConnectorVendors() {
+  state.connectorVendors = (await api('GET', '/platform/connector-vendors')).vendors || []
+}
+
+async function loadConnectors() {
+  state.connectors = (await api('GET', '/platform/connectors')).connectors || []
+}
+
+async function loadConnectorToolkits() {
+  state.connectorToolkits = (await api('GET', '/platform/connector-toolkits')).toolkits || []
+}
+
+async function loadOrgConnectors() {
+  const id = orgId()
+  const [list, stats] = await Promise.all([
+    api('GET', `/orgs/${encodeURIComponent(id)}/connectors`),
+    api('GET', `/orgs/${encodeURIComponent(id)}/connector-stats`).catch(() => null),
+  ])
+  state.orgConnectors = list.connectors || []
+  state.connectorStats = stats
+}
+
+async function loadMarket() {
+  state.market = (await api('GET', '/me/connectors')).connectors || []
+}
+
+/**
+ * 一个连接器的详情：我的安装、我的几把连接、可开的工具。
+ *
+ * 工具清单是现拉的（Gateway 那边去问供应商），所以这一条会慢一点；拉不到时后端给
+ * `toolsError`，界面照样能装能连。
+ */
+async function loadConnectorDetail(id) {
+  state.connectorDetail = await api('GET', `/me/connectors/${encodeURIComponent(id)}`)
+}
+
 async function loadSettings() {
   if (isOwner()) {
     state.settings = await api('GET', '/platform/settings')
@@ -611,6 +653,17 @@ async function loadPage() {
       }
     } else if (state.path === '/stats') {
       await loadStats()
+    } else if (state.path.startsWith('/connectors/')) {
+      await loadConnectorDetail(connectorIdOfPath(state.path))
+    } else if (state.path === '/connectors') {
+      if (isOwner()) {
+        // 上架清单、供应商状态、单价一起要：没有密钥时那颗「上架」按钮是灰的。
+        await Promise.all([loadConnectorVendors(), loadConnectors(), loadSettings()])
+      } else if (isAdmin()) {
+        await loadOrgConnectors()
+      } else {
+        await loadMarket()
+      }
     } else if (state.path === '/providers') {
       await Promise.all([loadCatalog(), loadCreds(), loadCustomProviders().catch(() => { state.customProviders = [] })])
     } else if (state.path === '/company') {

@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
-import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, emptyPlatformSettings, emptySettings, parsePriceMultiplier, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf } from './db/rows.ts'
+import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, emptyPlatformSettings, emptySettings, parseConnectorPricing, parsePriceMultiplier, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -712,6 +712,370 @@ export class Db {
       cachedTokens: num(row.cachedTokens),
       lastAt: numOrNull(row.lastAt),
     }))
+  }
+
+  // ── 连接器：安装、连接、调用流水。见 docs/connectors.md §10。────────
+
+  async connectorInstalls(accountId: string): Promise<ConnectorInstall[]> {
+    const rows = await this.many('select * from connector_installs where "accountId" = ? order by "createdAt"', [accountId])
+    return rows.map(connectorInstallOf)
+  }
+
+  /** 一家公司谁装了什么。admin 那一屏唯一能看清攻击面的地方。 */
+  async connectorInstallsOfCompany(companyId: string): Promise<ConnectorInstall[]> {
+    const rows = await this.many('select * from connector_installs where "companyId" = ? order by "createdAt"', [companyId])
+    return rows.map(connectorInstallOf)
+  }
+
+  async connectorInstall(connectorId: string, accountId: string): Promise<ConnectorInstall | undefined> {
+    const r = await this.one('select * from connector_installs where "connectorId" = ? and "accountId" = ?', [connectorId, accountId])
+    return r ? connectorInstallOf(r) : undefined
+  }
+
+  /**
+   * 装一个。**已经装了就原样返回**，不报错也不重置工具开关——重复点「安装」是
+   * 用户会做的事（网络慢、手抖），把它变成一次静默的配置重置就太狠了。
+   */
+  async installConnector(input: { connectorId: string; accountId: string; companyId: string }): Promise<ConnectorInstall> {
+    const cur = await this.connectorInstall(input.connectorId, input.accountId)
+    if (cur) return cur
+    const now = Date.now()
+    const row: ConnectorInstall = {
+      id: randomUUID(),
+      connectorId: input.connectorId,
+      accountId: input.accountId,
+      companyId: input.companyId,
+      enabledTools: [],
+      createdAt: now,
+      updatedAt: now,
+    }
+    try {
+      await this.run(
+        'insert into connector_installs (id, "connectorId", "accountId", "companyId", "enabledTools", "createdAt", "updatedAt") values (?,?,?,?,?,?,?)',
+        [row.id, row.connectorId, row.accountId, row.companyId, JSON.stringify(row.enabledTools), row.createdAt, row.updatedAt],
+      )
+    } catch (e) {
+      // 两次点击撞在一起：唯一索引兜住，取回已有的那条。
+      if (!isUniqueViolation(e)) throw e
+      return (await this.connectorInstall(input.connectorId, input.accountId))!
+    }
+    return row
+  }
+
+  async setInstallTools(id: string, enabledTools: string[]): Promise<ConnectorInstall | undefined> {
+    await this.run('update connector_installs set "enabledTools" = ?, "updatedAt" = ? where id = ?', [
+      JSON.stringify(enabledTools),
+      Date.now(),
+      id,
+    ])
+    const r = await this.one('select * from connector_installs where id = ?', [id])
+    return r ? connectorInstallOf(r) : undefined
+  }
+
+  async deleteConnectorInstall(id: string): Promise<void> {
+    await this.run('delete from connector_installs where id = ?', [id])
+  }
+
+  async connectorConnection(id: string): Promise<ConnectorConnection | undefined> {
+    const r = await this.one('select * from connector_connections where id = ?', [id])
+    return r ? connectorConnectionOf(r) : undefined
+  }
+
+  /**
+   * 这个账号能用的所有连接：自己的，加上本公司共用的那些。
+   *
+   * 合成工具表、`@` 选单、计费归属都从这一条出发——「能用哪些」只有一个来源，
+   * 免得三处各写一遍再慢慢分叉。
+   */
+  async connectionsFor(accountId: string, companyId: string | null): Promise<ConnectorConnection[]> {
+    const rows = companyId
+      ? await this.many(
+          'select * from connector_connections where ("accountId" = ? and scope = \'user\') or ("companyId" = ? and scope = \'company\') order by "createdAt"',
+          [accountId, companyId],
+        )
+      : await this.many('select * from connector_connections where "accountId" = ? and scope = \'user\' order by "createdAt"', [accountId])
+    return rows.map(connectorConnectionOf)
+  }
+
+  async connectionsOfCompany(companyId: string): Promise<ConnectorConnection[]> {
+    const rows = await this.many('select * from connector_connections where "companyId" = ? order by "createdAt"', [companyId])
+    return rows.map(connectorConnectionOf)
+  }
+
+  async insertConnectorConnection(input: {
+    connectorId: string
+    vendor: string
+    scope: ConnectionScope
+    label: string
+    accountId: string | null
+    companyId: string
+    externalUserId: string
+    mentionOnly?: boolean
+  }): Promise<ConnectorConnection> {
+    const now = Date.now()
+    const row: ConnectorConnection = {
+      id: randomUUID(),
+      connectorId: input.connectorId,
+      vendor: input.vendor,
+      scope: input.scope,
+      label: input.label,
+      accountId: input.accountId,
+      companyId: input.companyId,
+      externalUserId: input.externalUserId,
+      externalId: null,
+      status: 'pending',
+      mentionOnly: input.mentionOnly ?? false,
+      lastError: null,
+      connectedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await this.run(
+      'insert into connector_connections (id, "connectorId", vendor, scope, label, "accountId", "companyId", "externalUserId", "externalId", status, "mentionOnly", "lastError", "connectedAt", "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [
+        row.id,
+        row.connectorId,
+        row.vendor,
+        row.scope,
+        row.label,
+        row.accountId,
+        row.companyId,
+        row.externalUserId,
+        row.externalId,
+        row.status,
+        row.mentionOnly,
+        row.lastError,
+        row.connectedAt,
+        row.createdAt,
+        row.updatedAt,
+      ],
+    )
+    return row
+  }
+
+  async updateConnectorConnection(
+    id: string,
+    patch: {
+      label?: string
+      externalId?: string | null
+      status?: ConnectionStatus
+      mentionOnly?: boolean
+      lastError?: string | null
+      connectedAt?: number | null
+    },
+  ): Promise<ConnectorConnection | undefined> {
+    const cur = await this.connectorConnection(id)
+    if (!cur) return undefined
+    const next = { ...cur, ...patch, updatedAt: Date.now() }
+    await this.run(
+      'update connector_connections set label=?, "externalId"=?, status=?, "mentionOnly"=?, "lastError"=?, "connectedAt"=?, "updatedAt"=? where id=?',
+      [next.label, next.externalId, next.status, next.mentionOnly, next.lastError, next.connectedAt, next.updatedAt, id],
+    )
+    return next
+  }
+
+  async deleteConnectorConnection(id: string): Promise<void> {
+    await this.run('delete from connector_connections where id = ?', [id])
+  }
+
+  async insertConnectorCall(input: {
+    companyId: string | null
+    accountId: string
+    connectionId?: string | null
+    botId?: string | null
+    sessionId?: string | null
+    vendor: string
+    connector: string
+    label?: string
+    tool: string
+    status: ConnectorCallStatus
+    amountMicros?: number
+    bonusMicros?: number
+    latencyMs?: number
+    viaMention?: boolean
+  }): Promise<ConnectorCall> {
+    const row: ConnectorCall = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      accountId: input.accountId,
+      connectionId: input.connectionId ?? null,
+      botId: input.botId ?? null,
+      sessionId: input.sessionId ?? null,
+      vendor: input.vendor,
+      connector: input.connector,
+      label: input.label ?? '',
+      tool: input.tool,
+      status: input.status,
+      amountMicros: Math.max(0, Math.trunc(input.amountMicros ?? 0)),
+      // 赠送承担的部分不可能超过总额——脏数据也不能算出负的「充值承担」。
+      bonusMicros: Math.min(
+        Math.max(0, Math.trunc(input.bonusMicros ?? 0)),
+        Math.max(0, Math.trunc(input.amountMicros ?? 0)),
+      ),
+      latencyMs: Math.max(0, Math.trunc(input.latencyMs ?? 0)),
+      viaMention: input.viaMention ?? false,
+      createdAt: Date.now(),
+    }
+    await this.run(
+      'insert into connector_calls (id, "companyId", "accountId", "connectionId", "botId", "sessionId", vendor, connector, label, tool, status, "amountMicros", "bonusMicros", "latencyMs", "viaMention", "createdAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [
+        row.id,
+        row.companyId,
+        row.accountId,
+        row.connectionId,
+        row.botId,
+        row.sessionId,
+        row.vendor,
+        row.connector,
+        row.label,
+        row.tool,
+        row.status,
+        row.amountMicros,
+        row.bonusMicros,
+        row.latencyMs,
+        row.viaMention,
+        row.createdAt,
+      ],
+    )
+    return row
+  }
+
+  /**
+   * 连接器用量：一次查询给出四种切法。
+   *
+   * 按 (谁 / 连接器 / 工具 / 状态) 分别 group by，而不是把原始行拉回来在 JS 里算——
+   * 一天几万行，拉回来就是拿内存换一句 SQL。
+   *
+   * 金额直接 `sum(amountMicros)`，**不按当前单价现折**：单价改过之后，历史账不能跟着
+   * 一起变（docs/connectors.md §9）。
+   */
+  async connectorUsage(
+    scope: { companyId?: string | null; accountId?: string },
+    range?: { from?: number; to?: number },
+  ): Promise<{
+    total: { calls: number; amountMicros: number; lastAt: number | null }
+    byStatus: { status: string; calls: number; amountMicros: number }[]
+    byAccount: { accountId: string; calls: number; amountMicros: number; lastAt: number | null }[]
+    byConnector: { connector: string; label: string; calls: number; amountMicros: number }[]
+    byTool: { connector: string; tool: string; calls: number; amountMicros: number }[]
+  }> {
+    const where: string[] = ['1=1']
+    const args: (string | number)[] = []
+    if (scope.accountId) {
+      where.push('"accountId" = ?')
+      args.push(scope.accountId)
+    }
+    if (scope.companyId) {
+      where.push('"companyId" = ?')
+      args.push(scope.companyId)
+    }
+    if (range?.from != null) {
+      where.push('"createdAt" >= ?')
+      args.push(range.from)
+    }
+    if (range?.to != null) {
+      where.push('"createdAt" <= ?')
+      args.push(range.to)
+    }
+    const w = where.join(' and ')
+    const g = async (cols: string, group: string) =>
+      this.many(
+        `select ${cols}, count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt" from connector_calls where ${w} group by ${group}`,
+        args,
+      )
+
+    const total = await this.one(
+      `select count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt" from connector_calls where ${w}`,
+      args,
+    )
+    const byStatus = await g('status', 'status')
+    const byAccount = await g('"accountId"', '"accountId"')
+    const byConnector = await g('connector, label', 'connector, label')
+    const byTool = await g('connector, tool', 'connector, tool')
+    return {
+      total: { calls: num(total?.calls ?? 0), amountMicros: num(total?.micros ?? 0), lastAt: numOrNull(total?.lastAt) },
+      byStatus: byStatus.map((r) => ({ status: str(r.status), calls: num(r.calls), amountMicros: num(r.micros) })),
+      byAccount: byAccount.map((r) => ({
+        accountId: str(r.accountId),
+        calls: num(r.calls),
+        amountMicros: num(r.micros),
+        lastAt: numOrNull(r.lastAt),
+      })),
+      byConnector: byConnector.map((r) => ({
+        connector: str(r.connector),
+        label: str(r.label || ''),
+        calls: num(r.calls),
+        amountMicros: num(r.micros),
+      })),
+      byTool: byTool.map((r) => ({
+        connector: str(r.connector),
+        tool: str(r.tool),
+        calls: num(r.calls),
+        amountMicros: num(r.micros),
+      })),
+    }
+  }
+
+  /** 平台统计的底表：按 (公司, 连接器) 汇总。owner 的调用 companyId 为 null，原样留着。 */
+  async connectorUsageByCompany(range?: { from?: number; to?: number }): Promise<
+    { companyId: string | null; connector: string; calls: number; amountMicros: number; lastAt: number | null }[]
+  > {
+    const where: string[] = ['1=1']
+    const args: number[] = []
+    if (range?.from != null) {
+      where.push('"createdAt" >= ?')
+      args.push(range.from)
+    }
+    if (range?.to != null) {
+      where.push('"createdAt" <= ?')
+      args.push(range.to)
+    }
+    const rows = await this.many(
+      `select "companyId", connector, count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt"
+       from connector_calls where ${where.join(' and ')}
+       group by "companyId", connector order by "companyId", connector`,
+      args,
+    )
+    return rows.map((r) => ({
+      companyId: strOrNull(r.companyId),
+      connector: str(r.connector),
+      calls: num(r.calls),
+      amountMicros: num(r.micros),
+      lastAt: numOrNull(r.lastAt),
+    }))
+  }
+
+  /**
+   * 这家公司花出去多少微元，**按桶分开**。
+   *
+   * **余额是「充的 − 花的」现算，没有余额行。** 建一行余额就要为每次工具调用去更新它，
+   * 一家公司所有席位挤在同一行上排队，为一次 20 毫秒的调用付出一次行锁——不值得。
+   *
+   * 两个桶必须分开算，因为它们的有效期不一样：
+   *
+   * - **套餐赠送**跟着账期，到期作废。所以只统计 `bonusSince`（当前账期起点）之后的，
+   *   上一期花掉的赠送不能再从这一期扣。
+   * - **充值**不过期，累计全部历史。
+   *
+   * 合成一个数的话，套餐一到期，它已经花掉的部分会从充值余额上再扣一遍——刚充过钱
+   * 的公司会被判定成欠费（见迁移 0005）。
+   */
+  async connectorSpend(
+    companyId: string,
+    bonusSince: number | null,
+  ): Promise<{ bonusMicros: number; topupMicros: number }> {
+    const topup = await this.one(
+      'select coalesce(sum("amountMicros" - "bonusMicros"), 0) as spent from connector_calls where "companyId" = ?',
+      [companyId],
+    )
+    const bonus =
+      bonusSince == null
+        ? undefined
+        : await this.one(
+            'select coalesce(sum("bonusMicros"), 0) as spent from connector_calls where "companyId" = ? and "createdAt" >= ?',
+            [companyId, bonusSince],
+          )
+    return { bonusMicros: num(bonus?.spent ?? 0), topupMicros: num(topup?.spent ?? 0) }
   }
 
   // ── 分组。全体成员是算出来的，不进这张表。──────────────────────────
@@ -1964,6 +2328,7 @@ export class Db {
       utility: { provider: next.utility.provider, model: next.utility.model },
       enabledModels: enabled,
       priceMultiplier: parsePriceMultiplier(next.priceMultiplier),
+      connectorPricing: parseConnectorPricing(next.connectorPricing),
       // **不能漏。** 这一行漏了整整一版：类型上有、路由层收得好好的、界面也能填，
       // 只有这里拼 payload 时把它丢了——于是 PUT 回 200、读出来永远是空。
       // 后果是「全机队钉版本」这一级完全失效：传一个包上去，所有没有逐台钉过的机器
@@ -1995,6 +2360,7 @@ export class Db {
             utility: s.utility,
             enabledModels: cur.enabledModels,
             priceMultiplier: cur.priceMultiplier,
+            connectorPricing: cur.connectorPricing,
           })
           lifted.settings = true
           break

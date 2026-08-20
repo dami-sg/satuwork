@@ -74,10 +74,21 @@ export function headerOf(req: Req, name: string): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
 
-export function inviteLinkOf(req: Req, token: string): string {
+/**
+ * 这个 Gateway 对外的地址。
+ *
+ * 从请求头推，不从配置里读——同一份部署可能同时挂在内网 IP 和公网域名上，写死一个
+ * 就会有一半的链接打不开。**回调地址也走这条**：连接器的 OAuth 回调必须落在用户
+ * 刚才所在的那个域名上，否则浏览器带回来的是另一个源。
+ */
+export function originOf(req: Req): string {
   const host = headerOf(req, 'x-forwarded-host') || headerOf(req, 'host') || '127.0.0.1:3080'
   const proto = headerOf(req, 'x-forwarded-proto') || 'http'
-  return `${proto}://${host}/join/${token}`
+  return `${proto}://${host}`
+}
+
+export function inviteLinkOf(req: Req, token: string): string {
+  return `${originOf(req)}/join/${token}`
 }
 
 export async function inviteeOf(db: Db, token: string) {
