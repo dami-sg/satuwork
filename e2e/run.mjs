@@ -35,6 +35,7 @@ import { runCustomProvider } from './custom-provider.mjs'
 import { runStats } from './stats.mjs'
 import { runMigrate } from './migrate.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
+import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
 import { PG_URL, requirePg } from './pg.mjs'
@@ -336,28 +337,25 @@ async function runGateway() {
     memberTok = login.json.token
   })
 
-  await test('管理员 CRUD 公司 bot/skill；目录可见；成员不能写', async () => {
-    const created = await req(base, 'POST', `/orgs/${orgId}/bots`, {
+  await test('自己建 Bot / 管理员 CRUD 公司 skill；目录可见；成员不能写 skill', async () => {
+    // Bot 现在是**每个人自己的**：管理员也走这条，公司那一层只剩一份模版。
+    const created = await req(base, 'POST', '/runtime/bots', {
       token,
       body: { name: '公司助手' },
     })
     assert(created.status === 201, `bot ${created.status} ${created.text}`)
-    assert(created.json.bot.origin === 'company', 'company bot')
+    assert(created.json.bot.scope === 'user', 'user bot')
     botId = created.json.bot.id
 
-    const patched = await req(base, 'PATCH', `/orgs/${orgId}/bots/${botId}`, {
+    const patched = await req(base, 'PATCH', `/runtime/bots/${botId}`, {
       token,
       body: { name: '公司助手改' },
     })
     assert(patched.status === 200, `patch bot ${patched.status}`)
     assert(patched.json.bot.name === '公司助手改', 'renamed')
 
-    const got = await req(base, 'GET', `/orgs/${orgId}/bots/${botId}`, { token })
+    const got = await req(base, 'GET', `/runtime/bots/${botId}`, { token })
     assert(got.status === 200 && got.json.bot.name === '公司助手改', 'get bot')
-
-    const cat = await req(base, 'GET', '/catalog/bots', { token })
-    assert(cat.status === 200, `catalog ${cat.status}`)
-    assert(cat.json.items.some((i) => i.id === botId && i.name === '公司助手改'), 'catalog 看见公司 bot')
 
     const skill = await req(base, 'POST', `/orgs/${orgId}/skills`, {
       token,
@@ -375,23 +373,26 @@ async function runGateway() {
     const skills = await req(base, 'GET', '/catalog/skills', { token })
     assert(skills.json.items.some((i) => i.id === skillId), 'catalog 看见 skill')
 
-    const denyBot = await req(base, 'POST', `/orgs/${orgId}/bots`, {
+    // 员工建自己的 Bot 是**允许**的；不许的是碰公司这一层的东西。
+    const ownBot = await req(base, 'POST', '/runtime/bots', {
       token: memberTok,
-      body: { name: '不该成功' },
+      body: { name: '员工自己的' },
     })
-    assert(denyBot.status === 403, `member bot ${denyBot.status}`)
+    assert(ownBot.status === 201, `member bot ${ownBot.status} ${ownBot.text}`)
     const denySkill = await req(base, 'POST', `/orgs/${orgId}/skills`, {
       token: memberTok,
       body: { name: '不该成功' },
     })
     assert(denySkill.status === 403, `member skill ${denySkill.status}`)
-    const denyPatch = await req(base, 'PATCH', `/orgs/${orgId}/bots/${botId}`, {
+    // 但改不了别人那一个：这条是「只有主人看得见」的另一面。
+    const denyPatch = await req(base, 'PATCH', `/runtime/bots/${botId}`, {
       token: memberTok,
       body: { name: '不该成功' },
     })
-    assert(denyPatch.status === 403, `member patch ${denyPatch.status}`)
+    assert(denyPatch.status === 404, `member patch ${denyPatch.status}`)
+    await req(base, 'DELETE', `/runtime/bots/${ownBot.json.bot.id}`, { token: memberTok })
 
-    const del = await req(base, 'DELETE', `/orgs/${orgId}/bots/${botId}`, { token })
+    const del = await req(base, 'DELETE', `/runtime/bots/${botId}`, { token })
     assert(del.status === 200 && del.json.deleted === true, 'delete bot')
     const delS = await req(base, 'DELETE', `/orgs/${orgId}/skills/${skillId}`, { token })
     assert(delS.status === 200 && delS.json.deleted === true, 'delete skill')
@@ -1916,7 +1917,7 @@ async function runGateway() {
     assert(neu.json.account.id === inviteAdminId, 'same account')
   })
 
-  await test('公司 Bot：空列表、创建、改、选项、权限、删除、SPA', async () => {
+  await test('我的 Bot：创建、改、只进自己的名册、删除、SPA', async () => {
     const login = await req(base, 'POST', '/auth/login', {
       body: { email: 'boss@invite.test', password: 'new-horse-10' },
     })
@@ -1927,12 +1928,12 @@ async function runGateway() {
     assert(empty.status === 200, `list ${empty.status} ${empty.text}`)
     assert(Array.isArray(empty.json.bots) && empty.json.bots.length === 0, 'starts empty')
 
-    const created = await req(base, 'POST', `/orgs/${inviteOrg}/bots`, {
+    const created = await req(base, 'POST', '/runtime/bots', {
       token: adminTok,
       body: { name: '客服助手', description: '客服' },
     })
     assert(created.status === 201, `create ${created.status} ${created.text}`)
-    assert(created.json.bot.origin === 'company', 'origin')
+    assert(created.json.bot.scope === 'user', 'scope')
     assert(created.json.bot.enabled === true, 'enabled')
     assert(created.json.bot.name === '客服助手', 'name')
     assert(created.json.bot.description === '客服', 'description')
@@ -1940,33 +1941,24 @@ async function runGateway() {
     assert(typeof created.json.bot.model === 'string' && created.json.bot.model, 'model')
     const id = created.json.bot.id
 
+    // 自建的**不进**公司管理目录：那一页列的是全局项和停用掉的老公司 Bot。
     const list = await req(base, 'GET', `/orgs/${inviteOrg}/bots`, { token: adminTok })
-    assert(list.json.bots.some((b) => b.id === id && b.name === '客服助手'), 'list contains')
+    assert(!list.json.bots.some((b) => b.id === id), '自建 Bot 漏进了管理目录')
+    const mine = await req(base, 'GET', '/runtime/bots', { token: adminTok })
+    assert(mine.json.bots.some((b) => b.id === id && b.name === '客服助手'), '自己的名册里没有')
+    assert(mine.json.quota && mine.json.quota.max >= 1, `没给配额 ${mine.text}`)
 
-    const patched = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${id}`, {
+    const patched = await req(base, 'PATCH', `/runtime/bots/${id}`, {
       token: adminTok,
       // 头像改版后键换了一套。老键仍然收，映射到新的那一个存下来。
-      body: { prompt: '你是客服。', enabled: false, icon: 'chat' },
+      body: { greeting: '你好，我是客服。', enabled: false, icon: 'chat' },
     })
     assert(patched.status === 200, `patch ${patched.status} ${patched.text}`)
-    assert(patched.json.bot.prompt === '你是客服。', 'prompt')
+    assert(patched.json.bot.greeting === '你好，我是客服。', 'greeting')
     assert(patched.json.bot.enabled === false, 'enabled false')
     assert(patched.json.bot.icon === 'c-chat', `icon ${patched.json.bot.icon}`)
 
-    const opts = await req(base, 'GET', `/orgs/${inviteOrg}/bots/options`, { token: adminTok })
-    assert(opts.status === 200, `options ${opts.status} ${opts.text}`)
-    assert(Array.isArray(opts.json.groups), 'groups array')
-    assert(Array.isArray(opts.json.skills), 'skills')
-    assert(Array.isArray(opts.json.mcps), 'mcps')
-    assert(Array.isArray(opts.json.kbs) && opts.json.kbs.length === 0, 'kbs empty')
-
-    const deny = await req(base, 'POST', `/orgs/${inviteOrg}/bots`, {
-      token: invitedTok,
-      body: { name: '不该成功' },
-    })
-    assert(deny.status === 403, `member post ${deny.status}`)
-
-    const emptyName = await req(base, 'POST', `/orgs/${inviteOrg}/bots`, {
+    const emptyName = await req(base, 'POST', '/runtime/bots', {
       token: adminTok,
       body: { name: '   ' },
     })
@@ -1980,33 +1972,31 @@ async function runGateway() {
     assert(spaOne.status === 200, `spa one ${spaOne.status}`)
     assert(String(spaOne.text).includes('<!doctype html>') || String(spaOne.text).includes('Satuwork'), 'spa detail html')
 
-    const del = await req(base, 'DELETE', `/orgs/${inviteOrg}/bots/${id}`, { token: adminTok })
+    const del = await req(base, 'DELETE', `/runtime/bots/${id}`, { token: adminTok })
     assert(del.status === 200 && del.json.deleted === true && del.json.id === id, 'delete')
-    const gone = await req(base, 'GET', `/orgs/${inviteOrg}/bots/${id}`, { token: adminTok })
+    const gone = await req(base, 'GET', `/runtime/bots/${id}`, { token: adminTok })
     assert(gone.status === 404, `gone ${gone.status}`)
-    assert(String(gone.json.error).includes('没有这个助理'), '404 文案')
-    const after = await req(base, 'GET', `/orgs/${inviteOrg}/bots`, { token: adminTok })
+    const after = await req(base, 'GET', '/runtime/bots', { token: adminTok })
     assert(!after.json.bots.some((b) => b.id === id), 'list gone')
   })
 
-  await test('行为边界与记忆：存得下、读得回、越界的收口', async () => {
+  await test('模版的行为边界与记忆：存得下、读得回、越界的收口，自建 Bot 跟着走', async () => {
     const login = await req(base, 'POST', '/auth/login', {
       body: { email: 'boss@invite.test', password: 'new-horse-10' },
     })
     const tok = login.json.token
 
-    const made = await req(base, 'POST', `/orgs/${inviteOrg}/bots`, { token: tok, body: { name: '记忆助手' } })
-    assert(made.status === 201, `create ${made.status} ${made.text}`)
-    const bot = made.json.bot
-    // 新建就带全套默认，不是 undefined——前端照着画，缺了就得各自兜底。
-    assert(bot.guards && bot.guards['high-risk'] === true && bot.guards.pii === true, `默认守卫 ${JSON.stringify(bot.guards)}`)
-    assert(bot.memory && bot.memory.on === true && bot.memory.scope === '所属分组', `默认记忆 ${JSON.stringify(bot.memory)}`)
-    assert(bot.memory.cap === 20 && bot.memory.ttl === '90 天', `默认上限/时长 ${JSON.stringify(bot.memory)}`)
+    const fresh = await req(base, 'GET', `/orgs/${inviteOrg}/bot-template`, { token: tok })
+    assert(fresh.status === 200, `模版 ${fresh.status} ${fresh.text}`)
+    const tpl = fresh.json.template
+    // 新公司就带全套默认，不是 undefined——前端照着画，缺了就得各自兜底。
+    assert(tpl.guards && tpl.guards['high-risk'] === true && tpl.guards.pii === true, `默认守卫 ${JSON.stringify(tpl.guards)}`)
+    assert(tpl.memory && tpl.memory.on === true && tpl.memory.scope === '所属分组', `默认记忆 ${JSON.stringify(tpl.memory)}`)
+    assert(tpl.memory.cap === 20 && tpl.memory.ttl === '90 天', `默认上限/时长 ${JSON.stringify(tpl.memory)}`)
 
-    const saved = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${bot.id}`, {
+    const saved = await req(base, 'PUT', `/orgs/${inviteOrg}/bot-template`, {
       token: tok,
       body: {
-        greeting: '你好，我是客服',
         escalate: '连续 3 次说不清就转人工',
         // 只传改动的那一个开关，另外两个不该被带回默认。
         guards: { pii: false },
@@ -2014,23 +2004,29 @@ async function runGateway() {
         memory: { scope: '全公司', kinds: ['流程', '瞎写的'], ttl: '永久保留', cap: 999, confirm: false },
       },
     })
-    assert(saved.status === 200, `patch ${saved.status} ${saved.text}`)
-    const g = saved.json.bot.guards
+    assert(saved.status === 200, `存 ${saved.status} ${saved.text}`)
+    assert(saved.json.template.version === tpl.version + 1, `版本号没加一：${saved.json.template.version}`)
+    const g = saved.json.template.guards
     assert(g.pii === false && g['high-risk'] === true && g['no-external'] === true, `守卫合并 ${JSON.stringify(g)}`)
-    const m = saved.json.bot.memory
+    const m = saved.json.template.memory
     assert(m.scope === '全公司' && m.ttl === '永久保留', `记忆 ${JSON.stringify(m)}`)
     assert(m.kinds.length === 1 && m.kinds[0] === '流程', `认不出的类型没丢 ${JSON.stringify(m.kinds)}`)
     assert(m.cap === 50, `注入上限没收口：${m.cap}`)
     assert(m.confirm === false && m.pii === true, `没传的那几项被带回默认了 ${JSON.stringify(m)}`)
 
     // 真落库了才算数：回执对、重新拉一次也对。
-    const back = await req(base, 'GET', `/orgs/${inviteOrg}/bots/${bot.id}`, { token: tok })
-    assert(back.json.bot.greeting === '你好，我是客服', `开场问候 ${back.json.bot.greeting}`)
-    assert(back.json.bot.escalate.includes('转人工'), `升级条件 ${back.json.bot.escalate}`)
-    assert(back.json.bot.guards.pii === false, '守卫没落库')
-    assert(back.json.bot.memory.cap === 50 && back.json.bot.memory.scope === '全公司', '记忆没落库')
+    const back = await req(base, 'GET', `/orgs/${inviteOrg}/bot-template`, { token: tok })
+    assert(back.json.template.escalate.includes('转人工'), `升级条件 ${back.json.template.escalate}`)
+    assert(back.json.template.guards.pii === false, '守卫没落库')
+    assert(back.json.template.memory.cap === 50 && back.json.template.memory.scope === '全公司', '记忆没落库')
 
-    await req(base, 'DELETE', `/orgs/${inviteOrg}/bots/${bot.id}`, { token: tok })
+    // 自建的 Bot 不存自己的一份——读出来就是模版这一份。
+    const made = await req(base, 'POST', '/runtime/bots', { token: tok, body: { name: '记忆助手' } })
+    assert(made.status === 201, `建 ${made.status} ${made.text}`)
+    assert(made.json.bot.guards.pii === false, `没继承守卫 ${JSON.stringify(made.json.bot.guards)}`)
+    assert(made.json.bot.memory.cap === 50, `没继承记忆 ${JSON.stringify(made.json.bot.memory)}`)
+    assert(made.json.bot.escalate.includes('转人工'), '没继承升级条件')
+    await req(base, 'DELETE', `/runtime/bots/${made.json.bot.id}`, { token: tok })
   })
 
   await test('Bot 用平台指定的模型：自己挑不了，平台换了就跟着换', async () => {
@@ -2045,7 +2041,7 @@ async function runGateway() {
       token: ownerTok,
       body: { daily: { provider: 'e2e-fake', model: 'pinned-one' } },
     })
-    const made = await req(base, 'POST', `/orgs/${inviteOrg}/bots`, {
+    const made = await req(base, 'POST', '/runtime/bots', {
       token: tok,
       // 建的时候就想指一个别的，不能得逞。
       body: { name: '挑模型的', provider: 'openai', model: 'gpt-9-ultra' },
@@ -2055,7 +2051,7 @@ async function runGateway() {
     assert(made.json.bot.provider === 'e2e-fake', `建出来的供应商是 ${made.json.bot.provider}`)
     const botId = made.json.bot.id
 
-    const patched = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${botId}`, {
+    const patched = await req(base, 'PATCH', `/runtime/bots/${botId}`, {
       token: tok,
       body: { provider: 'openai', model: 'gpt-9-ultra' },
     })
@@ -2066,12 +2062,12 @@ async function runGateway() {
       token: ownerTok,
       body: { daily: { provider: 'e2e-fake', model: 'pinned-two' } },
     })
-    const back = await req(base, 'GET', `/orgs/${inviteOrg}/bots/${botId}`, { token: tok })
+    const back = await req(base, 'GET', `/runtime/bots/${botId}`, { token: tok })
     assert(back.json.bot.model === 'pinned-two', `平台换了之后还是 ${back.json.bot.model}`)
-    const listed = (await req(base, 'GET', `/orgs/${inviteOrg}/bots`, { token: tok })).json.bots.find((b) => b.id === botId)
+    const listed = (await req(base, 'GET', '/runtime/bots', { token: tok })).json.bots.find((b) => b.id === botId)
     assert(listed.model === 'pinned-two', `列表里还是 ${listed.model}`)
 
-    await req(base, 'DELETE', `/orgs/${inviteOrg}/bots/${botId}`, { token: tok })
+    await req(base, 'DELETE', `/runtime/bots/${botId}`, { token: tok })
     await req(base, 'PUT', '/platform/settings', { token: ownerTok, body: { daily: before.daily, utility: before.utility } })
   })
 
@@ -2222,7 +2218,7 @@ async function runGateway() {
     assert(String(goneM.json.error).includes('没有这个 MCP 服务器'), '404 mcp 文案')
   })
 
-  await test('公司 Bot 持久化 skills/mcps ids；未知 id 忽略；成员 PATCH 403', async () => {
+  await test('模版持久化 skills/mcps ids；未知 id 忽略；成员改不动', async () => {
     const login = await req(base, 'POST', '/auth/login', {
       body: { email: 'boss@invite.test', password: 'new-horse-10' },
     })
@@ -2257,18 +2253,22 @@ async function runGateway() {
       assert(!item.definition || item.definition.token == null, 'definition.token')
     }
 
-    const created = await req(base, 'POST', `/orgs/${inviteOrg}/bots`, {
+    // 挂载在**模版**上，不在某一个 Bot 上：认识的收下，不认识的丢掉。
+    const created = await req(base, 'PUT', `/orgs/${inviteOrg}/bot-template`, {
       token: adminTok,
-      body: { name: '带挂载', skills: [skillId, 'no-such'], mcps: [mcpId, 'nope'] },
+      body: { skills: [skillId, 'no-such'], mcps: [mcpId, 'nope'] },
     })
-    assert(created.status === 201, `create ${created.status} ${created.text}`)
-    assert(JSON.stringify(created.json.bot.skills) === JSON.stringify([skillId]), `skills ${JSON.stringify(created.json.bot.skills)}`)
-    assert(JSON.stringify(created.json.bot.mcps) === JSON.stringify([mcpId]), `mcps ${JSON.stringify(created.json.bot.mcps)}`)
-    assert(created.json.bot.skillCount === 1, 'skillCount')
-    assert(created.json.bot.mcpCount === 1, 'mcpCount')
-    const id = created.json.bot.id
+    assert(created.status === 200, `create ${created.status} ${created.text}`)
+    assert(JSON.stringify(created.json.template.skills) === JSON.stringify([skillId]), `skills ${JSON.stringify(created.json.template.skills)}`)
+    assert(JSON.stringify(created.json.template.mcps) === JSON.stringify([mcpId]), `mcps ${JSON.stringify(created.json.template.mcps)}`)
 
-    const got = await req(base, 'GET', `/orgs/${inviteOrg}/bots/${id}`, { token: adminTok })
+    const bot = await req(base, 'POST', '/runtime/bots', { token: adminTok, body: { name: '带挂载' } })
+    assert(bot.status === 201, `建 ${bot.status} ${bot.text}`)
+    assert(bot.json.bot.skillCount === 1, 'skillCount')
+    assert(bot.json.bot.mcpCount === 1, 'mcpCount')
+    const id = bot.json.bot.id
+
+    const got = await req(base, 'GET', `/runtime/bots/${id}`, { token: adminTok })
     assert(got.status === 200, `get ${got.status}`)
     assert(got.json.bot.skills[0] === skillId && got.json.bot.mcps[0] === mcpId, 'get ids')
 
@@ -2290,25 +2290,28 @@ async function runGateway() {
     const rtKey = await req(base, 'GET', '/runtime/catalog', { token: platAcc.json.apiKey })
     assert(rtKey.status === 401, `runtime 不该收 sk_sw_ ${rtKey.status}`)
 
-    const patched = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${id}`, {
+    const patched = await req(base, 'PUT', `/orgs/${inviteOrg}/bot-template`, {
       token: adminTok,
       body: { skills: [], mcps: [mcpId] },
     })
     assert(patched.status === 200, `patch ${patched.status} ${patched.text}`)
-    assert(Array.isArray(patched.json.bot.skills) && patched.json.bot.skills.length === 0, 'cleared skills')
-    assert(patched.json.bot.skillCount === 0, 'skillCount 0')
-    assert(patched.json.bot.mcpCount === 1, 'mcpCount stays')
+    assert(Array.isArray(patched.json.template.skills) && patched.json.template.skills.length === 0, 'cleared skills')
+    // 已经建好的那个 Bot 跟着变，不用碰它。
+    const after = await req(base, 'GET', `/runtime/bots/${id}`, { token: adminTok })
+    assert(after.json.bot.skillCount === 0, `skillCount 0，实际 ${after.json.bot.skillCount}`)
+    assert(after.json.bot.mcpCount === 1, 'mcpCount stays')
 
-    const deny = await req(base, 'PATCH', `/orgs/${inviteOrg}/bots/${id}`, {
+    const deny = await req(base, 'PUT', `/orgs/${inviteOrg}/bot-template`, {
       token: invitedTok,
       body: { skills: [skillId] },
     })
     assert(deny.status === 403, `member patch ${deny.status}`)
 
-    const opts = await req(base, 'GET', `/orgs/${inviteOrg}/bots/options`, { token: adminTok })
+    const opts = await req(base, 'GET', `/orgs/${inviteOrg}/bot-template`, { token: adminTok })
     assert(opts.status === 200, `options ${opts.status}`)
-    assert(opts.json.skills.some((s) => s.id === skillId && s.name === '挂载技能'), 'options skills')
-    assert(opts.json.mcps.some((s) => s.id === mcpId && s.name === '挂载mcp'), 'options mcps')
+    assert(opts.json.options.skills.some((s) => s.id === skillId && s.name === '挂载技能'), 'options skills')
+    assert(opts.json.options.mcps.some((s) => s.id === mcpId && s.name === '挂载mcp'), 'options mcps')
+    await req(base, 'DELETE', `/runtime/bots/${id}`, { token: adminTok })
   })
 
   child.kill('SIGTERM')
@@ -2779,6 +2782,7 @@ async function main() {
     await runStats({ gwRoot, test, req, start, waitHttp, assert, log })
     await runMigrate({ gwRoot, test, start, waitHttp, assert, log })
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log })
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runManagerConfirm({ root, test, assert, log })
     await runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log })

@@ -136,21 +136,27 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
         assert(!item.definition || item.definition.token == null, 'catalog/mcp 泄漏 token 字段')
       }
 
+      /**
+       * 人设和能力挂在**公司模版**上，Bot 由这个人自己建。
+       *
+       * 下面整条链路（席位实例拉目录 → 提示词进上下文 → Skill/MCP 进工具表）验的就是
+       * 「员工建的 Bot 长在公司模版上」这件事真的走通了，不是只在接口层面对得上。
+       */
       const prompt = '你是 Runtime 探针助理。只回答 ping。PROMPT-OK-RUNTIME'
-      const created = await req(gwBase, 'POST', `/orgs/${orgId}/bots`, {
+      const tpl = await req(gwBase, 'PUT', `/orgs/${orgId}/bot-template`, {
         token: adminTok,
-        body: {
-          name: 'Runtime 探针',
-          description: 'e2e runtime path',
-          prompt,
-          enabled: true,
-          skills: [skillId, 'no-such-skill'],
-          mcps: [mcpId, 'no-such-mcp'],
-        },
+        body: { prompt, skills: [skillId, 'no-such-skill'], mcps: [mcpId, 'no-such-mcp'] },
+      })
+      assert(tpl.status === 200, `模版 ${tpl.status} ${tpl.text}`)
+      assert(tpl.json.template.skills.length === 1 && tpl.json.template.skills[0] === skillId, 'skills ids')
+      assert(tpl.json.template.mcps.length === 1 && tpl.json.template.mcps[0] === mcpId, 'mcps ids')
+
+      const created = await req(gwBase, 'POST', '/runtime/bots', {
+        token: adminTok,
+        body: { name: 'Runtime 探针', description: 'e2e runtime path' },
       })
       assert(created.status === 201, `bot ${created.status} ${created.text}`)
-      assert(created.json.bot.skills.length === 1 && created.json.bot.skills[0] === skillId, 'skills ids')
-      assert(created.json.bot.mcps.length === 1 && created.json.bot.mcps[0] === mcpId, 'mcps ids')
+      assert(created.json.bot.prompt === prompt, `没继承模版的人设：${created.json.bot.prompt}`)
       assert(created.json.bot.skillCount === 1 && created.json.bot.mcpCount === 1, 'counts')
       const remoteBotId = created.json.bot.id
 
@@ -226,6 +232,8 @@ await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2
           GATEWAY_URL: gwBase,
           GATEWAY_TOKEN: seatAccess,
           GATEWAY_API_KEY: seatApiKey,
+          // 生产上是一分钟一探。这里调快，好在几秒内看到模版改动落到实例上。
+          SATUWORK_CATALOG_POLL_MS: '1000',
           ...(stubLlm ? { E2E_STUB_LLM: '1' } : {}),
         },
       })
@@ -277,6 +285,35 @@ await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2
       assert(pinned.origin === 'company', `origin ${pinned.origin}`)
       assert(pinned.remoteId === remoteBotId, `remoteId ${pinned.remoteId}`)
       assert(pinned.prompt === prompt, 'prompt mismatch')
+
+      /**
+       * **模版一改，跑着的席位自己跟上。**
+       *
+       * 这是「公司改一次口径，所有人的 Bot 一起变」的落地点。没有这一段，改模版只
+       * 是改了 Gateway 上的一行 JSON——机器上那个进程还端着启动时拉的那一份，要等到
+       * 下一次重新部署才知道，而重新部署会断掉正在进行的对话。
+       */
+      const nextPrompt = '你是 Runtime 探针助理 v2。PROMPT-OK-ROLLED'
+      const rolled = await req(gwBase, 'PUT', `/orgs/${orgId}/bot-template`, {
+        token: adminTok,
+        body: { prompt: nextPrompt },
+      })
+      assert(rolled.status === 200, `改模版 ${rolled.status} ${rolled.text}`)
+      const wantVersion = rolled.json.template.version
+
+      const rollDeadline = Date.now() + 20000
+      let rolledPrompt = ''
+      let seenVersion = 0
+      while (Date.now() < rollDeadline) {
+        const st = await req(botBase, 'GET', '/api/runtime/status', { token: seatAccess })
+        seenVersion = st.json?.templateVersion || 0
+        const cur = await req(botBase, 'GET', '/api/bots', { token: seatAccess })
+        rolledPrompt = (cur.json?.bots || []).find((b) => b.id === remoteBotId)?.prompt || ''
+        if (seenVersion === wantVersion && rolledPrompt === nextPrompt) break
+        await sleep(300)
+      }
+      assert(seenVersion === wantVersion, `实例还停在模版 v${seenVersion}，Gateway 已经是 v${wantVersion}`)
+      assert(rolledPrompt === nextPrompt, `名册里的人设没跟着换：${rolledPrompt}`)
 
       const sess = await req(botBase, 'GET', `/api/bots/${pinned.id}/session`, { token: seatAccess })
       assert(sess.status === 200, `session ${sess.status} ${sess.text}`)

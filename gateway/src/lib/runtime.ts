@@ -55,7 +55,7 @@ export async function visibleBotOf(db: Db, account: Account, botId: string) {
   requireSeat(account)
   const id = (botId || '').trim()
   if (!id) throw new HttpError(400, 'botId 不能为空')
-  const hit = (await db.visibleCatalog('bot', account.companyId)).find((b) => b.id === id)
+  const hit = (await db.botsFor(account.companyId, account.id)).find((b) => b.id === id)
   if (!hit) throw new HttpError(404, '没有这个 Bot')
   return hit
 }

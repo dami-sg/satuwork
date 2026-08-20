@@ -75,7 +75,9 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
     // 名字一次性查齐，不要每行两次。
     const names = {
       accounts: new Map((await db.accountsOf(company.id)).map((a) => [a.id, a])),
-      bots: new Map((await db.visibleCatalog('bot', company.id)).map((b) => [b.id, b])),
+      // 管理员看的是全公司的会话，所以这里要**不分主人**的那一份：员工自己建的 Bot
+      // 也得能按 id 显示出名字，否则审计页上只剩一串 uuid。
+      bots: new Map((await db.companyBots(company.id)).map((b) => [b.id, b])),
     }
     json(res, 200, {
       sessions: await Promise.all(page.map((row) => publicSessionIndex(db, row, names))),

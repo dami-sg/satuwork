@@ -24,6 +24,17 @@ const GW_PORT = 18680
  * 拿它来造一个「迁移机制之前的库」——那正是生产库现在的样子。写死一份副本的话，
  * 这条用例过几个月就会在测一个和线上无关的形状。
  */
+/**
+ * 代码里一共有几条迁移。**从源码数出来，不写死**——写死的话每加一条迁移都要回来改
+ * 这个文件，改着改着就会有人图省事把断言删掉，而这几条断言正是「迁移真的只跑一遍」
+ * 的唯一证据。
+ */
+function migrationIds(gwRoot) {
+  const src = readFileSync(join(gwRoot, 'src/db/migrations/index.ts'), 'utf8')
+  const body = src.slice(src.indexOf('export const MIGRATIONS'))
+  return [...body.matchAll(/\{\s*id:\s*'([^']+)'/g)].map((m) => m[1])
+}
+
 function initialSql(gwRoot) {
   const src = readFileSync(join(gwRoot, 'src/db/migrations/0001-initial.ts'), 'utf8')
   // 从 `export const SQL = ` 之后那个反引号开始数——文件抬头的注释里也有反引号。
@@ -114,20 +125,22 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
 
   let gw
   try {
-    await test('空库：建全套并记上 0001', async () => {
+    const ALL = migrationIds(gwRoot)
+
+    await test('空库：建全套并按顺序记上每一条', async () => {
       await fresh()
       gw = boot('migrate-fresh')
       await waitHttp(`${base}/health`)
       const rows = await ledger()
-      assert(rows.length === 1, `应只有一条迁移，实际 ${rows.length}：${JSON.stringify(rows)}`)
-      assert(rows[0].id === '0001-initial', `编号 ${rows[0].id}`)
+      assert(rows.length === ALL.length, `应有 ${ALL.length} 条迁移，实际 ${rows.length}：${JSON.stringify(rows)}`)
+      assert(rows.map((r) => r.id).join(',') === ALL.join(','), `编号或顺序不对：${rows.map((r) => r.id)}`)
       assert(rows[0].checksum && rows[0].checksum.length === 16, `校验和形状不对：${rows[0].checksum}`)
       // 表真的建出来了，不是只记了一行账。
       const t = await client.query(
         `select count(*)::int as n from information_schema.tables where table_schema = '${SCHEMA}' and table_name = 'companies'`,
       )
       assert(t.rows[0].n === 1, 'companies 表没建出来')
-      assert(gw._out.includes('已应用 1 条迁移'), `启动日志没说跑了哪几条：\n${gw._out.slice(-400)}`)
+      assert(gw._out.includes(`已应用 ${ALL.length} 条迁移`), `启动日志没说跑了哪几条：\n${gw._out.slice(-400)}`)
       await stop(gw)
     })
 
@@ -135,7 +148,7 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       gw = boot('migrate-again')
       await waitHttp(`${base}/health`)
       const rows = await ledger()
-      assert(rows.length === 1, `迁移被重复应用了：${JSON.stringify(rows)}`)
+      assert(rows.length === ALL.length, `迁移被重复应用了：${JSON.stringify(rows)}`)
       assert(gw._out.includes('已是最新'), `没说「已是最新」：\n${gw._out.slice(-400)}`)
       await stop(gw)
     })
@@ -170,7 +183,8 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       gw = boot('migrate-legacy')
       await waitHttp(`${base}/health`)
       const rows = await ledger()
-      assert(rows.length === 1 && rows[0].id === '0001-initial', `没接上基线：${JSON.stringify(rows)}`)
+      // 0001 在存量库上是空转（它幂等），后面几条是真跑的——账本上一条都不能少。
+      assert(rows.map((r) => r.id).join(',') === ALL.join(','), `没接上基线：${JSON.stringify(rows)}`)
       const kept = await client.query('select name from companies where id = $1', ['co-legacy'])
       assert(kept.rows.length === 1 && kept.rows[0].name === '存量公司', '存量数据被弄丢了')
       const after = await client.query('select count(*)::int as n from information_schema.tables where table_schema = $1', [SCHEMA])
@@ -220,7 +234,7 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       // 太容易出现，而两个连接同时 create table 的报错很难看懂。
       const r = await runProbe(gwRoot, 'e2e-migrate-race.mjs')
       assert(r.exactlyOneApplied, `应该恰好一边跑了：${JSON.stringify(r.applied)}`)
-      assert(r.noDuplicate, `schema_migrations 有 ${r.ledgerRows} 行，应该只有 1 行`)
+      assert(r.noDuplicate, `schema_migrations 有 ${r.ledgerRows} 行，应该是 ${r.expectedRows} 行`)
       assert(r.tables > 10, `表没建全，只有 ${r.tables} 张`)
       // 锁没放开的话，下一个起来的进程会永远卡在 pg_advisory_lock 上——
       // 那是最难查的一种「起不来」：没有报错，就是不动。

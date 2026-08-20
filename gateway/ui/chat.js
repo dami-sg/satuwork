@@ -2212,6 +2212,8 @@ function chatHeadInline() {
   const menu =
     state.menu === 'chat'
       ? `<div class="satu-menu" data-flip="${String(Boolean(state.menuFlip))}">
+          ${/* 自己建的那种才给设置入口：别人的、全局的，这一页上没有可改的东西。 */ ''}
+          ${isMyBot(bot) ? `<button type="button" class="satu-menuitem" data-act="go" data-href="/bots/${esc(bot.id)}">${t('Bot 设置')}</button>` : ''}
           <button type="button" class="satu-menuitem" data-act="chat-copy-all">${t('复制全文')}</button>
           <button type="button" class="satu-menuitem" data-act="chat-export">${t('导出 Markdown')}</button>
         </div>`
@@ -2238,7 +2240,7 @@ function chatPage() {
   const banner = runtimeDownBanner()
   if (!selected) {
     return `<div class="gw-chat"><section class="gw-chat-main">${banner}
-      <div class="gw-chat-empty-main"><p>${bots.length ? t('从左边选一个 Bot 开始对话。') : t('还没有 Bot。公司后台配置并上线后会出现在这里。')}</p></div>
+      <div class="gw-chat-empty-main"><p>${bots.length ? t('从左边选一个 Bot 开始对话。') : t('还没有 Bot。点左下角「新建 Bot」建一个，它会用公司的 Bot 模版当底座。', 'No bots yet. Use “New bot” at the bottom left — it will run on your company template.')}</p></div>
     </section></div>`
   }
   // 席位没上线：正文换成一块「去部署」，连输入框一起不渲染（见 chatDeployPrompt）。

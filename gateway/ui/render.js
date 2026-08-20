@@ -140,6 +140,9 @@ function appView() {
             空一大片——沉底的理由是「给名单让位」，名单不在，理由也就不在了。 */ ''}
       <div style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
         ${roster ? `<div class="satu-botlist">${roster}</div>` : ''}
+        ${/* 「新建 Bot」跟着名单走：Bot 是自己建的，入口就该在自己那份名单底下，而不是
+              藏在某个设置页里。owner 没有席位也没有名册，那一侧不出现。 */ ''}
+        ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="new-bot">${svg(['M12 5v14', 'M5 12h14'], 15)} <span>${t('新建 Bot', 'New bot')}</span></button>`}
         ${
           mainNav || restNav
             ? `<div class="satu-navfoot">
@@ -174,6 +177,7 @@ function appView() {
       ${aside}
     </main>
     ${confirmModal()}
+    ${newBotModal()}
     ${logsModal()}
     ${previewModal()}
   </div>`

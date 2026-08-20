@@ -327,26 +327,84 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(ui.catalogBase() === '', `member 拿到 ${ui.catalogBase()}`)
     })
 
-    await test('全局项在公司侧标出来且只读；owner 自己那份不算只读', async () => {
+    await test('/bots 两副面孔：owner 是全局名录，公司管理员是那份模版', async () => {
       const ui = await boot(ownerToken)
       ui.state.path = '/bots'
       ui.state.bots = [
-        { id: 'g1', name: '全局助理', origin: 'global', enabled: true },
-        { id: 'c1', name: '本公司助理', origin: 'company', enabled: true },
+        { id: 'g1', name: '全局助理', origin: 'global', scope: 'global', enabled: true },
+        { id: 'c1', name: '老公司助理', origin: 'company', scope: 'company', enabled: false, legacy: true },
       ]
       // owner 管的就是全局那份，不该被标成只读。
       assert(ui.readOnlyItem(ui.state.bots[0]) === false, 'owner 被当成只读了')
       ui.render()
       assert(ui.html().includes('全局 Bot'), 'owner 侧标题不对')
+      assert(ui.html().includes('配置'), 'owner 侧的行不该是只读')
 
+      // 公司侧：这一页现在是模版。全局项和停用掉的老公司 Bot 列在底下，都只能看。
       ui.state.me = { account: { role: 'admin', email: 'a@x' }, company: { id: 'org-1' }, settings: ui.state.settings }
       assert(ui.readOnlyItem(ui.state.bots[0]) === true, '公司侧没把全局项当只读')
-      assert(ui.readOnlyItem(ui.state.bots[1]) === false, '把公司自己的项也当只读了')
+      assert(ui.readOnlyItem(ui.state.bots[1]) === true, '停用掉的老公司 Bot 该是只读')
+      assert(ui.readOnlyItem({ id: 'u1', scope: 'user', origin: 'company' }) === false, '自己建的 Bot 被当成只读了')
+      ui.state.template = { version: 3, prompt: '公司口径', escalate: '', guards: {}, memory: {}, skills: [], mcps: [] }
+      ui.state.templateDraft = {
+        prompt: '公司口径', escalate: '', skills: [], mcps: [], guards: [],
+        memoryOn: true, scope: '所属分组', kinds: [], ttl: '90 天', cap: 20, confirmOn: true, piiOn: true,
+      }
       ui.render()
       const html = ui.html()
-      assert(html.includes('全局'), '没标出「全局」')
-      assert(html.includes('查看'), '全局行没换成「查看」')
-      assert(html.includes('配置'), '公司自己的行不该变成只读')
+      assert(html.includes('Bot 模版'), '公司侧没画出模版页')
+      assert(html.includes('v3'), '没显示模版版本号')
+      assert(html.includes('公司口径'), '模版正文没画出来')
+      assert(html.includes('立即下发到全部席位'), '没有下发入口')
+      assert(html.includes('全局'), '底下那张表没标出「全局」')
+      assert(html.includes('已停用'), '没标出停用掉的老公司 Bot')
+      // 公司管理员这一页不该再有「新建 Bot」——Bot 由员工自己建。
+      assert(!html.includes('data-act="bot-create"'), '公司侧还留着建公司 Bot 的入口')
+    })
+
+    await test('只读地看别人维护的 Bot：页面上不留任何按了没反应的控件', async () => {
+      // 「看着能按、按了不生效」比少一个控件更糟：人以为改上了，刷新一下又回去了。
+      const ui = await boot(ownerToken)
+      ui.state.me = { account: { role: 'admin', email: 'a@x' }, company: { id: 'org-1' }, settings: ui.state.settings }
+      ui.state.path = '/bots/g1'
+      ui.state.bot = { id: 'g1', name: '全局助理', origin: 'global', scope: 'global', enabled: true }
+      ui.state.botDraft = {
+        name: '全局助理', description: '', prompt: '平台口径', greeting: '', escalate: '', icon: 'g-core',
+        model: 'm', enabled: true, skills: [], mcps: [], groups: [], kbs: [],
+        guards: [{ id: 'pii', title: '拦截个人敏感信息', desc: '', on: true }],
+        memoryOn: true, scope: '所属分组', kinds: ['偏好'], ttl: '90 天', cap: 20, confirmOn: true, piiOn: true,
+      }
+      ui.render()
+      const html = ui.html()
+      assert(html.includes('只读'), '保存键没标成只读')
+      // 记忆那块的「记录哪些内容」曾经漏了这一条：药丸照常带着 bot-pick，点了会改草稿。
+      assert(!html.includes('data-act="bot-pick"'), '只读页面上还留着可点的勾选药丸')
+      assert(!html.includes('data-act="bot-guard"'), '只读页面上还留着可点的行为边界开关')
+      assert(!html.includes('data-act="bot-scope"'), '只读页面上还留着可点的记忆范围')
+    })
+
+    await test('员工自己的 Bot：详情页只给身份和补充说明，底座只读', async () => {
+      const ui = await boot(ownerToken)
+      ui.state.me = { account: { role: 'member', email: 'm@x' }, company: { id: 'org-1' }, settings: ui.state.settings }
+      ui.state.path = '/bots/u1'
+      ui.state.bot = { id: 'u1', name: '回访助手', origin: 'company', scope: 'user', enabled: true, templateVersion: 3, extraPrompt: '带上客户名' }
+      ui.state.botDraft = {
+        name: '回访助手', description: '', prompt: '公司口径\n\n带上客户名', extraPrompt: '带上客户名',
+        greeting: '', icon: 'c-bot', model: 'm', enabled: true, skills: [], mcps: [], guards: [],
+        memoryOn: true, scope: '所属分组', kinds: [], ttl: '90 天', cap: 20, confirmOn: true, piiOn: true,
+      }
+      ui.state.template = { version: 3, prompt: '公司口径', escalate: '', guards: {}, memory: {}, skills: [], mcps: [] }
+      assert(ui.pathAllowed('/bots/u1'), '员工进不了自己 Bot 的详情页')
+      assert(!ui.pathAllowed('/bots'), '员工进得了管理员的模版页')
+      ui.render()
+      const html = ui.html()
+      assert(html.includes('这个 Bot 的补充说明'), '没有补充说明那一栏')
+      assert(html.includes('继承自公司模版'), '没说清楚底座从哪来')
+      assert(html.includes('v3'), '没显示继承的是哪一版')
+      // 底座那份提示词摆出来了，但不能是可编辑的。
+      const soul = html.indexOf('公司口径')
+      assert(soul > -1, '没把模版的人设摆出来')
+      assert(html.slice(0, soul).lastIndexOf('disabled') > html.slice(0, soul).lastIndexOf('<textarea'), '模版正文是可编辑的')
     })
 
     await test('二级页面的头是「上一级 / 这一条」，返回在最前面', async () => {
