@@ -16,12 +16,13 @@ import { createCompany } from './org.mjs'
 import { PG_URL } from './pg.mjs'
 import { el, fakeSse } from './ui-dom.mjs'
 import { readFileSync } from 'node:fs'
+import { freePort } from './ports.mjs'
 
 const APP = 'gateway/ui/app.js'
 
 export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-ui-gw'
-  const GW_PORT = 18680
+  const GW_PORT = await freePort()
   const gwBase = `http://127.0.0.1:${GW_PORT}`
   const appPath = join(root, APP)
 

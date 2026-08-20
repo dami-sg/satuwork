@@ -9,6 +9,7 @@ import { startMockMcp } from './mock-mcp.mjs'
 import { PG_URL } from './pg.mjs'
 import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
+import { freePorts } from './ports.mjs'
 
 const LIVE_GW_DB = '/workspace/satuwork/.data/gateway/gateway.db'
 
@@ -37,8 +38,7 @@ async function readLiveCreds() {
 export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-runtime-gw'
   const BOT_HOME = '/tmp/satuwork-e2e-runtime-bot'
-  const GW_PORT = 18180
-  const BOT_PORT = 18182
+  const [GW_PORT, BOT_PORT] = await freePorts(2)
   const MACHINE_TOK = 'e2e-runtime-machine'
   const PLATFORM_TOK = 'e2e-runtime-platform'
   const gwBase = `http://127.0.0.1:${GW_PORT}`

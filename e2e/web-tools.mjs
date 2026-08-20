@@ -14,6 +14,7 @@ import { rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { freePort } from './ports.mjs'
 
 /** SSRF 闸跑在 gateway/e2e-web-guard.mjs 里——那几个函数是纯的，起一整套服务没必要。 */
 function runGuardProbe(gwRoot) {
@@ -39,7 +40,7 @@ const SCHEMA = 'e2e_webtools'
 
 export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-webtools'
-  const GW_PORT = 18884
+  const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })
@@ -216,13 +217,41 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(rows[rows.length - 1].units === 1, `计费条数 ${rows[rows.length - 1].units}，应当只算那条真抓的`)
     })
 
-    await test('真文档走另一条路，照样只算一条', async () => {
+    await test('文档记在 document 名下，按它自己那档价算', async () => {
+      // PDF 是 Gateway 自己下的，提取后端一次都没被调用。记在 tavily 头上的话，
+      // 统计里「按后端」那张表就在撒谎——而那张表正是用来看钱花在哪家的。
+      const put = await req(base, 'PUT', '/platform/tools/web', {
+        token,
+        body: { pricing: { tavily: { search: 8, extract: 8 }, document: { search: 0, extract: 5 } } },
+      })
+      assert(put.status === 200, `定价 ${put.status} ${put.text}`)
+      const doc = put.json.backends.find((b) => b.id === 'document')
+      assert(doc && doc.selectable === false, 'document 不该是可选后端')
+
       const r = await req(base, 'POST', '/runtime/web/extract', { token: seatToken, body: { urls: ['https://a.test/real.pdf'] } })
       assert(r.json.ok === true, r.text)
-      const page = r.json.pages[0]
-      assert(page.document && page.document.base64, `没走文档那条路：${JSON.stringify(page).slice(0, 200)}`)
+      assert(r.json.pages[0].document?.base64, `没走文档那条路：${JSON.stringify(r.json.pages[0]).slice(0, 200)}`)
       const rows = await webCalls()
-      assert(rows[rows.length - 1].units === 1, `文档计费条数 ${rows[rows.length - 1].units}`)
+      const last = rows[rows.length - 1]
+      assert(last.backend === 'document', `记在了 ${last.backend} 头上`)
+      // 5 厘 × 1 条 × 1.2 = 6
+      assert(last.units === 1 && last.mils === 6, `文档那笔：${JSON.stringify(last)}`)
+    })
+
+    await test('一次调用里网页和文档各按各的价，分开落账', async () => {
+      const before = (await webCalls()).length
+      const r = await req(base, 'POST', '/runtime/web/extract', {
+        token: seatToken,
+        body: { urls: ['https://a.test/mixed-page', 'https://a.test/mixed.pdf'] },
+      })
+      assert(r.json.ok === true, r.text)
+      const rows = (await webCalls()).slice(before)
+      assert(rows.length === 2, `该落两笔（网页一笔、文档一笔），实际 ${rows.length}`)
+      const byBackend = Object.fromEntries(rows.map((x) => [x.backend, x]))
+      assert(byBackend.tavily?.units === 1, `网页那笔：${JSON.stringify(byBackend.tavily)}`)
+      assert(byBackend.document?.units === 1, `文档那笔：${JSON.stringify(byBackend.document)}`)
+      // 8 × 1.2 = 9.6 → 10；5 × 1.2 = 6
+      assert(byBackend.tavily.mils === 10 && byBackend.document.mils === 6, `金额：${JSON.stringify(rows)}`)
     })
 
     await test('参数越界当场说清楚，不发给后端', async () => {
@@ -243,7 +272,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       const rowsBefore = await webCalls()
       const put = await req(base, 'PUT', '/platform/tools/web', {
         token,
-        body: { pricing: { tavily: { search: 100, extract: 100 } } },
+        body: { pricing: { tavily: { search: 100, extract: 100 }, document: { search: 0, extract: 5 } } },
       })
       assert(put.status === 200, `改价 ${put.status}`)
       const rowsAfter = await webCalls()

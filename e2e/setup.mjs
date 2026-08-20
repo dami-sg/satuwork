@@ -7,10 +7,11 @@
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { freePort } from './ports.mjs'
 
 export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-setup-gw'
-  const GW_PORT = 18580
+  const GW_PORT = await freePort()
   const gwBase = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })
@@ -94,7 +95,7 @@ export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log
       // 请求必然都 409——断言过得去，但那条「谁先谁赢」的竞态一次都没跑到。这个测试
       // 以前就是这么空过的。
       const RACE_HOME = '/tmp/satuwork-e2e-setup-race'
-      const RACE_PORT = 18581
+      const RACE_PORT = await freePort()
       const raceBase = `http://127.0.0.1:${RACE_PORT}`
       rmSync(RACE_HOME, { recursive: true, force: true })
       const raceGw = start('setup-race-gw', ['--import', 'tsx', join(gwRoot, 'src/index.ts')], {

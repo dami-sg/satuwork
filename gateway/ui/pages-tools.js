@@ -15,6 +15,7 @@ const WEB_BACKEND_NAMES = {
   searxng: 'SearXNG',
   duckduckgo: 'DuckDuckGo',
   firecrawl: 'Firecrawl',
+  document: '文档直取（PDF / Word / Excel）',
 }
 
 const WEB_BACKEND_NOTES = {
@@ -22,6 +23,7 @@ const WEB_BACKEND_NOTES = {
   searxng: '自托管，查询词不出自己的网。只有搜索；实例的 settings.yml 里要开 json 输出。',
   duckduckgo: '无密钥、零配置的兜底。没有商务约定，会限流也可能封 IP，别当主力用。',
   firecrawl: '还没接入。',
+  document: 'PDF / Word / Excel 由 Gateway 自己下载，提取后端一次都不会被调用，所以单独一档价。填 0 就是不额外收费。',
 }
 
 function webCfg() {
@@ -47,7 +49,7 @@ function milsToUsd(mils) {
 }
 
 function webBackendOptions(selected, cap) {
-  const rows = webBackends().filter((b) => b[cap])
+  const rows = webBackends().filter((b) => b.selectable !== false && b[cap])
   const opts = rows
     .map((b) => `<option value="${esc(b.id)}" ${selected === b.id ? 'selected' : ''}>${esc(WEB_BACKEND_NAMES[b.id] || b.id)}</option>`)
     .join('')
@@ -102,7 +104,7 @@ function webPriceRows() {
         return `$${(unit * mult / 1000).toFixed(4)}`
       }
       return `<div class="satu-modelrow" style="grid-template-columns: 1fr 130px 130px 1fr;">
-        <span style="font-weight: 600; font-size: 14px;">${esc(WEB_BACKEND_NAMES[b.id] || b.id)}</span>
+        <span style="font-weight: 600; font-size: 14px;">${esc(WEB_BACKEND_NAMES[b.id] || b.label || b.id)}</span>
         ${cell('search', b.search)}
         ${cell('extract', b.extract)}
         <span style="font-size: 13px; color: var(--muted-foreground);">

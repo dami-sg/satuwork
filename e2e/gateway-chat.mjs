@@ -8,6 +8,7 @@ import { PG_URL } from './pg.mjs'
 import { createCompany } from './org.mjs'
 import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
+import { freePorts } from './ports.mjs'
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -69,8 +70,7 @@ async function readSse(url, { token, timeout = 8000, until } = {}) {
 export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHttp, assert, log, treeHas }) {
   const GW_HOME = '/tmp/satuwork-e2e-chat-gw'
   const BOT_HOME = '/tmp/satuwork-e2e-chat-bot'
-  const GW_PORT = 18280
-  const BOT_PORT = 18282
+  const [GW_PORT, BOT_PORT] = await freePorts(2)
   const MACHINE_TOK = 'e2e-chat-machine'
   const PLATFORM_TOK = 'e2e-chat-platform'
   const gwBase = `http://127.0.0.1:${GW_PORT}`

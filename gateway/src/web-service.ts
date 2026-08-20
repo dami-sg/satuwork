@@ -6,7 +6,7 @@
  * 相同（自检是 owner，另两条是席位票）。
  */
 import type { Account, Db, WebCallKind, WebToolsSettings } from './db.ts'
-import { emptyWebTools, parsePriceMultiplier } from './db.ts'
+import { WEB_DOCUMENT, emptyWebTools, parsePriceMultiplier } from './db.ts'
 import {
   WebToolError,
   applyFilters,
@@ -290,20 +290,22 @@ export async function runExtract(db: Db, account: Account, rawUrls: unknown): Pr
   // 一个 .pdf 结尾却返回 HTML 的地址会把计数器加两次，于是缓存命中数被算成负的，
   // 一条 URL 收两份钱，连同一次调用里真正命中缓存的那几条也一起收了。
   const done = await Promise.all(
-    urls.map(async (url): Promise<{ page: ExtractedPage; billable: boolean }> => {
+    urls.map(async (url): Promise<{ page: ExtractedPage; billable: string | null }> => {
       const key = `extract:${id}:${url}`
       const hit = cacheGet<ExtractedPage>(key)
       // 命中缓存这一次没打后端，也就没有这笔成本。
-      if (hit) return { page: hit, billable: false }
+      if (hit) return { page: hit, billable: null }
       try {
         // 看着像文档就自己取字节：提取后端对着一份 PDF 要么给空、要么给乱码。
         if (looksLikeDocument(url)) {
           const doc = await fetchDoc(url)
           if (doc) {
             // 文档不进缓存：base64 一份就有好几 MB，64 条能把进程撑爆。
+            // **记在 document 头上，不记在提取后端头上**：这一趟是我们自己下的文件，
+            // 提取后端一次都没被调用。记错了，统计里「按后端」那张表就在撒谎。
             return {
               page: { url, ok: true, title: docTitle(url), contentType: doc.contentType, document: doc },
-              billable: true,
+              billable: WEB_DOCUMENT,
             }
           }
           // 后缀骗人（.pdf 结尾其实是 HTML），落回正常那条路——这一趟只读了响应头，
@@ -319,20 +321,26 @@ export async function runExtract(db: Db, account: Account, rawUrls: unknown): Pr
           chars: got.markdown.length,
         }
         cachePut(key, page)
-        return { page, billable: true }
+        return { page, billable: id }
       } catch (e) {
         // 失败不进缓存：下一次多半是另一个结果，缓存一条 404 只会把它钉死 15 分钟。
         // 也不计费：没抓着的那条没花后端的钱。
         return {
           page: { url, ok: false, error: e instanceof WebToolError ? e.hint : (e as Error).message },
-          billable: false,
+          billable: null,
         }
       }
     }),
   )
   const pages = done.map((d) => d.page)
   const elapsedMs = Date.now() - started
-  const mils = await meter(db, account, 'extract', id, done.filter((d) => d.billable).length)
+  // 一次调用里网页和文档可能各占几条，两者单价不同，所以按各自的名义分开落账。
+  const byBackend = new Map<string, number>()
+  for (const d of done) {
+    if (d.billable) byBackend.set(d.billable, (byBackend.get(d.billable) ?? 0) + 1)
+  }
+  let mils = 0
+  for (const [name, units] of byBackend) mils += await meter(db, account, 'extract', name, units)
   return { backend: id, pages, elapsedMs, mils }
 }
 

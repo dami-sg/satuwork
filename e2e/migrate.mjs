@@ -13,10 +13,10 @@ import { readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { freePort } from './ports.mjs'
 
 const SCHEMA = 'e2e_migrate'
 const GW_HOME = '/tmp/satuwork-e2e-migrate'
-const GW_PORT = 18684
 
 /**
  * 0001 那段 SQL，直接从源码里读。
@@ -79,6 +79,7 @@ async function stop(child) {
 }
 
 export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log }) {
+  const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
   rmSync(GW_HOME, { recursive: true, force: true })
   log('\n# migrate')

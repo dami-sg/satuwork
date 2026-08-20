@@ -484,6 +484,18 @@ export interface PlatformSettings {
 export const WEB_BACKENDS = ['tavily', 'searxng', 'duckduckgo', 'firecrawl'] as const
 export type WebBackendId = (typeof WEB_BACKENDS)[number]
 
+/**
+ * PDF / Word / Excel 是 Gateway **自己**取回来的，提取后端一次都没被调用。
+ *
+ * 所以它不能记在提取后端头上：`web_calls.backend` 写着 tavily、而 Tavily 根本没跑，
+ * 统计里「按后端」那张表就在撒谎。给它一个自己的名字和自己的单价——真实成本是我们
+ * 的带宽和内存，跟买来的搜索额度不是一回事，本来也该分开定价。
+ */
+export const WEB_DOCUMENT = 'document'
+
+/** 能定价的条目 = 后端 ∪ 自取文档。**不是**能选的后端，document 不进那两个下拉。 */
+export const WEB_PRICEABLE = [...WEB_BACKENDS, WEB_DOCUMENT] as const
+
 /** 单价，整数「厘」（千分之一美元），每次调用。和账单那套的单位一致。 */
 export interface WebToolPrice {
   search: number
@@ -520,7 +532,7 @@ export function parseWebTools(raw: unknown): WebToolsSettings {
     WEB_BACKENDS.includes(v as WebBackendId) ? (v as WebBackendId) : ''
   const pricing: Record<string, WebToolPrice> = {}
   const rawPricing = (o.pricing && typeof o.pricing === 'object' ? o.pricing : {}) as Record<string, unknown>
-  for (const id of WEB_BACKENDS) {
+  for (const id of WEB_PRICEABLE) {
     if (rawPricing[id] != null) pricing[id] = parseWebPrice(rawPricing[id])
   }
   const limit = Math.round(Number(o.dailyLimit))

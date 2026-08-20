@@ -13,6 +13,7 @@ import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { createCompany } from './org.mjs'
+import { freePort } from './ports.mjs'
 
 /** 按 7 字节一刀切，几乎必然把 3 字节的汉字切断。 */
 function sseChunks(frames) {
@@ -89,7 +90,7 @@ function startFakeUpstream() {
 
 export async function runLlmUsage({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-usage-gw'
-  const GW_PORT = 18480
+  const GW_PORT = await freePort()
   const gwBase = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })

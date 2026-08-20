@@ -8,11 +8,11 @@
 import { createServer } from 'node:http'
 import { rmSync } from 'node:fs'
 import { PG_URL } from './pg.mjs'
+import { freePorts } from './ports.mjs'
 
 export async function runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-custom'
-  const GW_PORT = 18780
-  const UP_PORT = 18781
+  const [GW_PORT, UP_PORT] = await freePorts(2)
   const base = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })

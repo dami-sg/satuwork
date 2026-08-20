@@ -6,10 +6,11 @@
  */
 import { rmSync } from 'node:fs'
 import { PG_URL } from './pg.mjs'
+import { freePort } from './ports.mjs'
 
 export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-global'
-  const GW_PORT = 18980
+  const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })

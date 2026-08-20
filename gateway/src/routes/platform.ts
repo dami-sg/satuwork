@@ -7,7 +7,7 @@ import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { enabledModelsOf, modelRoleOf, priceMultiplierOf, publicPlatformCred, publicSettings } from '../lib/org.ts'
 import { rangeQuery, requireOwner, requireUser } from '../lib/guards.ts'
-import { WEB_BACKENDS, type PlatformSettings, emptyWebTools, parsePriceMultiplier, parseWebTools } from '../db.ts'
+import { WEB_BACKENDS, WEB_DOCUMENT, type PlatformSettings, emptyWebTools, parsePriceMultiplier, parseWebTools } from '../db.ts'
 import { WebToolError, canExtract, canSearch, needsSecret } from '../web-tools.ts'
 import { testBackend } from '../web-service.ts'
 
@@ -100,16 +100,32 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
     return {
       web,
       priceMultiplier: parsePriceMultiplier(s.priceMultiplier),
-      backends: WEB_BACKENDS.map((id) => ({
-        id,
-        search: canSearch(id),
-        extract: canExtract(id),
-        needsSecret: needsSecret(id),
-        // firecrawl 在名单里但没实现：界面上要能看见它「未接入」，而不是凭空少一项。
-        implemented: canSearch(id) || canExtract(id),
-        configured: needsSecret(id) ? creds.has(id) : true,
-        updatedAt: creds.get(id)?.updatedAt ?? null,
-      })),
+      backends: [
+        ...WEB_BACKENDS.map((id) => ({
+          id,
+          label: id,
+          search: canSearch(id),
+          extract: canExtract(id),
+          needsSecret: needsSecret(id),
+          // firecrawl 在名单里但没实现：界面上要能看见它「未接入」，而不是凭空少一项。
+          implemented: canSearch(id) || canExtract(id),
+          // 能不能出现在那两个下拉里。document 不能：它不是可选的后端，是一条计价项。
+          selectable: true,
+          configured: needsSecret(id) ? creds.has(id) : true,
+          updatedAt: creds.get(id)?.updatedAt ?? null,
+        })),
+        {
+          id: WEB_DOCUMENT,
+          label: '文档直取（PDF / Word / Excel）',
+          search: false,
+          extract: true,
+          needsSecret: false,
+          implemented: true,
+          selectable: false,
+          configured: true,
+          updatedAt: null,
+        },
+      ],
     }
   }
 

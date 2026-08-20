@@ -40,6 +40,7 @@ import { runGlobalCatalog } from './global-catalog.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
 import { PG_URL, requirePg } from './pg.mjs'
+import { freePort } from './ports.mjs'
 import { createCompany } from './org.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -58,8 +59,13 @@ const BOT_HOME = process.env.E2E_BOT_HOME || '/tmp/satuwork-e2e-bot'
 const SESSION_FORMAT = Number(
   /SESSION_FORMAT_VERSION = (\d+)/.exec(readFileSync(join(root, 'bot/src/session/types.ts'), 'utf8'))?.[1],
 )
-const GW_PORT = Number(process.env.E2E_GW_PORT || 18080)
-const BOT_PORT = Number(process.env.E2E_BOT_PORT || 18082)
+/**
+ * 端口在 main() 里向内核要（见 ports.mjs）。写死数字迟早会撞，而撞上之后的现象和
+ * 真实原因毫无关系——探活会连到别人的残留进程上，然后报一个牛头不对马嘴的断言。
+ * 环境变量仍然能钉死，本地调试时要固定地址还用得上。
+ */
+let GW_PORT = 0
+let BOT_PORT = 0
 const MACHINE_TOK = 'e2e-machine-token'
 // bot 的入站凭据现在**只有**席位票。机器票不再进 bot.env，也不再被 bot 接受——
 // 它是管家的 root 控制面凭据，而 bot.env 是席位那个普通 Linux 用户读得到的。
@@ -2723,6 +2729,8 @@ async function runBot() {
 }
 
 async function main() {
+  GW_PORT = Number(process.env.E2E_GW_PORT) || (await freePort())
+  BOT_PORT = Number(process.env.E2E_BOT_PORT) || (await freePort())
   process.on('SIGINT', () => {
     killAll()
     process.exit(130)

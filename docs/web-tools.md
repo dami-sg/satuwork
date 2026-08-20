@@ -88,6 +88,10 @@ mils = round(unitMils(backend, kind) × units × priceMultiplier)
 
 `unitMils` 来自第 9 节那屏的价目表，`priceMultiplier` 沿用 `platform_settings` 里那个既有的加价倍率——模型和搜索用同一个倍率，不再多一个旋钮。自托管的 SearXNG 和无密钥的 DuckDuckGo 单价可以填 0，那就是记数不计钱；填 0 和「没填」在界面上是两回事，后者要提示管理员先定价。
 
+**PDF / Word / Excel 单列一档 `document`。** 那些文件是 Gateway 自己下的，提取后端一次都没被调用——记在它头上的话，`web_calls.backend` 写着 `tavily` 而 Tavily 根本没跑，统计里「按后端」那张表就在撒谎，而那张表正是用来看钱花在哪家的。它的真实成本是我们的带宽和内存，跟买来的搜索额度不是一回事，本来也该分开定价（填 0 就是不额外收费）。`document` **只是一条计价项，不是可选后端**，不出现在那两个下拉里。
+
+一次调用里网页和文档可能各占几条，两者单价不同，所以**按各自的名义分开落账**：两笔 `web_calls`，不是一笔。
+
 **摘要那次模型调用不记在这里。** 它走 `/v1/chat/completions`，已经进了 `llm_calls`，按 token 算过一次钱了。一件事只记一次，账才对得上。
 
 统计屏（`/platform/stats`）里，网页调用和模型用量**并排但不合并**：网页那一块单开，按公司、按后端两个维度列出次数、计费条数与金额，金额直接把 `mils` 求和——不重算，因为它已经是当时的报价了。不并进 token 那个合计，是因为两者不是一个量纲，混在一起「调用次数」这一列会变成两种东西相加。
@@ -195,6 +199,8 @@ Hermes 的阈值是 5k / 500k / 2M。方向对，数字不能照抄——它是�
 **PDF 和别的文档。** 提取后端返回的是「网页正文」，对着一份 PDF 它要么给空、要么给乱码。所以这类地址走另一条路：**Gateway 自己取回字节**（过同一道 SSRF 闸，上限 10 MiB），席位拿到的是 `document: { contentType, ext, base64, bytes }`；席位落盘到 `work/web/`，再交给 `workspace/extract.ts` 那条现成的路（unpdf / mammoth / exceljs），然后照同样的分级摘要。
 
 判定先看后缀（`.pdf` / `.docx` / `.xlsx` / `.xlsm`）再验 `content-type`——后缀骗人的时候（`.pdf` 结尾其实是 HTML）落回正常那条路。只按后缀先筛是为了不给每个普通网页都多加一次 HEAD 往返。
+
+计费上它走 `document` 那一档（见第 4 节），不占提取后端的价。
 
 **文档的原件一定落盘，`save` 管不着它**：一份 PDF 的原件本身就是产出，人多半还要自己打开看，而提取那条路本来也得先有个文件。扫描件没有文本层这件事 `workspace/extract.ts` 已经会明说了，这里不重复造。
 
