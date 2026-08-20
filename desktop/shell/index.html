@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>连接 Satuwork</title>
+<!--
+  包里唯一的一页：问「连哪台 Gateway」。
+
+  样式是照着 gateway/ui/theme.css 抄的一小撮，不是引进来的——引的话这一页就得先连上
+  服务器才画得出来，而它存在的理由正是「还不知道服务器在哪」。这里只有几个颜色，
+  漂了也不要紧；真正的界面在下一扇窗户里。
+-->
+<style>
+  :root {
+    --bg: #faf9f5; --fg: #3d3929; --card: #f5f4ef; --border: #dad9d4;
+    --input-border: #b4b2a7; --muted: #6e6d68; --primary: #c96442; --on-primary: #fff;
+    --danger: #b05730;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17161a; --fg: #eae7e0; --card: #201f24; --border: #34323a;
+      --input-border: #4a4751; --muted: #9a968d; --primary: #d97757; --on-primary: #17161a;
+      --danger: #f5a79c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  main { width: 380px; }
+  h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  p.sub { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+  label { display: block; margin-bottom: 6px; font-size: 12px; color: var(--muted); }
+  input {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--input-border); border-radius: 10px;
+    background: var(--card); color: var(--fg); font: inherit; -webkit-user-select: text; user-select: text;
+  }
+  input:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: transparent; }
+  button {
+    width: 100%; margin-top: 14px; padding: 10px 12px; border: 0; border-radius: 10px;
+    background: var(--primary); color: var(--on-primary); font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  .err { margin-top: 12px; min-height: 18px; color: var(--danger); font-size: 12px; }
+  .hint { margin-top: 18px; color: var(--muted); font-size: 12px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>连接到 Gateway</h1>
+  <p class="sub">这台机器上的 Satuwork 界面从哪台服务器取。</p>
+  <label for="url">服务器地址</label>
+  <input id="url" type="text" placeholder="gw.example.com 或 192.168.1.10:3080" autocomplete="off" spellcheck="false" autofocus>
+  <button id="go" type="button">连接</button>
+  <div class="err" id="err"></div>
+  <p class="hint">不写协议就按 <code>http://</code> 算。连不上会停在这一屏并说明原因，不会存下一个打不开的地址。之后可以在菜单「服务器 → 切换服务器…」里改。</p>
+</main>
+<script>
+  // 走 __TAURI_INTERNALS__ 而不是 __TAURI__：后者要开 withGlobalTauri，而那个开关是
+  // 全局的——它会把整套 API 一起注进装远端页面的那扇窗（实测 typeof window.__TAURI__
+  // === 'object'）。命令有 ACL 拦着，但没必要把这一层白送出去。
+  //
+  // 代价：__TAURI_INTERNALS__ 是内部约定，Tauri 大版本升级时要来这儿看一眼。这一页
+  // 只调两个命令，坏了当场就看得见（连接按钮点了没反应），不会悄悄坏。
+  const invoke = window.__TAURI_INTERNALS__.invoke
+  const url = document.getElementById('url')
+  const go = document.getElementById('go')
+  const err = document.getElementById('err')
+
+  invoke('current_server').then((s) => { if (s) url.value = s }).catch(() => {})
+  // 「存过地址却还是回到了这一屏」——原因摆在这儿，否则人只会以为是自己没填过。
+  invoke('startup_error').then((s) => { if (s) err.textContent = s }).catch(() => {})
+
+  async function connect() {
+    err.textContent = ''
+    go.disabled = true
+    try {
+      await invoke('connect', { url: url.value })
+      // 成功之后这扇窗户会被 Rust 那边关掉，不用自己收尾。
+    } catch (e) {
+      err.textContent = typeof e === 'string' ? e : (e && e.message) || '连不上'
+      go.disabled = false
+      url.focus()
+    }
+  }
+
+  go.addEventListener('click', connect)
+  url.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect() })
+</script>
+</body>
+</html>

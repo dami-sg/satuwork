@@ -19,3 +19,7 @@ bot/cordis.e2e.yml
 
 # 本机运行时（Gateway/Bot 数据与密钥）
 .data/
+
+# 桌面壳（Rust 编译产物与 Tauri 生成的 schema）
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

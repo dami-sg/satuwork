@@ -63,3 +63,33 @@ jobs:
 
       - name: e2e
         run: node e2e/run.mjs
+
+  # 桌面壳单独一档：它是 Rust，和上面那档共用不了任何一步，串在一起只会让本来 3 分钟
+  # 的 typecheck 等 Rust 编译。
+  #
+  # 只 `cargo check`，不打包：要的是「main.rs 改坏了当场知道」，而不是产物——真正的包
+  # 三个系统各要一台机器，那是发版流水线的事。顺带这一档也是 Linux 那边唯一的编译
+  # 信号（webview 的开发库只有在 Linux 上才装得起来）。
+  desktop:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri 在 Linux 上编译要 webkit2gtk 的开发头文件；4.1 是 Tauri 2 的那一档。
+      - name: 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './desktop/src-tauri -> target'
+
+      # --locked：Cargo.lock 进了版本库，CI 不该悄悄把它升了再说「过了」。
+      - name: cargo check
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
