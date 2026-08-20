@@ -7,7 +7,7 @@ import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { enabledModelsOf, modelRoleOf, priceMultiplierOf, publicPlatformCred, publicSettings } from '../lib/org.ts'
 import { rangeQuery, requireOwner, requireUser } from '../lib/guards.ts'
-import { type PlatformSettings, parsePriceMultiplier } from '../db.ts'
+import { type PlatformSettings, parseConnectorPricing, parsePriceMultiplier } from '../db.ts'
 
 export function attachPlatform(router: Router, ctx: RouteCtx) {
   const { db, keys, llm } = ctx
@@ -30,6 +30,8 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       utility: 'utility' in body ? modelRoleOf(body.utility, 'utility') : cur.utility,
       enabledModels: 'enabledModels' in body ? enabledModelsOf(body.enabledModels) : cur.enabledModels ?? [],
       priceMultiplier: priceMultiplierOf(body.priceMultiplier, parsePriceMultiplier(cur.priceMultiplier)),
+      // 写端和 parsePlatformPayload 必须成对：少一边这个开关就是死的。
+      connectorPricing: 'connectorPricing' in body ? parseConnectorPricing(body.connectorPricing) : cur.connectorPricing,
       managerVersion:
         'managerVersion' in body ? String(body.managerVersion ?? '').trim() : (cur.managerVersion ?? ''),
     }
