@@ -181,6 +181,7 @@ function fold(events, live) {
         blocks.push(assistant)
       }
       if (text) assistant.text = text
+      assistant.endTime = at
     } else if (type === 'assistant/chunk') {
       const chunk = data.chunk || {}
       if (chunk.type === 'text-delta' && chunk.text) {
@@ -189,6 +190,7 @@ function fold(events, live) {
           blocks.push(assistant)
         }
         assistant.text += chunk.text
+        assistant.endTime = at
       }
     } else if (type === 'tool/call') {
       // 工具常常在助手吐出第一个字**之前**就开始跑（先查订单再回话）。以前只在已经有
@@ -199,8 +201,17 @@ function fold(events, live) {
         assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
-      tools.push({ callId: data.callId, name: data.name || 'tool', result: null, failed: false })
+      // arguments 要留着：工具药丸的悬浮窗全靠它回答「这次到底拿什么跑的」。存的是
+      // bot 那边 JSON.stringify 过的原串，展示时再 parse 一次做缩进（见 toolPopBody）。
+      tools.push({
+        callId: data.callId,
+        name: data.name || 'tool',
+        args: typeof data.arguments === 'string' ? data.arguments : '',
+        result: null,
+        failed: false,
+      })
       assistant.tools = tools
+      assistant.endTime = at
     } else if (type === 'tool/result') {
       const hit =
         tools.find((x) => x.callId && x.callId === data.callId && x.result == null) ||
@@ -213,10 +224,15 @@ function fold(events, live) {
         // 那段文本是写给模型的散文，措辞一改就扫不出来了。
         hit.files = Array.isArray(data.files) ? data.files : null
       }
+      if (assistant) assistant.endTime = at
     } else if (type === 'turn/start') {
       status = 'running'
     } else if (type === 'turn/end') {
       status = ''
+      // **这一轮真正收口的时刻。** 气泡下面那个时间要的是「输出完毕」而不是「开始
+      // 输出」，靠的就是它：比最后一条 chunk 准，也覆盖「只调工具、一个字没吐」的
+      // 那种轮次（那种轮里根本没有 chunk 可以取时间）。
+      if (assistant) assistant.endTime = at
     }
   }
   // bot 说过话就听它的：这份历史可能是截断的，而扫描对截断毫无抵抗力（见 chatLive）。
@@ -983,10 +999,20 @@ function fileChipHtml(f) {
   )
 }
 
-function chipHtml(x) {
+/**
+ * 一条工具痕迹。
+ *
+ * **不再挂 title**：原生 tooltip 要等一秒才出、只能显示一行纯文本，而且会和下面那个
+ * 悬浮窗同时冒出来。详情改由 sw-toolpop 给——参数和结果都在里面，那两样才是「它刚才
+ * 到底干了什么」的答案，尤其是失败的那几颗，以前只能去导出记录里翻。
+ *
+ * 详情**不塞进 data-***：一次 bash 的参数加输出动辄几 KB，进属性要转义、要整份重复
+ * 写进 DOM，而 chips 每次状态变化都重画一遍。改成 updateRow 把工具对象直接挂在节点上。
+ */
+function chipHtml(x, i) {
   const state_ = x.result == null ? 'running' : x.failed ? 'error' : 'done'
   const label = x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')
-  return `<span class="sw-chip" data-state="${state_}" title="${esc(x.name + ' · ' + label)}">${ICON_TOOL}<span>${esc(x.name)} · ${esc(label)}</span></span>`
+  return `<span class="sw-chip sw-toolchip" data-state="${state_}" data-i="${i}" tabindex="0">${ICON_TOOL}<span>${esc(x.name)} · ${esc(label)}</span></span>`
 }
 
 /** 一条消息的外壳。正文和工具条留空，交给 updateRow 填——它俩每帧都可能变。 */
@@ -994,7 +1020,10 @@ function rowShell(b, key) {
   const account = (state.me && state.me.account) || {}
   const avatar = b.kind === 'user' ? esc(initialOf(account)) : ICON_BOT
   // 时间戳两侧一致，都挂在气泡外面（见 chat.css 里 .sw-time 的说明）。
-  const time = b.time ? `<time class="sw-time" datetime="${new Date(b.time).toISOString()}">${esc(chatClock(b.time))}</time>` : ''
+  //
+  // 内容留空，交给 updateRow：助手那条**还在输出时是读秒**、输出完了才换成时刻，
+  // 而 rowShell 只在节点新建时跑一次，盯不住这个变化。
+  const time = '<time class="sw-time" hidden></time>'
   return (
     `<div class="sw-msg" data-role="${b.kind}" data-key="${key}"${b.pending ? ' data-pending="1"' : ''}>` +
     `<div class="sw-msg-avatar" aria-hidden="true">${avatar}</div>` +
@@ -1075,6 +1104,89 @@ function updateRow(el, b, streaming) {
     chips.setAttribute('data-sig', sig)
     chips.innerHTML = tools.map(chipHtml).join('') + outs.map(fileChipHtml).join('')
     chips.hidden = !tools.length && !outs.length
+    // 工具对象直接挂到节点上，悬浮窗按需取。顺序和 chipHtml 生成的顺序一一对应；
+    // 产出文件那几颗是 sw-filechip，不在这个选择器里，不会错位。
+    const nodes = chips.querySelectorAll('.sw-toolchip')
+    for (let i = 0; i < nodes.length; i++) nodes[i].__tool = tools[i]
+    // 这一批节点刚被换掉。开着的悬浮窗要么跟着换到新节点上，要么关掉——
+    // 「调用中 → 完成」正好是人盯着它看的那一刻，不该在那时候闪没。
+    refreshToolPop()
+  }
+  paintRowTime(el, b, streaming)
+}
+
+/**
+ * 气泡下面那一行时间。
+ *
+ * 还在输出时显示**读秒**，输出完了显示**收口的时刻**。
+ *
+ * 以前两种情况都显示「开始的时刻」，于是一轮跑了三分钟的对话，下面写着的是三分钟前
+ * 那个数字，而且从头到尾一动不动——既看不出它在跑，也看不出它跑了多久。而人在等的
+ * 时候最想知道的恰恰是「已经等了多久」。
+ *
+ * 只有助手那条读秒：status 是 'sending' 时（消息刚发出去、还没有回执）最后一条是
+ * 用户自己那句，给它挂个秒表没有意义。
+ */
+function paintRowTime(el, b, streaming) {
+  const node = el.querySelector('.sw-time')
+  if (!node) return
+  const running = Boolean(streaming) && b.kind === 'assistant' && Boolean(b.time)
+  if (running) {
+    node.hidden = false
+    node.setAttribute('data-running', '1')
+    node.setAttribute('data-since', String(b.time))
+    node.removeAttribute('datetime')
+    node.textContent = elapsedText(Date.now() - b.time)
+    return
+  }
+  // endTime 是这一块最后一条事件的时间（turn/end 最准）。老会话没有它——那时候
+  // 事件里也拿不出更好的答案，回落到开始时刻，和以前一个样，不会更差。
+  const at = b.endTime || b.time
+  node.removeAttribute('data-running')
+  node.removeAttribute('data-since')
+  if (!at) {
+    node.hidden = true
+    node.textContent = ''
+    return
+  }
+  node.hidden = false
+  node.setAttribute('datetime', new Date(at).toISOString())
+  node.textContent = chatClock(at)
+}
+
+/** 读秒的文本。一分钟以内就是秒，超过了给 m:ss——纯秒数到了几百就读不出来了。 */
+function elapsedText(ms) {
+  const s = Math.max(0, Math.round((Number(ms) || 0) / 1000))
+  if (s < 60) return s + 's'
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+}
+
+/**
+ * 读秒的心跳。
+ *
+ * 只在**屏幕上真有**一个读秒中的时间戳时才转，转完自己停——挂一个长明的
+ * setInterval 在这种页面上是白烧电，标签页在后台时尤其。
+ */
+let clockTimer = null
+function tickClocks() {
+  const nodes = document.querySelectorAll('.sw-time[data-running]')
+  if (!nodes.length) {
+    clearInterval(clockTimer)
+    clockTimer = null
+    return
+  }
+  for (const n of nodes) {
+    const since = Number(n.getAttribute('data-since')) || 0
+    if (since) n.textContent = elapsedText(Date.now() - since)
+  }
+}
+
+function ensureClockTick() {
+  const has = document.querySelector('.sw-time[data-running]')
+  if (has && !clockTimer) clockTimer = setInterval(tickClocks, 1000)
+  else if (!has && clockTimer) {
+    clearInterval(clockTimer)
+    clockTimer = null
   }
 }
 
@@ -1286,6 +1398,7 @@ function paintChat() {
     if (grew > 0) thread.scrollTop += grew
   } else if (stick) thread.scrollTop = thread.scrollHeight
   paintChatChrome(folded)
+  ensureClockTick()
 }
 
 /** 抬头的在线灯、输入区的提示和中止按钮——都不重绘整页，就地改。 */
@@ -2649,11 +2762,30 @@ async function sendChat() {
   }
 }
 
+/**
+ * 中止这一轮。
+ *
+ * 以前是 `catch {}` 一把吞掉。三种完全不同的情况在界面上长得一模一样——请求没发出去、
+ * 席位不认这条会话、这一轮其实早就结束了——都是「点了没反应」，连往哪儿查都给不出。
+ *
+ * **它止不住已经开跑的工具。** bot 那边 `agent.abort()` 掐的是模型那条流，而工具的
+ * execute 拿不到这个信号（bot/src/agent/index.ts 的 bridgeTools 没接）。所以点在一颗
+ * `bash·调用中` 上时，这里是成功的，画面却要等 bash 自己跑完——最长十分钟。这句如实
+ * 说出来，别让人对着一个其实生效了的按钮反复点。
+ */
 async function abortChat() {
-  if (!state.chatSessionId) return
+  const sessionId = state.chatSessionId
+  if (!sessionId) return
+  const stillRunning = Boolean(document.querySelector('.sw-toolchip[data-state="running"]'))
   try {
-    await api('POST', '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/abort', {})
-  } catch {}
+    const r = await api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/abort', {})
+    if (r && r.aborted === false) flash('err', t('这一轮已经结束了'))
+    else if (stillRunning) flash('ok', t('已中止；正在跑的那个工具要等它自己收尾'))
+    render()
+  } catch (err) {
+    flash('err', t('没能中止：') + (err && err.message ? err.message : ''))
+    render()
+  }
 }
 
 async function updateOrgRuntime() {
@@ -2813,3 +2945,165 @@ async function cancelQueued(id) {
     render()
   }
 }
+
+/* ── 工具痕迹的悬浮窗 ────────────────────────────────────────────────────
+ *
+ * 药丸上只有「工具名 · 状态」，而人真正想知道的是**它拿什么参数跑的、跑出了什么**。
+ * 失败的那几颗尤其——以前想知道为什么失败，只能去「导出记录」里翻整段 JSON。
+ *
+ * 浮层挂在 body 上，不放进气泡里：气泡有自己的圆角和 overflow，浮层长在里面会被裁掉
+ * 一角；而且最后一条消息贴着输入框时，往上弹还是往下弹得按视口算，气泡内的坐标系
+ * 算不出来。
+ *
+ * 鼠标移开有一小段宽限，且移到浮层上算「还在看」——否则一个能滚动的浮层，人刚要伸手
+ * 去滚它就没了。
+ */
+const TOOLPOP_HIDE_MS = 160
+const TOOLPOP_MAX_CHARS = 4000
+let toolPop = null
+let toolPopAnchor = null
+let toolPopHost = null
+let toolPopIndex = -1
+let toolPopHideTimer = null
+
+function toolPopEl() {
+  if (toolPop) return toolPop
+  toolPop = document.createElement('div')
+  toolPop.className = 'sw-toolpop'
+  toolPop.hidden = true
+  toolPop.addEventListener('mouseenter', () => clearTimeout(toolPopHideTimer))
+  toolPop.addEventListener('mouseleave', () => hideToolPop(TOOLPOP_HIDE_MS))
+  document.body.appendChild(toolPop)
+  return toolPop
+}
+
+/** 参数是 bot 那边 stringify 过的原串。能 parse 就缩进展示，不能就原样——不猜格式。 */
+function prettyArgs(raw) {
+  const text = String(raw == null ? '' : raw).trim()
+  if (!text) return ''
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    return text
+  }
+}
+
+/** 超长就截断并说清楚截了多少。悄悄截掉会让人以为工具真的只输出了这么点。 */
+function clip(text) {
+  const s = String(text == null ? '' : text)
+  if (s.length <= TOOLPOP_MAX_CHARS) return s
+  return s.slice(0, TOOLPOP_MAX_CHARS) + '\n\n…（还有 ' + (s.length - TOOLPOP_MAX_CHARS) + ' 个字符，完整内容见「导出记录」）'
+}
+
+function toolPopBody(x) {
+  const label = x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')
+  const state_ = x.result == null ? 'running' : x.failed ? 'error' : 'done'
+  const args = prettyArgs(x.args)
+  const rows = [
+    `<div class="sw-toolpop-head"><span class="sw-toolpop-name">${esc(x.name)}</span>` +
+      `<span class="sw-toolpop-state" data-state="${state_}">${esc(label)}</span></div>`,
+  ]
+  // 参数为空是常事（now、ls 这种），那就不摆一个空框——空框看着像「读不出来」。
+  if (args) rows.push(`<div class="sw-toolpop-k">${esc(t('参数'))}</div><pre>${esc(clip(args))}</pre>`)
+  if (x.result == null) {
+    rows.push(`<div class="sw-toolpop-wait">${esc(t('还在跑，结果出来后这里会填上'))}</div>`)
+  } else {
+    const out = String(x.result || '').trim()
+    rows.push(
+      `<div class="sw-toolpop-k">${esc(x.failed ? t('错误') : t('结果'))}</div>` +
+        (out ? `<pre>${esc(clip(out))}</pre>` : `<div class="sw-toolpop-wait">${esc(t('（没有输出）'))}</div>`),
+    )
+  }
+  return rows.join('')
+}
+
+/**
+ * 定位。先填内容再量高度——内容是刚换的，没量过就不知道往上弹放不放得下。
+ * 放不下就翻到下面，两边都不够时贴住视口，宁可挡一点也不要跑到屏幕外面去。
+ */
+function placeToolPop(chip) {
+  const pop = toolPopEl()
+  const r = chip.getBoundingClientRect()
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  pop.style.maxWidth = Math.min(520, vw - 24) + 'px'
+  const box = pop.getBoundingClientRect()
+  const above = r.top >= box.height + 12
+  let top = above ? r.top - box.height - 8 : r.bottom + 8
+  if (!above && top + box.height > vh - 8) top = Math.max(8, vh - box.height - 8)
+  let left = r.left
+  if (left + box.width > vw - 12) left = vw - 12 - box.width
+  if (left < 12) left = 12
+  pop.style.top = Math.max(8, top) + 'px'
+  pop.style.left = left + 'px'
+  pop.setAttribute('data-side', above ? 'top' : 'bottom')
+}
+
+function showToolPop(chip) {
+  const x = chip.__tool
+  if (!x) return
+  clearTimeout(toolPopHideTimer)
+  const pop = toolPopEl()
+  // 同一颗药丸重复触发（鼠标在药丸里移动）就别重画了，否则滚动位置每帧都被重置。
+  if (toolPopAnchor !== chip || pop.hidden) {
+    toolPopAnchor = chip
+    toolPopHost = chip.parentElement
+    toolPopIndex = Number(chip.getAttribute('data-i'))
+    pop.innerHTML = toolPopBody(x)
+    pop.hidden = false
+    placeToolPop(chip)
+  }
+}
+
+function hideToolPop(delay) {
+  clearTimeout(toolPopHideTimer)
+  const run = () => {
+    if (toolPop) toolPop.hidden = true
+    toolPopAnchor = null
+    toolPopHost = null
+    toolPopIndex = -1
+  }
+  if (!delay) run()
+  else toolPopHideTimer = setTimeout(run, delay)
+}
+
+/**
+ * chips 重画之后把浮层接到新节点上。
+ *
+ * 节点是 innerHTML 整体换掉的，原来那个 anchor 已经脱离文档。按容器 + 下标重新认一次
+ * ——「调用中 → 完成」正是人盯着它看的那一刻，那时候浮层闪没最难受。认不回来才关。
+ */
+function refreshToolPop() {
+  if (!toolPop || toolPop.hidden) return
+  if (toolPopAnchor && document.contains(toolPopAnchor)) return
+  const list = toolPopHost ? toolPopHost.querySelectorAll('.sw-toolchip') : []
+  const next = toolPopIndex >= 0 ? list[toolPopIndex] : null
+  if (!next || !next.__tool) return hideToolPop(0)
+  toolPopAnchor = next
+  toolPop.innerHTML = toolPopBody(next.__tool)
+  placeToolPop(next)
+}
+
+document.addEventListener('mouseover', (e) => {
+  const el = e.target instanceof Element ? e.target : null
+  if (!el) return
+  const chip = el.closest('.sw-toolchip')
+  if (chip) return showToolPop(chip)
+  if (el.closest('.sw-toolpop')) return
+  if (toolPop && !toolPop.hidden) hideToolPop(TOOLPOP_HIDE_MS)
+})
+
+// 键盘也要能看。药丸带 tabindex，Tab 到就出，离开就收。
+document.addEventListener('focusin', (e) => {
+  const el = e.target instanceof Element ? e.target : null
+  const chip = el && el.closest('.sw-toolchip')
+  if (chip) showToolPop(chip)
+  else if (el && !el.closest('.sw-toolpop')) hideToolPop(0)
+})
+
+// 滚动时立刻收：浮层是 fixed 的，跟不上锚点，留在原地就是一块飘着的脏东西。
+window.addEventListener('scroll', () => hideToolPop(0), true)
+window.addEventListener('resize', () => hideToolPop(0))
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && toolPop && !toolPop.hidden) hideToolPop(0)
+})

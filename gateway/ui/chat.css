@@ -321,9 +321,79 @@
 .sw-send:hover { background: var(--color-accent-600); }
 .sw-send:active { background: var(--color-accent-700); }
 .sw-send svg { display: block; }
-/* 停止态换成中性的深色：它不是「往前走一步」，不该继续顶着主操作的品牌色。 */
-.sw-send[data-state='stop'] { background: var(--color-neutral-800); color: var(--color-neutral-100); }
-.sw-send[data-state='stop']:hover { background: var(--color-neutral-900); }
+/* 停止态。
+ *
+ * 意图是「中性、退到主操作后面」，但**不能用 --color-neutral-***：那套色阶在暗色主题
+ * 里是翻过来的（--color-neutral-800 在暗色下是 #e0dcd3，几乎是白的），于是这颗按钮在
+ * 暗色界面上变成一颗刺眼的白球，比它要让位的主操作还抢眼。
+ *
+ * 改用语义色 --secondary / --border：这一组两套主题都朝同一个方向走，和消息里的工具
+ * 药丸、附件按钮是同一种「次要控件」的底色，停止态因此看着像本来就在那儿的东西。 */
+.sw-send[data-state='stop'] {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.sw-send[data-state='stop']:hover {
+  background: var(--muted);
+  color: var(--foreground);
+  box-shadow: inset 0 0 0 1px var(--muted-foreground);
+}
+.sw-send[data-state='stop']:active { background: var(--secondary); }
+
+/* 工具痕迹的悬浮窗。挂在 body 上，位置由 placeToolPop 算（见 chat.js）。 */
+.sw-toolpop {
+  position: fixed;
+  z-index: 60;
+  max-width: 520px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.sw-toolpop[hidden] { display: none; }
+.sw-toolpop-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.sw-toolpop-name {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+.sw-toolpop-state {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 11px;
+}
+.sw-toolpop-state[data-state='error'] { background: var(--color-accent-100); color: var(--color-accent-800); }
+.sw-toolpop-k {
+  margin: 8px 0 4px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.sw-toolpop-k:first-of-type { margin-top: 0; }
+.sw-toolpop-wait { color: var(--muted-foreground); }
+/* 结果可能很长，所以给它自己的滚动区，而不是让浮层长到屏幕外面去。 */
+.sw-toolpop pre {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 药丸本身要看得出「可以看详情」。 */
+.sw-toolchip { cursor: help; }
+.sw-toolchip:hover, .sw-toolchip:focus-visible { background: var(--muted); }
 .sw-composer-tip {
   display: flex;
   align-items: center;
