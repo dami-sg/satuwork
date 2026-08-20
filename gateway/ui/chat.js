@@ -517,19 +517,35 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
       signal: ac.signal,
     })
   } catch (err) {
-    releaseChatStream(ac, owner)
     endReplay()
-    if (ac.signal.aborted) return
+    if (ac.signal.aborted) {
+      releaseChatStream(ac, owner)
+      return
+    }
+    // **连不上要接着退避重试，不能就此认输。** 见下面 503 那条的说明。
     state.runtimeError = '实例还没上线'
     paintChat()
-    return
+    return retryChatStream(sessionId, ac, attempt + 1)
   }
+  /**
+   * 503 = 席位此刻不在（Gateway 对席位的 fetch 抛了或没回 2xx，见 runtime.ts 的
+   * proxySse）。**这是「正在重启」，不是「坏了」**：每一次重新部署、每一次管家换版，
+   * 都必然有几秒钟落在这个窗口里。
+   *
+   * 以前这里直接 return，于是撞上这几秒的那次重连就是最后一次——流断了、也不再重来。
+   * 席位一分钟后好端端地回来了，页面却再也接不回去：消息 POST 走的是另一条请求，
+   * 照发照跑，回答经 SSE 送出来时没人在听。屏幕上就一直挂着「正在思考」——因为
+   * mergePending 手上那条 pending 只能靠 SSE 回来的 user/message 销账（见 mergePending）。
+   * bot 日志里那一轮明明写着 completed，这是那个「日志跑完了、网页还转着」的成因。
+   *
+   * 退避重试到第 6 次为止（约 24 秒），比重新部署那几秒宽裕得多；真的一直不回来，
+   * retryChatStream 会把「连接断开」摆到界面上。
+   */
   if (res.status === 503) {
-    releaseChatStream(ac, owner)
     endReplay()
     state.runtimeError = '实例还没上线'
     paintChat()
-    return
+    return retryChatStream(sessionId, ac, attempt + 1)
   }
   if (!res.ok || !res.body) {
     releaseChatStream(ac, owner)
