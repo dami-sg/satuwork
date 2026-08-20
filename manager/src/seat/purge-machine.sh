@@ -19,6 +19,14 @@
 #   --node       apt purge nodejs 和 nodesource 源；这台机器上别的东西很可能也在用 Node
 #
 # 三样都不给的话，跑完这个脚本机器上还剩：账号、work/、系统包。那是安全的默认值。
+
+# **这一行必须在 set 之前，而且必须是 POSIX 语法。**
+# 这份脚本是人手敲出来的，而人会写 `sudo sh purge-machine.sh`——Debian 的 /bin/sh 是
+# dash，dash 既没有 pipefail 也没有 -E，于是下一行当场 "set: Illegal option -o pipefail"。
+# 那句话看着像脚本坏了，而这时候机器往往已经没别的救法了，人会卡在这儿。
+# 仓库里别的 seat 脚本不需要这一层：它们由管家用 bash 起，没人手敲。
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+
 set -Eeuo pipefail
 
 # -E（errtrace）不能省，理由同 deploy-seat.sh：不加的话下面这条 ERR trap 进不了函数。
