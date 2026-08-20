@@ -166,8 +166,8 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       await fresh()
       // 造一个「迁移机制之前」的库：直接跑 0001 的 SQL，不建 schema_migrations。
       await client.query(initialSql(gwRoot))
-      const before = await client.query('select count(*)::int as n from information_schema.tables where table_schema = $1', [SCHEMA])
-      assert(before.rows[0].n > 10, `存量库该有一堆表，实际 ${before.rows[0].n}`)
+      const before = await client.query('select table_name from information_schema.tables where table_schema = $1', [SCHEMA])
+      assert(before.rows.length > 10, `存量库该有一堆表，实际 ${before.rows.length}`)
       const has = await client.query(
         `select count(*)::int as n from information_schema.tables where table_schema = '${SCHEMA}' and table_name = 'schema_migrations'`,
       )
@@ -187,12 +187,17 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       assert(rows.map((r) => r.id).join(',') === ALL.join(','), `没接上基线：${JSON.stringify(rows)}`)
       const kept = await client.query('select name from companies where id = $1', ['co-legacy'])
       assert(kept.rows.length === 1 && kept.rows[0].name === '存量公司', '存量数据被弄丢了')
-      const after = await client.query('select count(*)::int as n from information_schema.tables where table_schema = $1', [SCHEMA])
-      // 只多出 schema_migrations 一张。
-      assert(
-        after.rows[0].n === before.rows[0].n + 1,
-        `表数量对不上：${before.rows[0].n} → ${after.rows[0].n}`,
-      )
+      const after = await client.query('select table_name from information_schema.tables where table_schema = $1', [SCHEMA])
+      const names = new Set(after.rows.map((r) => r.table_name))
+      /**
+       * 存量库里已有的表**一张都不能少**，并且多出 schema_migrations。
+       *
+       * 这里原来断言的是「正好多一张」，但那把「后续迁移不许建新表」也一起钉死了——
+       * 0004 加了三张连接器的表，这条就红了，而它想守的其实是「0001 的表没被重建、
+       * 没被删」。所以改成集合包含：新增多少张不管，少一张就是错。
+       */
+      for (const row of before.rows) assert(names.has(row.table_name), `存量表不见了：${row.table_name}`)
+      assert(names.has('schema_migrations'), '没记账本')
       await stop(gw)
     })
 

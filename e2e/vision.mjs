@@ -94,6 +94,11 @@ export async function runVision({ root, test, assert, log }) {
     // tail，整条会话的重放还要把它再搬一遍。
     assert(r.logShape.没存base64, '图片字节被写进会话日志了')
     assert(r.logShape.一行够短, `事件行 ${r.logShape.一行够短} 太长了`)
-    assert(r.formatVersion === 4, `会话格式应为 v4，实为 v${r.formatVersion}`)
+    /**
+     * **不钉死具体版本号。** image 块是 v4 加的，所以不能比 4 老；再往上是别人的事
+     * （v5 加了 `mention` 块）。钉成 `=== 4` 的话，以后每加一种内容块都会让这一组
+     * 无关的用例变红，而它想守的其实是「图这条路还在当前格式里成立」。
+     */
+    assert(r.formatVersion >= 4, `图片块是 v4 加的，版本不该比它老，实为 v${r.formatVersion}`)
   })
 }

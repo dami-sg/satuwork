@@ -26,6 +26,7 @@ import { runWorkspaceFiles } from './workspace-files.mjs'
 import { runDocExtract } from './doc-extract.mjs'
 import { runVision } from './vision.mjs'
 import { runTurnImages } from './turn-images.mjs'
+import { runMentions } from './mentions.mjs'
 import { runHistoryTime } from './history-time.mjs'
 import { runCompact } from './compact.mjs'
 import { runSetup } from './setup.mjs'
@@ -35,6 +36,7 @@ import { runCustomProvider } from './custom-provider.mjs'
 import { runStats } from './stats.mjs'
 import { runMigrate } from './migrate.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
+import { runConnectors } from './connectors.mjs'
 import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
@@ -2782,6 +2784,7 @@ async function main() {
     await runStats({ gwRoot, test, req, start, waitHttp, assert, log })
     await runMigrate({ gwRoot, test, start, waitHttp, assert, log })
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runConnectors({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log })
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runManagerConfirm({ root, test, assert, log })
@@ -2794,6 +2797,7 @@ async function main() {
     await runDocExtract({ root, test, assert, log })
     await runVision({ root, test, assert, log })
     await runTurnImages({ root, test, assert, log })
+    await runMentions({ root, test, assert, log })
     await runHistoryTime({ root, test, assert, log })
     await runCompact({ root, test, assert, log })
   } finally {
