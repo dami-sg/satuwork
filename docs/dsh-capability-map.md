@@ -1,6 +1,6 @@
 # Satuwork × DeepSeek Harness 能力映射
 
-把 [design/Satuwork Dashboard.dc.html](../design/Satuwork%20Dashboard.dc.html) 的 25 个视图逐个拆到 dsh（[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)）的服务与事件上，作为拆任务的依据。
+把最初那份 Dashboard 设计稿的 25 个视图逐个拆到 dsh（[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)）的服务与事件上，作为拆任务的依据。
 
 三档标注：
 

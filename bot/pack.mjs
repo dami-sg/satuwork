@@ -104,14 +104,6 @@ try {
   if (!existsSync(join(stage, 'node_modules', 'tsx'))) die('staging 里没有 tsx，包跑不起来')
   if (!process.argv.includes('--allow-foreign-platform')) assertLinuxPack(stage)
 
-  // 设计稿留在仓库里（那是设计资产），但没有理由跟着每个包上席位机器——2.4MB 的
-  // .dc.html，运行时一个字节都不读。
-  //
-  // 这里直接从 staging 删，不加 `--exclude=design`：GNU tar 默认 non-anchored、
-  // bsdtar 匹配整个路径名，同一个 pattern 在 CI（Linux）和本地（macOS）上未必是
-  // 同一个意思，而这种差异的表现是「包里悄悄多了 2.4MB」，没人会去看。
-  rmSync(join(stage, 'design'), { recursive: true, force: true })
-
   writeFileSync(join(stage, 'VERSION'), version + '\n')
 
   console.log('pack: tar 中…')

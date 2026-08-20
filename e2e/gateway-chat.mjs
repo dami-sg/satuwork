@@ -5,6 +5,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { createCompany } from './org.mjs'
 import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
 
@@ -104,18 +105,17 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
     })
     await waitHttp(gwBase + '/health')
 
-    const reg = await req(gwBase, 'POST', '/auth/register', {
-      body: {
-        email: 'admin@chat.test',
-        password: 'correct-horse',
-        companyName: 'ChatCo',
-        slug: 'chatco',
-        seats: 2,
-      },
+    const reg = await createCompany(req, gwBase, {
+      ownerEmail: 'owner@chat.test',
+      ownerPassword: 'test-owner-chat',
+      email: 'admin@chat.test',
+      password: 'correct-horse',
+      companyName: 'ChatCo',
+      slug: 'chatco',
+      seats: 2,
     })
-    assert(reg.status === 201, `register ${reg.status} ${reg.text}`)
-    const adminTok = reg.json.token
-    const orgId = reg.json.company.id
+    const adminTok = reg.token
+    const orgId = reg.company.id
 
     const memberCreate = await req(gwBase, 'POST', `/orgs/${orgId}/accounts`, {
       token: adminTok,
@@ -128,12 +128,8 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
     assert(memberLogin.status === 200, `member login ${memberLogin.status}`)
     const memberTok = memberLogin.json.token
 
-    const ownerLogin = await req(gwBase, 'POST', '/auth/login', {
-      body: { email: 'owner@chat.test', password: 'test-owner-chat' },
-    })
-    assert(ownerLogin.status === 200, `owner ${ownerLogin.status} ${ownerLogin.text}`)
-    const ownerTok = ownerLogin.json.token
-    const adminId = reg.json.account.id
+    const ownerTok = reg.ownerToken
+    const adminId = reg.account.id
     const seat = await req(gwBase, 'GET', `/platform/accounts/${adminId}`, { token: ownerTok })
     assert(seat.status === 200, `seat secrets ${seat.status} ${seat.text}`)
     const seatAccess = seat.json.accessToken

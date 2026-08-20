@@ -1,6 +1,7 @@
 {
   "name": "satuwork-workspace",
   "private": true,
+  "packageManager": "pnpm@11.7.0",
   "scripts": {
     "dev:gateway": "pnpm --filter satuwork-gateway dev",
     "dev:bot": "pnpm --filter satuwork dev",

@@ -148,7 +148,7 @@ export function apply(ctx: Context) {
     try {
       for (const row of outbox.list()) {
         // 升级前压在队列里的 usage 项：丢掉，别发。留着只会重复计费，
-        // 而且新的 /internal/usage 也不再写库了。
+        // 而且 Gateway 那条 /internal/usage 已经拆掉了，发出去只会 404。
         if (row.value.kind !== 'index') {
           outbox.delete(row.id)
           continue

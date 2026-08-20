@@ -359,11 +359,34 @@ export async function machineForAccount(
   const paired = loads.filter((l) => machinePaired(l.machine))
   if (!paired.length) return { ok: false, status: 409, error: '公司还没有配对任何运行机器' }
 
+  /**
+   * 粘住是**不变量，不是优化**。
+   *
+   * 以前这里只有 `if (hit) return …`：找到了这个账号的机器、但它此刻不可用
+   * （没配对好、换过地址、token 轮换失败、正在重装），就直接往下走「填满一台再用
+   * 下一台」，把这个人的新 bot 部署到另一台机器上。共享 `~/work` 靠的是同一个 uid
+   * 在同一台机器上，劈开之后这条就不成立了——而且没有任何告警，人只是从此看不见
+   * 自己在另一台机器上的文件。
+   *
+   * 更糟的是下一次：seatRuntimesOfAccount 按 slot 排序，而 slot 是**按机器**分配的，
+   * 跨机器排序没有语义——一旦劈开，挑哪台就变成任意的。
+   *
+   * 所以找到了就必须用那台；那台不行就报出来，让人先去修机器。
+   */
   const mine = (await db.seatRuntimesOfAccount(accountId)).find((r) => r.machineId)
   if (mine) {
     const hit = paired.find((l) => l.machine.id === mine.machineId)
     // 粘住的机器就算已经满了也继续用：它的容量早就把这个账号算进去了。
     if (hit) return { ok: true, machine: hit.machine }
+    const stale = loads.find((l) => l.machine.id === mine.machineId)?.machine
+    return {
+      ok: false,
+      status: 409,
+      error: stale
+        ? `这个账号的席位在机器 ${stale.id.slice(0, 8)}（${stale.host || '地址未知'}）上，那台还没配对好。` +
+          '先把它修好再部署——换一台会让这个人的共享文件对不上。'
+        : '这个账号的席位所在的机器已经不在这家公司名下了。先把它派回来，或者删掉这个账号的旧席位。',
+    }
   }
 
   const open = paired.filter((l) => !l.full).sort((a, b) => b.accounts - a.accounts || a.machine.createdAt - b.machine.createdAt)
@@ -670,6 +693,38 @@ export async function managerRemoveSeat(machine: Machine, seatId: string): Promi
     signal: AbortSignal.timeout(120_000),
   })
   if (!res.ok && res.status !== 404) throw new Error(`管家拆席位失败 ${res.status}`)
+}
+
+/**
+ * 把一批席位从它们所在的机器上拆掉。**删账号和删公司走的是同一条**。
+ *
+ * 为什么不能只删库里的行：`seat_runtimes` 一没，slot 立刻能被下一个账号分走
+ * （`allocateSlot` 就是扫这张表找第一个空号），而机器上那套 systemd 单元还在跑、
+ * 还占着同一组端口（3200+N / 6081+N）。下一个人的席位于是起不来，现象是「新员工
+ * 的 bot 一直起不来」，谁也不会想到是几个月前删掉的那家公司留下的。
+ *
+ * 拆不掉就抛，由调用方翻成 502 并劝人先「停用」——那是现成的非破坏性动作，机器
+ * 回来之后再删也不迟。硬删下去只会留下一批谁也看不见、还占着端口的席位。
+ *
+ * 没配对的机器（还没装管家、或者已经注销）跳过：那上面本来就没有我们放上去的东西。
+ */
+export async function releaseSeats(db: Db, seats: SeatRuntime[]): Promise<void> {
+  // 一台机器查一次，别为同一台机器上的每个席位都去 db.machine() 一趟。
+  const machines = new Map<string, Machine | undefined>()
+  for (const seat of seats) {
+    if (!seat.machineId) continue
+    if (!machines.has(seat.machineId)) machines.set(seat.machineId, await db.machine(seat.machineId))
+    const machine = machines.get(seat.machineId)
+    if (!machinePaired(machine)) continue
+    try {
+      await managerRemoveSeat(machine, seat.seatId)
+    } catch (e) {
+      throw new Error(
+        `席位 ${seat.seatId} 所在的机器拆不掉（${sanitizeError(e, [machine.token])}）。` +
+          '先把它「停用」，等机器恢复后再删除。',
+      )
+    }
+  }
 }
 
 /** 问管家还活着吗。配对回拨和界面上的「检查连通」都走它。 */

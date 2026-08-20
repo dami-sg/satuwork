@@ -4,6 +4,7 @@
  */
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { createCompany } from './org.mjs'
 import { startMockMcp } from './mock-mcp.mjs'
 import { PG_URL } from './pg.mjs'
 import { publishRelease } from './release.mjs'
@@ -33,7 +34,7 @@ async function readLiveCreds() {
   }
 }
 
-export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, waitHttp, cookieOf, assert, log }) {
+export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-runtime-gw'
   const BOT_HOME = '/tmp/satuwork-e2e-runtime-bot'
   const GW_PORT = 18180
@@ -71,25 +72,19 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
   let botChild
   try {
     await test('Gateway 配置的 Skill/MCP/Bot 被实例加载并进入对话', async () => {
-      const reg = await req(gwBase, 'POST', '/auth/register', {
-        body: {
-          email: 'admin@runtime.test',
-          password: 'correct-horse',
-          companyName: 'RuntimeCo',
-          slug: 'runtimeco',
-          seats: 2,
-        },
+      const reg = await createCompany(req, gwBase, {
+        ownerEmail: 'owner@runtime.test',
+        ownerPassword: 'test-owner-runtime',
+        email: 'admin@runtime.test',
+        password: 'correct-horse',
+        companyName: 'RuntimeCo',
+        slug: 'runtimeco',
+        seats: 2,
       })
-      assert(reg.status === 201, `register ${reg.status} ${reg.text}`)
-      const adminTok = reg.json.token
-      const orgId = reg.json.company.id
-
-      const ownerLogin = await req(gwBase, 'POST', '/auth/login', {
-        body: { email: 'owner@runtime.test', password: 'test-owner-runtime' },
-      })
-      assert(ownerLogin.status === 200, `owner ${ownerLogin.status} ${ownerLogin.text}`)
-      const ownerTok = ownerLogin.json.token
-      const adminId = reg.json.account.id
+      const adminTok = reg.token
+      const orgId = reg.company.id
+      const ownerTok = reg.ownerToken
+      const adminId = reg.account.id
       const seat = await req(gwBase, 'GET', `/platform/accounts/${adminId}`, { token: ownerTok })
       assert(seat.status === 200, `seat secrets ${seat.status} ${seat.text}`)
       const seatAccess = seat.json.accessToken
@@ -268,13 +263,10 @@ await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2
         `servers ${JSON.stringify(status.servers)}`,
       )
 
-      const setup = await req(botBase, 'POST', '/api/auth/setup', {
-        body: { email: 'admin@bot.test', name: '管理员', password: 'correct-horse' },
-      })
-      assert(setup.status === 200, `setup ${setup.status} ${setup.text}`)
-      const cookie = cookieOf(setup)
-
-      const list = await req(botBase, 'GET', '/api/bots', { cookie })
+      // bot 认的唯一一把入站凭据就是席位票（GATEWAY_TOKEN），和 Gateway 反代时发的
+      // 是同一把。以前这里先 POST /api/auth/setup 建个本地管理员再拿 cookie，
+      // 那套账号体系已经删了。
+      const list = await req(botBase, 'GET', '/api/bots', { token: seatAccess })
       assert(list.status === 200, `bots ${list.status} ${list.text}`)
       const bots = list.json.bots || []
       assert(bots.length === 1, `Gateway 钉住的名册应只有 1 颗，实际 ${bots.length} ${JSON.stringify(bots)}`)
@@ -286,13 +278,13 @@ await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2
       assert(pinned.remoteId === remoteBotId, `remoteId ${pinned.remoteId}`)
       assert(pinned.prompt === prompt, 'prompt mismatch')
 
-      const sess = await req(botBase, 'GET', `/api/bots/${pinned.id}/session`, { cookie })
+      const sess = await req(botBase, 'GET', `/api/bots/${pinned.id}/session`, { token: seatAccess })
       assert(sess.status === 200, `session ${sess.status} ${sess.text}`)
       const sessionId = sess.json.sessionId
       assert(sessionId, 'sessionId')
 
       const msg = await req(botBase, 'POST', `/api/sessions/${sessionId}/messages`, {
-        cookie,
+        token: seatAccess,
         body: { text: 'ping' },
       })
       assert(msg.status === 200, `message ${msg.status} ${msg.text}`)

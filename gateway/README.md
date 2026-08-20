@@ -33,11 +33,65 @@ docker compose up -d
 `GATEWAY_PG_RESET=1` 会在启动时把自己那个 schema drop 掉重建，**只对非 public schema 生效**——
 给 e2e 用的，生产跑在 public 上碰不到。
 
+## 代码布局
+
+```
+src/index.ts        起进程：连库、种 owner、装路由、监听
+src/http.ts         很小的路由器 + 静态文件
+src/routes.ts       只做组装：把下面九组路由按顺序挂上去
+src/routes/         按边界分的九组路由，每组收一个 RouteCtx { db, keys, llm }
+src/lib/            路由用的帮手：校验、序列化、鉴权守卫、四个反代、目录定义
+src/db.ts           Db 类（连接、事务、查询）；类型和行解析原样再导出
+src/db/types.ts     库里那些行长什么样，以及跟着走的常量
+src/db/rows.ts      裸行 → 类型
+src/db/migrate.ts   编号迁移的执行器（advisory lock、一条一个事务、校验和）
+src/db/migrations/  一条迁移一个文件，index.ts 是那张有序表
+src/deploy.ts       席位：槽位、端口、下发给管家、拆席位
+src/desktop.ts      桌面反代（票换 cookie、WebSocket 升级）
+src/v1.ts           /v1/* 模型代理
+src/llm.ts          pi-ai 目录与上游调用
+```
+
+**注册顺序有意义**：路由器按段精确匹配、先注册的先中，所以段数相同、更具体的路径要排在
+带参数的前面（`/orgs/:id/bots/options` 必须在 `/orgs/:id/bots/:botId` 之前）。那类相邻关系
+都在各自的模块里，跨模块之间段数不同、互不相抢。
+
+## 数据库迁移
+
+**起进程时自动跑，跑完才对外服务。** 一条迁移一个文件，编号升序，只跑一次，
+跑过的记在 `schema_migrations` 里。
+
+加一条：
+
+```bash
+# 1. 新建 gateway/src/db/migrations/0002-<短名>.ts，导出一个 SQL
+# 2. 在 gateway/src/db/migrations/index.ts 的数组末尾加一行
+# 3. 起一次进程
+```
+
+日志会说这一轮跑了什么：
+
+```
+satuwork-gateway: 已应用 1 条迁移：0002-seat-labels
+satuwork-gateway: 数据库已是最新（0002-seat-labels）
+```
+
+三条规矩：
+
+- **已经发出去的迁移不能改。** 校验和对不上时进程直接不起来并说清楚是哪一条。
+  想撤销，写新的一条把它改回去。
+- **0001 是冻结的基线。** 它就是编号机制之前那段幂等脚本——存量库第一次带着新版本
+  起来时跑它等于空转，然后记一行账，**不需要任何人工基线标定**。
+- **一条迁移一件事。** 每条和它那行账在同一个事务里落，失败就整条回滚，
+  不存在「跑了一半」。
+
+库里出现代码里没有的编号（把代码回滚到了比库更旧的版本）同样直接停机——
+让旧代码去读一个更新的库，比起不来危险得多。
+
 ## 检查
 
 ```bash
 pnpm typecheck        # tsc，无输出即通过
-node smoke.mjs        # 单进程冒烟，自带临时 schema
 node ../e2e/run.mjs   # 全量 e2e（要先起 postgres）
 ```
 

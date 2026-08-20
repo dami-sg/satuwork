@@ -52,6 +52,7 @@ export async function runStats({ gwRoot, test, req, start, waitHttp, assert, log
   try {
     let token = ''
     let orgId = ''
+    let accountId = ''
     await test('种数据：一家公司、有价模型和无价模型各若干条调用', async () => {
       const setup = await req(base, 'POST', '/auth/setup', {
         body: { email: 'o@stats.test', name: 'o', password: 'correct-horse-1' },
@@ -81,7 +82,7 @@ export async function runStats({ gwRoot, test, req, start, waitHttp, assert, log
       assert(prov.status === 201, `provider ${prov.status} ${prov.text}`)
 
       const acc = await client.query(`select id from accounts where email = 'a@stats.test'`)
-      const accountId = acc.rows[0].id
+      accountId = acc.rows[0].id
       const insert = (id, provider, model, pt, ct, at) =>
         client.query(
           'insert into llm_calls (id, "accountId", "companyId", provider, model, "promptTokens", "completionTokens", "createdAt") values ($1,$2,$3,$4,$5,$6,$7,$8)',
@@ -125,6 +126,50 @@ export async function runStats({ gwRoot, test, req, start, waitHttp, assert, log
       assert(m && m.priced === false, '按模型那行没标 priced=false')
       // 它有 3M token，但一分钱都不该加进去。
       assert(Math.abs(r.json.totals.costUsd - 6) < 1e-9, '没单价的模型把金额算进去了')
+    })
+
+    await test('命中缓存的 token 按缓存读单价算，不按输入价', async () => {
+      // 这条以前是错的：聚合 SQL 只 sum(promptTokens)/sum(completionTokens)，
+      // llm_calls 里明明存着 cachedTokens 却没人汇总，于是整个提示词按输入价计。
+      // 一个 Bot 一条长会话、系统提示词稳定，正是缓存命中率最高的形态——命中率越高
+      // 账面越虚，而 quotedUsd 是报给公司的价。
+      //
+      // claude-haiku-4-5：输入 $1/1M、输出 $5/1M、缓存读 $0.1/1M（差十倍）。
+      // 1M 提示词里 900k 命中缓存：
+      //   对的：100k × $1 + 900k × $0.1 = $0.10 + $0.09 = $0.19
+      //   错的：1M × $1                  = $1.00
+      const at = now - 45 * DAY
+      await client.query(
+        'insert into llm_calls (id, "accountId", "companyId", provider, model, "promptTokens", "completionTokens", "cachedTokens", "createdAt")' +
+          ' values ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        ['s-cache', accountId, orgId, 'anthropic', 'claude-haiku-4-5', 1_000_000, 0, 900_000, at],
+      )
+      // 自己的窗口，和上面几条互不打扰。
+      const r = await req(base, 'GET', q(now - 50 * DAY, now - 40 * DAY), { token })
+      assert(r.status === 200, `${r.status} ${r.text}`)
+      assert(r.json.totals.calls === 1, `这个窗口应只有 1 条，实际 ${r.json.totals.calls}`)
+      assert(r.json.totals.cachedTokens === 900_000, `缓存 token 没汇总：${r.json.totals.cachedTokens}`)
+      assert(
+        Math.abs(r.json.totals.costUsd - 0.19) < 1e-9,
+        `成本价 ${r.json.totals.costUsd}，应当是 0.19（按输入价算会得到 1）`,
+      )
+      const m = r.json.byModel.find((x) => x.model === 'claude-haiku-4-5')
+      assert(m && m.cachedTokens === 900_000, `按模型那行缺缓存 token：${JSON.stringify(m)}`)
+    })
+
+    await test('缓存 token 比提示词还多时按提示词封顶，不算出负的未命中量', async () => {
+      // 脏数据防线：上游改口径、或者旧行没这一列的时候，不能算出负数把账拉低。
+      const at = now - 46 * DAY
+      await client.query(
+        'insert into llm_calls (id, "accountId", "companyId", provider, model, "promptTokens", "completionTokens", "cachedTokens", "createdAt")' +
+          ' values ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        ['s-cache-bad', accountId, orgId, 'anthropic', 'claude-haiku-4-5', 100_000, 0, 999_000_000, at],
+      )
+      const r = await req(base, 'GET', q(now - 47 * DAY, now - 45.5 * DAY), { token })
+      assert(r.json.totals.calls === 1, `窗口里应只有那条脏数据，实际 ${r.json.totals.calls}`)
+      // 100k 全按缓存读价：100_000 × 0.1 / 1e6 = 0.01
+      assert(Math.abs(r.json.totals.costUsd - 0.01) < 1e-9, `封顶后应是 0.01，实际 ${r.json.totals.costUsd}`)
+      assert(r.json.totals.costUsd >= 0, '算出了负成本')
     })
 
     await test('倍率只影响报价，不动成本价', async () => {
