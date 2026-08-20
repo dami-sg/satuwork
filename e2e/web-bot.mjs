@@ -97,9 +97,14 @@ export async function runWebBot({ root, test, assert, log }) {
     all(r.chunked, '分块摘要', assert)
   })
 
-  await test('PDF：原件一定落盘，正文用文档提取器取出来', () => {
-    // 提取后端对着一份 PDF 要么给空、要么给乱码，所以这类地址走的是另一条路。
+  await test('document_read：原件一定落盘，正文用文档提取器取出来', () => {
+    // 提取后端对着一份 PDF 要么给空、要么给乱码，所以文档是另一把工具、另一条路。
     all(r.pdf, 'PDF', assert)
+  })
+
+  await test('两把工具各管各的，撞了要互相指路', () => {
+    // 一把工具一件事，模型选起来才准。撞了要说清楚该换哪把，而不是硬着头皮给个坏结果。
+    all(r.split, '分工', assert)
   })
 
   await test('Gateway 给的后缀是外部输入，落盘不能被它带出工作区', () => {

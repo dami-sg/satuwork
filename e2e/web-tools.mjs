@@ -217,6 +217,18 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(rows[rows.length - 1].units === 1, `计费条数 ${rows[rows.length - 1].units}，应当只算那条真抓的`)
     })
 
+    await test('web_extract 撞见文档：指路、不下正文、不计费', async () => {
+      const before = (await webCalls()).length
+      const r = await req(base, 'POST', '/runtime/web/extract', { token: seatToken, body: { urls: ['https://a.test/paper.pdf'] } })
+      assert(r.json.ok === true, r.text)
+      const page = r.json.pages[0]
+      assert(page.ok === false, `不该按网页抽出来：${JSON.stringify(page).slice(0, 200)}`)
+      assert(page.error.includes('document_read'), `没指路：${page.error}`)
+      assert(!page.markdown && !page.document, '正文/字节不该跟着回来')
+      // 只读了响应头就把连接排空了，没花提取后端的钱。
+      assert((await webCalls()).length === before, '只探了个头也记了账')
+    })
+
     await test('文档记在 document 名下，按它自己那档价算', async () => {
       // PDF 是 Gateway 自己下的，提取后端一次都没被调用。记在 tavily 头上的话，
       // 统计里「按后端」那张表就在撒谎——而那张表正是用来看钱花在哪家的。
@@ -228,9 +240,9 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       const doc = put.json.backends.find((b) => b.id === 'document')
       assert(doc && doc.selectable === false, 'document 不该是可选后端')
 
-      const r = await req(base, 'POST', '/runtime/web/extract', { token: seatToken, body: { urls: ['https://a.test/real.pdf'] } })
+      const r = await req(base, 'POST', '/runtime/web/document', { token: seatToken, body: { urls: ['https://a.test/real.pdf'] } })
       assert(r.json.ok === true, r.text)
-      assert(r.json.pages[0].document?.base64, `没走文档那条路：${JSON.stringify(r.json.pages[0]).slice(0, 200)}`)
+      assert(r.json.pages[0].document?.base64, `没取到字节：${JSON.stringify(r.json.pages[0]).slice(0, 200)}`)
       const rows = await webCalls()
       const last = rows[rows.length - 1]
       assert(last.backend === 'document', `记在了 ${last.backend} 头上`)
@@ -238,20 +250,16 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(last.units === 1 && last.mils === 6, `文档那笔：${JSON.stringify(last)}`)
     })
 
-    await test('一次调用里网页和文档各按各的价，分开落账', async () => {
-      const before = (await webCalls()).length
-      const r = await req(base, 'POST', '/runtime/web/extract', {
-        token: seatToken,
-        body: { urls: ['https://a.test/mixed-page', 'https://a.test/mixed.pdf'] },
-      })
-      assert(r.json.ok === true, r.text)
-      const rows = (await webCalls()).slice(before)
-      assert(rows.length === 2, `该落两笔（网页一笔、文档一笔），实际 ${rows.length}`)
-      const byBackend = Object.fromEntries(rows.map((x) => [x.backend, x]))
-      assert(byBackend.tavily?.units === 1, `网页那笔：${JSON.stringify(byBackend.tavily)}`)
-      assert(byBackend.document?.units === 1, `文档那笔：${JSON.stringify(byBackend.document)}`)
-      // 8 × 1.2 = 9.6 → 10；5 × 1.2 = 6
-      assert(byBackend.tavily.mils === 10 && byBackend.document.mils === 6, `金额：${JSON.stringify(rows)}`)
+    await test('读文档不需要配提取后端——它花的是我们自己的带宽', async () => {
+      // 把提取后端撤掉：web_extract 该罢工，document_read 照跑。这正是拆开的好处，
+      // 一套刚装好、还没买 key 的部署读 PDF 也是通的。
+      const cur = await req(base, 'GET', '/platform/tools/web', { token })
+      await req(base, 'PUT', '/platform/tools/web', { token, body: { extractBackend: '' } })
+      const page = await req(base, 'POST', '/runtime/web/extract', { token: seatToken, body: { urls: ['https://a.test/x'] } })
+      assert(page.json.ok === false && page.json.error.includes('提取后端'), `没配后端却没拦：${page.text}`)
+      const doc = await req(base, 'POST', '/runtime/web/document', { token: seatToken, body: { urls: ['https://a.test/still.pdf'] } })
+      assert(doc.json.ok === true && doc.json.pages[0].document?.base64, `没配后端时读文档也断了：${doc.text}`)
+      await req(base, 'PUT', '/platform/tools/web', { token, body: { extractBackend: cur.json.web.extractBackend } })
     })
 
     await test('参数越界当场说清楚，不发给后端', async () => {
