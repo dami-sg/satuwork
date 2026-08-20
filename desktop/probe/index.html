@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Satuwork 桌面壳自检</title>
+<style>
+  body { margin: 24px; font: 14px/1.6 -apple-system, "PingFang SC", "Segoe UI", sans-serif; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 16px; color: #6e6d68; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; max-width: 720px; }
+  td { padding: 6px 8px; border-bottom: 1px solid #dad9d4; vertical-align: top; }
+  td.k { width: 180px; color: #535146; }
+  td.v { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .pass { color: #2f7d32; font-weight: 600; }
+  .fail { color: #b05730; font-weight: 600; }
+  .ua { margin-top: 16px; color: #6e6d68; font-size: 11px; word-break: break-all; max-width: 720px; }
+</style>
+</head>
+<body>
+<h1>桌面壳自检</h1>
+<p class="sub">gateway/ui 靠的四样东西，在这个 webview 里逐个试一遍。结论同时回填到起靶子的那个终端。</p>
+<table id="out"></table>
+<div class="ua" id="ua"></div>
+<script>
+const results = {}
+const out = document.getElementById('out')
+
+/**
+ * 记一条结论。
+ *
+ * **同一条只认第一次。** WebSocket 那条踩过这个坑：回声到了（PASS 已经记下），
+ * 紧接着 close 触发了一次 onerror，同名再记一次就把 PASS 覆盖成了 FAIL——服务端
+ * 日志里字节收发都对得上，结果文件里却写着「坏」。靶子撒一次谎，后面所有判断都建在
+ * 沙子上。
+ */
+function row(key, ok, detail) {
+  if (key in results) return
+  results[key] = { ok, detail }
+  const tr = document.createElement('tr')
+  tr.innerHTML =
+    '<td class="k">' + key + '</td>' +
+    '<td class="v"><span class="' + (ok ? 'pass' : 'fail') + '">' + (ok ? 'PASS' : 'FAIL') + '</span> ' +
+    String(detail).replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;')) + '</td>'
+  out.appendChild(tr)
+}
+
+/**
+ * 边收边给，还是攒完一次性给。
+ *
+ * 只看「读到了内容」不够——那样即使 webview 把整条流缓冲到结束再交出来也算过，而
+ * 那正是聊天打字机效果消失的样子。这里数的是**分几次读到**，以及第一次读到距离
+ * 发起请求过了多久。
+ */
+async function checkStream() {
+  const t0 = performance.now()
+  const res = await fetch('/sse', { headers: { accept: 'text/event-stream' } })
+  if (!res.ok || !res.body) return row('fetch 流式读取', false, 'body 拿不到（res.ok=' + res.ok + '）')
+  const reader = res.body.getReader()
+  let reads = 0
+  let firstAt = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value && value.length) {
+      reads += 1
+      if (!firstAt) firstAt = Math.round(performance.now() - t0)
+    }
+  }
+  // 服务端发 5 拍、每拍隔 150ms。分 3 次以上读到就算真流式。
+  row('fetch 流式读取', reads >= 3, reads + ' 次读到，首字节 ' + firstAt + 'ms')
+}
+
+function checkWs() {
+  return new Promise((done) => {
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws'
+    let ws
+    try {
+      ws = new WebSocket(url)
+    } catch (e) {
+      row('WebSocket', false, '构造就抛了：' + e)
+      return done()
+    }
+    const timer = setTimeout(() => {
+      row('WebSocket', false, '3 秒没有回声')
+      try { ws.close() } catch {}
+      done()
+    }, 3000)
+    ws.onopen = () => ws.send('hi')
+    let settled = false
+    ws.onmessage = (ev) => {
+      clearTimeout(timer)
+      settled = true
+      row('WebSocket', ev.data === 'echo:hi', '收到 ' + JSON.stringify(ev.data))
+      // 先摘掉 onerror 再关：WKWebView 在 close 之后还会补一次 error，留着它就等于
+      // 自己把刚记下的 PASS 再否掉一遍。
+      ws.onerror = null
+      try { ws.close() } catch {}
+      done()
+    }
+    ws.onerror = () => {
+      if (settled) return
+      clearTimeout(timer)
+      row('WebSocket', false, 'onerror')
+      done()
+    }
+  })
+}
+
+async function checkCookie() {
+  try {
+    const res = await fetch('/cookie/set')
+    const json = await res.json()
+    row('302 + SameSite=Lax cookie', !!json.ok, json.ok ? '下一跳带上了' : '下一跳没带上——桌面那块屏会 401')
+  } catch (e) {
+    row('302 + SameSite=Lax cookie', false, String(e))
+  }
+}
+
+function checkBlobPreview() {
+  return new Promise((done) => {
+    const blob = new Blob(['<p id="hit">ok</p>'], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    const frame = document.createElement('iframe')
+    frame.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0'
+    const timer = setTimeout(() => {
+      row('blob: 预览 iframe', false, '2 秒没 onload')
+      frame.remove()
+      done()
+    }, 2000)
+    frame.onload = () => {
+      clearTimeout(timer)
+      row('blob: 预览 iframe', true, 'onload 触发')
+      URL.revokeObjectURL(url)
+      frame.remove()
+      done()
+    }
+    frame.src = url
+    document.body.appendChild(frame)
+  })
+}
+
+/**
+ * 下载。
+ *
+ * 分两半：**请求发没发出来**由服务端判（webview 静默丢掉下载时，那边一条请求都收不
+ * 到，而这正是最常见也最难看出来的那种坏法）；**文件落没落盘**只有磁盘知道，页面
+ * 判不了，所以那一半写在结论里让人去看，不算进 PASS。
+ *
+ * 之前这一条无论如何都报 PASS，等于在结果文件里写了一句没验过的「过」——换系统跑
+ * 的时候，那份结果就是唯一的证据，它不能撒谎。
+ */
+async function checkDownload() {
+  const a = document.createElement('a')
+  a.href = '/download'
+  a.download = 'probe.txt'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  await new Promise((r) => setTimeout(r, 800))
+  let asked = false
+  try {
+    asked = (await (await fetch('/download/seen')).json()).ok
+  } catch {}
+  row(
+    '<a download>',
+    asked,
+    asked ? '请求发出来了；文件落没落盘去 ~/Downloads 看 probe.txt' : 'webview 把下载静默丢了——一条请求都没发',
+  )
+}
+
+/**
+ * 链接。三条分开验，因为它们在壳子里走的是三段不同的代码：
+ *
+ *   1. 同源 `target="_blank"`（对话页那个「打开桌面」按钮）
+ *   2. `window.open()`
+ *   3. 站外链接（markdown 里贴的任何一个网址）
+ *
+ * 裸 webview 里前两条是**空操作**——不报错、不开窗、连请求都不发；第三条会把唯一的
+ * 窗口整个带走，而这个壳没有地址栏也没有后退。壳子给前两条改了路、给第三条加了守卫，
+ * 这里验的是补丁还在不在。
+ *
+ * 判的依据是服务端有没有收到那三个请求：页面看不见「新窗口开在哪儿」，服务端看得见
+ * 「有没有人来取」。站外那一条由隔壁端口收，收到就说明它真的被送出去了。
+ */
+async function checkLinks() {
+  const outside = location.protocol + '//' + location.hostname + ':' + (Number(location.port) + 1) + '/links/outside'
+  const click = (href, blank) => {
+    const a = document.createElement('a')
+    a.href = href
+    if (blank) a.target = '_blank'
+    a.rel = 'noopener noreferrer'
+    a.style.cssText = 'position:absolute;opacity:0'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  }
+  click('/links/blank', true)
+  await new Promise((r) => setTimeout(r, 600))
+  try { window.open('/links/open', '_blank') } catch {}
+  await new Promise((r) => setTimeout(r, 600))
+  click(outside, true)
+  await new Promise((r) => setTimeout(r, 1500))
+  let seen = { blank: false, open: false, outside: false }
+  try {
+    seen = await (await fetch('/links/seen')).json()
+  } catch {}
+  row('target="_blank"（同源）', seen.blank, seen.blank ? '有人来取了' : '点了没反应——对话页那个「打开桌面」在这个系统上是死的')
+  row('window.open()（同源）', seen.open, seen.open ? '有人来取了' : '空操作')
+  row('站外链接', seen.outside, seen.outside ? '送出去了（该出现在系统浏览器里）' : '没送出去')
+  // 「窗口没被带走」不用单列一条：被带走的话，上面这几行和最后那次回填都不会发生，
+  // 结果文件里直接少一整份——那比一条永远为真的 PASS 说明得多。
+}
+
+function checkStorage() {
+  try {
+    localStorage.setItem('satu_probe', '1')
+    sessionStorage.setItem('satu_probe', '1')
+    row('localStorage / sessionStorage', localStorage.getItem('satu_probe') === '1' && sessionStorage.getItem('satu_probe') === '1', '可读可写')
+  } catch (e) {
+    row('localStorage / sessionStorage', false, String(e))
+  }
+}
+
+;(async () => {
+  document.getElementById('ua').textContent = navigator.userAgent
+  checkStorage()
+  await checkStream()
+  await checkWs()
+  await checkCookie()
+  await checkBlobPreview()
+  await checkDownload()
+  await checkLinks()
+  try {
+    await fetch('/result', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ua: navigator.userAgent, origin: location.origin, results }, null, 2),
+    })
+  } catch {}
+})()
+</script>
+</body>
+</html>

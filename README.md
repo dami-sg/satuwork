@@ -20,6 +20,12 @@ Bot 不在 compose 里——它由席位机器上的机器管家按 (账号, bot
 Gateway 的业务数据在 PostgreSQL；宿主机端口用 **5434**（5432 一般已被别的实例占着）。
 `SATUWORK_GATEWAY_HOME` 只放 JWT 密钥对和 Bot 发布包。
 
+## 桌面端
+
+`desktop/` 是个 Tauri 壳，**包里没有前端**——它只记住「连哪台 Gateway」，然后开一个
+没有地址栏的窗口装 Gateway 自己发的那份界面。为什么是这个形状、以及换系统时该先跑
+哪个自检，见 [desktop/README.md](desktop/README.md)。
+
 ## 出包
 
 本地测试包（过一层 Docker 打 Linux 包、传进本地 Gateway）见

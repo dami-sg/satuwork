@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    内网的 Gateway 通常是 http（desktop.ts 发 cookie 时就按这个假设加不加 Secure）。
+    macOS 的 ATS 拦不拦明文 http，各系统版本上不一样，而拦的时候表现是**一片空白**，
+    界面上没有任何一句话能让人分辨「被系统拦了」和「服务器没起来」。
+
+    实测：macOS 26.5 + WKWebView 605.1.15 上，不加这段也能装 http://192.168.x.x
+    的页面（desktop/probe 跑过负向对照）。所以这段现在**没在起作用**——它留着是
+    给旧系统的保险，一旦哪台机器上出现「填了地址却一片空白，而浏览器打得开」，
+    第一个该看的就是这里。
+
+    只放开局域网那一段（私有网段、.local）。公网的 Gateway 该上 https，不该在这里
+    开 NSAllowsArbitraryLoads。
+  -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
+</dict>
+</plist>
