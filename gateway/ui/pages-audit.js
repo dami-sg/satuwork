@@ -743,6 +743,7 @@ function companyDetailPage() {
             ${invoiceRows || empty(t('还没有订阅账单。支付接上之后，账期会列在这里。'))}
           </div>
         </div>
+        ${chargeTable('org', state.org?.id || '')}
         ${seatEnvModal()}
       </div>
     </div>`

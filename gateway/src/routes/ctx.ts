@@ -1,6 +1,7 @@
 import type { Db } from '../db.ts'
 import type { JwtKeys } from '../crypto.ts'
 import type { Llm } from '../llm.ts'
+import type { Meter } from '../lib/meter.ts'
 
 /**
  * 每组路由都收这一个。
@@ -13,4 +14,9 @@ export interface RouteCtx {
   db: Db
   keys: JwtKeys
   llm: Llm
+  /**
+   * 计费适配器。**整个进程一个**——它记着每家公司的余额，拆成多份就等于多份各算各的
+   * 记忆，谁都不知道别人扣过了。
+   */
+  meter: Meter
 }

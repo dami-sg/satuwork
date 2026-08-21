@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
-import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseConnectorPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf } from './db/rows.ts'
+import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -562,6 +562,7 @@ export class Db {
     promptTokens?: number
     completionTokens?: number
     cachedTokens?: number
+    cacheWriteTokens?: number
   }): Promise<LlmCall> {
     const row: LlmCall = {
       id: randomUUID(),
@@ -572,10 +573,11 @@ export class Db {
       promptTokens: input.promptTokens ?? 0,
       completionTokens: input.completionTokens ?? 0,
       cachedTokens: input.cachedTokens ?? 0,
+      cacheWriteTokens: input.cacheWriteTokens ?? 0,
       createdAt: Date.now(),
     }
     await this.run(
-      'insert into llm_calls (id, "accountId", "companyId", provider, model, "promptTokens", "completionTokens", "cachedTokens", "createdAt") values (?,?,?,?,?,?,?,?,?)',
+      'insert into llm_calls (id, "accountId", "companyId", provider, model, "promptTokens", "completionTokens", "cachedTokens", "cacheWriteTokens", "createdAt") values (?,?,?,?,?,?,?,?,?,?)',
       [
         row.id,
         row.accountId,
@@ -585,6 +587,7 @@ export class Db {
         row.promptTokens,
         row.completionTokens,
         row.cachedTokens,
+        row.cacheWriteTokens,
         row.createdAt,
       ],
     )
@@ -593,14 +596,12 @@ export class Db {
 
   async updateLlmCallTokens(
     id: string,
-    usage: { prompt_tokens: number; completion_tokens: number; cached_tokens?: number },
+    usage: { prompt_tokens: number; completion_tokens: number; cached_tokens?: number; cache_write_tokens?: number },
   ): Promise<void> {
-    await this.run('update llm_calls set "promptTokens"=?, "completionTokens"=?, "cachedTokens"=? where id=?', [
-      usage.prompt_tokens,
-      usage.completion_tokens,
-      usage.cached_tokens ?? 0,
-      id,
-    ])
+    await this.run(
+      'update llm_calls set "promptTokens"=?, "completionTokens"=?, "cachedTokens"=?, "cacheWriteTokens"=? where id=?',
+      [usage.prompt_tokens, usage.completion_tokens, usage.cached_tokens ?? 0, usage.cache_write_tokens ?? 0, id],
+    )
   }
 
   async insertWebCall(input: {
@@ -609,7 +610,6 @@ export class Db {
     kind: WebCallKind
     backend: string
     units: number
-    mils: number
   }): Promise<WebCall> {
     const row: WebCall = {
       id: randomUUID(),
@@ -618,7 +618,8 @@ export class Db {
       kind: input.kind,
       backend: input.backend,
       units: input.units,
-      mils: input.mils,
+      // 同 connector_calls：钱在账本里，这一列留给老行，新行恒为 0。
+      mils: 0,
       createdAt: Date.now(),
     }
     await this.run(
@@ -632,7 +633,7 @@ export class Db {
   async webUsageByCompanyBackend(
     range?: { from?: number; to?: number },
     companyId?: string,
-  ): Promise<{ companyId: string | null; backend: string; kind: string; calls: number; units: number; mils: number; lastAt: number | null }[]> {
+  ): Promise<{ companyId: string | null; backend: string; kind: string; calls: number; units: number; amountMicros: number; lastAt: number | null }[]> {
     const r = this.llmRangeSql(range)
     const args: unknown[] = [...r.args]
     let where = `where 1=1${r.sql}`
@@ -640,8 +641,17 @@ export class Db {
       where += ' and "companyId" = ?'
       args.push(companyId)
     }
+    // 金额按 refId 从账本接回来。web_calls 有 backend / kind / units 这些账本里没有的
+    // 维度，账本有钱——两边各出各的那一半（docs/billing.md §2）。老行的钱还在 mils 上，
+    // 回填脚本会把它们翻成账本行，所以这里只认账本，不再 `sum(mils)`。
     const rows = await this.many(
-      `select "companyId", backend, kind, count(*) as calls, coalesce(sum(units), 0) as units, coalesce(sum(mils), 0) as mils, max("createdAt") as "lastAt" from web_calls ${where} group by "companyId", backend, kind`,
+      `select w."companyId", w.backend, w.kind, count(*) as calls,
+              coalesce(sum(w.units), 0) as units,
+              coalesce(sum(u."amountMicros"), 0) as micros,
+              max(w."createdAt") as "lastAt"
+       from web_calls w left join usage_charges u on u."refId" = w.id
+       ${where.replace(/"companyId"/g, 'w."companyId"').replace(/"createdAt"/g, 'w."createdAt"')}
+       group by w."companyId", w.backend, w.kind`,
       args,
     )
     return rows.map((row) => ({
@@ -650,7 +660,7 @@ export class Db {
       kind: str(row.kind),
       calls: num(row.calls),
       units: num(row.units),
-      mils: num(row.mils),
+      amountMicros: num(row.micros),
       lastAt: row.lastAt == null ? null : num(row.lastAt),
     }))
   }
@@ -689,6 +699,7 @@ export class Db {
       promptTokens: num(r.promptTokens),
       completionTokens: num(r.completionTokens),
       cachedTokens: num(r.cachedTokens),
+      cacheWriteTokens: num(r.cacheWriteTokens),
       createdAt: num(r.createdAt),
     }))
   }
@@ -766,15 +777,26 @@ export class Db {
       where += ' and "companyId" = ?'
       args.push(companyId)
     }
+    /**
+     * `unledgeredCalls`：这一组里**账本上根本没有对应行**的调用数。
+     *
+     * 金额只从账本来之后，「按 $0 收了」和「压根没记过账」在结果里长得一模一样，
+     * 而后者恰恰是升级前所有历史调用的样子（回填脚本刻意不给模型调用补金额）。
+     * 不把它数出来的话，翻上个月看到的是真实的 token 配一个 $0.00 加零句提示——
+     * 那正是这套代码一直在防的「$0.00 被读成免费」。
+     */
     const rows = await this.many(
-      `select "companyId", provider, model, count(*) as calls,
-              coalesce(sum("promptTokens"), 0) as "promptTokens",
-              coalesce(sum("completionTokens"), 0) as "completionTokens",
-              coalesce(sum("cachedTokens"), 0) as "cachedTokens",
-              max("createdAt") as "lastAt"
-       from llm_calls ${where}
-       group by "companyId", provider, model
-       order by "companyId", provider, model`,
+      `select l."companyId", l.provider, l.model, count(*) as calls,
+              coalesce(sum(l."promptTokens"), 0) as "promptTokens",
+              coalesce(sum(l."completionTokens"), 0) as "completionTokens",
+              coalesce(sum(l."cachedTokens"), 0) as "cachedTokens",
+              coalesce(sum(l."cacheWriteTokens"), 0) as "cacheWriteTokens",
+              coalesce(sum(case when u.id is null then 1 else 0 end), 0) as "unledgeredCalls",
+              max(l."createdAt") as "lastAt"
+       from llm_calls l left join usage_charges u on u."refId" = l.id
+       ${where.replace(/"(companyId|createdAt)"/g, 'l."$1"')}
+       group by l."companyId", l.provider, l.model
+       order by l."companyId", l.provider, l.model`,
       args,
     )
     return rows.map((row) => ({
@@ -785,6 +807,8 @@ export class Db {
       promptTokens: num(row.promptTokens),
       completionTokens: num(row.completionTokens),
       cachedTokens: num(row.cachedTokens),
+      cacheWriteTokens: num(row.cacheWriteTokens),
+      unledgeredCalls: num(row.unledgeredCalls),
       lastAt: numOrNull(row.lastAt),
     }))
   }
@@ -964,8 +988,6 @@ export class Db {
     label?: string
     tool: string
     status: ConnectorCallStatus
-    amountMicros?: number
-    bonusMicros?: number
     latencyMs?: number
     viaMention?: boolean
   }): Promise<ConnectorCall> {
@@ -981,12 +1003,10 @@ export class Db {
       label: input.label ?? '',
       tool: input.tool,
       status: input.status,
-      amountMicros: Math.max(0, Math.trunc(input.amountMicros ?? 0)),
-      // 赠送承担的部分不可能超过总额——脏数据也不能算出负的「充值承担」。
-      bonusMicros: Math.min(
-        Math.max(0, Math.trunc(input.bonusMicros ?? 0)),
-        Math.max(0, Math.trunc(input.amountMicros ?? 0)),
-      ),
+      // 钱不在这张表里了，见 docs/billing.md §2：账本（usage_charges）是唯一的钱。
+      // 这两列留着是为了老行，新行恒为 0——统计要金额时按 refId 去账本上取。
+      amountMicros: 0,
+      bonusMicros: 0,
       latencyMs: Math.max(0, Math.trunc(input.latencyMs ?? 0)),
       viaMention: input.viaMention ?? false,
       createdAt: Date.now(),
@@ -1052,21 +1072,23 @@ export class Db {
       where.push('"createdAt" <= ?')
       args.push(range.to)
     }
-    const w = where.join(' and ')
+    // 维度在 connector_calls（label / tool / 状态），钱在账本，按 refId 接起来。
+    const w = where.join(' and ').replace(/"(accountId|companyId|createdAt)"/g, 'c."$1"')
+    const from = 'from connector_calls c left join usage_charges u on u."refId" = c.id'
     const g = async (cols: string, group: string) =>
       this.many(
-        `select ${cols}, count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt" from connector_calls where ${w} group by ${group}`,
+        `select ${cols}, count(*) as calls, coalesce(sum(u."amountMicros"), 0) as micros, max(c."createdAt") as "lastAt" ${from} where ${w} group by ${group}`,
         args,
       )
 
     const total = await this.one(
-      `select count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt" from connector_calls where ${w}`,
+      `select count(*) as calls, coalesce(sum(u."amountMicros"), 0) as micros, max(c."createdAt") as "lastAt" ${from} where ${w}`,
       args,
     )
-    const byStatus = await g('status', 'status')
-    const byAccount = await g('"accountId"', '"accountId"')
-    const byConnector = await g('connector, label', 'connector, label')
-    const byTool = await g('connector, tool', 'connector, tool')
+    const byStatus = await g('c.status', 'c.status')
+    const byAccount = await g('c."accountId"', 'c."accountId"')
+    const byConnector = await g('c.connector, c.label', 'c.connector, c.label')
+    const byTool = await g('c.connector, c.tool', 'c.connector, c.tool')
     return {
       total: { calls: num(total?.calls ?? 0), amountMicros: num(total?.micros ?? 0), lastAt: numOrNull(total?.lastAt) },
       byStatus: byStatus.map((r) => ({ status: str(r.status), calls: num(r.calls), amountMicros: num(r.micros) })),
@@ -1106,9 +1128,11 @@ export class Db {
       args.push(range.to)
     }
     const rows = await this.many(
-      `select "companyId", connector, count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt"
-       from connector_calls where ${where.join(' and ')}
-       group by "companyId", connector order by "companyId", connector`,
+      `select c."companyId", c.connector, count(*) as calls,
+              coalesce(sum(u."amountMicros"), 0) as micros, max(c."createdAt") as "lastAt"
+       from connector_calls c left join usage_charges u on u."refId" = c.id
+       where ${where.join(' and ').replace(/"createdAt"/g, 'c."createdAt"')}
+       group by c."companyId", c.connector order by c."companyId", c.connector`,
       args,
     )
     return rows.map((r) => ({
@@ -1120,37 +1144,213 @@ export class Db {
     }))
   }
 
+  // ── 计费账本。**钱只在这张表里**，领域表只记事实。见 docs/billing.md。───
+
+  async insertUsageCharge(input: {
+    companyId: string | null
+    accountId: string
+    botId?: string | null
+    sessionId?: string | null
+    kind: ChargeKind
+    subject: string
+    status: ChargeStatus
+    quantity?: Record<string, number>
+    unitPrice?: Record<string, number>
+    multiplier?: number
+    amountMicros?: number
+    bonusMicros?: number
+    unpriced?: boolean
+    refId?: string | null
+  }): Promise<UsageCharge> {
+    const amount = Math.max(0, Math.trunc(input.amountMicros ?? 0))
+    const row: UsageCharge = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      accountId: input.accountId,
+      botId: input.botId ?? null,
+      sessionId: input.sessionId ?? null,
+      kind: input.kind,
+      subject: input.subject,
+      status: input.status,
+      quantity: input.quantity ?? {},
+      unitPrice: input.unitPrice ?? {},
+      multiplier: input.multiplier ?? 1,
+      amountMicros: amount,
+      // 赠送承担的不可能超过总额——脏数据也不能算出负的「充值承担」（同 0005 的处理）。
+      bonusMicros: Math.min(Math.max(0, Math.trunc(input.bonusMicros ?? 0)), amount),
+      unpriced: input.unpriced === true,
+      refId: input.refId ?? null,
+      createdAt: Date.now(),
+    }
+    await this.run(
+      'insert into usage_charges (id, "companyId", "accountId", "botId", "sessionId", kind, subject, status, quantity, "unitPrice", multiplier, "amountMicros", "bonusMicros", unpriced, "refId", "createdAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [
+        row.id,
+        row.companyId,
+        row.accountId,
+        row.botId,
+        row.sessionId,
+        row.kind,
+        row.subject,
+        row.status,
+        JSON.stringify(row.quantity),
+        JSON.stringify(row.unitPrice),
+        row.multiplier,
+        row.amountMicros,
+        row.bonusMicros,
+        row.unpriced,
+        row.refId,
+        row.createdAt,
+      ],
+    )
+    return row
+  }
+
   /**
-   * 这家公司花出去多少微元，**按桶分开**。
+   * 这家公司在两个桶上各花了多少（微元）。**三条计费路一起算**——账本是唯一的钱。
    *
-   * **余额是「充的 − 花的」现算，没有余额行。** 建一行余额就要为每次工具调用去更新它，
-   * 一家公司所有席位挤在同一行上排队，为一次 20 毫秒的调用付出一次行锁——不值得。
-   *
-   * 两个桶必须分开算，因为它们的有效期不一样：
-   *
-   * - **套餐赠送**跟着账期，到期作废。所以只统计 `bonusSince`（当前账期起点）之后的，
-   *   上一期花掉的赠送不能再从这一期扣。
+   * - **套餐赠送**跟着账期，到期作废，所以只统计 `bonusSince`（当前账期起点）之后的。
    * - **充值**不过期，累计全部历史。
    *
-   * 合成一个数的话，套餐一到期，它已经花掉的部分会从充值余额上再扣一遍——刚充过钱
-   * 的公司会被判定成欠费（见迁移 0005）。
+   * 合成一个数的话，套餐一到期，它已经花掉的部分会从充值余额上再扣一遍（见迁移 0005）。
    */
-  async connectorSpend(
-    companyId: string,
-    bonusSince: number | null,
-  ): Promise<{ bonusMicros: number; topupMicros: number }> {
+  async chargeSpend(companyId: string, bonusSince: number | null): Promise<{ bonusMicros: number; topupMicros: number }> {
     const topup = await this.one(
-      'select coalesce(sum("amountMicros" - "bonusMicros"), 0) as spent from connector_calls where "companyId" = ?',
+      'select coalesce(sum("amountMicros" - "bonusMicros"), 0) as spent from usage_charges where "companyId" = ?',
       [companyId],
     )
     const bonus =
       bonusSince == null
         ? undefined
         : await this.one(
-            'select coalesce(sum("bonusMicros"), 0) as spent from connector_calls where "companyId" = ? and "createdAt" >= ?',
+            'select coalesce(sum("bonusMicros"), 0) as spent from usage_charges where "companyId" = ? and "createdAt" >= ?',
             [companyId, bonusSince],
           )
     return { bonusMicros: num(bonus?.spent ?? 0), topupMicros: num(topup?.spent ?? 0) }
+  }
+
+  /** 从某个时刻起一共扣了多少微元。账单屏的「本期已扣」用它。 */
+  async chargeSpentSince(companyId: string, since: number): Promise<number> {
+    const r = await this.one(
+      'select coalesce(sum("amountMicros"), 0) as spent from usage_charges where "companyId" = ? and "createdAt" >= ?',
+      [companyId, since],
+    )
+    return num(r?.spent ?? 0)
+  }
+
+  async usageCharge(id: string): Promise<UsageCharge | undefined> {
+    const r = await this.one('select * from usage_charges where id = ?', [id])
+    return r ? usageChargeOf(r) : undefined
+  }
+
+  /**
+   * 计费明细一页。游标是 `${createdAt}:${id}`，和会话索引那套一样（routes/sessions.ts）。
+   *
+   * **必须接口分页。** 平台那四张长表是前端切页的（一次拉齐、切的是已经拿到的数据），
+   * 理由是「问题不在拉不动，在一屏塞不下」。账本不一样：一家公司一天就能产生几千行，
+   * 一次拉齐是真的拉不动。
+   */
+  async listUsageCharges(filter: {
+    companyId?: string
+    accountId?: string
+    botId?: string
+    kind?: ChargeKind
+    status?: ChargeStatus
+    from?: number
+    to?: number
+    limit?: number
+    before?: { createdAt: number; id: string }
+  }): Promise<UsageCharge[]> {
+    let sql = 'select * from usage_charges where 1=1'
+    const args: unknown[] = []
+    // companyId 为 null 的是 owner 自己的调用。传了 companyId 就只看这一家，
+    // 不传就是全平台（含平台自己那些）。
+    if (filter.companyId) {
+      sql += ' and "companyId" = ?'
+      args.push(filter.companyId)
+    }
+    if (filter.accountId) {
+      sql += ' and "accountId" = ?'
+      args.push(filter.accountId)
+    }
+    if (filter.botId) {
+      sql += ' and "botId" = ?'
+      args.push(filter.botId)
+    }
+    if (filter.kind) {
+      sql += ' and kind = ?'
+      args.push(filter.kind)
+    }
+    if (filter.status) {
+      sql += ' and status = ?'
+      args.push(filter.status)
+    }
+    if (filter.from != null) {
+      sql += ' and "createdAt" >= ?'
+      args.push(filter.from)
+    }
+    if (filter.to != null) {
+      sql += ' and "createdAt" <= ?'
+      args.push(filter.to)
+    }
+    if (filter.before) {
+      // 同一毫秒里可能有好几行，光比时间会漏掉或重复。带上 id 当第二把钥匙。
+      sql += ' and ("createdAt", id) < (?, ?)'
+      args.push(filter.before.createdAt, filter.before.id)
+    }
+    const limit = Math.min(Math.max(Math.trunc(filter.limit ?? CHARGE_PAGE_DEFAULT), 1), CHARGE_PAGE_MAX + 1)
+    sql += ' order by "createdAt" desc, id desc limit ?'
+    args.push(limit)
+    return (await this.many(sql, args)).map(usageChargeOf)
+  }
+
+  /**
+   * 账本汇总：按公司 × 类型。统计屏用它。
+   *
+   * **只 sum，不按当前单价重算**——金额在写行那一刻就定死了（docs/billing.md §2）。
+   */
+  async chargeUsageBy(
+    columns: ('companyId' | 'accountId' | 'kind' | 'subject')[],
+    range?: { from?: number; to?: number },
+    filter?: { companyId?: string; accountId?: string },
+  ): Promise<{ companyId: string | null; accountId: string; kind: string; subject: string; calls: number; amountMicros: number; bonusMicros: number; costMicros: number; unpricedCalls: number; lastAt: number | null }[]> {
+    const cols = columns.map((c) => `"${c}"`).join(', ')
+    const r = this.llmRangeSql(range)
+    let where = `where 1=1${r.sql}`
+    const args: unknown[] = [...r.args]
+    if (filter?.companyId) {
+      where += ' and "companyId" = ?'
+      args.push(filter.companyId)
+    }
+    if (filter?.accountId) {
+      where += ' and "accountId" = ?'
+      args.push(filter.accountId)
+    }
+    const rows = await this.many(
+      `select ${cols}, count(*) as calls,
+              coalesce(sum("amountMicros"), 0) as "amountMicros",
+              coalesce(sum("bonusMicros"), 0) as "bonusMicros",
+              -- 原价是**倒推**的：成交额 ÷ 当时的倍率。账本存倍率而不是原价，因为
+              -- 倍率只有一个数、原价有四项；除法在这里做，历史行各按各的倍率还原。
+              coalesce(sum("amountMicros" / greatest(multiplier, 0.0001)), 0) as "costMicros",
+              coalesce(sum(case when unpriced then 1 else 0 end), 0) as "unpricedCalls",
+              max("createdAt") as "lastAt"
+       from usage_charges ${where}
+       group by ${cols}`,
+      args,
+    )
+    return rows.map((row) => ({
+      companyId: columns.includes('companyId') ? strOrNull(row.companyId) : null,
+      accountId: columns.includes('accountId') ? str(row.accountId) : '',
+      kind: columns.includes('kind') ? str(row.kind) : '',
+      subject: columns.includes('subject') ? str(row.subject) : '',
+      calls: num(row.calls),
+      amountMicros: num(row.amountMicros),
+      bonusMicros: num(row.bonusMicros),
+      costMicros: Math.round(num(row.costMicros)),
+      unpricedCalls: num(row.unpricedCalls),
+      lastAt: numOrNull(row.lastAt),
+    }))
   }
 
   // ── 分组。全体成员是算出来的，不进这张表。──────────────────────────
@@ -2411,6 +2611,10 @@ export class Db {
       managerVersion: String(next.managerVersion ?? '').trim(),
       // 同上：这一行漏了，工具配置那一屏就是「能填、回 200、读出来永远是空」。
       webTools: parseWebTools(next.webTools),
+      // 同上第三次。这两项漏了的后果更重：单价覆盖存不进去，缺价的模型就永远缺价；
+      // 熔断开关存不进去，`enforce` 就成了一个改不动的常量。
+      modelPricing: parseModelPricing(next.modelPricing),
+      billing: parseBilling(next.billing),
     })
     await this.run(
       "insert into platform_settings (id, payload, \"updatedAt\") values ('platform', ?, ?) on conflict (id) do update set payload=excluded.payload, \"updatedAt\"=excluded.\"updatedAt\"",

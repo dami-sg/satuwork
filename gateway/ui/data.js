@@ -382,6 +382,7 @@ async function loadMachines(id) {
 }
 
 async function loadCompanyDetail(id) {
+  resetChargePaging()
   if (!id) {
     flash('err', t('公司不存在'))
     state.path = '/companies'
@@ -402,6 +403,9 @@ async function loadCompanyDetail(id) {
       loadPlanSkus().catch(() => { state.planSkus = [] }),
       // 充值记录：只有已付款的充值单才有，拉不到就当空的，不挡整页。
       loadOrgTopups(id).catch(() => { state.orgTopups = [] }),
+      // 这家公司的计费明细。owner 在这一屏要回答的是「这家的钱花在哪了」，
+      // 而那个问题在汇总数字上答不了。
+      loadCharges('org', id).catch(() => { state.charges = null }),
     ])
     state.org = org.company
     state.plan = org.plan
@@ -606,6 +610,75 @@ async function loadBilling() {
   state.billing = await api('GET', `/orgs/${encodeURIComponent(id)}/billing`)
 }
 
+/**
+ * 计费明细。`where` 决定打哪条接口：平台看全平台，公司看自己家，员工看自己。
+ *
+ * 翻页靠游标栈（state.chargesCursors）：数组最后一个是当前页的起点。
+ * 「下一页」压入服务端给的 nextCursor，「上一页」弹掉栈顶。
+ */
+async function loadCharges(where, forOrg) {
+  const cursor = state.chargesCursors[state.chargesCursors.length - 1]
+  const q = new URLSearchParams()
+  if (state.chargesKind) q.set('kind', state.chargesKind)
+  if (cursor) q.set('cursor', cursor)
+  // 时间窗跟着这一屏上面那块走。**明细和汇总必须问同一个范围**——同屏两张表各说各的
+  // 时间段，人只会以为数字错了。
+  const range = chargesWindow(where)
+  if (range) {
+    q.set('from', String(range.from))
+    q.set('to', String(range.to))
+  }
+  if (where === 'platform' && state.statsCompany) q.set('companyId', state.statsCompany)
+  const path =
+    where === 'platform'
+      ? `/platform/charges?${q}`
+      : where === 'me'
+        ? `/me/charges?${q}`
+        : `/orgs/${encodeURIComponent(forOrg || orgId())}/charges?${q}`
+  state.chargesLoading = true
+  render()
+  try {
+    state.charges = await api('GET', path)
+  } catch (err) {
+    state.charges = null
+    flash('err', err.message)
+  } finally {
+    state.chargesLoading = false
+    render()
+  }
+}
+
+/**
+ * 明细该问哪个时间窗。
+ *
+ * - `/stats`：跟统计那三颗胶囊 + 月份选择器走。
+ * - `/usage`：跟那一屏自己的范围胶囊走。
+ * - 别处（账单页、平台的公司详情）：没有范围控件，就是全时段。
+ */
+function chargesWindow(where) {
+  if (where === 'platform') return statsWindow()
+  if (state.path === '/usage') return usageRangeMs(state.usageRange || '近 30 天')
+  return null
+}
+
+/** 换筛选、换时间窗都要回到第一页——停在第 3 页筛完只剩两页的话，那一下是空的。 */
+function resetChargePaging() {
+  state.chargesCursors = [null]
+}
+
+/** 统计屏的一次刷新：汇总和明细一起，用同一个窗口。 */
+async function reloadStatsPage() {
+  resetChargePaging()
+  await Promise.all([loadStats(), loadCharges('platform')])
+}
+
+/** 用量屏的一次刷新：同上。 */
+async function reloadUsagePage() {
+  resetChargePaging()
+  // owner 没有自己的公司，`/orgs//charges` 是条打不通的地址——那时看自己的。
+  await Promise.all([loadUsage(), loadCharges((isAdmin() || isOwner()) && orgId() ? 'org' : 'me')])
+}
+
 function usageRangeMs(range) {
   const now = Date.now()
   if (range === '近 7 天') return { from: now - 7 * 24 * 3600 * 1000, to: now }
@@ -673,7 +746,7 @@ async function loadPage() {
           ''
       }
     } else if (state.path === '/stats') {
-      await loadStats()
+      await reloadStatsPage()
     } else if (state.path === '/tools') {
       await loadWebTools()
     } else if (state.path.startsWith('/connectors/')) {
@@ -734,9 +807,12 @@ async function loadPage() {
     } else if (state.path === '/billing' || state.path === '/costs') {
       if (location.pathname === '/costs') history.replaceState({}, '', '/billing')
       state.path = '/billing'
-      await loadBilling()
+      resetChargePaging()
+      // 余额和明细一起拉：这一屏要回答「还剩多少、都花在哪了」，分两次拉会在界面上
+      // 短暂地互相矛盾。
+      await Promise.all([loadBilling(), loadCharges('org')])
     } else if (state.path === '/usage') {
-      await loadUsage()
+      await reloadUsagePage()
     } else if (isChatPath(state.path) || (memberChatHome() && state.path === '/')) {
       await loadChatPage()
     }

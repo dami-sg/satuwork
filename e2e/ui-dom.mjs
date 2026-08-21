@@ -186,7 +186,7 @@ export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
     'HTMLSelectElement',
     'HTMLTextAreaElement',
     'HTMLFormElement',
-    `${src}\n;return { boot, render, state, api, auditTranscript, messageText, setToken, clearToken, token, onSetup, testLlm, saveSettings, savePriceMultiplier, saveCustomProvider, saveCustomModel, loadCustomProviders, runConfirm, statsWindow, loadStats, catalogBase, pathAllowed, machineHead, readOnlyItem, startChatStream, stopChatStream, paintChat, ensureChatSession, fold, threadRows, loadOlderChat, hydrateChat, pushBotEvent, botStreamOf, resetBotStream, chatPages, CHAT_TAIL_TURNS, STREAM_TAIL_TURNS, CHAT_RETRY_MAX, loadWebTools, saveWebTools, saveWebPrice, testWebBackend, mentionQueryAt, paintChatMentions, paintChatQueue, paintMentionPick, takeMention, chatQueues }`,
+    `${src}\n;return { boot, render, state, api, auditTranscript, messageText, setToken, clearToken, token, onSetup, testLlm, saveSettings, savePriceMultiplier, saveCustomProvider, saveCustomModel, loadCustomProviders, runConfirm, statsWindow, chargesWindow, usageRangeMs, loadStats, loadCharges, catalogBase, pathAllowed, machineHead, readOnlyItem, startChatStream, stopChatStream, paintChat, ensureChatSession, fold, threadRows, loadOlderChat, hydrateChat, pushBotEvent, botStreamOf, resetBotStream, chatPages, CHAT_TAIL_TURNS, STREAM_TAIL_TURNS, CHAT_RETRY_MAX, loadWebTools, saveWebTools, saveWebPrice, testWebBackend, mentionQueryAt, paintChatMentions, paintChatQueue, paintMentionPick, takeMention, chatQueues }`,
   )
 
   /**

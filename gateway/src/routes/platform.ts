@@ -5,15 +5,15 @@ import type { RouteCtx } from './ctx.ts'
 import { CUSTOM_APIS, type CustomProviderDef, DefError, parseProviderDef } from '../providers.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
-import { enabledModelsOf, modelProviderCreds, modelRoleOf, priceMultiplierOf, publicPlatformCred, publicSettings } from '../lib/org.ts'
+import { billingOf, enabledModelsOf, modelPricingOf, modelProviderCreds, modelRoleOf, priceMultiplierOf, publicPlatformCred, publicSettings } from '../lib/org.ts'
 import { isVendor } from '../connectors/index.ts'
 import { rangeQuery, requireOwner, requireUser } from '../lib/guards.ts'
-import { WEB_BACKENDS, WEB_DOCUMENT, type PlatformSettings, emptyWebTools, parseConnectorPricing, parsePriceMultiplier, parseWebTools } from '../db.ts'
+import { WEB_BACKENDS, WEB_DOCUMENT, type PlatformSettings, emptyWebTools, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from '../db.ts'
 import { WebToolError, canExtract, canSearch, needsSecret } from '../web-tools.ts'
 import { testBackend } from '../web-service.ts'
 
 export function attachPlatform(router: Router, ctx: RouteCtx) {
-  const { db, keys, llm } = ctx
+  const { db, keys, llm, meter } = ctx
 
   // ── 平台（owner）───────────────────────────────────────────────────
 
@@ -40,8 +40,12 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       // 这一屏不管网页工具，但 next 是整份覆盖上去的——不带着它，去模型配置页存一次
       // 就把工具配置抹了。
       webTools: cur.webTools ?? emptyWebTools(),
+      modelPricing: 'modelPricing' in body ? modelPricingOf(body.modelPricing, parseModelPricing(cur.modelPricing)) : parseModelPricing(cur.modelPricing),
+      billing: 'billing' in body ? billingOf(body.billing, parseBilling(cur.billing)) : parseBilling(cur.billing),
     }
     const saved = await db.putPlatformSettings(next)
+    // 改了熔断开关，各家公司的余额记忆当场作废——不然要等它自己过期，界面上像没改上。
+    meter.forget(null)
     await db.audit({ companyId: 'platform', accountId: account.id, action: 'platform.settings.update', detail: publicSettings(saved) })
     json(res, 200, publicSettings(saved))
   })
@@ -208,11 +212,11 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
 
   /** 网页调用的汇总：按公司一行、按后端一行，外加一个合计。 */
   function webStats(
-    rows: { companyId: string | null; backend: string; kind: string; calls: number; units: number; mils: number; lastAt: number | null }[],
+    rows: { companyId: string | null; backend: string; kind: string; calls: number; units: number; amountMicros: number; lastAt: number | null }[],
     companies: Map<string, { id: string; name: string }>,
   ) {
-    const byCompany = new Map<string, { companyId: string | null; name: string; calls: number; units: number; mils: number; lastAt: number | null }>()
-    const byBackend = new Map<string, { backend: string; search: number; extract: number; units: number; mils: number }>()
+    const byCompany = new Map<string, { companyId: string | null; name: string; calls: number; units: number; amountMicros: number; lastAt: number | null }>()
+    const byBackend = new Map<string, { backend: string; search: number; extract: number; units: number; amountMicros: number }>()
     for (const row of rows) {
       const key = row.companyId ?? ''
       let c = byCompany.get(key)
@@ -220,44 +224,48 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
         c = {
           companyId: row.companyId,
           name: row.companyId ? companies.get(row.companyId)?.name ?? row.companyId : '平台（系统管理员）',
-          calls: 0, units: 0, mils: 0, lastAt: null,
+          calls: 0, units: 0, amountMicros: 0, lastAt: null,
         }
         byCompany.set(key, c)
       }
       c.calls += row.calls
       c.units += row.units
-      c.mils += row.mils
+      c.amountMicros += row.amountMicros
       if (row.lastAt != null && (c.lastAt == null || row.lastAt > c.lastAt)) c.lastAt = row.lastAt
 
       let b = byBackend.get(row.backend)
       if (!b) {
-        b = { backend: row.backend, search: 0, extract: 0, units: 0, mils: 0 }
+        b = { backend: row.backend, search: 0, extract: 0, units: 0, amountMicros: 0 }
         byBackend.set(row.backend, b)
       }
       if (row.kind === 'search') b.search += row.calls
       else b.extract += row.calls
       b.units += row.units
-      b.mils += row.mils
+      b.amountMicros += row.amountMicros
     }
-    const list = [...byCompany.values()].sort((a, b) => b.mils - a.mils)
+    const list = [...byCompany.values()].sort((a, b) => b.amountMicros - a.amountMicros)
     return {
       byCompany: list,
-      byBackend: [...byBackend.values()].sort((a, b) => b.mils - a.mils),
+      byBackend: [...byBackend.values()].sort((a, b) => b.amountMicros - a.amountMicros),
       totals: list.reduce(
-        (acc, x) => ({ calls: acc.calls + x.calls, units: acc.units + x.units, mils: acc.mils + x.mils }),
-        { calls: 0, units: 0, mils: 0 },
+        (acc, x) => ({ calls: acc.calls + x.calls, units: acc.units + x.units, amountMicros: acc.amountMicros + x.amountMicros }),
+        { calls: 0, units: 0, amountMicros: 0 },
       ),
     }
   }
 
   /**
-   * 平台用量统计：按公司汇总 token，并按模型单价折成金额。
+   * 平台用量统计：token 从 `llm_calls` 汇总，**金额从账本汇总**。
    *
    * 时间窗由前端算好用 from/to（unix 毫秒）传进来——「今日」「本月」是相对
    * **用户所在时区**的，服务端不知道那是哪个时区，自己切会错一整天。
    *
-   * 金额用浮点数算：它是从 token 数折出来的展示值，不是账本条目（账本那边
-   * 是 amountMils 整数厘）。token 数和单价的量级下，双精度的误差落不到显示位上。
+   * **金额不再按当前单价现折。** 以前这里是「token 数 × 目录里此刻的单价 × 此刻的
+   * 倍率」，于是改一次倍率，上个月的模型账单跟着变，而同一张表里连接器那一列不变。
+   * 现在三条路一个口径：写行那一刻定死，统计只 sum（docs/billing.md §2）。
+   *
+   * 原价那一列是**倒推**出来的：成交额 ÷ 当时的倍率。账本上存的是倍率而不是原价，
+   * 因为倍率只有一个数、而原价有四项。
    */
   router.get('/platform/stats', async (req, res) => {
     const account = await requireUser(req, db, keys)
@@ -269,18 +277,17 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
     const rows = await db.llmUsageByCompanyModel(range, companyId || undefined)
     const webRows = await db.webUsageByCompanyBackend(range, companyId || undefined)
     const multiplier = parsePriceMultiplier((await db.platformSettings()).priceMultiplier)
-    const rates = new Map<string, { input: number; output: number; cacheRead: number }>()
-    for (const m of await llm.catalog(null)) {
-      const c = (m.cost ?? {}) as { input?: unknown; output?: unknown; cacheRead?: unknown }
-      const input = Number(c.input) || 0
-      rates.set(`${m.provider}/${m.id}`, {
-        input,
-        output: Number(c.output) || 0,
-        // 目录里没写缓存读单价就按输入价算——宁可高估，也不要因为缺一列就把这部分白送。
-        // 自定义供应商的 cost.cacheRead 允许留 0（providers.ts 的 nonNegative），
-        // 那种情况下 `|| input` 正好接住。
-        cacheRead: Number(c.cacheRead) || input,
-      })
+
+    /** 账本里模型那一类的钱，按 (公司, 模型) 摊开。key 和下面 token 那份对齐。 */
+    const charged = new Map<string, { amountMicros: number; costMicros: number; unpricedCalls: number }>()
+    for (const c of await db.chargeUsageBy(['companyId', 'kind', 'subject'], range, { companyId: companyId || undefined })) {
+      if (c.kind !== 'llm') continue
+      const key = `${c.companyId ?? ''}|${c.subject}`
+      const cur = charged.get(key) ?? { amountMicros: 0, costMicros: 0, unpricedCalls: 0 }
+      cur.amountMicros += c.amountMicros
+      cur.costMicros += c.costMicros
+      cur.unpricedCalls += c.unpricedCalls
+      charged.set(key, cur)
     }
 
     const companies = new Map((await db.companies()).map((c) => [c.id, c]))
@@ -292,9 +299,14 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       completionTokens: number
       /** promptTokens 里命中缓存的那一截。是子集，界面上用来解释金额为什么比 token 数低。 */
       cachedTokens: number
-      costUsd: number
-      quotedUsd: number
+      /** promptTokens 里写进缓存的那一截。也是子集，但它比普通输入**贵**。 */
+      cacheWriteTokens: number
+      /** 已扣的（成交额）和倒推的原价，都是微元。 */
+      amountMicros: number
+      costMicros: number
       unpricedCalls: number
+      /** 账本上根本没有对应行的调用数。金额是 0，但那个 0 是「没记过账」。 */
+      unledgeredCalls: number
       lastAt: number | null
     }
     const byCompany = new Map<string, Bucket>()
@@ -305,43 +317,40 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       promptTokens: number
       completionTokens: number
       cachedTokens: number
-      costUsd: number
-      quotedUsd: number
+      cacheWriteTokens: number
+      amountMicros: number
+      costMicros: number
       priced: boolean
+      unledgeredCalls: number
     }>()
     /** 目录里没价的模型（pi-ai 没收录，或自定义时留了 0）。金额算不出来，得说清楚。 */
     const unpricedModels = new Set<string>()
+    /**
+     * 账本上没有行的模型。**和「没单价」是两回事，所以分开报**：一个是配置漏了、
+     * 现在就得去补，另一个是那段历史本来就没记过账、补不回来。混成一句话的话，
+     * owner 会跑去模型配置页找一个并不存在的问题。
+     */
+    const unledgeredModels = new Set<string>()
 
     for (const row of rows) {
       const key = `${row.provider}/${row.model}`
-      const rate = rates.get(key)
-      const priced = !!rate && (rate.input > 0 || rate.output > 0)
-      if (!priced) unpricedModels.add(key)
-      /**
-       * 单价的单位是「每 100 万 token 多少美元」，和内置目录一致。
-       *
-       * **命中缓存的那一截要单算。** `promptTokens` 含缓存（见 v1.ts 的
-       * openaiUsage：pi 的 `input` 是未命中的部分，缓存那截另算，两者相加才是这次
-       * 真发出去的提示词），而缓存读的单价低得多——Anthropic 的 claude-haiku-4-5 是
-       * 输入 1、缓存读 0.1，差十倍。全部按输入价算，等于把最省钱的那部分按最贵的收。
-       *
-       * `min` 是防线：cachedTokens 理论上是 promptTokens 的子集，真出现脏数据
-       * （上游改了口径、旧行没有这一列）也不能算出负的未命中量。
-       */
-      const cached = Math.min(Math.max(0, row.cachedTokens), row.promptTokens)
-      const fresh = row.promptTokens - cached
-      const cost = priced
-        ? (fresh * rate.input + cached * rate.cacheRead + row.completionTokens * rate.output) / 1_000_000
-        : 0
-
       const cid = row.companyId
+      const money = charged.get(`${cid ?? ''}|${key}`) ?? { amountMicros: 0, costMicros: 0, unpricedCalls: 0 }
+      if (money.unpricedCalls > 0) unpricedModels.add(key)
+      if (row.unledgeredCalls > 0) unledgeredModels.add(key)
+      // cachedTokens / cacheWriteTokens 理论上都是 promptTokens 的子集。真出现脏数据
+      // （上游改了口径、旧行没有这一列）也不能让界面上算出负的未命中量。
+      const cached = Math.min(Math.max(0, row.cachedTokens), row.promptTokens)
+      const written = Math.min(Math.max(0, row.cacheWriteTokens), row.promptTokens - cached)
+
       const bk = cid ?? ''
       let bucket = byCompany.get(bk)
       if (!bucket) {
         bucket = {
           companyId: cid,
           name: cid ? companies.get(cid)?.name ?? cid : '平台（系统管理员）',
-          calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0, quotedUsd: 0, unpricedCalls: 0, lastAt: null,
+          calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0,
+          amountMicros: 0, costMicros: 0, unpricedCalls: 0, unledgeredCalls: 0, lastAt: null,
         }
         byCompany.set(bk, bucket)
       }
@@ -349,22 +358,27 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       bucket.promptTokens += row.promptTokens
       bucket.completionTokens += row.completionTokens
       bucket.cachedTokens += cached
-      bucket.costUsd += cost
-      bucket.quotedUsd += cost * multiplier
-      if (!priced) bucket.unpricedCalls += row.calls
+      bucket.cacheWriteTokens += written
+      bucket.amountMicros += money.amountMicros
+      bucket.costMicros += money.costMicros
+      bucket.unpricedCalls += money.unpricedCalls
+      bucket.unledgeredCalls += row.unledgeredCalls
       if (row.lastAt != null && (bucket.lastAt == null || row.lastAt > bucket.lastAt)) bucket.lastAt = row.lastAt
 
       let mb = byModel.get(key)
       if (!mb) {
-        mb = { provider: row.provider, model: row.model, calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0, quotedUsd: 0, priced }
+        mb = { provider: row.provider, model: row.model, calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, amountMicros: 0, costMicros: 0, priced: true, unledgeredCalls: 0 }
         byModel.set(key, mb)
       }
       mb.calls += row.calls
       mb.promptTokens += row.promptTokens
       mb.completionTokens += row.completionTokens
       mb.cachedTokens += cached
-      mb.costUsd += cost
-      mb.quotedUsd += cost * multiplier
+      mb.cacheWriteTokens += written
+      mb.amountMicros += money.amountMicros
+      mb.costMicros += money.costMicros
+      if (money.unpricedCalls > 0) mb.priced = false
+      mb.unledgeredCalls += row.unledgeredCalls
     }
 
     const list = [...byCompany.values()].sort((a, b) => b.promptTokens + b.completionTokens - (a.promptTokens + a.completionTokens))
@@ -374,16 +388,19 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
         promptTokens: acc.promptTokens + x.promptTokens,
         completionTokens: acc.completionTokens + x.completionTokens,
         cachedTokens: acc.cachedTokens + x.cachedTokens,
-        costUsd: acc.costUsd + x.costUsd,
-        quotedUsd: acc.quotedUsd + x.quotedUsd,
+        cacheWriteTokens: acc.cacheWriteTokens + x.cacheWriteTokens,
+        amountMicros: acc.amountMicros + x.amountMicros,
+        costMicros: acc.costMicros + x.costMicros,
         unpricedCalls: acc.unpricedCalls + x.unpricedCalls,
+        unledgeredCalls: acc.unledgeredCalls + x.unledgeredCalls,
       }),
-      { calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, costUsd: 0, quotedUsd: 0, unpricedCalls: 0 },
+      { calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, amountMicros: 0, costMicros: 0, unpricedCalls: 0, unledgeredCalls: 0 },
     )
 
     json(res, 200, {
       from: range.from ?? null,
       to: range.to ?? null,
+      // 当前倍率，只给界面上那句「现在按几倍报价」用。历史金额里的倍率是各行自己的。
       multiplier,
       companies: [...companies.values()].map((c) => ({ id: c.id, name: c.name })),
       byCompany: list,
@@ -391,8 +408,10 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       totals,
       // 前端要据此提示「有模型没单价，金额不完整」，不能让 $0.00 被读成免费。
       unpricedModels: [...unpricedModels],
+      // 同上，但原因不同：这些调用在账本上根本没有行（多半是升级前那段），
+      // 金额补不回来。两句话分开说，否则 owner 会去配置页找一个不存在的问题。
+      unledgeredModels: [...unledgeredModels],
       // 网页工具按次算钱，跟 token 不是一个量纲，所以单开一块，不混进上面的合计。
-      // 金额直接求和：那已经是**写行那一刻的报价**，不重算（重算会让改价追溯改账）。
       web: webStats(webRows, companies),
     })
   })

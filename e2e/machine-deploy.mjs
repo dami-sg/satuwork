@@ -951,6 +951,9 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
           password: 'correct-horse',
           companyName: 'Doomed',
           slug: 'doomed',
+          // 这家是要被真删掉的。有订单或充值就必须留档（DELETE 会 409），
+          // 所以别给它充钱——它也不需要，这一条验的是拆席位，不是计费。
+          topup: 0,
         })
         const code = await req(gwBase, 'POST', `/platform/orgs/${co.company.id}/pairing-code`, { token: ownerTok })
         assert(code.status === 201, `配对码 ${code.status} ${code.text}`)

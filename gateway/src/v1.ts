@@ -4,7 +4,8 @@ import type { Account, Db } from './db.ts'
 import type { JwtKeys } from './crypto.ts'
 import { verifyJwt } from './crypto.ts'
 import { HttpError, bearer, json, type Req, type Router } from './http.ts'
-import { EMPTY_USAGE, openaiModelId, redact, type Llm } from './llm.ts'
+import { EMPTY_USAGE, openaiModelId, redact, type CatalogModel, type Llm } from './llm.ts'
+import type { Billable, Meter } from './lib/meter.ts'
 
 const ANTHROPIC_VERSION = '2023-06-01'
 
@@ -71,6 +72,77 @@ async function recordLlmCall(
     model: found.id,
   })
   return row.id
+}
+
+/**
+ * 余额闸。**402，不是 403**：这是「要付钱」，不是「不许你来」。
+ *
+ * Bot 那边（`bot/src/llm/gateway.ts`）会把非 2xx 的 `error` 原样变成一条失败消息给
+ * 用户看，所以这句话要能直接读。
+ */
+async function gateOr402(meter: Meter, account: Account, found: CatalogModel): Promise<void> {
+  const gate = await meter.gate(account, {
+    kind: 'llm',
+    provider: found.provider,
+    model: found.id,
+    cost: found.cost,
+  })
+  if (gate.ok) return
+  // 被拒的也落一行（金额 0）。「为什么我的 Bot 停了」这个问题得有一个地方答得了，
+  // 而它和「谁调了」应当在同一张表上——分两个地方查的东西，最后总有一个没人看。
+  await meter.charge({
+    kind: 'llm',
+    account,
+    status: 'denied',
+    provider: found.provider,
+    model: found.id,
+    tokens: { promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0 },
+    cost: found.cost,
+  }, { amountMicros: 0, unitPrice: {}, multiplier: 1, unpriced: false })
+  throw new HttpError(402, gate.reason)
+}
+
+/**
+ * 收尾：把用量写回 `llm_calls`，再落一行账。
+ *
+ * 四条路由都在这里收口，是因为「什么时候算花了钱」这件事三条路各有各的坑，只有这里
+ * 是共同的终点：
+ *
+ * - **上游没报 usage 也要落账。** 静默不落的话，账本上查不到这次调用，而 `llm_calls`
+ *   里躺着一行 token 全 0 的记录——对账时说不清它是没花钱还是没记上。这种行金额记 0
+ *   且标 `unpriced`：那个 0 是「算不出来」，不是「免费」。
+ * - **断流照落账。** `proxyUpstream` 已经保证中途断开时保留已累计的 usage。
+ * - **客户端提前走了也照落账。** 已经问上游要过的 token 是花掉了的，不记等于白送。
+ */
+async function settle(
+  db: Db,
+  meter: Meter,
+  account: Account,
+  found: CatalogModel,
+  callId: string,
+  usage: TokenUsage | undefined,
+): Promise<void> {
+  if (usage) await db.updateLlmCallTokens(callId, usage)
+  const billable: Billable = {
+    kind: 'llm',
+    account,
+    // 没拿到用量不等于调用没发生：上游回了，只是没报数。记成 failed 而不是 ok，
+    // 是为了让「这次到底花没花钱」在明细里一眼看得出来。
+    status: usage ? 'ok' : 'failed',
+    provider: found.provider,
+    model: found.id,
+    tokens: {
+      promptTokens: usage?.prompt_tokens ?? 0,
+      completionTokens: usage?.completion_tokens ?? 0,
+      cachedTokens: usage?.cached_tokens ?? 0,
+      cacheWriteTokens: usage?.cache_write_tokens ?? 0,
+    },
+    cost: found.cost,
+    refId: callId,
+  }
+  const quote = await meter.quote(billable)
+  // 没拿到用量就没有金额可言。硬按 0 收会让这一行看着像一次免费调用。
+  await meter.charge(billable, usage ? quote : { ...quote, amountMicros: 0, unpriced: true })
 }
 
 function bodyOf(req: Req): Record<string, unknown> {
@@ -289,10 +361,14 @@ function openaiUsage(u: any) {
   // 对「含不含缓存」的约定相反，必须分开处理，否则要么漏掉、要么加两遍。
   const isPi = u.input != null || u.output != null
   const cached_tokens = nonNegInt(isPi ? u.cacheRead : u.prompt_tokens_details?.cached_tokens)
+  // 写进缓存的那一截也是**这次真发出去的提示词**，和缓存读一样要加回总量。
+  // 只加缓存读的话，`fresh = prompt − cached − written` 会把一部分未命中的输入
+  // 当成缓存写来计价——而缓存写比输入还贵。OpenAI 那一侧没有这个概念，也不需要加。
+  const cache_write = isPi ? nonNegInt(u.cacheWrite) : 0
   const prompt = isPi ? u.input : u.prompt_tokens
   const completion = isPi ? u.output : u.completion_tokens
   if (prompt == null && completion == null) return undefined
-  const prompt_tokens = nonNegInt(prompt) + (isPi ? cached_tokens : 0)
+  const prompt_tokens = nonNegInt(prompt) + (isPi ? cached_tokens + cache_write : 0)
   const completion_tokens = nonNegInt(completion)
   return {
     prompt_tokens,
@@ -302,17 +378,46 @@ function openaiUsage(u: any) {
   }
 }
 
-type TokenUsage = { prompt_tokens: number; completion_tokens: number; cached_tokens: number }
+type TokenUsage = {
+  prompt_tokens: number
+  completion_tokens: number
+  cached_tokens: number
+  /**
+   * prompt_tokens 里**这次写进缓存**的那一截。
+   *
+   * 不上线（`openaiUsage` 不返回它）：OpenAI 的 usage 里没有这个字段，往响应里塞一个
+   * 自造的键，下游按 OpenAI 口径解析的东西会看到一个它不认识的数。它只走内部——
+   * 落库、计价。缓存写比普通输入还贵（Anthropic 1.25 倍），漏掉它就是每次都少收。
+   */
+  cache_write_tokens: number
+}
 
 /** 一帧只报了一半是常事，所以缺的字段是 undefined，不是 0——0 会把上一帧盖掉。 */
-type PartialUsage = { prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number }
+type PartialUsage = {
+  prompt_tokens?: number
+  completion_tokens?: number
+  cached_tokens?: number
+  cache_write_tokens?: number
+}
 
-function tokensOf(u: ReturnType<typeof openaiUsage>): TokenUsage | undefined {
+/**
+ * pi / Anthropic 的 usage 里那一截「写进缓存」的 token。
+ *
+ * 单独一个函数，是因为它**不能**跟着 `openaiUsage` 上线（见 TokenUsage 的注释），
+ * 所以取原始 usage 再捞一次。OpenAI 没有这个概念，取不到就是 0。
+ */
+function cacheWriteOf(u: any): number {
+  if (!u) return 0
+  return nonNegInt(u.cacheWrite ?? u.cache_creation_input_tokens)
+}
+
+function tokensOf(u: ReturnType<typeof openaiUsage>, raw?: unknown): TokenUsage | undefined {
   if (!u) return undefined
   return {
     prompt_tokens: u.prompt_tokens,
     completion_tokens: u.completion_tokens,
     cached_tokens: u.prompt_tokens_details?.cached_tokens ?? 0,
+    cache_write_tokens: cacheWriteOf(raw),
   }
 }
 
@@ -361,7 +466,7 @@ function usageFromPayload(obj: unknown): PartialUsage | undefined {
     const writeRaw = openaiPrompt != null ? undefined : raw.cache_creation_input_tokens
     const cacheRead = nonNegInt(readRaw)
     // 写缓存的那部分也是这次真发出去的提示词，算进总量；但它不是「读到的缓存」，
-    // 不进 cached_tokens——两者单价不同。
+    // 不进 cached_tokens——两者单价不同，而且缓存写**比普通输入还贵**。
     const cacheWrite = nonNegInt(writeRaw)
     const out: PartialUsage = {}
     const pt = Number(prompt)
@@ -373,6 +478,8 @@ function usageFromPayload(obj: unknown): PartialUsage | undefined {
       // input 900 + cache_read 400，后面某个 message_delta 只回传累计 input_tokens
       // 而不重复缓存字段，最终就落库成 900/0——正是这次要修的那个漏记又回来了。
       if (readRaw != null) out.cached_tokens = cacheRead
+      // 同上：这一帧没带就别写这个键，写成 0 会在 mergeUsage 里把前面帧记下的抹掉。
+      if (writeRaw != null) out.cache_write_tokens = cacheWrite
     }
     if (completion != null && Number.isFinite(ct)) out.completion_tokens = ct
     if (out.prompt_tokens != null || out.completion_tokens != null) return out
@@ -395,6 +502,7 @@ function mergeUsage(cur: TokenUsage | undefined, next: PartialUsage): TokenUsage
     prompt_tokens: pick(next.prompt_tokens, cur?.prompt_tokens),
     completion_tokens: pick(next.completion_tokens, cur?.completion_tokens),
     cached_tokens: pick(next.cached_tokens, cur?.cached_tokens),
+    cache_write_tokens: pick(next.cache_write_tokens, cur?.cache_write_tokens),
   }
 }
 
@@ -473,7 +581,7 @@ async function streamChatCompletions(
         case 'done': {
           const reason = event.reason === 'toolUse' ? 'tool_calls' : event.reason === 'length' ? 'length' : 'stop'
           const u = openaiUsage(event.message?.usage)
-          if (u) usage = tokensOf(u)
+          if (u) usage = tokensOf(u, event.message?.usage)
           writeSse(res, chunk(id, modelId, {}, { finish_reason: reason, usage: u }))
           break
         }
@@ -554,7 +662,7 @@ async function completeChatCompletions(
     ],
     usage: openaiUsage(message?.usage) ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   })
-  return tokensOf(openaiUsage(message?.usage))
+  return tokensOf(openaiUsage(message?.usage), message?.usage)
 }
 
 async function proxyUpstream(
@@ -659,7 +767,7 @@ async function proxyUpstream(
  * OpenAI / Anthropic 兼容的模型代理。鉴权是席位 API Key（sk_sw_）或登录 JWT；
  * 上游供应商密钥只在 Gateway 里，响应永不回显。
  */
-export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
+export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm, meter: Meter) {
   router.get('/v1/models', async (req, res) => {
     const account = await requireUser(req, db, keys)
     json(res, 200, { object: 'list', data: await publicModels(llm, account.companyId) })
@@ -673,15 +781,16 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
     const hint = str(body.provider) || undefined
     const found = await resolveOr404(llm, account.companyId, modelRaw, hint)
     const secret = await secretOr402(llm, account.companyId, found.provider)
+    await gateOr402(meter, account, found)
     const callId = await recordLlmCall(db, account, found)
     const stream = body.stream === true
     if (stream) {
       const usage = await streamChatCompletions(req, res, llm, found, secret, body)
-      if (usage) await db.updateLlmCallTokens(callId, usage)
+      await settle(db, meter, account, found, callId, usage)
       return
     }
     const usage = await completeChatCompletions(res, llm, found, secret, body)
-    if (usage) await db.updateLlmCallTokens(callId, usage)
+    await settle(db, meter, account, found, callId, usage)
   })
 
   router.post('/v1/responses', async (req, res) => {
@@ -692,6 +801,7 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
     const found = await resolveOr404(llm, account.companyId, modelRaw, str(body.provider) || 'openai')
     requireProvider(found.provider, 'openai', '/v1/responses')
     const secret = await secretOr402(llm, account.companyId, found.provider)
+    await gateOr402(meter, account, found)
     const callId = await recordLlmCall(db, account, found)
     body.model = found.id
     const headers: Record<string, string> = {
@@ -706,7 +816,7 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
       body,
       secret,
     })
-    if (usage) await db.updateLlmCallTokens(callId, usage)
+    await settle(db, meter, account, found, callId, usage)
   })
 
   router.post('/v1/messages', async (req, res) => {
@@ -717,6 +827,7 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
     const found = await resolveOr404(llm, account.companyId, modelRaw, str(body.provider) || 'anthropic')
     requireProvider(found.provider, 'anthropic', '/v1/messages')
     const secret = await secretOr402(llm, account.companyId, found.provider)
+    await gateOr402(meter, account, found)
     const callId = await recordLlmCall(db, account, found)
     body.model = found.id
     const versionHeader = req.headers['anthropic-version']
@@ -731,6 +842,6 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm) {
       body,
       secret,
     })
-    if (usage) await db.updateLlmCallTokens(callId, usage)
+    await settle(db, meter, account, found, callId, usage)
   })
 }

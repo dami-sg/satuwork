@@ -424,7 +424,59 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       const html = ui.html()
       assert(html.includes('按公司'), '没画「按公司」')
       assert(html.includes('按模型'), '没画「按模型」')
-      assert(html.includes('成本价') && html.includes('报价'), '两个金额列没都画出来')
+      assert(html.includes('原价') && html.includes('已扣'), '两个金额列没都画出来')
+      // 计费明细跟统计画在同一屏：汇总回答「多少」，明细回答「为什么是这个数」。
+      assert(html.includes('计费明细'), '没画计费明细')
+    })
+
+    await test('明细和汇总永远问同一个时间窗', async () => {
+      /**
+       * 统计屏上那三颗胶囊只刷过汇总，底下的计费明细还留着上一个窗口的行——同一屏
+       * 两张表各说各的时间段，人只会以为数字算错了。这条钉的是「窗口只有一个来源」。
+       */
+      const ui = await boot(ownerToken)
+      ui.state.path = '/stats'
+      ui.state.statsRange = '7d'
+      const seven = ui.chargesWindow('platform')
+      assert(seven.from === ui.statsWindow().from && seven.to === ui.statsWindow().to, '统计屏的明细没跟着统计窗口')
+      ui.state.statsRange = 'month'
+      ui.state.statsMonth = '2026-02'
+      const feb = ui.chargesWindow('platform')
+      assert(feb.from === new Date(2026, 1, 1).getTime(), `换月之后明细没跟上：${new Date(feb.from).toString()}`)
+
+      // 用量屏跟的是它自己那排胶囊，不是统计的。
+      ui.state.path = '/usage'
+      ui.state.usageRange = '近 7 天'
+      const usage = ui.chargesWindow('org')
+      assert(usage && usage.from === ui.usageRangeMs('近 7 天').from, '用量屏的明细没跟着范围胶囊')
+
+      // 账单页和平台的公司详情没有范围控件，那里就是全时段。
+      ui.state.path = '/billing'
+      assert(ui.chargesWindow('org') === null, '账单页凭空造了一个时间窗')
+    })
+
+    await test('计费明细：倍率对所有种类都画出来，不只是模型', async () => {
+      // 这一列的全部意义是让人自己乘一遍对得上金额。倍率只加在模型那一支的时候，
+      // 网页那行写着「4 条 × $0.0080」而金额是 $0.0384，对账的人会先怀疑金额错了。
+      const ui = await boot(ownerToken)
+      ui.state.path = '/billing'
+      ui.state.billingTab = 'usage'
+      ui.state.charges = {
+        charges: [
+          {
+            id: 'c1', createdAt: Date.now(), companyId: 'o1', companyName: 'Acme', accountId: 'a1', accountName: '张三',
+            kind: 'web', subject: 'tavily:extract', status: 'ok',
+            quantity: { units: 4 }, unitPrice: { unit: 8000 }, multiplier: 1.2,
+            amountMicros: 38400, amount: 0.0384, bonusMicros: 0, topupMicros: 38400, unpriced: false,
+          },
+        ],
+        limit: 20, hasMore: false, nextCursor: null,
+      }
+      ui.render()
+      const html = ui.html()
+      assert(html.includes('4 条 × $0.0080'), `计量那格没画出来：${html.slice(0, 200)}`)
+      assert(html.includes('倍率 ×1.2'), '网页那一行漏了倍率')
+      assert(!html.includes('1.2000000476837158'), '倍率的小数位没收干净')
     })
 
     await test('catalogBase：owner 走 /platform，公司管理员走 /orgs/:id', async () => {
@@ -548,7 +600,12 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         plan: { name: '标准版', period: '2026-08-01 → 2026-09-01' },
         invoices: [],
         topups: [],
-        balance: { amount: '$350.00', planBonus: '$200.00', planBonusExpires: '2026-09-01', topup: '$150.00', spentThisMonth: '—', alertAt: '—' },
+        // 发放 $200 + $150，已扣 $40，还剩 $310。**大字画的是剩的，不是发的**。
+        balance: {
+          amount: '$350.00', planBonus: '$200.00', planBonusExpires: '2026-09-01', topup: '$150.00',
+          planBonusLeft: '$160.00', topupLeft: '$150.00', left: '$310.00', leftMicros: 310_000_000,
+          grantedMicros: 350_000_000, spentThisPeriod: '$40.00', alertAt: '—', enforce: true,
+        },
       }
       ui.render()
       const html = ui.html()
@@ -556,8 +613,12 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       const account = html.indexOf('账户余额')
       assert(bonus > -1 && account > -1, '两张卡没都画出来')
       assert(bonus < account, '赠送那张跑到账户余额后面去了')
-      assert(html.includes('$200.00') && html.includes('$350.00') && html.includes('$150.00'), '三个数没都画出来')
+      assert(html.includes('$310.00') && html.includes('$160.00') && html.includes('$150.00'), '剩余额没都画出来')
+      assert(html.includes('本期已扣 $40.00'), '已扣没画出来')
+      // 发放额也要在，但只能是小字——只报发放额的话那个数永远不动。
+      assert(html.includes('$200.00'), '本期发放没画出来')
       assert(html.includes('2026-09-01 到期'), '到期日没画出来')
+      assert(!html.includes('额度已用完'), '还有钱却报了熔断')
       // 并排靠 auto-fit 网格，窄了自己叠成一列；写死两列会在窄屏上挤成一团。
       assert(html.includes('repeat(auto-fit, minmax(280px, 1fr))'), '不是自适应两列')
     })
@@ -569,12 +630,41 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         plan: {},
         invoices: [],
         topups: [],
-        balance: { amount: '$0.00', planBonus: '$0.00', planBonusExpires: '—', topup: '$0.00', spentThisMonth: '—', alertAt: '—' },
+        balance: {
+          amount: '$0.00', planBonus: '$0.00', planBonusExpires: '—', topup: '$0.00',
+          planBonusLeft: '$0.00', topupLeft: '$0.00', left: '$0.00', leftMicros: 0,
+          grantedMicros: 0, spentThisPeriod: '$0.00', alertAt: '—', enforce: true,
+        },
       }
       ui.render()
       const html = ui.html()
       assert(html.includes('没有生效中的套餐'), '空态没写清楚')
       assert(!html.includes('— 到期'), '把「—」当成到期日画出来了')
+      // 余额 0 且熔断开着：这一屏必须说出「调用已经停下来了」，不能只画一个 $0.00。
+      assert(html.includes('额度已用完'), '余额见底没给告警')
+    })
+
+    await test('余额告警的措辞跟着 enforce 变：真停了和只记账不拦是两件事', async () => {
+      const ui = await boot(ownerToken)
+      ui.state.path = '/billing'
+      const base = {
+        amount: '$0.00', planBonus: '$0.00', planBonusExpires: '—', topup: '$0.00',
+        planBonusLeft: '$0.00', topupLeft: '$0.00', left: '$0.00', leftMicros: 0,
+        grantedMicros: 100_000_000, spentThisPeriod: '$100.00', alertAt: '—',
+      }
+      ui.state.billing = { plan: {}, invoices: [], topups: [], balance: { ...base, enforce: false } }
+      ui.render()
+      assert(ui.html().includes('调用还在继续'), 'enforce 关着却说停了')
+
+      // 还剩不到一成：提醒，但别说已经停了——那时人还来得及去充。
+      ui.state.billing = {
+        plan: {}, invoices: [], topups: [],
+        balance: { ...base, enforce: true, left: '$5.00', leftMicros: 5_000_000 },
+      }
+      ui.render()
+      const low = ui.html()
+      assert(low.includes('还剩不到一成'), '低余额没提醒')
+      assert(!low.includes('额度已用完'), '还有钱却说用完了')
     })
 
     await test('原地重绘不丢滚动位置；换了页面才回到顶部', async () => {

@@ -6,7 +6,8 @@
  * 相同（自检是 owner，另两条是席位票）。
  */
 import type { Account, Db, WebCallKind, WebToolsSettings } from './db.ts'
-import { WEB_DOCUMENT, emptyWebTools, parsePriceMultiplier } from './db.ts'
+import { WEB_DOCUMENT, emptyWebTools } from './db.ts'
+import type { Meter } from './lib/meter.ts'
 import {
   WebToolError,
   applyFilters,
@@ -74,9 +75,9 @@ export function clearWebCache() {
   cache.clear()
 }
 
-async function settingsOf(db: Db): Promise<{ web: WebToolsSettings; multiplier: number }> {
+async function settingsOf(db: Db): Promise<{ web: WebToolsSettings }> {
   const s = await db.platformSettings()
-  return { web: s.webTools ?? emptyWebTools(), multiplier: parsePriceMultiplier(s.priceMultiplier) }
+  return { web: s.webTools ?? emptyWebTools() }
 }
 
 /**
@@ -117,36 +118,49 @@ export async function resolveBackend(db: Db, kind: WebCallKind): Promise<Resolve
 }
 
 /**
- * 报价。**写行的那一刻定死**，不回头重算。
+ * 计一次，落一行流水加一行账，返回这一次收了多少微元。
  *
- * 模型的单价来自 pi-ai 目录，是外部事实，重算还是那个数；搜索单价是人在配置屏里
- * 手填的，管理员一改，重算会把上个月的账单也改掉。
+ * 流水（`web_calls`）记事实：哪个后端、什么类型、抓成功几条。账本（`usage_charges`）
+ * 记钱，靠 `refId` 串回来。报价在**写行那一刻定死**，之后不重算——搜索单价是人在配置
+ * 屏里手填的，管理员一改，重算会把上个月的账单也改掉（docs/billing.md §2）。
  */
-export function quoteMils(web: WebToolsSettings, backend: string, kind: WebCallKind, units: number, multiplier: number): number {
-  const unit = web.pricing?.[backend]?.[kind] ?? 0
-  if (!unit || units <= 0) return 0
-  return Math.round(unit * units * multiplier)
-}
-
-async function meter(
+async function meterCall(
   db: Db,
+  meter: Meter,
   account: Account,
   kind: WebCallKind,
   backend: string,
   units: number,
 ): Promise<number> {
   if (units <= 0) return 0
-  const { web, multiplier } = await settingsOf(db)
-  const mils = quoteMils(web, backend, kind, units, multiplier)
-  await db.insertWebCall({
+  const row = await db.insertWebCall({
     accountId: account.id,
     companyId: account.companyId,
     kind,
     backend,
     units,
-    mils,
   })
-  return mils
+  const charge = await meter.charge({
+    kind: 'web',
+    account,
+    status: 'ok',
+    backend,
+    webKind: kind,
+    units,
+    refId: row.id,
+  })
+  return charge.amountMicros
+}
+
+/**
+ * 余额闸。撞上了是**业务失败**，不是 4xx——席位那头会把这句话原样交给模型。
+ *
+ * 和 checkQuota 并排但不是一回事：那道闸防的是跑飞（一个循环把额度打光），
+ * 这道闸管的是钱。两道都要过。
+ */
+async function checkCredit(meter: Meter, account: Account, backends: string[], kind: WebCallKind): Promise<void> {
+  const gate = await meter.gate(account, { kind: 'web', backends, webKind: kind })
+  if (!gate.ok) throw new WebToolError('no credit', gate.reason)
 }
 
 /**
@@ -211,13 +225,15 @@ export interface SearchResult {
   /** 结果是在我们这边滤过的（后端不原生支持那几个约束）。要报给模型。 */
   filtered: boolean
   elapsedMs: number
-  mils: number
+  /** 这一次收了多少微元。命中缓存是 0。 */
+  amountMicros: number
 }
 
-export async function runSearch(db: Db, account: Account, raw: SearchArgs): Promise<SearchResult> {
+export async function runSearch(db: Db, meter: Meter, account: Account, raw: SearchArgs): Promise<SearchResult> {
   const q = parseSearchArgs(raw)
   const { id, cfg } = await resolveBackend(db, 'search')
   const { web } = await settingsOf(db)
+  await checkCredit(meter, account, [id], 'search')
   await checkQuota(db, account.companyId, web)
   const key = `search:${id}:${JSON.stringify(q)}`
   const cached = cacheGet<SearchHit[]>(key)
@@ -229,8 +245,8 @@ export async function runSearch(db: Db, account: Account, raw: SearchArgs): Prom
   // 并把「滤过」这件事报出去。悄悄忽略模型给的约束比不支持更糟。
   const post = id === 'tavily' ? { hits, filtered: false } : applyFilters(hits, q)
   // 命中缓存不记账：这一次没打后端，也就没有这笔成本。
-  const mils = cached ? 0 : await meter(db, account, 'search', id, 1)
-  return { backend: id, hits: post.hits.slice(0, q.count), filtered: post.filtered, elapsedMs, mils, cached: Boolean(cached) }
+  const amountMicros = cached ? 0 : await meterCall(db, meter, account, 'search', id, 1)
+  return { backend: id, hits: post.hits.slice(0, q.count), filtered: post.filtered, elapsedMs, amountMicros, cached: Boolean(cached) }
 }
 
 export interface ExtractedPage {
@@ -252,7 +268,8 @@ export interface ExtractResult {
   backend: string
   pages: ExtractedPage[]
   elapsedMs: number
-  mils: number
+  /** 这一次一共收了多少微元。命中缓存和抓失败的那几条不算在内。 */
+  amountMicros: number
 }
 
 /** e2e 里不打网络，文档那一步换成假的；生产走真的 fetchDocument。 */
@@ -280,10 +297,12 @@ export function parseExtractUrls(raw: unknown): string[] {
   return urls
 }
 
-export async function runExtract(db: Db, account: Account, rawUrls: unknown): Promise<ExtractResult> {
+export async function runExtract(db: Db, meter: Meter, account: Account, rawUrls: unknown): Promise<ExtractResult> {
   const urls = parseExtractUrls(rawUrls)
   const { id, cfg } = await resolveBackend(db, 'extract')
   const { web } = await settingsOf(db)
+  // 带上 WEB_DOCUMENT：这一次里的 PDF / Word / Excel 记在它头上，不是提取后端头上。
+  await checkCredit(meter, account, [id, WEB_DOCUMENT], 'extract')
   await checkQuota(db, account.companyId, web)
   const backend = backendOf(id)!
   const started = Date.now()
@@ -342,9 +361,9 @@ export async function runExtract(db: Db, account: Account, rawUrls: unknown): Pr
   for (const d of done) {
     if (d.billable) byBackend.set(d.billable, (byBackend.get(d.billable) ?? 0) + 1)
   }
-  let mils = 0
-  for (const [name, units] of byBackend) mils += await meter(db, account, 'extract', name, units)
-  return { backend: id, pages, elapsedMs, mils }
+  let amountMicros = 0
+  for (const [name, units] of byBackend) amountMicros += await meterCall(db, meter, account, 'extract', name, units)
+  return { backend: id, pages, elapsedMs, amountMicros }
 }
 
 /**

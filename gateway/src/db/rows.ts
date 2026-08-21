@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, SessionIndex, Theme, Topup, emptyPlatformSettings, parseConnectorPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -118,6 +118,9 @@ export function parsePlatformPayload(raw: unknown): PlatformSettings {
     // 空字符串 = 没钉，跟最新发布走。写端和这里必须成对，少一边这个开关就是死的。
     managerVersion: typeof o.managerVersion === 'string' ? o.managerVersion.trim() : '',
     webTools: parseWebTools(o.webTools),
+    modelPricing: parseModelPricing(o.modelPricing),
+    // 老库里没有这个字段，回落成「开」——默认值定死在 parseBilling 里，这里不另写一份。
+    billing: parseBilling(o.billing),
   }
 }
 export function planOf(r: Row): Plan {
@@ -354,6 +357,38 @@ export function connectorCallOf(r: Row): ConnectorCall {
     bonusMicros: num(r.bonusMicros),
     latencyMs: num(r.latencyMs),
     viaMention: r.viaMention === true,
+    createdAt: num(r.createdAt),
+  }
+}
+
+/** 账本行。jsonb 两列回来已经是对象，但早期写进去的字符串也兜一下（jsonOf）。 */
+export function usageChargeOf(r: Row): UsageCharge {
+  const nums = (v: unknown): Record<string, number> => {
+    const o = jsonOf(v)
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return {}
+    const out: Record<string, number> = {}
+    for (const [k, val] of Object.entries(o as Record<string, unknown>)) {
+      const n = Number(val)
+      if (Number.isFinite(n)) out[k] = n
+    }
+    return out
+  }
+  return {
+    id: str(r.id),
+    companyId: strOrNull(r.companyId),
+    accountId: str(r.accountId),
+    botId: strOrNull(r.botId),
+    sessionId: strOrNull(r.sessionId),
+    kind: str(r.kind) as ChargeKind,
+    subject: str(r.subject),
+    status: str(r.status) as ChargeStatus,
+    quantity: nums(r.quantity),
+    unitPrice: nums(r.unitPrice),
+    multiplier: num(r.multiplier),
+    amountMicros: num(r.amountMicros),
+    bonusMicros: num(r.bonusMicros),
+    unpriced: r.unpriced === true,
+    refId: strOrNull(r.refId),
     createdAt: num(r.createdAt),
   }
 }

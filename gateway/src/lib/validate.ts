@@ -131,6 +131,16 @@ export function usd(mils: number): string {
   return `${mils < 0 ? '-' : ''}$${Math.floor(a / 1000).toLocaleString('en-US')}.${dec}`
 }
 
+/**
+ * 微元 → 给人看的美元字符串。
+ *
+ * 账本存微元（一次调用值半厘是常态，用厘存会被舍成 0），界面显示到厘就够了——
+ * 再往下的位数在一行账单上没有意义。**只在显示这一步舍**，参与运算的永远是微元。
+ */
+export function usdMicros(micros: number): string {
+  return usd(Math.round(micros / 1000))
+}
+
 export function payStatusOf(v: unknown, fallback: PayStatus = 'unpaid'): PayStatus {
   if (v == null || v === '') return fallback
   if (v !== 'paid' && v !== 'unpaid') throw new HttpError(400, '付款状态只能是 paid 或 unpaid')

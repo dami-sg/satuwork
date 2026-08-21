@@ -5,7 +5,7 @@
  */
 import { EMAIL_RE, PHONE_RE, SLUG_RE, strField } from './validate.ts'
 import { HttpError } from '../http.ts'
-import { type Account, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRole, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, type Plan, type PlatformSettings, type Role, type SessionIndex, parseConnectorPricing, parsePriceMultiplier } from '../db.ts'
+import { type Account, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRate, type ModelRole, type BillingSettings, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, type Plan, type PlatformSettings, type Role, type SessionIndex, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier } from '../db.ts'
 import { WEB_BACKENDS, WEB_DOCUMENT } from '../db/types.ts'
 import { VENDORS } from '../connectors/index.ts'
 
@@ -92,6 +92,8 @@ export function publicSettings(s: CompanySettings | PlatformSettings): PlatformS
     priceMultiplier: parsePriceMultiplier((s as PlatformSettings).priceMultiplier),
     connectorPricing: parseConnectorPricing((s as PlatformSettings).connectorPricing),
     managerVersion: (s as PlatformSettings).managerVersion ?? '',
+    modelPricing: parseModelPricing((s as PlatformSettings).modelPricing),
+    billing: parseBilling((s as PlatformSettings).billing),
   }
 }
 
@@ -172,6 +174,41 @@ export function priceMultiplierOf(v: unknown, fallback: number): number {
     throw new HttpError(400, `priceMultiplier 只能在 ${PRICE_MULTIPLIER_MIN} 到 ${PRICE_MULTIPLIER_MAX} 之间`)
   }
   return n
+}
+
+/**
+ * 模型单价覆盖表。写坏了当场报错，不悄悄回落——回落等于把管理员刚填的价吞了，
+ * 而他会以为已经改上了（同 priceMultiplierOf 的处理）。
+ */
+export function modelPricingOf(v: unknown, fallback: Record<string, ModelRate>): Record<string, ModelRate> {
+  if (v == null) return fallback
+  if (typeof v !== 'object' || Array.isArray(v)) throw new HttpError(400, 'modelPricing 必须是对象')
+  for (const [key, raw] of Object.entries(v as Record<string, unknown>)) {
+    if (!key.includes('/')) throw new HttpError(400, `modelPricing 的键要写成 provider/model：${key}`)
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new HttpError(400, `${key} 的单价必须是对象`)
+    }
+    for (const field of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+      const n = (raw as Record<string, unknown>)[field]
+      if (n == null || n === '') continue
+      const x = Number(n)
+      if (!Number.isFinite(x) || x < 0) throw new HttpError(400, `${key} 的 ${field} 必须是不小于 0 的数字`)
+    }
+  }
+  return parseModelPricing(v)
+}
+
+/** 熔断开关。`enforce` 不传就不动——整份覆盖上去的写法容易把它顺手抹掉。 */
+export function billingOf(v: unknown, fallback: BillingSettings): BillingSettings {
+  if (v == null) return fallback
+  if (typeof v !== 'object' || Array.isArray(v)) throw new HttpError(400, 'billing 必须是对象')
+  const o = v as Record<string, unknown>
+  if (o.enforce != null && typeof o.enforce !== 'boolean') throw new HttpError(400, 'billing.enforce 只能是 true/false')
+  if (o.graceMicros != null && o.graceMicros !== '') {
+    const n = Number(o.graceMicros)
+    if (!Number.isFinite(n) || n < 0) throw new HttpError(400, 'billing.graceMicros 必须是不小于 0 的整数微元')
+  }
+  return parseBilling({ enforce: o.enforce ?? fallback.enforce, graceMicros: o.graceMicros ?? fallback.graceMicros })
 }
 
 export function publicAccount(a: Account) {
@@ -258,6 +295,22 @@ export function sessionCursorOf(raw: string | null): { updatedAt: number; sessio
   const sessionId = i < 0 ? '' : text.slice(i + 1)
   if (i < 0 || !Number.isFinite(updatedAt) || !sessionId) throw new HttpError(400, 'cursor 不合法')
   return { updatedAt, sessionId }
+}
+
+/**
+ * 计费明细的翻页游标：`createdAt:id`。
+ *
+ * 和会话那条一样要带第二把钥匙：账本一毫秒里落好几行是常态（一轮里并发的几个工具调用），
+ * 只比时间的话翻页边界上要么漏要么重。
+ */
+export function chargeCursorOf(raw: string | null): { createdAt: number; id: string } | undefined {
+  const text = (raw || '').trim()
+  if (!text) return undefined
+  const i = text.indexOf(':')
+  const createdAt = Number(text.slice(0, i))
+  const id = i < 0 ? '' : text.slice(i + 1)
+  if (i < 0 || !Number.isFinite(createdAt) || !id) throw new HttpError(400, 'cursor 不合法')
+  return { createdAt, id }
 }
 
 export async function publicSessionIndex(

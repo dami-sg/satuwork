@@ -304,6 +304,15 @@ export interface SeatRuntime {
 /** 发布包的种类。bot 装到席位上，manager 是机器管家自己。 */
 export type ReleaseKind = 'bot' | 'manager'
 
+/**
+ * 计费明细一页的默认条数与硬上限。
+ *
+ * 默认 20，和平台那四张长表的分页粒度一致（commit 06b4349）——那是「一屏能看清多少行」
+ * 的答案，跟数据在哪切没关系。上限 200：再多的话一页的 JSON 比人一次能看的多一个数量级。
+ */
+export const CHARGE_PAGE_DEFAULT = 20
+export const CHARGE_PAGE_MAX = 200
+
 /** 会话索引一页的默认条数与硬上限。调用方可以调小，调不大。 */
 export const SESSION_PAGE_DEFAULT = 500
 export const SESSION_PAGE_MAX = 2000
@@ -521,6 +530,14 @@ export interface LlmCall {
   completionTokens: number
   /** promptTokens 里命中缓存的那一截，是子集不是加项。 */
   cachedTokens: number
+  /**
+   * promptTokens 里**这次写进缓存**的那一截。也是子集，也不是加项。
+   *
+   * 和 cachedTokens 分开记，因为单价不同：缓存读便宜一个数量级，缓存写反而比普通输入
+   * 贵（Anthropic 是 1.25 倍）。混成一项的话，一次「写了 4000 token 缓存」的调用会
+   * 按最便宜的那档收。
+   */
+  cacheWriteTokens: number
   createdAt: number
 }
 
@@ -565,6 +582,15 @@ export interface CompanyModelUsage {
   completionTokens: number
   /** promptTokens 里命中缓存的那一截。是子集，不是加项——计价时要按缓存读的单价单算。 */
   cachedTokens: number
+  /** promptTokens 里写进缓存的那一截。同样是子集，单价又是另一档。 */
+  cacheWriteTokens: number
+  /**
+   * 这一组里账本上没有对应行的调用数。
+   *
+   * 金额只从账本来之后，「收了 $0」和「压根没记过账」在数字上长得一样，而后者是
+   * 升级前所有历史调用的样子。界面要据此喊出来，别让 $0.00 被读成免费。
+   */
+  unledgeredCalls: number
   lastAt: number | null
 }
 
@@ -605,6 +631,124 @@ export interface PlatformSettings {
   managerVersion?: string
   /** 网页搜索/提取的后端与价目。密钥不在这里，在 platform_credentials。 */
   webTools?: WebToolsSettings
+  /**
+   * 模型单价的**平台覆盖**，键是 `provider/model`。
+   *
+   * 目录里的价（pi-ai 内置、自定义供应商自己填的）是默认值，这张表压在它上面。
+   * 存在的理由有两个，都是真事：pi-ai 没收录价格的模型（zai 那批，目录里四项全是 0）
+   * 得有地方补；上游调价的那天不该等 pi-ai 发版才能跟上。
+   */
+  modelPricing?: ModelPricing
+  /** 熔断与透支。见 docs/billing.md §6。 */
+  billing?: BillingSettings
+}
+
+/** 每 100 万 token 多少美元。四项，和 pi-ai 内置目录的 `cost` 同口径。 */
+export interface ModelRate {
+  input: number
+  output: number
+  /** 命中缓存读出来的那一截。Anthropic 是输入价的十分之一。 */
+  cacheRead: number
+  /** 这次写进缓存的那一截。Anthropic 是输入价的 1.25 倍——**比普通输入贵**。 */
+  cacheWrite: number
+}
+
+/** 键是 `provider/model`（和 `enabledModels`、`/v1/models` 里的 id 一致）。 */
+export type ModelPricing = Record<string, ModelRate>
+
+export function emptyModelRate(): ModelRate {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+}
+
+/** 单价一律收成非负有限数。负价和 NaN 都不是价，是手滑。 */
+export function parseModelRate(raw: unknown): ModelRate {
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+  const one = (v: unknown) => {
+    const n = Number(v)
+    return Number.isFinite(n) && n >= 0 ? n : 0
+  }
+  return { input: one(o.input), output: one(o.output), cacheRead: one(o.cacheRead), cacheWrite: one(o.cacheWrite) }
+}
+
+/**
+ * 覆盖表。**四项全是 0 的那条会被丢掉**——它和「没有覆盖」等价，留着只会让界面上
+ * 多出一条看不出有什么用的记录，而删掉它的办法还得另找。
+ */
+export function parseModelPricing(raw: unknown): ModelPricing {
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+  const out: ModelPricing = {}
+  for (const [k, v] of Object.entries(o)) {
+    const key = String(k).trim()
+    if (!key) continue
+    const rate = parseModelRate(v)
+    if (rate.input || rate.output || rate.cacheRead || rate.cacheWrite) out[key] = rate
+  }
+  return out
+}
+
+/**
+ * 熔断开关。
+ *
+ * `enforce` 默认**开**：余额见底就拦。关掉它就是「影子计费」——照样落账，一律放行，
+ * 用来在真开始收钱之前对一个账期的账。
+ *
+ * `graceMicros` 是允许透支多少。默认 0。它接的是这么一类情况：套餐昨天到期、续费的
+ * 单子今天才走完流程，中间那半天不该整家公司哑掉。
+ */
+export interface BillingSettings {
+  enforce: boolean
+  graceMicros: number
+}
+
+export function emptyBilling(): BillingSettings {
+  return { enforce: true, graceMicros: 0 }
+}
+
+export function parseBilling(raw: unknown): BillingSettings {
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+  const grace = Math.trunc(Number(o.graceMicros))
+  return {
+    // 老库里没有这个字段。回落成**开**：默认值是拍板定的，不能因为库里是空的就变成关。
+    enforce: o.enforce == null ? true : o.enforce === true,
+    graceMicros: Number.isFinite(grace) && grace > 0 ? grace : 0,
+  }
+}
+
+/** 一次计费调用是哪一类。第四类出现时加在这里，账本表的 check 也要跟着改。 */
+export type ChargeKind = 'llm' | 'connector' | 'web'
+
+/** 和 ConnectorCallStatus 同一套值，故意的：三条路的结局分类必须能横着比。 */
+export type ChargeStatus = ConnectorCallStatus
+
+/**
+ * 账本的一行 = 一次计费调用。**钱只在这里**，领域表只记事实。
+ *
+ * 金额在写行那一刻定死，之后只 sum，绝不按当前单价重算——单价是我们改得动的东西，
+ * 重算意味着上个月的账单每天都不一样（同 connectors.md §9）。
+ */
+export interface UsageCharge {
+  id: string
+  /** null = owner 自己的调用：记账，但没有公司余额可扣。 */
+  companyId: string | null
+  accountId: string
+  botId: string | null
+  sessionId: string | null
+  kind: ChargeKind
+  /** 人读得懂的收费对象：`anthropic/claude-haiku-4-5` / `gmail:GMAIL_SEND_EMAIL`。 */
+  subject: string
+  status: ChargeStatus
+  /** 计量。llm 是四项 token，web 是 `{ units }`，connector 是空对象（恒为一次）。 */
+  quantity: Record<string, number>
+  /** 写行那一刻的单价快照。llm 是 ModelRate，另两条是 `{ unit }`。 */
+  unitPrice: Record<string, number>
+  multiplier: number
+  amountMicros: number
+  /** amountMicros 里由套餐赠送承担的部分，差额算充值。 */
+  bonusMicros: number
+  /** 查不到单价。金额 0，但不是免费——界面要说出来。 */
+  unpriced: boolean
+  refId: string | null
+  createdAt: number
 }
 
 /** 能挂网页工具的后端。`firecrawl` 只占位，还没接。 */
@@ -695,6 +839,8 @@ export function emptyPlatformSettings(): PlatformSettings {
     connectorPricing: emptyConnectorPricing(),
     managerVersion: '',
     webTools: emptyWebTools(),
+    modelPricing: {},
+    billing: emptyBilling(),
   }
 }
 

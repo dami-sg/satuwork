@@ -1,5 +1,6 @@
 import { desktopIntercept } from './desktop.ts'
 import { createLlm } from './llm.ts'
+import { createMeter } from './lib/meter.ts'
 import type { Db } from './db.ts'
 import type { JwtKeys } from './crypto.ts'
 import type { Router } from './http.ts'
@@ -16,6 +17,7 @@ import { attachConnectors } from './routes/connectors.ts'
 import { attachConnectorMcp } from './routes/mcp.ts'
 import { attachBotTemplate } from './routes/bot-template.ts'
 import { attachSessions } from './routes/sessions.ts'
+import { attachCharges } from './routes/charges.ts'
 import { attachInternal } from './routes/internal.ts'
 
 /**
@@ -37,8 +39,9 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   // 原始 req 当流用，不能让路由器先把 body 读掉，路径也是通配的。
   router.intercept(desktopIntercept(db, keys))
 
-  const ctx: RouteCtx = { db, keys, llm: createLlm(db) }
-  attachV1(router, db, keys, ctx.llm)
+  const llm = createLlm(db)
+  const ctx: RouteCtx = { db, keys, llm, meter: createMeter(db) }
+  attachV1(router, db, keys, llm, ctx.meter)
 
   attachAuth(router, ctx)
   attachPlatform(router, ctx)
@@ -51,5 +54,6 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   attachConnectorMcp(router, ctx)
   attachBotTemplate(router, ctx)
   attachSessions(router, ctx)
+  attachCharges(router, ctx)
   attachInternal(router, ctx)
 }

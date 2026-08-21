@@ -13,7 +13,6 @@ import type { RouteCtx } from './ctx.ts'
 import { ProviderError, providerFor, type ToolDef } from '../connectors/index.ts'
 import { MAX_TOOLS, blockMapOf, connectorDefOf, toolsOf } from '../lib/connectors.ts'
 import { requireSeatOnly } from '../lib/guards.ts'
-import { balanceOf } from '../lib/billing.ts'
 import type { Account, ConnectorCallStatus, ConnectorConnection, Db } from '../db.ts'
 
 /**
@@ -81,7 +80,7 @@ function toolResult(text: string, isError = false) {
 }
 
 export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
-  const { db } = ctx
+  const { db, meter } = ctx
 
   /**
    * 这一把连接现在能不能用，以及它属于谁。
@@ -129,33 +128,9 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
     }
   }
 
-  /**
-   * 两个桶各还剩多少（微元）。
-   *
-   * **余额是「充的 − 花的」现算，没有余额行。** 建一行余额就要为每次工具调用去更新它，
-   * 一家公司所有席位挤在同一行上排队——为一次几十毫秒的调用付出一次行锁，不值得。
-   * 代价是并发时可能透支一点点（最多一轮并发的量，几分钱），认了。
-   *
-   * **两个桶必须分开算**：赠送跟着账期作废，充值不过期。合成一个数的话，套餐一到期，
-   * 上一期花掉的赠送会从充值余额上再扣一遍——刚充过钱的公司当场变成欠费。
-   */
-  async function budgetOf(companyId: string): Promise<{ bonusLeft: number; topupLeft: number; left: number }> {
-    const bal = await balanceOf(db, companyId)
-    const spent = await db.connectorSpend(companyId, bal.planBonusStartAt)
-    const bonusLeft = Math.max(0, bal.planBonusMils * 1000 - spent.bonusMicros)
-    const topupLeft = Math.max(0, bal.topupMils * 1000 - spent.topupMicros)
-    return { bonusLeft, topupLeft, left: bonusLeft + topupLeft }
-  }
-
-  /** 这一次调用收多少钱。按 toolkit 覆盖，没配就用默认单价。 */
-  async function priceMicrosOf(toolkit: string): Promise<number> {
-    const settings = (await db.platformSettings()) as { connectorPricing?: unknown }
-    const p = (settings.connectorPricing ?? {}) as { defaultMicros?: unknown; byToolkit?: Record<string, unknown> }
-    const byToolkit = p.byToolkit && typeof p.byToolkit === 'object' ? p.byToolkit : {}
-    const raw = byToolkit[toolkit] ?? p.defaultMicros
-    const n = Number(raw)
-    return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : 0
-  }
+  // 余额、单价、落账都在 lib/meter.ts 了。这里曾经有一份自己的 budgetOf 和
+  // priceMicrosOf——那时连接器是唯一往下扣的东西，所以「余额」只看 connector_calls。
+  // 模型和网页工具接上之后那个口径就错了：钱烧在别处，这里算出来的余额纹丝不动。
 
   router.post('/mcp/connectors/:connectionId', async (req, res) => {
     const body = (req.body ?? {}) as RpcReq
@@ -234,9 +209,15 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
     const slug = resolveToolSlug(g.toolkit, String(params.name ?? ''), known)
     const startedAt = Date.now()
 
-    /** 落一行流水。**被拒的也落**——「谁想调、为什么没调成」和「谁调了」一样要留档。 */
-    const record = async (status: ConnectorCallStatus, amountMicros: number, bonusMicros = 0) => {
-      await db.insertConnectorCall({
+    /**
+     * 落一行流水 + 一行账。**被拒的也落**——「谁想调、为什么没调成」和「谁调了」
+     * 一样要留档。
+     *
+     * 流水记事实（耗时、是不是点名来的、哪一把连接），账本记钱，靠 `refId` 串起来。
+     * `free` 是「这一次不收钱」：我们自己拒掉的、根本没跑成的，没有产生上游成本。
+     */
+    const record = async (status: ConnectorCallStatus, free = false) => {
+      const call = await db.insertConnectorCall({
         companyId: g.account.companyId,
         accountId: g.account.id,
         connectionId: g.conn.id,
@@ -246,44 +227,44 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
         label: g.conn.label,
         tool: slug,
         status,
-        amountMicros,
-        bonusMicros,
         latencyMs: Date.now() - startedAt,
         viaMention,
+      })
+      await meter.charge({
+        kind: 'connector',
+        account: g.account,
+        botId: g.botId || null,
+        status,
+        toolkit: g.toolkit,
+        tool: slug,
+        free,
+        refId: call.id,
       })
     }
 
     if (!slug) {
-      await record('denied', 0)
+      await record('denied', true)
       rpcOk(res, id, toolResult('没有指定工具名', true))
       return
     }
     if (g.enabledTools.length && !g.enabledTools.includes(slug)) {
-      await record('denied', 0)
+      await record('denied', true)
       rpcOk(res, id, toolResult('这个工具没有开启，去连接器那一屏打开它', true))
       return
     }
 
-    const price = await priceMicrosOf(g.toolkit)
-    /**
-     * 这一笔从哪个桶出。**先扣套餐赠送，再扣充值**——赠送跟着套餐到期作废，反过来扣
-     * 等于逼公司先花光不过期的那笔，然后眼看着赠送过期。
-     */
-    let bonusPart = 0
-    if (g.account.companyId && price > 0) {
-      const budget = await budgetOf(g.account.companyId)
-      if (budget.left <= 0) {
-        await record('denied', 0)
-        // **一句人话，不是 HTTP 错误。** 席位那边会把它当工具输出交给模型，模型照实
-        // 告诉用户；回错误的话模型多半会重试三次再放弃。
-        rpcOk(res, id, toolResult('这家公司的额度用完了，请联系管理员充值', true))
-        return
-      }
-      bonusPart = Math.min(price, budget.bonusLeft)
+    // 变量名不叫 gate：这个文件里 gate() 已经是「取连接、查权限」那个函数了。
+    const credit = await meter.gate(g.account, { kind: 'connector', toolkit: g.toolkit })
+    if (!credit.ok) {
+      await record('denied', true)
+      // **一句人话，不是 HTTP 错误。** 席位那边会把它当工具输出交给模型，模型照实
+      // 告诉用户；回错误的话模型多半会重试三次再放弃。
+      rpcOk(res, id, toolResult(credit.reason, true))
+      return
     }
 
     if (!g.conn.externalId) {
-      await record('error', 0)
+      await record('error', true)
       rpcOk(res, id, toolResult('这个账号还没连上', true))
       return
     }
@@ -303,13 +284,13 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
        * 失败（「邮箱不存在」是跑完才知道的，成本已经发生）。没跑成的一律走下面的
        * catch：provider 的契约是「抛出 = 没跑成」，不许把异常吞成一个返回值。
        */
-      await record(out.ok ? 'ok' : 'failed', price, bonusPart)
+      await record(out.ok ? 'ok' : 'failed')
       rpcOk(res, id, toolResult(out.text, !out.ok))
     } catch (e) {
       const timedOut = timer.aborted
       // 超时**照收钱**：发出去的邮件不会因为我们没等到响应就退回来。别的失败
       // （连不上、4xx、5xx）没产生上游成本，不收。
-      await record(timedOut ? 'timeout' : 'error', timedOut ? price : 0, timedOut ? bonusPart : 0)
+      await record(timedOut ? 'timeout' : 'error', !timedOut)
       const msg = e instanceof ProviderError ? e.message : (e as Error).message
       rpcOk(res, id, toolResult(timedOut ? `工具调用超时（${UPSTREAM_TIMEOUT_MS / 1000} 秒）` : `工具调用失败：${msg}`, true))
     }
