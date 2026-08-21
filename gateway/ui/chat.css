@@ -1067,3 +1067,11 @@
 @media (prefers-reduced-motion: reduce) {
   .sw-preview-spin { animation: none; }
 }
+
+/* 正文里就地替换出来的文件药丸（见 chat.js 的 inlineFileChips）。
+   它长在一行文字中间，所以要跟着基线走，也不能因为文件名长就把这一行撑开。 */
+.sw-filechip-inline {
+  vertical-align: -3px;
+  margin: 0 1px;
+  max-width: min(34ch, 100%);
+}

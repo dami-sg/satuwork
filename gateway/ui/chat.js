@@ -1053,6 +1053,48 @@ function chipHtml(x, i) {
   return `<span class="sw-chip sw-toolchip" data-state="${state_}" data-i="${i}" tabindex="0">${ICON_TOOL}<span>${esc(x.name)} · ${esc(label)}</span></span>`
 }
 
+/**
+ * 正文里被**行内代码**点了名的产出文件。
+ *
+ * 判据是 markdown 源码里出现 `` `路径` ``，而不是去渲染后的 DOM 里找。两个理由：
+ * 一是它要参与 chips 那条的 sig（决定底下还摆哪几颗），必须在渲染之前就算得出来；
+ * 二是源码里的反引号是模型明确写下的「这是个路径」，比事后按文本匹配可靠。
+ *
+ * **不做模糊匹配**：只认整段相等的完整路径。截一半的、拼在句子里的一律不动——
+ * 那正是「拿正则扫散文猜路径」的老毛病，措辞一改就散架。
+ */
+function mentionedFiles(text, files) {
+  const src = String(text == null ? '' : text)
+  const set = new Set()
+  for (const f of files || []) if (f && f.path && src.includes('`' + f.path + '`')) set.add(f.path)
+  return set
+}
+
+/**
+ * 把正文里那几段路径原地换成可以点开的药丸。
+ *
+ * 模型写出来的是 `uploads/s-0189cf21-787b-4c33-a4d4-c3daf292da34/Receipt-2095.md`
+ * 这样一长串——占掉整行、看不出重点，而且不能点。换成药丸之后，「它生成了什么」
+ * 就在说这句话的地方，不用再往下找。
+ *
+ * **跳过代码块里的**：那里面的路径是给人抄去执行的命令的一部分，换成按钮就抄不走了。
+ */
+function inlineFileChips(host, files) {
+  const byPath = new Map((files || []).filter((f) => f && f.path).map((f) => [f.path, f]))
+  if (!byPath.size) return
+  for (const code of [...host.querySelectorAll('code')]) {
+    if (code.closest('pre')) continue
+    const hit = byPath.get(code.textContent.trim())
+    if (!hit) continue
+    const box = document.createElement('span')
+    box.innerHTML = fileChipHtml(hit)
+    const chip = box.firstElementChild
+    if (!chip) continue
+    chip.classList.add('sw-filechip-inline')
+    code.replaceWith(chip)
+  }
+}
+
 /** 一条消息的外壳。正文和工具条留空，交给 updateRow 填——它俩每帧都可能变。 */
 function rowShell(b, key) {
   const account = (state.me && state.me.account) || {}
@@ -1124,26 +1166,34 @@ function updateRow(el, b, streaming) {
     void fillShots(strip)
   }
 
+  const tools = b.tools || []
+  // 产出文件 + 上传的附件。两边是同一种东西（工作区里一个能点开的文件），
+  // 用同一种药丸，点开走同一个预览。
+  const outs = outputFiles(tools).concat(b.files || [])
+  // 正文里已经点了名的那些，就地换成药丸（见 inlineFileChips），底下那条就不再
+  // 重复摆一遍——同一个文件在一条消息里出现两次是噪音，而且下面那颗离它被提到的
+  // 那句话隔了好几行。
+  const inlined = mentionedFiles(b.text, outs)
+
   if (!String(b.text || '').trim() && streaming) {
     // 还没吐字。给一个空气泡里的三点——它就地长成正文，位置不跳。
     if (!md.querySelector('.sw-typing')) md.innerHTML = '<span class="sw-typing"><i></i><i></i><i></i></span>'
   } else {
     if (md.querySelector('.sw-typing')) md.innerHTML = ''
     syncMd(md, b.text, streaming)
+    if (inlined.size) inlineFileChips(md, outs)
   }
 
-  const tools = b.tools || []
-  // 产出文件 + 上传的附件。两边是同一种东西（工作区里一个能点开的文件），
-  // 用同一种药丸，点开走同一个预览。
-  const outs = outputFiles(tools).concat(b.files || [])
+  // 底下只留没被正文点过名的。
+  const rest = outs.filter((f) => !inlined.has(f.path))
   const sig =
     tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|') +
     '#' +
-    outs.map((f) => f.path).join('|')
+    rest.map((f) => f.path).join('|')
   if (chips.getAttribute('data-sig') !== sig) {
     chips.setAttribute('data-sig', sig)
-    chips.innerHTML = tools.map(chipHtml).join('') + outs.map(fileChipHtml).join('')
-    chips.hidden = !tools.length && !outs.length
+    chips.innerHTML = tools.map(chipHtml).join('') + rest.map(fileChipHtml).join('')
+    chips.hidden = !tools.length && !rest.length
     // 工具对象直接挂到节点上，悬浮窗按需取。顺序和 chipHtml 生成的顺序一一对应；
     // 产出文件那几颗是 sw-filechip，不在这个选择器里，不会错位。
     const nodes = chips.querySelectorAll('.sw-toolchip')
