@@ -214,7 +214,17 @@ export function apply(ctx: Context, _config: Config = {}) {
    * 拒绝处理掉了。
    */
   ctx.server.post('/api/sessions/:id/approvals/:callId', async (req, res) => {
-    const body = (await req.json().catch(() => ({}))) as { decision?: string; scope?: string }
+    const body = (await req.json().catch(() => ({}))) as {
+      decision?: string
+      scope?: string
+      /**
+       * 人在卡片上改过的那几格：`{ 'args.body': '改后的正文' }`。
+       *
+       * **收下不等于照单全收**：哪几格能改由席位这边的表单说了算（见 policy/forms.ts
+       * 的 applyEdits），这里只负责把原样送到那儿。
+       */
+      edits?: Record<string, unknown>
+    }
     const decision = body.decision === 'approve' ? 'approve' : body.decision === 'deny' ? 'deny' : ''
     if (!decision) {
       res.status = 400
@@ -222,7 +232,8 @@ export function apply(ctx: Context, _config: Config = {}) {
       return
     }
     const scope = body.scope === 'session' ? 'session' : 'once'
-    const r = ctx.policy.approvals.decide(req.params.id, req.params.callId, decision, scope)
+    const edits = body.edits && typeof body.edits === 'object' && !Array.isArray(body.edits) ? body.edits : undefined
+    const r = ctx.policy.approvals.decide(req.params.id, req.params.callId, decision, scope, edits)
     if (r === 'ok') {
       res.json({ ok: true, decision, scope })
       return

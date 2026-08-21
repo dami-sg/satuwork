@@ -2,6 +2,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { guardsOf, type BotRecord } from '../registry/index.ts'
 import type { ToolCall, ToolResult } from '../tools/index.ts'
 import { ApprovalGate, type Verdict } from './approvals.ts'
+import { formOf, unwrapCall } from './forms.ts'
 import { scanPii } from './pii.ts'
 import { destructiveCommand, networkCommand } from './shell.ts'
 
@@ -99,8 +100,16 @@ export class PolicyService extends Service {
       const hit = destructiveCommand(call.arguments)
       return hit ? `这条命令会不可逆地改动系统（${hit}）` : null
     }
-    if (risk.includes('destructive')) return `${call.name} 可能不可逆地删除或覆盖数据`
-    if (risk.includes('external') && risk.includes('write')) return `${call.name} 会往外部系统写入或发送内容`
+    /**
+     * 话里说的是**剥壳之后**那把工具。
+     *
+     * 连接器工具太多时它们会收进 `SW_RUN`，真正的工具名在参数里。照着壳的名字写，
+     * 卡片上就是「mcp_github_default_sw_run 会往外部系统写入或发送内容」——人看不出
+     * 自己在批什么，而这张卡片除了「让人看清楚」没有别的用处。
+     */
+    const tool = unwrapCall(call).tool
+    if (risk.includes('destructive')) return `${tool} 可能不可逆地删除或覆盖数据`
+    if (risk.includes('external') && risk.includes('write')) return `${tool} 会往外部系统写入或发送内容`
     return null
   }
 
@@ -377,7 +386,8 @@ export function apply(ctx: Context) {
         if (guards['high-risk']) {
           const why = ctx.policy.needsApproval(call, risk)
           if (why) {
-            const { verdict, viaGrant } = await ctx.policy.approvals.ask(call, why)
+            // 表单在**席位这边**算：剥元工具的壳、认字段、定哪几格能改，全在 forms.ts。
+            const { verdict, viaGrant, edited } = await ctx.policy.approvals.ask(call, why, formOf(call))
             await ctx.policy.record({
               sessionId: call.sessionId,
               botId: bot?.id ?? '',
@@ -388,7 +398,11 @@ export function apply(ctx: Context) {
               // **靠这句话才看得出这次为什么没弹卡片。** 「本会话都批准」之后的每一次
               // 放行，日志上都只是一条 approved；不写清楚出处，事后翻记录的人会以为
               // 有人一次次点过头。
-              reason: viaGrant ? `${why}（这次对话此前已批准同一把工具）` : why,
+              reason: viaGrant
+                ? `${why}（这次对话此前已批准同一把工具）`
+                : edited?.length
+                  ? `${why}（批准时改过：${edited.join('、')}）`
+                  : why,
               at: Date.now(),
             })
             if (verdict !== 'approved') return blockedByUser(verdict, why)

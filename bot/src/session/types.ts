@@ -204,6 +204,20 @@ export interface SessionEventMap {
     /** 为什么需要确认，一句话。「这会往外发东西」和「这会删掉文件」不是一回事。 */
     reason: string
     state: 'pending' | 'approved' | 'denied' | 'timeout' | 'aborted'
+    /**
+     * 这次用哪张卡、卡上有哪几格（见 bot/src/policy/forms.ts）。
+     *
+     * **界面照着它画，不自己认工具。** 「这是一封要发出去的邮件」这个判断需要知道
+     * 工具的参数长什么样、元工具那层壳怎么剥——那是席位这边的知识，搬进浏览器只会
+     * 变成两份会各自漂的规则。认不出的 kind 一律退回通用卡。
+     */
+    form?: {
+      kind: string
+      tool: string
+      fields: { key: string; label: string; value: string; editable?: boolean; multiline?: boolean }[]
+    }
+    /** 人在卡片上改过哪几格（标签）。终态事件里的 arguments / form 已经是改后的那份。 */
+    edited?: string[]
     /** 批准的范围：只这一次，还是这条会话里同一把工具都放行。 */
     scope?: 'once' | 'session'
     /**

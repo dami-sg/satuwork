@@ -680,7 +680,17 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       res,
       'POST',
       `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/approvals/${encodeURIComponent(req.params.callId)}`,
-      { decision: strField(body, 'decision'), scope: strField(body, 'scope', false) || 'once' },
+      {
+        decision: strField(body, 'decision'),
+        scope: strField(body, 'scope', false) || 'once',
+        /**
+         * 卡片上改过的那几格，**原样转发**。
+         *
+         * Gateway 不认字段、也不做校验：哪几格能改是席位那边算出来的（policy/forms.ts），
+         * 在这儿再判一次就是同一套规则的第二份，两份迟早会漂。这里只保证形状是个对象。
+         */
+        ...(body.edits && typeof body.edits === 'object' && !Array.isArray(body.edits) ? { edits: body.edits } : {}),
+      },
       await seatBearer(db, account.id),
       target.machineToken,
     )

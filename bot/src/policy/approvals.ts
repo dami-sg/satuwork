@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolCall } from '../tools/index.ts'
+import { applyEdits, type ApprovalForm } from './forms.ts'
 
 /** 一条还等着人拍板的调用。刷新页面之后界面靠它把卡片摆回来。 */
 export interface PendingApproval {
@@ -8,6 +9,8 @@ export interface PendingApproval {
   name: string
   arguments: string
   reason: string
+  /** 这次要用哪张卡、卡上有哪几格（见 forms.ts）。界面照着它画。 */
+  form: ApprovalForm
   createdAt: number
   expiresAt: number
 }
@@ -27,6 +30,8 @@ export interface Decision {
   scope?: 'once' | 'session'
   /** 这次是被此前那条「本会话都批准」直接放行的，没有再问过人。 */
   viaGrant?: boolean
+  /** 人在卡片上改过哪几格（标签，给日志和审计看）。没改就没有这一项。 */
+  edited?: string[]
 }
 
 /**
@@ -48,7 +53,22 @@ const TIMEOUT_MS = Math.max(10_000, Math.trunc(Number(process.env.SATUWORK_APPRO
  * 决定权和执行点之间没有中间人。
  */
 export class ApprovalGate {
-  private waiting = new Map<string, { rec: PendingApproval; settle: (v: Verdict, scope?: 'once' | 'session') => void }>()
+  private waiting = new Map<
+    string,
+    {
+      rec: PendingApproval
+      /**
+       * **那次调用本身**，不是它的副本。
+       *
+       * 人在卡片上改了正文之后，改的必须是真正要执行的那份参数——`ToolService.execute`
+       * 里的 `run()` 是在 `next()` 之后才读 `call.arguments` 的（见 tools/index.ts），
+       * 所以在这里改它，跑出去的就是改过的那一份。留一份副本再「同步回去」的话，
+       * 中间那一步迟早会漏，而漏掉的表现是：界面显示改过了，发出去的还是原文。
+       */
+      call: ToolCall
+      settle: (v: Verdict, scope?: 'once' | 'session', edited?: string[]) => void
+    }
+  >()
   /**
    * 「本会话内都批准」的口子：sessionId → 工具名。
    *
@@ -70,7 +90,7 @@ export class ApprovalGate {
    * 三条出路都要走到：人点了、这一轮被中止（停止按钮）、等到超时。少任何一条，
    * 那次调用就会挂着不动——而它挂着的时候，整条会话都在等它。
    */
-  async ask(call: ToolCall, reason: string): Promise<Decision> {
+  async ask(call: ToolCall, reason: string, form: ApprovalForm): Promise<Decision> {
     const granted = this.grants.get(call.sessionId)
     if (granted?.has(call.name)) return { verdict: 'approved', scope: 'session', viaGrant: true }
 
@@ -82,6 +102,7 @@ export class ApprovalGate {
       name: call.name,
       arguments: call.arguments,
       reason,
+      form,
       createdAt: now,
       expiresAt: now + TIMEOUT_MS,
     }
@@ -95,19 +116,19 @@ export class ApprovalGate {
      */
     const settled = new Promise<Decision>((resolve) => {
       let done = false
-      const finish = (v: Verdict, scope?: 'once' | 'session') => {
+      const finish = (v: Verdict, scope?: 'once' | 'session', edited?: string[]) => {
         if (done) return
         done = true
         clearTimeout(timer)
         call.signal?.removeEventListener('abort', onAbort)
         this.waiting.delete(key)
-        resolve(scope ? { verdict: v, scope } : { verdict: v })
+        resolve({ verdict: v, ...(scope ? { scope } : {}), ...(edited?.length ? { edited } : {}) })
       }
       const onAbort = () => finish('aborted')
       const timer = setTimeout(() => finish('timeout'), TIMEOUT_MS)
       // 已经是 aborted 的信号不会再发事件——那种情况要当场收，否则这次确认会挂在一个
       // 早就被喊停的轮次里等满五分钟。
-      this.waiting.set(key, { rec, settle: finish })
+      this.waiting.set(key, { rec, call, settle: finish })
       if (call.signal?.aborted) return finish('aborted')
       call.signal?.addEventListener('abort', onAbort, { once: true })
     })
@@ -117,16 +138,26 @@ export class ApprovalGate {
       name: rec.name,
       arguments: rec.arguments,
       reason,
+      form: rec.form,
       state: 'pending',
       expiresAt: rec.expiresAt,
     })
 
     const decision = await settled
+    /**
+     * 终态事件带的是**最终那一份**：参数、表单里的值都取改过之后的。
+     *
+     * 落原文的话，日志上写着模型起草的那封信，而实际发出去的是人改过的另一封——
+     * 「发了什么」这个问题从此没有答案，而这正是留这条记录的全部理由。
+     */
     await this.append(rec.sessionId, {
       callId: rec.callId,
       name: rec.name,
+      // decide() 把改过的那份同时写回了 rec.arguments（和 call.arguments 是同一串）。
       arguments: rec.arguments,
       reason,
+      form: rec.form,
+      ...(decision.edited?.length ? { edited: decision.edited } : {}),
       state: decision.verdict,
       // **范围要落进终态事件。** 少了它，「这次对话都批准」在日志里跟「只批这一次」
       // 长得一模一样，而后面那些不再弹卡片的调用就成了没有出处的放行。
@@ -147,16 +178,37 @@ export class ApprovalGate {
     callId: string,
     decision: 'approve' | 'deny',
     scope: 'once' | 'session' = 'once',
+    edits?: Record<string, unknown>,
   ): 'ok' | 'gone' {
     const hit = this.waiting.get(`${sessionId}:${callId}`)
     if (!hit) return 'gone'
+    let edited: string[] = []
+    if (decision === 'approve' && edits && typeof edits === 'object') {
+      /**
+       * 改动写回**真正要执行的那份参数**（见 waiting 里 call 上的说明），
+       * 而且只认席位这边算出来的那几格可改字段——浏览器送来的 key 一概不作数。
+       */
+      const patched = applyEdits(hit.call.arguments, hit.rec.form, edits)
+      hit.call.arguments = patched.arguments
+      hit.rec.arguments = patched.arguments
+      hit.rec.form = { ...hit.rec.form, fields: patched.fields }
+      edited = patched.changed
+    }
+    /**
+     * **改过的这一次不能变成整场放行。**
+     *
+     * 「这次对话都批准」的意思是「后面同样的调用不用再问我」，而后面那些调用带的是
+     * 模型自己写的内容，不是人刚改的这一份。两件事凑在一起，等于人改了一封信，
+     * 然后默许了之后所有没人看过的信。
+     */
+    if (edited.length) scope = 'once'
     if (decision === 'approve' && scope === 'session') {
       const set = this.grants.get(sessionId) ?? new Set<string>()
       set.add(hit.rec.name)
       this.grants.set(sessionId, set)
     }
     // 拒绝没有「范围」可言——带上一个 scope: 'once' 只会让日志读起来像「他只拒了这一次」。
-    hit.settle(decision === 'approve' ? 'approved' : 'denied', decision === 'approve' ? scope : undefined)
+    hit.settle(decision === 'approve' ? 'approved' : 'denied', decision === 'approve' ? scope : undefined, edited)
     return 'ok'
   }
 
@@ -170,6 +222,8 @@ export class ApprovalGate {
     name: string
     arguments: string
     reason: string
+    form?: ApprovalForm
+    edited?: string[]
     state: 'pending' | Verdict
     scope?: 'once' | 'session'
     expiresAt?: number

@@ -482,12 +482,19 @@ function fold(events, live) {
         // 同一个 callId 会来两条：先 pending，人点了之后再来终态。取最后一条。
         cur.state = data.state || cur.state
         if (data.scope) cur.scope = data.scope
+        // 终态那条带的是**最终**那一份（人改过的话就是改后的），覆盖掉起草时那份。
+        if (typeof data.arguments === 'string') cur.args = data.arguments
+        if (data.form && Array.isArray(data.form.fields)) cur.form = data.form
+        if (Array.isArray(data.edited)) cur.edited = data.edited
       } else {
         list.push({
           callId: data.callId,
           name: data.name || '',
           args: typeof data.arguments === 'string' ? data.arguments : '',
           reason: data.reason || '',
+          // 这次用哪张卡、卡上哪几格。**席位算好的**，界面照着画（见 policy/forms.ts）。
+          form: data.form && Array.isArray(data.form.fields) ? data.form : null,
+          edited: Array.isArray(data.edited) ? data.edited : null,
           state: data.state || 'pending',
           expiresAt: Number(data.expiresAt) || 0,
           // 这条 pending 落在日志的第几行。核对现况时拿它跟快照的水位比——
@@ -1280,6 +1287,10 @@ const ICON_BOT =
   '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>'
 const ICON_TOOL =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>'
+/** 发信那张卡的抬头。信封比盾牌说得更准：这一张问的是「这封信发不发」。 */
+const ICON_MAIL =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>'
+
 /** 确认卡上那面盾。用盾不用感叹号：这是一道**边界**，不是一次故障。 */
 const ICON_SHIELD =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>'
@@ -1471,42 +1482,160 @@ function inlineFileChips(host, files) {
   }
 }
 
-/** 终态那一行怎么说。四种不批准分开讲，合成一句「已拒绝」会把后三种说成人的决定。 */
-const APPROVAL_DONE = {
-  approved: () => t('已批准，这次调用继续执行了。', 'Approved — the call went through.'),
-  denied: () => t('已拒绝，这次调用没有执行。', 'Denied — the call did not run.'),
-  timeout: () => t('一直没人回应，已按不执行处理。', 'Nobody responded; treated as not approved.'),
-  aborted: () => t('这一轮被停止了，确认作废。', 'The turn was stopped; this request is void.'),
+/** 药丸上那几个字。比卡片上那句话短——药丸要一眼扫过，长了就换行。 */
+const APPROVAL_CHIP_LABEL = {
+  approved: () => t('已批准', 'approved'),
+  denied: () => t('已拒绝', 'denied'),
+  timeout: () => t('超时未批', 'timed out'),
+  aborted: () => t('已作废', 'voided'),
+  expired: () => t('已失效', 'expired'),
+}
+
+/** 这条确认现在算哪一态。失效是界面自己判出来的（见 approvalDead），日志里没有。 */
+function approvalState(a) {
+  return approvalDead(a) ? 'expired' : a.state
 }
 
 /**
- * 一张确认卡。
+ * 有结论的确认，收成一颗药丸。
+ *
+ * **和工具痕迹用同一个类（sw-toolchip）**，为的是复用悬浮窗那一整套——触发、定位、
+ * chips 重画之后把浮层接回新节点。多加一个 sw-approvalchip 只是为了让挂 `__tool`
+ * 那两个循环分得开彼此，别把下标错位（见 updateRow）。
+ *
+ * 批准的用普通底色：那是常态，不该每条对话里都跳出来。没批准的走 error 那一档——
+ * 它往往正是「它后来为什么没干成」的答案，翻记录时要找得到。
+ */
+function approvalChipHtml(a, i) {
+  const state = approvalState(a)
+  const label = (APPROVAL_CHIP_LABEL[state] || APPROVAL_CHIP_LABEL.denied)()
+  const tone = state === 'approved' ? 'done' : 'error'
+  const mail = a.form && a.form.kind === 'email'
+  // 药丸上写**剥壳之后**那把工具的名字：`mcp_github_default_sw_run` 谁也看不出是什么。
+  const name = (a.form && a.form.tool) || a.name
+  const edited = (a.edited || []).length ? ' · ' + t('已改', 'edited') : ''
+  return (
+    `<span class="sw-chip sw-toolchip sw-approvalchip" data-state="${tone}" data-i="${i}" tabindex="0">` +
+    `${mail ? ICON_MAIL : ICON_SHIELD}<span>${esc(name)} · ${esc(label)}${esc(edited)}</span></span>`
+  )
+}
+
+/** 挂到药丸上给悬浮窗读的那份。`approval: true` 是分支标记，见 toolPopBody。 */
+function approvalPop(a) {
+  return {
+    approval: true,
+    name: (a.form && a.form.tool) || a.name,
+    args: a.args,
+    form: a.form || null,
+    edited: a.edited || null,
+    reason: a.reason,
+    state: approvalState(a),
+  }
+}
+
+/**
+ * 卡片上改到一半的内容：`callId::key` → 当前值。
+ *
+ * **必须存在渲染之外。** 气泡会因为别的事重画（同一轮里又来了一条工具结果、另一条
+ * 确认冒出来），而重画是 innerHTML 整体换掉——正在写的那段正文会跟着没。这张表在
+ * 重画之后把值填回去，人写到哪儿还是哪儿。
+ */
+const approvalDrafts = new Map()
+
+function draftKey(callId, key) {
+  return callId + '::' + key
+}
+
+/** 这张卡现在这几格的值：人改过就用改过的，没改过就是模型起草的那份。 */
+function approvalValue(a, field) {
+  const draft = approvalDrafts.get(draftKey(a.callId, field.key))
+  return draft === undefined ? field.value || '' : draft
+}
+
+/** 这张卡被人动过没有。动过就不许再点「这次对话都批准」，见下面按钮上的说明。 */
+function approvalTouched(a) {
+  const fields = (a.form && a.form.fields) || []
+  return fields.some((f) => f.editable && approvalValue(a, f) !== (f.value || ''))
+}
+
+/** 卡片底下那排按钮。发信那张的第一个按钮说「批准并发送」——它就是要干这件事。 */
+function approvalActs(a, okLabel) {
+  const touched = approvalTouched(a)
+  return (
+    `<div class="sw-approval-acts">` +
+    `<button type="button" class="btn btn-primary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="once">${esc(okLabel)}</button>` +
+    `<button type="button" class="btn btn-secondary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="session"` +
+    // 改过的这一次不能变成整场放行：后面那些调用带的是模型自己写的内容，不是人刚改的这份。
+    (touched
+      ? ` disabled title="${esc(t('这一次改过内容，只能批准这一次', 'You edited this one, so it can only be approved once'))}"`
+      : '') +
+    `>${esc(t('这次对话都批准', 'Approve for this chat'))}</button>` +
+    `<button type="button" class="btn btn-ghost" data-act="chat-deny" data-call="${esc(a.callId)}">${esc(t('拒绝', 'Deny'))}</button>` +
+    `</div>`
+  )
+}
+
+/**
+ * 发信那张卡。
+ *
+ * **为什么单独做一张**：通用卡把整份 JSON 摊出来，而人在批一封信的时候要看的是
+ * 「发给谁、写了什么」，不是一段带转义符的 JSON。更要紧的是**得能改**——模型起草的
+ * 正文十有八九要动一两句，只能「批准/拒绝」的话，人就得拒掉、再去跟它解释一遍，
+ * 而它下一稿仍然是它写的。
+ *
+ * 改动最终落在**真正要执行的那份参数**上（见 policy/approvals.ts 的 decide），
+ * 不是这儿改个样子。哪几格能改由席位说了算，这里只负责画和收。
+ */
+function approvalEmailHtml(a) {
+  const fields = (a.form && a.form.fields) || []
+  const rows = fields
+    .map((f) => {
+      const value = approvalValue(a, f)
+      if (!f.editable) {
+        // 只读的那几格（收件人、抄送、附件…）**照样摆出来**：藏起来的话，人以为自己
+        // 看到了这封信的全部，而实际发出去的可能带着别的东西。
+        return value
+          ? `<div class="sw-mail-row"><span class="sw-mail-k">${esc(f.label)}</span><span class="sw-mail-v">${esc(value)}</span></div>`
+          : ''
+      }
+      const attrs = `data-edit="${esc(f.key)}" data-call="${esc(a.callId)}"`
+      return f.multiline
+        ? `<div class="sw-mail-body"><span class="sw-mail-k">${esc(f.label)}</span>` +
+            `<textarea class="input sw-mail-text" rows="8" ${attrs}>${esc(value)}</textarea></div>`
+        : `<div class="sw-mail-row"><span class="sw-mail-k">${esc(f.label)}</span>` +
+            `<input class="input sw-mail-input" type="text" value="${esc(value)}" ${attrs}></div>`
+    })
+    .join('')
+  return (
+    `<div class="sw-approval sw-approval-mail" data-state="pending" data-call="${esc(a.callId)}">` +
+    `<div class="sw-approval-head">${ICON_MAIL}<span>${esc(t('这封邮件要发出去了', 'This email is about to be sent'))}</span></div>` +
+    `<div class="sw-approval-why">${esc(t('可以直接改主题和正文，改完发出去的就是你现在看到的这一份。', 'Edit the subject or body if you like — what you see is what gets sent.'))}</div>` +
+    `<div class="sw-mail">${rows}</div>` +
+    `<div class="sw-approval-tool"><code>${esc((a.form && a.form.tool) || a.name)}</code></div>` +
+    approvalActs(a, t('批准并发送', 'Approve and send')) +
+    `</div>`
+  )
+}
+
+/**
+ * 一张确认卡。**只画还等着人点的那些**——有结论的收成药丸（approvalChipHtml）。
+ *
+ * 按席位给的 `form.kind` 分流：认得的走定制样式（发信那张），认不出的走下面这张通用卡。
+ * **认不出不是理由把参数藏起来**——通用卡把整份 JSON 摆出来，人照样看得见自己在批什么。
  *
  * **参数要摆出来。** 「Bot 想调用 send_email，批准吗」这句话本身没有信息量——人要批的
  * 是「发给谁、写了什么」，看不到这些就只能凭信任点，那和没有这个开关是一样的。
  */
 function approvalHtml(a) {
-  const dead = approvalDead(a)
-  const pending = a.state === 'pending' && !dead
+  if (a.form && a.form.kind === 'email' && (a.form.fields || []).length) return approvalEmailHtml(a)
   const args = prettyArgs(a.args)
-  const acts = pending
-    ? `<div class="sw-approval-acts">` +
-      `<button type="button" class="btn btn-primary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="once">${esc(t('批准这一次', 'Approve once'))}</button>` +
-      `<button type="button" class="btn btn-secondary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="session">${esc(t('这次对话都批准', 'Approve for this chat'))}</button>` +
-      `<button type="button" class="btn btn-ghost" data-act="chat-deny" data-call="${esc(a.callId)}">${esc(t('拒绝', 'Deny'))}</button>` +
-      `</div>`
-    : `<div class="sw-approval-done">${esc(
-        dead
-          ? t('这条确认已经失效了（席位重启或已超时），那次调用没有执行。', 'This request expired (seat restarted or timed out); the call did not run.')
-          : (APPROVAL_DONE[a.state] || APPROVAL_DONE.denied)(),
-      )}</div>`
   return (
-    `<div class="sw-approval" data-state="${esc(dead ? 'expired' : a.state)}" data-call="${esc(a.callId)}">` +
+    `<div class="sw-approval" data-state="pending" data-call="${esc(a.callId)}">` +
     `<div class="sw-approval-head">${ICON_SHIELD}<span>${esc(t('需要你确认', 'Needs your approval'))}</span></div>` +
     `<div class="sw-approval-why">${esc(a.reason)}</div>` +
     `<div class="sw-approval-tool"><code>${esc(a.name)}</code></div>` +
     (args ? `<pre class="sw-approval-args">${esc(clip(args))}</pre>` : '') +
-    acts +
+    approvalActs(a, t('批准这一次', 'Approve once')) +
     `</div>`
   )
 }
@@ -1620,20 +1749,45 @@ function updateRow(el, b, streaming) {
     if (inlined.size) inlineFileChips(md, outs)
   }
 
+  /**
+   * 确认卡分两拨：**还等着人点的摊开，已经有结论的收成一颗药丸。**
+   *
+   * 摊开是给「你要批的到底是什么」用的——参数看不见就只能凭信任点，那和没有这个开关
+   * 一样。可人点完之后它就只是一条痕迹了，再占着半屏参数，往上翻这一轮的对话会被
+   * 几张已经作废的卡片挡住。收起来之后和工具痕迹排在一起，详情走同一个悬浮窗。
+   */
+  const apps = b.approvals || []
+  const waiting = apps.filter((a) => a.state === 'pending' && !approvalDead(a))
+  const settled = apps.filter((a) => !waiting.includes(a))
+
   // 底下只留没被正文点过名的。
   const rest = outs.filter((f) => !inlined.has(f.path))
   const sig =
     tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|') +
     '#' +
-    rest.map((f) => f.path).join('|')
+    rest.map((f) => f.path).join('|') +
+    '#' +
+    settled.map((a) => a.callId + ':' + approvalState(a)).join('|')
   if (chips.getAttribute('data-sig') !== sig) {
     chips.setAttribute('data-sig', sig)
-    chips.innerHTML = tools.map(chipHtml).join('') + rest.map(fileChipHtml).join('')
-    chips.hidden = !tools.length && !rest.length
-    // 工具对象直接挂到节点上，悬浮窗按需取。顺序和 chipHtml 生成的顺序一一对应；
-    // 产出文件那几颗是 sw-filechip，不在这个选择器里，不会错位。
-    const nodes = chips.querySelectorAll('.sw-toolchip')
+    chips.innerHTML =
+      tools.map(chipHtml).join('') +
+      rest.map(fileChipHtml).join('') +
+      settled.map((a, i) => approvalChipHtml(a, tools.length + i)).join('')
+    chips.hidden = !tools.length && !rest.length && !settled.length
+    /**
+     * 工具对象直接挂到节点上，悬浮窗按需取。
+     *
+     * **选择器要把确认那几颗排除掉**：它们也叫 sw-toolchip（为的是复用悬浮窗那一整套
+     * 触发、定位、重接），混进来的话下标就错位了，鼠标停在一颗工具药丸上会弹出另一次
+     * 调用的参数。产出文件那几颗是 sw-filechip，本来就不在这个选择器里。
+     */
+    const nodes = chips.querySelectorAll('.sw-toolchip:not(.sw-approvalchip)')
     for (let i = 0; i < nodes.length; i++) nodes[i].__tool = tools[i]
+    // data-i 是「在这个容器的 .sw-toolchip 列表里排第几」，所以确认那几颗接在工具后面
+    // 数（见 approvalChipHtml 的调用处）——refreshToolPop 靠它把浮层接回新节点。
+    const apNodes = chips.querySelectorAll('.sw-approvalchip')
+    for (let i = 0; i < apNodes.length; i++) apNodes[i].__tool = approvalPop(settled[i])
     // 这一批节点刚被换掉。开着的悬浮窗要么跟着换到新节点上，要么关掉——
     // 「调用中 → 完成」正好是人盯着它看的那一刻，不该在那时候闪没。
     refreshToolPop()
@@ -1645,19 +1799,18 @@ function updateRow(el, b, streaming) {
    * 和别处一样按签名跳过重绘：不这么做的话，流式那几帧会把卡片连同上面的按钮一起
    * 换掉，人正要点的那一下就落空了。
    */
-  const apps = b.approvals || []
   let apbox = bubble.querySelector('.sw-approvals')
-  if (apps.length && !apbox) {
+  if (waiting.length && !apbox) {
     apbox = document.createElement('div')
     apbox.className = 'sw-approvals'
     bubble.appendChild(apbox)
   }
   if (apbox) {
-    const apSig = apps.map((a) => a.callId + ':' + a.state + (approvalDead(a) ? ':dead' : '')).join('|')
+    const apSig = waiting.map((a) => a.callId).join('|')
     if (apbox.getAttribute('data-sig') !== apSig) {
       apbox.setAttribute('data-sig', apSig)
-      apbox.innerHTML = apps.map(approvalHtml).join('')
-      apbox.hidden = !apps.length
+      apbox.innerHTML = waiting.map(approvalHtml).join('')
+      apbox.hidden = !waiting.length
     }
   }
   paintRowTime(el, b, streaming)
@@ -3556,6 +3709,22 @@ async function abortChat() {
  *
  * 失败了要把它恢复回去：那次真的没送到，卡片得还能点。
  */
+/**
+ * 卡片上这几格现在是什么值。
+ *
+ * **点下去那一刻从 DOM 里现读**，不用上面那张草稿表：草稿表是为了重画之后不丢字，
+ * 而「要发出去的是哪一份」只能以人眼前看到的那一份为准。两者不一致时（重画的竞态），
+ * 眼前的那份才是他刚才读过的。
+ */
+function approvalEdits(callId) {
+  const edits = {}
+  for (const el of document.querySelectorAll('[data-edit]')) {
+    if (el.getAttribute('data-call') !== callId) continue
+    edits[el.getAttribute('data-edit')] = el.value
+  }
+  return edits
+}
+
 async function decideApproval(callId, decision, scope) {
   const sessionId = state.chatSessionId
   if (!sessionId || !callId) return
@@ -3565,11 +3734,16 @@ async function decideApproval(callId, decision, scope) {
     box.setAttribute('data-busy', '1')
   }
   try {
+    const edits = decision === 'approve' ? approvalEdits(callId) : null
     await api(
       'POST',
       '/runtime/sessions/' + encodeURIComponent(sessionId) + '/approvals/' + encodeURIComponent(callId),
-      { decision, scope: scope || 'once' },
+      { decision, scope: scope || 'once', ...(edits && Object.keys(edits).length ? { edits } : {}) },
     )
+    // 这一条已经落定，草稿留着只会在下一次同名 callId 上冒出来（不会发生，但也没用了）。
+    for (const key of [...approvalDrafts.keys()]) {
+      if (key.startsWith(callId + '::')) approvalDrafts.delete(key)
+    }
   } catch (err) {
     if (box) box.removeAttribute('data-busy')
     // 409 是「这条早就结束了」——超时、被停止、或者另一个标签页先点了。它不是错误，
@@ -3786,6 +3960,7 @@ function clip(text) {
 }
 
 function toolPopBody(x) {
+  if (x && x.approval) return approvalPopBody(x)
   const label = x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')
   const state_ = x.result == null ? 'running' : x.failed ? 'error' : 'done'
   const args = prettyArgs(x.args)
@@ -3803,6 +3978,52 @@ function toolPopBody(x) {
       `<div class="sw-toolpop-k">${esc(x.failed ? t('错误') : t('结果'))}</div>` +
         (out ? `<pre>${esc(clip(out))}</pre>` : `<div class="sw-toolpop-wait">${esc(t('（没有输出）'))}</div>`),
     )
+  }
+  return rows.join('')
+}
+
+/**
+ * 收起来的那颗确认，展开之后要看到的东西：为什么要确认、当时批的是什么参数。
+ *
+ * 参数留在这里而不是留在气泡里，是因为**它只在被问起时才重要**：批的那一刻必须摊开，
+ * 批完之后是一条痕迹。翻旧对话的人要的是「这一步谁点的头」，需要细看时再停一下鼠标。
+ */
+function approvalPopBody(a) {
+  const label = (APPROVAL_CHIP_LABEL[a.state] || APPROVAL_CHIP_LABEL.denied)()
+  const rows = [
+    `<div class="sw-toolpop-head"><span class="sw-toolpop-name">${esc(a.name)}</span>` +
+      `<span class="sw-toolpop-state" data-state="${a.state === 'approved' ? 'done' : 'error'}">${esc(label)}</span></div>`,
+  ]
+  if (a.reason) rows.push(`<div class="sw-toolpop-k">${esc(t('为什么要确认', 'Why approval was needed'))}</div><div>${esc(a.reason)}</div>`)
+  /**
+   * **改过要说出来，而且要说改了哪几格。**
+   *
+   * 下面摆的是最终那一份（席位在终态事件里给的就是改后的）。不写这一行的话，翻记录
+   * 的人会以为模型起草的就是这个样子——而「这句话是谁写的」正是事后最要紧的问题。
+   */
+  if ((a.edited || []).length) {
+    rows.push(
+      `<div class="sw-toolpop-k">${esc(t('批准时改过', 'Edited before approving'))}</div><div>${esc(a.edited.join('、'))}</div>`,
+    )
+  }
+  const fields = (a.form && a.form.fields) || []
+  if (fields.length) {
+    // 有表单就按表单摆（收件人 / 主题 / 正文），比一段带转义符的 JSON 好读得多。
+    rows.push(
+      `<div class="sw-toolpop-k">${esc(t('内容', 'Content'))}</div>` +
+        fields
+          .filter((f) => f.value)
+          .map(
+            (f) =>
+              `<div class="sw-toolpop-field"><span>${esc(f.label)}</span>${
+                f.multiline ? `<pre>${esc(clip(f.value))}</pre>` : `<div>${esc(f.value)}</div>`
+              }</div>`,
+          )
+          .join(''),
+    )
+  } else {
+    const args = prettyArgs(a.args)
+    if (args) rows.push(`<div class="sw-toolpop-k">${esc(t('参数'))}</div><pre>${esc(clip(args))}</pre>`)
   }
   return rows.join('')
 }
@@ -3873,6 +4094,32 @@ function refreshToolPop() {
   toolPop.innerHTML = toolPopBody(next.__tool)
   placeToolPop(next)
 }
+
+/**
+ * 卡片上打的字，随手记进草稿表。
+ *
+ * 挂在 document 上而不是每张卡上：卡片是 innerHTML 换出来的，节点每次重画都是新的，
+ * 挂在节点上的监听会跟着没。
+ */
+document.addEventListener('input', (e) => {
+  const el = e.target instanceof Element ? e.target : null
+  const key = el && el.getAttribute && el.getAttribute('data-edit')
+  if (!key) return
+  const callId = el.getAttribute('data-call') || ''
+  approvalDrafts.set(draftKey(callId, key), el.value)
+  /**
+   * 改过之后「这次对话都批准」就不能点了。**当场变灰**，不等下一次重画——重画是别的
+   * 事件驱动的，可能一直不来；而这颗按钮亮着，人点下去就是「把之后所有没人看过的信
+   * 也一起放行」。席位那边也会把改过的这一次强制成 once（见 approvals.ts），
+   * 这里变灰是让人看得见，不是唯一的一道。
+   */
+  const card = el.closest('.sw-approval')
+  const wide = card && card.querySelector('[data-act="chat-approve"][data-scope="session"]')
+  if (wide) {
+    wide.disabled = true
+    wide.title = t('这一次改过内容，只能批准这一次', 'You edited this one, so it can only be approved once')
+  }
+})
 
 document.addEventListener('mouseover', (e) => {
   const el = e.target instanceof Element ? e.target : null
