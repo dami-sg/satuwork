@@ -971,6 +971,152 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.stopChatStream()
     })
 
+    /* ── 历史和实时拆成两条路 ──────────────────────────────────────
+       历史走 HTTP（hydrateChat），实时走 SSE，而流上还垫一轮兜底：名单要那行灰字，
+       点进去的第一帧也要有东西可看。那一轮和 HTTP 拉回来的最后一轮**必然重叠**，
+       所以两头都要挡：进桶时「比尾巴大才收」，补历史时「比头小才收」。
+       两种到达顺序各测一遍——谁先到取决于网络，不该由它决定画出来对不对。
+       ────────────────────────────────────────────────────────── */
+
+    /** 一轮完整对话，seq 连号。 */
+    const chatTurn = (base, n) => [
+      { seq: base, time: base * 1000, type: 'user/message', data: { message: { content: [{ type: 'text', text: '问题' + n }] }, source: { kind: 'user' } } },
+      { seq: base + 1, time: base * 1000, type: 'turn/start', data: { turn: n } },
+      { seq: base + 2, time: base * 1000, type: 'assistant/message', data: { turn: n, message: { content: [{ type: 'text', text: '回答' + n }] } } },
+      { seq: base + 3, time: base * 1000, type: 'turn/end', data: { turn: n, reason: 'completed' } },
+    ]
+    const THREE_TURNS = [...chatTurn(1, 1), ...chatTurn(5, 2), ...chatTurn(9, 3)]
+
+    /** 接管 /history 和 /events 的 app 实例。history 回的是三轮全量。 */
+    const twoPathUi = async (sse, onHistory) => {
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/history')) {
+            if (onHistory) onHistory(path)
+            return new Response(JSON.stringify({ events: THREE_TURNS, firstSeq: 1, hasMore: false }), {
+              headers: { 'content-type': 'application/json' },
+            })
+          }
+          if (path.includes('/events')) return sse.response
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      return ui
+    }
+
+    await test('流先到、历史后到：重叠的那一轮不画两遍', async () => {
+      const sse = fakeSse()
+      const seen = []
+      const ui = await twoPathUi(sse, (path) => seen.push(path))
+      const row = ui.botStreamOf('bot-two-path')
+      row.sessionId = 's-two-a'
+      ui.state.chatBotId = 'bot-two-path'
+      ui.state.chatSessionId = 's-two-a'
+      ui.state.chatEvents = row.events
+
+      const run = ui.startChatStream('s-two-a', 0, 'bot-two-path')
+      // 流垫的那一轮 = 最后一轮，和 history 的尾巴完全重叠。
+      for (const ev of chatTurn(9, 3)) sse.push(ev)
+      sse.push({ type: 'replay/done', live: false, firstSeq: 9, hasMore: true })
+      for (let i = 0; i < 200 && row.events.length < 4; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(row.events.length === 4, `流垫的一轮没收全：${row.events.length}`)
+
+      await ui.hydrateChat('bot-two-path', 's-two-a')
+      const seqs = row.events.map((e) => e.seq)
+      assert(
+        JSON.stringify(seqs) === JSON.stringify(THREE_TURNS.map((e) => e.seq)),
+        `归并结果不对（该是 1..12 无重复）：${JSON.stringify(seqs)}`,
+      )
+      const folded = ui.fold(row.events)
+      assert(folded.blocks.length === 6, `该是 3 问 3 答共 6 条，实际 ${folded.blocks.length}`)
+      // 游标只许往前推：replay/done 说的是 9，HTTP 说的是 1，最后要留 1。
+      assert(ui.chatPages.get('s-two-a').firstSeq === 1, `翻页游标被缩回去了：${JSON.stringify(ui.chatPages.get('s-two-a'))}`)
+      assert(seen.length === 1 && seen[0].includes('turns=' + ui.CHAT_TAIL_TURNS), `历史那一跳不对：${JSON.stringify(seen)}`)
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
+    await test('历史先到、流后到：重放段整段被认成重复', async () => {
+      const sse = fakeSse()
+      const ui = await twoPathUi(sse)
+      const row = ui.botStreamOf('bot-two-path')
+      row.sessionId = 's-two-b'
+      ui.state.chatBotId = 'bot-two-path'
+      ui.state.chatSessionId = 's-two-b'
+      ui.state.chatEvents = row.events
+
+      await ui.hydrateChat('bot-two-path', 's-two-b')
+      assert(row.events.length === 12, `历史没进桶：${row.events.length}`)
+      assert(row.hydrated === true, 'hydrated 没置位')
+
+      const run = ui.startChatStream('s-two-b', 0, 'bot-two-path')
+      for (const ev of chatTurn(9, 3)) sse.push(ev)
+      sse.push({ type: 'replay/done', live: false })
+      await new Promise((r) => setTimeout(r, 120))
+      assert(row.events.length === 12, `重放段被重复收下了：${row.events.length}`)
+
+      // 真正的新事件照收。
+      for (const ev of chatTurn(13, 4)) sse.push(ev)
+      for (let i = 0; i < 200 && row.events.length < 16; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(row.events.length === 16, `新一轮没收进来：${row.events.length}`)
+      assert(row.sum.lastText === '回答4', `名单摘要不对：${JSON.stringify(row.sum.lastText)}`)
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
+    await test('流上只垫一轮，二十轮那份改走 HTTP', async () => {
+      // 名单上每个 Bot 都挂一条流。以前每条一上来都推二十轮历史，几个 Bot 乘二十轮
+      // 全在主线程上 parse，换来的只是侧栏一行字。
+      const sse = fakeSse()
+      let streamUrl = ''
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/events')) {
+            streamUrl = path
+            return sse.response
+          }
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-tail'
+      const run = ui.startChatStream('s-tail')
+      for (let i = 0; i < 100 && !streamUrl; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(streamUrl.includes('tail=' + ui.STREAM_TAIL_TURNS), `流上的 tail 不对：${streamUrl}`)
+      assert(ui.STREAM_TAIL_TURNS === 1, `流上该只垫一轮，实际 ${ui.STREAM_TAIL_TURNS}`)
+      assert(ui.CHAT_TAIL_TURNS === 20, `历史一页该是二十轮，实际 ${ui.CHAT_TAIL_TURNS}`)
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
+    await test('拉历史途中会话被重建：这一份作废，不串台', async () => {
+      const sse = fakeSse()
+      const ui = await twoPathUi(sse)
+      const row = ui.botStreamOf('bot-two-path')
+      row.sessionId = 's-old'
+      ui.state.chatBotId = 'bot-two-path'
+      ui.state.chatSessionId = 's-old'
+      ui.state.chatEvents = row.events
+      const job = ui.hydrateChat('bot-two-path', 's-old')
+      // 席位重建了会话——这份历史属于另一条对话。
+      ui.resetBotStream(row)
+      row.sessionId = 's-new'
+      await job
+      assert(row.events.length === 0, `串台的历史进桶了：${row.events.length}`)
+      assert(row.hydrated === false, '作废的那次不该置 hydrated')
+      sse.close()
+    })
+
     await test('bot 说了 replay/done 就立刻开闸，不用等静默', async () => {
       const sse = fakeSse()
       const ui = loadApp({
