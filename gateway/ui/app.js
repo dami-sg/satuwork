@@ -345,6 +345,18 @@ document.getElementById('app').addEventListener('click', async (e) => {
   }
   if (act === 'machine-filter') {
     state.machineFilter = btn.getAttribute('data-filter') || ''
+    // 换了筛选就是换了一份列表，页码得从头来：留在第 3 页的话，筛完只剩两页时人
+    // 看到的是一片空白——而他刚点的那一下明明是「给我看这一档」。
+    state.listPage.machines = 1
+    render()
+    return
+  }
+  if (act === 'list-page') {
+    const key = btn.getAttribute('data-key')
+    const page = Number(btn.getAttribute('data-page'))
+    if (!key || !Number.isFinite(page)) return
+    // 只记下来，夹到合法范围是 pageSlice 的事——它才知道现在一共几页。
+    state.listPage[key] = Math.max(1, page)
     render()
     return
   }
@@ -801,6 +813,8 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.pwForm = { current: '', next: '', confirm: '' }
     state.pwError = ''
     state.notifyOff = []
+    // 翻到第几页是上一个人的看法，跟聊天正文一样不能留给下一个登进来的人。
+    state.listPage = {}
     history.replaceState({}, '', '/')
     state.path = '/'
     render()

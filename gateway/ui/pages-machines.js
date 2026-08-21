@@ -47,6 +47,9 @@ function machinesPage() {
   for (const c of all) counts[machineLinkOf(c.machine)] = (counts[machineLinkOf(c.machine)] || 0) + 1
   const filter = state.machineFilter || ''
   const rows = filter ? all.filter((c) => machineLinkOf(c.machine) === filter) : all
+  // 先筛后分页。**上面那排计数不能跟着分页走**：它们答的是「这一档有几台」，
+  // 按当前这一页去数，「失联 3 台」会随着翻页变成 1 台——那是句假话。
+  const view = pageSlice('machines', rows)
   const cols = '120px minmax(180px, 2fr) minmax(120px, 1.2fr) 110px 72px minmax(140px, 1.2fr) minmax(110px, 1fr)'
   const dim = (text) =>
     `<span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(text || '—')}</span>`
@@ -54,7 +57,7 @@ function machinesPage() {
     const n = f.key ? counts[f.key] || 0 : all.length
     return `<button type="button" class="btn ${filter === f.key ? 'btn-primary' : ''}" data-act="machine-filter" data-filter="${esc(f.key)}">${t(f.label)} ${n}</button>`
   }).join('')
-  const body = rows
+  const body = view.rows
     .map((card) => {
       const m = card.machine || {}
       // **整行可点，而不是行尾一个「查看」**：这张表上的每一列都是「这台机器怎么样」，
@@ -97,6 +100,7 @@ function machinesPage() {
             <span>${t('状态')}</span><span>${t('机器')}</span><span>${t('归属公司')}</span><span>${t('账号位')}</span><span>${t('已部署 Bot')}</span><span>${t('管家版本')}</span><span>${t('最近心跳')}</span>
           </div>
           ${body || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${all.length ? t('这一档下没有机器') : t('还没有机器配对进来。到某家公司的详情页生成配对码，在那台 Debian 上跑一条命令即可。')}</div>`}
+          ${listPager('machines', view, '台')}
         </div>
         <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('机器是在公司名下配对进来的：新增一台请到公司详情页生成配对码。这里管的是已经进来的那些。')}</p>
       </div>

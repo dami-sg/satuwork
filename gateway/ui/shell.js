@@ -222,6 +222,60 @@ function flashes() {
     ${state.notice ? `<div class="gw-flash gw-flash-ok">${esc(state.notice)}</div>` : ''}`
 }
 
+/**
+ * 一页放多少条。
+ *
+ * 这几张表的行高在 56px 上下，20 条正好是一屏多一点——翻页的人一眼能看完一页，
+ * 又不至于两条就要点一次「下一页」。
+ */
+const LIST_PAGE_SIZE = 20
+
+/**
+ * 把一份列表切成当前这一页。
+ *
+ * 切的是**前端已经拿到的整份数据**，不是接口分页：这几张表（公司、用户、机器、发布
+ * 包）都是一次拉齐的，机器那条接口的汇总数字更是按全量算的（见 /platform/machines）。
+ * 改成接口分页，汇总和筛选计数就得跟着一起改口径——而这几张表本来就是几十上百条的
+ * 量级，问题从来不在「拉不动」，在「一屏塞不下、找不着」。
+ *
+ * 页码不写回 state：数据变少了（筛掉一批、删了几条）就地夹到最后一页，人看到的是
+ * 有内容的一页，而不是一片空白加一个「第 7 页」。
+ */
+function pageSlice(key, rows) {
+  const all = Array.isArray(rows) ? rows : []
+  const pages = Math.max(1, Math.ceil(all.length / LIST_PAGE_SIZE))
+  const page = Math.min(Math.max(1, Number(state.listPage?.[key]) || 1), pages)
+  const from = (page - 1) * LIST_PAGE_SIZE
+  return { rows: all.slice(from, from + LIST_PAGE_SIZE), page, pages, total: all.length, from }
+}
+
+/**
+ * 列表底下那一条：一共多少条、这是第几页、往前往后。
+ *
+ * **总数一直在**，哪怕只有一页——「一共 7 家公司」本身就是这一屏要回答的问题之一，
+ * 而翻页的两颗只在真有第二页时才出现，不然就是两颗永远点不动的按钮。
+ *
+ * 一条都没有时整条不画：那时页面上已经有一句「还没有公司」，再压一条「共 0 条」
+ * 只是把空状态说了两遍。
+ */
+function listPager(key, view, unit) {
+  if (!view.total) return ''
+  const nav =
+    view.pages > 1
+      ? `<div style="display: flex; align-items: center; gap: var(--space-2);">
+          <button type="button" class="btn btn-ghost" data-act="list-page" data-key="${esc(key)}" data-page="${view.page - 1}" ${view.page <= 1 ? 'disabled' : ''}>${t('上一页')}</button>
+          <span>${t(`第 ${view.page} / ${view.pages} 页`, `Page ${view.page} of ${view.pages}`)}</span>
+          <button type="button" class="btn btn-ghost" data-act="list-page" data-key="${esc(key)}" data-page="${view.page + 1}" ${view.page >= view.pages ? 'disabled' : ''}>${t('下一页')}</button>
+        </div>`
+      : ''
+  const n = view.total
+  const label = unit ? t(`共 ${n} ${unit}`, `${n} total`) : t(`共 ${n} 条`, `${n} total`)
+  return `<div class="satu-pager">
+    <span>${esc(label)}</span>
+    ${nav}
+  </div>`
+}
+
 function placeholderPage(title, body) {
   return `
     <div class="gw-page">

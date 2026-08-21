@@ -614,6 +614,57 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       )
     })
 
+    await test('长列表分页：一页 20 条，越界夹回，筛选之后回到第一页', async () => {
+      // 这几张表是一次拉齐、前端切页的。切页最容易出的两种错都在这里钉住：
+      // **越界**（数据变少了还停在第 7 页，人看到一片空白）和**筛选之后不回第一页**
+      // （点了「只看在线」，结果因为停在第 3 页而一台都没有）。
+      const ui = await boot(ownerToken)
+      const rowsIn = (html) => (html.match(/class="satu-memberrow"/g) || []).length
+      ui.state.orgs = Array.from({ length: 47 }, (_, i) => ({ id: 'org-' + i, name: '公司' + i, slug: 'c' + i, plan: {} }))
+      ui.state.path = '/companies'
+      ui.render()
+      let html = ui.html()
+      assert(rowsIn(html) === 20, `第一页画了 ${rowsIn(html)} 行，不是一页 20 条`)
+      assert(html.includes('共 47 家'), `总数没说清：${html.slice(html.indexOf('satu-pager'), html.indexOf('satu-pager') + 200)}`)
+      assert(html.includes('第 1 / 3 页'), '页码没画出来')
+
+      ui.state.listPage.companies = 3
+      ui.render()
+      html = ui.html()
+      assert(rowsIn(html) === 7, `最后一页该是 7 行，实际 ${rowsIn(html)}`)
+
+      // 越界：数据缩水（删了一批、或者上一次看的是别的筛选）之后不能留在空页上。
+      ui.state.listPage.companies = 99
+      ui.render()
+      html = ui.html()
+      assert(html.includes('第 3 / 3 页'), '越界的页码没被夹回最后一页')
+      assert(rowsIn(html) > 0, '夹回之后还是一页空白')
+
+      // 一页装得下时只报总数，不画两颗永远点不动的翻页按钮。
+      ui.state.orgs = ui.state.orgs.slice(0, 5)
+      ui.render()
+      html = ui.html()
+      assert(html.includes('共 5 家'), '总数一直要在')
+      assert(!html.includes('data-act="list-page"'), '只有一页却画了翻页按钮')
+
+      // 机器：先筛后分页，而顶上那排计数仍然按全量算——它答的是「这一档有几台」，
+      // 跟着当前页变的话「失联 3 台」会在翻页时变成 1 台，那是句假话。
+      ui.state.allMachines = Array.from({ length: 47 }, (_, i) => ({
+        machine: { id: 'm' + i, host: '10.0.0.' + i, paired: true, link: i % 3 === 0 ? 'online' : 'offline' },
+        accounts: 1, maxAccounts: 4, seats: 1, company: null,
+      }))
+      ui.state.machineTotals = { machines: 47, paired: 47, online: 16, accounts: 47, max: 188, seats: 47 }
+      ui.state.path = '/machines'
+      ui.state.listPage.machines = 3
+      ui.render()
+      assert(ui.html().includes('第 3 / 3 页'), '机器表没停在第 3 页，后面那条断言就没意义了')
+      await ui.fire('click', el('button', { 'data-act': 'machine-filter', 'data-filter': 'online' }))
+      html = ui.html()
+      assert(html.includes('共 16 台'), `筛完的总数不对：${html.slice(html.indexOf('satu-pager'), html.indexOf('satu-pager') + 120)}`)
+      assert(rowsIn(html) === 16, `筛完该看到 16 行，实际 ${rowsIn(html)}——多半是还停在第 3 页`)
+      assert(/data-filter="online"[^>]*>[^<]*16/.test(html), '顶上那排计数被分页带歪了')
+    })
+
     await test('平台菜单是分组的，且分组没有吃掉任何一条入口', async () => {
       // 十几条平铺是找不到落点的。分组之后要盯住两件事：**组还在**（有人把标题删了，
       // 菜单就退回一根柱子），以及**条目一条不少**——漏一条的表现是那一页从此没有入口，

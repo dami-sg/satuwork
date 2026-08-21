@@ -1,6 +1,7 @@
 /** 平台用户、套餐与订单、余额面板，以及「我的资料」。 */
 function usersPage() {
-  const rows = (state.users || [])
+  const view = pageSlice('users', state.users)
+  const rows = view.rows
     .map((a) => {
       const company = a.company ? `${a.company.name} (${a.company.slug})` : t('平台')
       const initial = (a.email || '·').slice(0, 1).toUpperCase()
@@ -32,6 +33,7 @@ function usersPage() {
             <span>${t('账号')}</span><span>${t('角色')}</span><span>${t('加入时间')}</span><span></span><span></span>
           </div>
           ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有用户')}</div>`}
+          ${listPager('users', view, '个')}
         </div>
       </div>
     </div>`
