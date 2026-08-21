@@ -107,10 +107,24 @@ function loginView() {
   </div>`
 }
 
+/**
+ * 二级页面算在哪一条菜单项底下。
+ *
+ * 一般就是地址前缀：`/machines/xxx` 属于「机器管理」。**只有自己那个 Bot 是例外**
+ * ——`/bots` 在公司这一侧是「Bot 模版」，一份全公司共用的底座；从对话里点「Bot 设置」
+ * 进来的却是我自己那个 Bot，两件事只是碰巧同一段前缀。让模版那一条亮起来，等于告诉人
+ * 「你正在改全公司的底座」，而员工那边根本没有这条菜单，也就没人这么误会过。
+ */
+function navUnder(item) {
+  if (item.href === '/' || !state.path.startsWith(item.href + '/')) return false
+  if (item.href === '/bots' && ownBotPath(state.path)) return false
+  return true
+}
+
 function navItem(item) {
   const current =
     state.path === item.href ||
-    (item.href !== '/' && state.path.startsWith(item.href + '/')) ||
+    navUnder(item) ||
     (item.href === '/chat' && state.path.startsWith('/a/')) ||
     (item.href === '/' && memberChatHome() && state.path.startsWith('/a/'))
   return `<button type="button" class="satu-nav" data-act="go" data-href="${esc(item.href)}" aria-current="${current}">

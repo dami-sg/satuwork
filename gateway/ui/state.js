@@ -435,6 +435,23 @@ function botIdOfPath(p) {
   return decodeURIComponent(p.slice('/bots/'.length).split('/')[0] || '')
 }
 
+/**
+ * `/bots/:id` 指的是不是**我自己那个 Bot**。
+ *
+ * 同一个地址底下坐着两种东西：公司/全局那几个（从 `/bots` 那一页点进来），和我自己
+ * 建的那个（从对话里的「Bot 设置」点进来）。它们的上一级不是同一处——自己的那个属于
+ * 对话，跟公司模版没有从属关系，所以面包屑和侧栏高亮都得先问一句这是谁的。
+ *
+ * 先认名单：`runtimeBots` 是「我有哪几个 Bot」，一进来就有。名单还没到（比如直接
+ * 输地址进来）再看已经载到的那份详情，认不出来就当成公司那边的，宁可少收一格。
+ */
+function ownBotPath(p) {
+  const id = botIdOfPath(p || '')
+  if (!id) return false
+  if ((state.runtimeBots || []).some((b) => b.id === id)) return true
+  return Boolean(state.bot && state.bot.id === id && isMyBot(state.bot))
+}
+
 function companyIdOfPath(p) {
   if (!p.startsWith('/companies/')) return ''
   return decodeURIComponent(p.slice('/companies/'.length).split('/')[0] || '')
@@ -477,7 +494,8 @@ function crumbsOf(path) {
   if (path.startsWith('/bots/')) {
     const bot = state.bot && state.bot.id === botIdOfPath(path) ? state.bot : null
     // 员工没有 Bot 列表页可回——他的落点是对话，返回就该回那儿。
-    if (!isOwner() && !isAdmin()) return { href: '/', parent: t('对话'), current: bot?.name || t('Bot 详情') }
+    // 管理员同理：他点开的要是自己那个 Bot，来处也是对话，不是公司模版那一页。
+    if ((!isOwner() && !isAdmin()) || ownBotPath(path)) return { href: '/', parent: t('对话'), current: bot?.name || t('Bot 详情') }
     return { href: '/bots', parent: isOwner() ? t('全局 Bot') : t('Bot 模版'), current: bot?.name || t('Bot 详情') }
   }
   if (path.startsWith('/connectors/') && path !== '/connectors') {
