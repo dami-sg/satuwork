@@ -152,9 +152,14 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       const tav = saved.json.backends.find((b) => b.id === 'tavily')
       assert(tav.configured === true, 'tavily 应当显示已配置')
       assert(!JSON.stringify(saved.json).includes('tvly-e2e-never-leak'), '配置接口把密钥回显了')
-      // firecrawl 在名单里但没实现：界面上要能看见它「未接入」，而不是凭空少一项。
-      const fire = saved.json.backends.find((b) => b.id === 'firecrawl')
-      assert(fire && fire.implemented === false, 'firecrawl 应当列出来并标未接入')
+      // 四家后端都要列出来，各自的能力如实报——界面那两个下拉是照这个画的。
+      const by = Object.fromEntries(saved.json.backends.map((b) => [b.id, b]))
+      assert(by.tavily.search && by.tavily.extract, 'tavily 该是搜索+提取')
+      assert(by.firecrawl.search && by.firecrawl.extract, 'firecrawl 该是搜索+提取')
+      assert(by.searxng.search && !by.searxng.extract, 'searxng 只有搜索')
+      assert(by.duckduckgo.search && !by.duckduckgo.extract, 'duckduckgo 只有搜索')
+      assert(Object.values(by).every((b) => b.implemented), '有后端还没接入')
+      assert(by.firecrawl.needsSecret && by.duckduckgo.needsSecret === false, '要不要密钥报错了')
     })
 
     await test('存模型配置不会把工具配置抹掉', async () => {
@@ -252,6 +257,42 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(byBackend.document?.units === 1, `文档那笔：${JSON.stringify(byBackend.document)}`)
       // 8 × 1.2 = 9.6 → 10；5 × 1.2 = 6
       assert(byBackend.tavily.mils === 10 && byBackend.document.mils === 6, `金额：${JSON.stringify(rows)}`)
+    })
+
+    await test('两把工具各配各的 provider，互不影响', async () => {
+      // 搜索走 firecrawl、提取走 tavily。这是分开配的全部意义：查询词发给谁、正文由谁
+      // 抓，本来就是两笔生意（自托管 SearXNG 搜 + 托管服务抓，是很实在的一种组合）。
+      const cred = await req(base, 'POST', '/platform/credentials', { token, body: { provider: 'firecrawl', secret: 'fc-e2e-never-leak' } })
+      assert(cred.status === 201 || cred.status === 200, `密钥 ${cred.status} ${cred.text}`)
+      const put = await req(base, 'PUT', '/platform/tools/web', {
+        token,
+        body: {
+          searchBackend: 'firecrawl',
+          extractBackend: 'tavily',
+          pricing: { tavily: { search: 8, extract: 8 }, firecrawl: { search: 20, extract: 20 }, document: { search: 0, extract: 5 } },
+        },
+      })
+      assert(put.status === 200, `保存 ${put.status} ${put.text}`)
+
+      const before = (await webCalls()).length
+      const s1 = await req(base, 'POST', '/runtime/web/search', { token: seatToken, body: { query: '各走各家' } })
+      assert(s1.json.ok === true && s1.json.backend === 'firecrawl', `搜索没走 firecrawl：${s1.text}`)
+      assert(s1.json.hits[0].url.includes('fc-stub'), `拿到的不是 firecrawl 的结果：${JSON.stringify(s1.json.hits[0])}`)
+
+      const e1 = await req(base, 'POST', '/runtime/web/extract', { token: seatToken, body: { urls: ['https://a.test/mixed'] } })
+      assert(e1.json.ok === true && e1.json.backend === 'tavily', `提取没走 tavily：${e1.text}`)
+
+      // 两笔账各记各的名义、各按各的单价：20 × 1.2 = 24；8 × 1.2 = 9.6 → 10。
+      const rows = (await webCalls()).slice(before)
+      assert(rows.length === 2, `该落两笔，实际 ${rows.length}`)
+      const byBackend = Object.fromEntries(rows.map((x) => [x.backend, x]))
+      assert(byBackend.firecrawl?.kind === 'search' && byBackend.firecrawl.mils === 24, `firecrawl 那笔：${JSON.stringify(byBackend.firecrawl)}`)
+      assert(byBackend.tavily?.kind === 'extract' && byBackend.tavily.mils === 10, `tavily 那笔：${JSON.stringify(byBackend.tavily)}`)
+
+      // 新配的密钥照旧不回显。
+      const view = await req(base, 'GET', '/platform/tools/web', { token })
+      assert(!JSON.stringify(view.json).includes('fc-e2e-never-leak'), 'firecrawl 密钥被回显了')
+      await req(base, 'PUT', '/platform/tools/web', { token, body: { searchBackend: 'tavily', extractBackend: 'tavily' } })
     })
 
     await test('参数越界当场说清楚，不发给后端', async () => {

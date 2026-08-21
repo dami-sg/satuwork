@@ -6,11 +6,15 @@
  * Gateway 慢得多——把后端适配放进跑得慢的那一半，等于每换一家后端都要重新出包、
  * 重新部署所有席位。
  *
- * 三个实现（P0 两个）：
+ * 四家：
  * - **tavily**：搜索 + 提取都有，返回的已经是清好的正文。默认后端。
  * - **duckduckgo**：无密钥、零配置，只有搜索。兜底用——它是抓公开页面拿结果，没有
  *   商务约定，限流和封 IP 都可能发生，所以自带节流、被 429 直接认输不重试。
  * - **searxng**：自托管，只有搜索，地址由管理员填（SSRF 闸的明示例外）。
+ * - **firecrawl**：搜索 + 提取都有，提取那头是真渲染的浏览器，SPA 页面它拿得到。
+ *
+ * 搜索和提取**各配各的**（`searchBackend` / `extractBackend`）：自托管 SearXNG 搜索
+ * 配 Firecrawl 提取是很实在的组合——查询词不出自己的网，正文又要浏览器才渲染得出来。
  *
  * 每个方法**要么返回结果，要么抛 WebToolError**。上游 401/429/超时都是
  * WebToolError，路由层把它翻成一句给模型看的话，不是 500——模型看到文本才知道
@@ -533,6 +537,81 @@ function searxngQuery(q: SearchQuery): string {
   return [q.query, sites ? `(${sites})` : '', not].filter(Boolean).join(' ')
 }
 
+// ── Firecrawl ────────────────────────────────────────────────────────────
+
+/**
+ * 搜索和提取都有。提取那头是真渲染的浏览器，SPA 页面 Tavily 拿不到正文时它能拿到。
+ *
+ * **只用 markdown 这一个 format。** 它还有 `summary`（他们的 LLM 直接给摘要）和带
+ * prompt 的 `json`，但摘要在我们这儿一律走自己的 utility 模型：外包出去，摘要 prompt
+ * 里那三条规矩（数字/代码块/引文原样、不复述结构、不加原文没有的结论）就管不到了，
+ * 「摘要挂了退回原文开头」这条回退也没了，账还会从 llm_calls 混进 web_calls。
+ *
+ * 域名限制拼 `site:` / `-site:` 进查询词（他们文档里就是这么用的），拼完仍然在本地
+ * 再滤一遍并把「滤过」报出去——`site:` 是搜索引擎的建议，不是保证。
+ */
+const firecrawl: WebBackend = {
+  id: 'firecrawl',
+  async search(q, cfg) {
+    if (!cfg.secret) throw new WebToolError('firecrawl no key', '还没有配置 Firecrawl 的密钥，让系统管理员去配。')
+    const body: Record<string, unknown> = { query: firecrawlQuery(q), limit: q.count }
+    // tbs 是 Google 那套时间过滤：qdr:d/w/m/y。
+    const tbs: Record<string, string> = { day: 'qdr:d', week: 'qdr:w', month: 'qdr:m', year: 'qdr:y' }
+    if (q.freshness && tbs[q.freshness]) body.tbs = tbs[q.freshness]
+    const data = await upstreamJson('firecrawl', `${firecrawlBase()}/v2/search`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${cfg.secret}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      timeoutMs: SEARCH_TIMEOUT_MS,
+    })
+    // v2 把结果按来源分桶（web / news / images），我们只要 web 那一桶。
+    const rows = Array.isArray(data?.data?.web) ? data.data.web : Array.isArray(data?.results) ? data.results : []
+    return rows
+      .slice(0, q.count)
+      .map((r: any) => ({
+        title: String(r?.title ?? '').trim(),
+        url: String(r?.url ?? '').trim(),
+        // 字段名两版之间变过，按优先级取，取不到就空着——空摘要好过一段 undefined。
+        snippet: String(r?.description ?? r?.snippet ?? '').trim(),
+        publishedAt: r?.date ? String(r.date).slice(0, 10) : undefined,
+      }))
+      .filter((h: SearchHit) => h.url)
+  },
+  async extract(url, cfg) {
+    if (!cfg.secret) throw new WebToolError('firecrawl no key', '还没有配置 Firecrawl 的密钥，让系统管理员去配。')
+    const data = await upstreamJson('firecrawl', `${firecrawlBase()}/v2/scrape`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${cfg.secret}`, 'content-type': 'application/json' },
+      // onlyMainContent：去掉导航和页脚。它们对模型是纯噪音，还要占摘要的额度。
+      body: JSON.stringify({ url, formats: ['markdown'], onlyMainContent: true }),
+      timeoutMs: EXTRACT_TIMEOUT_MS,
+    })
+    const doc = data?.data
+    const markdown = String(doc?.markdown ?? '')
+    if (!markdown) {
+      const why = String(doc?.warning ?? doc?.metadata?.error ?? '').slice(0, 120)
+      throw new WebToolError(`firecrawl empty ${why}`, `抓不到这一页的正文${why ? `：${why}` : ''}`)
+    }
+    return {
+      url,
+      title: String(doc?.metadata?.title ?? '').trim(),
+      markdown,
+      contentType: 'text/markdown',
+    }
+  },
+}
+
+/** 自托管的 Firecrawl 也认这个变量，和上游文档里的 FIRECRAWL_API_URL 同名。 */
+function firecrawlBase(): string {
+  return (process.env.FIRECRAWL_API_URL || 'https://api.firecrawl.dev').replace(/\/$/, '')
+}
+
+function firecrawlQuery(q: SearchQuery): string {
+  const sites = q.domains.map((d) => `site:${d}`).join(' OR ')
+  const not = q.exclude.map((d) => `-site:${d}`).join(' ')
+  return [q.query, sites ? `(${sites})` : '', not].filter(Boolean).join(' ')
+}
+
 // ── 注册表 ────────────────────────────────────────────────────────────────
 
 /**
@@ -569,8 +648,28 @@ export function stubFetchDocument(url: string): FetchedDocument | null {
   return { contentType: 'application/pdf', ext: '.pdf', base64: buf.toString('base64'), bytes: buf.length }
 }
 
+/** e2e 用的第二家。和 stubTavily 长得不一样，好看出「这一次到底走了哪家」。 */
+const stubFirecrawl: WebBackend = {
+  id: 'firecrawl',
+  async search(q) {
+    if (q.query.includes('empty')) return []
+    return Array.from({ length: Math.min(q.count, 2) }, (_, i) => ({
+      title: `firecrawl stub ${i + 1}`,
+      url: `https://fc-stub.test/${i + 1}`,
+      snippet: 'firecrawl snippet',
+    }))
+  },
+  async extract(url) {
+    if (url.includes('fail')) throw new WebToolError('stub fail', '抓取失败：HTTP 404')
+    return { url, title: 'firecrawl page', markdown: `# firecrawl\n\n${url}`, contentType: 'text/markdown' }
+  },
+}
+
+const stubbedBackends = process.env.E2E_STUB_WEB === '1'
+
 const BACKENDS: Record<string, WebBackend> = {
-  tavily: process.env.E2E_STUB_WEB === '1' ? stubTavily : tavily,
+  tavily: stubbedBackends ? stubTavily : tavily,
+  firecrawl: stubbedBackends ? stubFirecrawl : firecrawl,
   duckduckgo,
   searxng,
 }

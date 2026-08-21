@@ -131,16 +131,18 @@ out.redirectCreds = {
 // 等于让任何一个地址拿 Gateway 的内存换一次拒绝——而 Gateway 是所有公司共用的
 // 那一个进程。这里直接对 readCapped 下断言：要验的是读取本身，不是那道闸
 //（闸会先把回环地址拒掉，测试服务器正好在回环上）。
-const BIG = 11 * 1024 * 1024
+// 服务器准备吐的量要**远大于**上限：这样「在哪一刻掐断」才有区分度。
+const BIG = 30 * 1024 * 1024
+const CHUNK = 1024 * 1024
 const CAP = 10 * 1024 * 1024
 const docs = createServer((req, res) => {
   if (req.url === '/small') {
     res.writeHead(200, { 'content-type': 'application/pdf' })
     return res.end(Buffer.from('%PDF-1.4 tiny'))
   }
-  // 不给 content-length：chunked 流式吐 11 MB。声明那道闸对它无效。
+  // 不给 content-length：chunked 流式吐 30 MB。声明那道闸对它无效。
   res.writeHead(200, { 'content-type': 'application/pdf' })
-  const chunk = Buffer.alloc(1024 * 1024, 0x41)
+  const chunk = Buffer.alloc(CHUNK, 0x41)
   let sent = 0
   const pump = () => {
     while (sent < BIG) {
@@ -154,18 +156,23 @@ const docs = createServer((req, res) => {
 await new Promise((r) => docs.listen(0, '127.0.0.1', r))
 const docBase = `http://127.0.0.1:${docs.address().port}`
 
-const rss0 = process.memoryUsage().rss
+/**
+ * 报错里带着**掐断时已经读了多少字节**。钉它，而不是钉进程的 RSS——
+ * RSS 受 GC 时机影响，同一份代码时红时绿，那种断言守不住任何东西。
+ */
+const trippedAt = await fetch(`${docBase}/huge`)
+  .then((r) => readCapped(r, CAP))
+  .then(() => -1)
+  .catch((e) => Number(/doc too large (\d+)/.exec(e.message)?.[1] ?? -1))
+
 out.docLimit = {
-  超限当场掐断: await fetch(`${docBase}/huge`)
-    .then((r) => readCapped(r, CAP))
-    .then(() => false)
-    .catch((e) => /10 MB|超过/.test(e.hint || e.message)),
+  超限当场掐断: trippedAt > CAP,
+  // 停在越过上限的**那一块**，不是收完 30 MB 再回头量：容差给一块的大小。
+  没把整份读进来: trippedAt > 0 && trippedAt <= CAP + CHUNK,
   小文档照读: await fetch(`${docBase}/small`)
     .then((r) => readCapped(r, CAP))
     .then((b) => b.length > 0)
     .catch(() => false),
-  // 边读边数的证据：拒掉 11 MB 之后常驻内存没跟着涨上去。
-  内存没被撑起来: process.memoryUsage().rss - rss0 < 40 * 1024 * 1024,
 }
 docs.close()
 
