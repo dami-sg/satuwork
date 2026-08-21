@@ -26,8 +26,13 @@ function connectorGroups(list) {
 
 function connectorLogo(c) {
   if (c.logo) {
+    // onerror 里那一段是**写在 HTML 属性里的 JS**，要转义两次：JSON.stringify 管的是
+    // JS 那一层（引号变 \"），可反斜杠对 HTML 解析器毫无意义——它看到 \" 里的那个引号
+    // 就把属性收了，后面半截 `GI"))">` 漏成正文，于是每张卡片名字后面挂一串乱码。
+    // 外面再 esc 一次，交给属性解析器还原成 JS 源码。
+    const fallback = esc(JSON.stringify(mark(c.name)))
     return `<img src="${esc(c.logo)}" alt="" style="width: 34px; height: 34px; border-radius: 8px; object-fit: cover; flex: none;"
-      onerror="this.replaceWith(document.createRange().createContextualFragment(${JSON.stringify(mark(c.name))}))">`
+      onerror="this.replaceWith(document.createRange().createContextualFragment(${fallback}))">`
   }
   return mark(c.name)
 }
@@ -145,7 +150,7 @@ function connectorPublishModal() {
       <p style="margin: 0 0 var(--space-3); font-size: 13px; color: var(--muted-foreground);">
         ${t('从 Composio 的清单里选一个，填上它在 Composio 那边的 auth config id。上架之后所有公司的员工都能在市场里看到并自己安装。')}
       </p>
-      ${draft.error ? `<div class="gw-alert gw-alert-err" style="margin-bottom: var(--space-3);">${esc(draft.error)}</div>` : ''}
+      ${draft.error ? `<div class="gw-flash gw-flash-err" style="margin-bottom: var(--space-3);">${esc(draft.error)}</div>` : ''}
       <input class="input" placeholder="${esc(t('搜索'))}" value="${esc(draft.q || '')}" data-act="conn-field" data-field="q" style="margin-bottom: var(--space-2);">
       <div id="conn-picks" style="max-height: 240px; overflow: auto; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2);">
         ${connectorPickRows()}
@@ -167,7 +172,7 @@ function connectorEditModal() {
   return `<div class="gw-modal-backdrop" data-act="conn-edit-close">
     <div class="gw-modal" role="dialog" aria-modal="true" style="max-width: 480px;">
       <h2 style="margin: 0 0 var(--space-3); font-size: 18px;">${esc(edit.name)}</h2>
-      ${edit.error ? `<div class="gw-alert gw-alert-err" style="margin-bottom: var(--space-3);">${esc(edit.error)}</div>` : ''}
+      ${edit.error ? `<div class="gw-flash gw-flash-err" style="margin-bottom: var(--space-3);">${esc(edit.error)}</div>` : ''}
       <p style="margin: 0 0 var(--space-3); font-size: 12px; color: var(--muted-foreground);">
         ${t('供应商和 toolkit 建完就不给改了——它们已经写进流水和员工已有的连接。要换就下架再上一条新的。')}
       </p>
@@ -323,7 +328,7 @@ function connectorToolsBox(detail) {
     </p>
     ${
       cap && on > cap
-        ? `<div class="gw-alert gw-alert-err" style="margin-bottom: var(--space-2);">${t(
+        ? `<div class="gw-flash gw-flash-err" style="margin-bottom: var(--space-2);">${t(
             `开了 ${on} 个，超过上限 ${cap} 个——多出来的 ${on - cap} 个不会下发给 Bot。关掉一些用不上的。`,
           )}</div>`
         : ''
@@ -356,10 +361,10 @@ function connectorDetailPage() {
           }
         </div>
         ${flashes()}
-        ${c.blocked ? `<div class="gw-alert gw-alert-err" style="margin-top: var(--space-3);">${t('本公司已禁用这个连接器')}${c.blockedReason ? `：${esc(c.blockedReason)}` : ''}</div>` : ''}
+        ${c.blocked ? `<div class="gw-flash gw-flash-err" style="margin-top: var(--space-3);">${t('本公司已禁用这个连接器')}${c.blockedReason ? `：${esc(c.blockedReason)}` : ''}</div>` : ''}
         ${
           installed
-            ? `<section style="margin-top: var(--space-5);">
+            ? `<section style="margin-top: var(--space-6);">
                 <h2 style="font-size: 13px; font-weight: 600; color: var(--muted-foreground); margin: 0 0 var(--space-2);">${t('账号')}</h2>
                 <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover); padding: 0 var(--space-4);">
                   ${conns.map((x) => connectionRow(x, c.id)).join('') || ''}
@@ -372,11 +377,11 @@ function connectorDetailPage() {
                   ${t('账号名会出现在工具名里（如 gmail_personal），模型靠它判断该用哪一个。')}
                 </p>
               </section>
-              <section style="margin-top: var(--space-5);">
+              <section style="margin-top: var(--space-6);">
                 <h2 style="font-size: 13px; font-weight: 600; color: var(--muted-foreground); margin: 0 0 var(--space-2);">${t('工具')}</h2>
                 ${connectorToolsBox(detail)}
               </section>`
-            : `<p style="margin-top: var(--space-5); font-size: 13px; color: var(--muted-foreground);">${t('先安装，再连接你的账号。')}</p>`
+            : `<p style="margin-top: var(--space-6); font-size: 13px; color: var(--muted-foreground);">${t('先安装，再连接你的账号。')}</p>`
         }
       </div>
     </div>`
@@ -386,7 +391,7 @@ function marketPage() {
   const groups = connectorGroups(state.market || [])
   const body = groups
     .map(
-      ([name, list]) => `<section style="margin-top: var(--space-5);">
+      ([name, list]) => `<section style="margin-top: var(--space-6);">
       <h2 style="font-size: 13px; font-weight: 600; color: var(--muted-foreground); margin: 0 0 var(--space-2);">${esc(name)}</h2>
       <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--space-3);">
         ${list.map(marketCard).join('')}
@@ -486,10 +491,260 @@ function connectorsPage() {
   return isAdmin() ? adminConnectorsPage() : marketPage()
 }
 
+// ── 插件弹窗：对话那一侧的入口 ───────────────────────────────────────
+
+/**
+ * 「插件」= 员工视角的连接器。同一批东西，两个入口。
+ *
+ * **为什么是弹窗而不是又一个页面**：装插件是**为了把话说完**才做的事——「让它读一下
+ * 我的邮件」说到一半才发现 Gmail 还没装。跳走一整页，回来时草稿、滚动位置、刚选好的
+ * 那颗 Bot 全没了。弹窗盖在对话上面，关掉就回到原处。
+ *
+ * 市场那两个页面没有撤：OAuth 回调落在 `/connectors/:id`（`connectors.ts` 那个 302），
+ * 深链和刷新也还得有人接。撤掉的只是员工侧栏里那一行——同一件事两个并排的入口，
+ * 只会让人问「这两个有什么不一样」。
+ */
+function pluginsModal() {
+  const p = state.plugins
+  if (!p) return ''
+  return `<div class="gw-modal-backdrop" data-act="plugins-close">
+    <div class="gw-modal gw-plugins" data-stop role="dialog" aria-modal="true" style="max-width: 720px; max-height: 88vh; overflow: hidden;">
+      ${p.id ? pluginDetailBody() : pluginMarketBody()}
+    </div>
+  </div>`
+}
+
+function pluginsHead(title, back) {
+  return `<div style="display: flex; align-items: center; gap: var(--space-2);">
+    ${back ? `<button type="button" class="btn btn-ghost btn-icon" style="flex: none;" data-act="plugins-back" aria-label="${esc(t('返回'))}">${svg(BACK_ARROW, 17)}</button>` : ''}
+    <h2 style="flex: 1; min-width: 0; margin: 0; font-size: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(title)}</h2>
+    <button type="button" class="btn btn-ghost btn-icon" style="flex: none;" data-act="plugins-close" aria-label="${esc(t('关闭'))}">${svg(['M18 6 6 18', 'M6 6l12 12'], 16)}</button>
+  </div>`
+}
+
+function pluginMarketBody() {
+  const p = state.plugins
+  return `${pluginsHead(t('插件', 'Plugins'), false)}
+    <div style="display: flex; align-items: center; gap: var(--space-2);">
+      <div style="display: flex; gap: 4px; flex: none;">
+        ${[
+          ['market', t('市场', 'Marketplace')],
+          ['mine', t('已安装', 'Yours')],
+        ]
+          .map(
+            ([key, label]) =>
+              `<button type="button" class="btn ${p.tab === key ? 'btn-secondary' : 'btn-ghost'}" data-act="plugins-tab" data-tab="${key}">${esc(label)}</button>`,
+          )
+          .join('')}
+      </div>
+      <input class="input" style="flex: 1; min-width: 0;" placeholder="${esc(t('搜索插件', 'Search plugins'))}"
+        value="${esc(p.q || '')}" data-act="plugins-field">
+    </div>
+    ${p.error ? `<div class="gw-flash gw-flash-err">${esc(p.error)}</div>` : ''}
+    ${/* 「已保存」「已断开」这些走的是共用的 flash()，而它画在页面正文里——弹窗盖着
+          正文，不在这儿再画一遍等于没画。 */ ''}
+    ${flashes()}
+    <div id="plugins-list" style="min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: var(--space-4);">
+      ${pluginListRows()}
+    </div>`
+}
+
+/**
+ * 清单那一块**单独一个函数**：搜索框边打边过滤时只重画这里。整页 render() 会把输入框
+ * 换掉，正在打字的人立刻丢焦点——上架弹窗那边（connectorPickRows）栽过同一个坑。
+ */
+function pluginListRows() {
+  const p = state.plugins
+  if (!p) return ''
+  if (p.loading) return `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('加载中…')}</div>`
+  const q = (p.q || '').trim().toLowerCase()
+  const list = (state.market || []).filter((c) => {
+    if (p.tab === 'mine' && !c.installed) return false
+    if (!q) return true
+    return `${c.name} ${c.toolkit} ${c.description || ''}`.toLowerCase().includes(q)
+  })
+  if (!list.length) {
+    const empty = q
+      ? t('没有匹配的插件', 'No plugins match that')
+      : p.tab === 'mine'
+        ? t('还没装任何插件。到「市场」里挑一个。', 'Nothing installed yet — pick one from the marketplace.')
+        : t('平台还没上架任何连接器。')
+    return `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${esc(empty)}</div>`
+  }
+  return connectorGroups(list)
+    .map(
+      ([name, rows]) => `<section>
+      <p style="margin: 0 0 var(--space-2); font-size: 12px; font-weight: 600; color: var(--muted-foreground);">${esc(name)}</p>
+      <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--space-2);">
+        ${rows.map(pluginRow).join('')}
+      </div>
+    </section>`,
+    )
+    .join('')
+}
+
+function pluginRow(c) {
+  // 被公司禁掉的既不给装也不给点进去：点进去只有一句「已禁用」，白跑一趟。
+  const action = c.blocked
+    ? `<span class="tag" style="flex: none;">${t('已禁用')}</span>`
+    : c.installed
+      ? `<button type="button" class="btn btn-ghost" style="flex: none;" data-act="plugins-detail" data-id="${esc(c.id)}">${t('管理')}</button>`
+      : `<button type="button" class="btn btn-secondary" style="flex: none;" data-act="conn-install" data-id="${esc(c.id)}">${t('添加', 'Add')}</button>`
+  return `<div style="display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); ${c.blocked ? 'opacity: 0.55;' : ''}">
+    ${connectorLogo(c)}
+    <div style="min-width: 0; flex: 1;">
+      <div style="font-size: 14px; font-weight: 600;">${esc(c.name)}${c.installed ? ` <span class="tag tag-accent">${t('已安装')}</span>` : ''}</div>
+      <div style="font-size: 12px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+        ${esc(c.blocked && c.blockedReason ? `${t('本公司已禁用')}：${c.blockedReason}` : c.description || c.toolkit)}
+      </div>
+    </div>
+    ${action}
+  </div>`
+}
+
+/**
+ * 装完之后的那一屏：连账号、挑工具。和详情页是同一套零件（connectionRow /
+ * connectorToolsBox），只是外面换了个壳——两份画法迟早会漂。
+ */
+function pluginDetailBody() {
+  const p = state.plugins
+  const detail = state.pluginDetail
+  if (!detail || detail.connector?.id !== p.id) {
+    return `${pluginsHead(t('插件', 'Plugins'), true)}
+      ${p.error ? `<div class="gw-flash gw-flash-err">${esc(p.error)}</div>` : ''}
+      <p style="font-size: 13px; color: var(--muted-foreground);">${t('加载中…')}</p>`
+  }
+  const c = detail.connector
+  const conns = detail.connections || []
+  return `${pluginsHead(c.name, true)}
+    <div style="display: flex; align-items: center; gap: var(--space-3);">
+      ${connectorLogo(c)}
+      <div style="min-width: 0; flex: 1; font-size: 13px; color: var(--muted-foreground);">${esc(c.description || c.toolkit)}</div>
+      <button type="button" class="btn btn-ghost" style="flex: none;" data-act="conn-uninstall" data-id="${esc(c.id)}">${t('卸载')}</button>
+    </div>
+    ${p.error ? `<div class="gw-flash gw-flash-err">${esc(p.error)}</div>` : ''}
+    ${flashes()}
+    ${c.blocked ? `<div class="gw-flash gw-flash-err">${t('本公司已禁用这个连接器')}${c.blockedReason ? `：${esc(c.blockedReason)}` : ''}</div>` : ''}
+    <div style="min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: var(--space-6);">
+      <section>
+        <h3 style="font-size: 13px; font-weight: 600; color: var(--muted-foreground); margin: 0 0 var(--space-2);">${t('账号')}</h3>
+        <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 0 var(--space-4);">
+          ${conns.map((x) => connectionRow(x, c.id)).join('')}
+          <div style="padding: var(--space-3) 0; display: flex; align-items: center; gap: var(--space-2);">
+            <input class="input" style="max-width: 200px;" data-input="conn-label" placeholder="${esc(t('账号名，如 personal'))}">
+            <button type="button" class="btn btn-secondary" data-act="conn-add-account" data-id="${esc(c.id)}">${t('添加账号')}</button>
+          </div>
+        </div>
+        <p style="margin: var(--space-2) 0 0; font-size: 12px; color: var(--muted-foreground);">
+          ${t('点「添加账号」会跳去授权，回来落在这个插件的详情页上。账号名会出现在工具名里（如 gmail_personal），模型靠它判断该用哪一个。', 'Adding an account sends you off to authorize; you come back on this plugin’s own page. The label shows up in the tool name (gmail_personal), which is how the model tells accounts apart.')}
+        </p>
+      </section>
+      <section>
+        <h3 style="font-size: 13px; font-weight: 600; color: var(--muted-foreground); margin: 0 0 var(--space-2);">${t('工具')}</h3>
+        ${connectorToolsBox(detail)}
+      </section>
+    </div>`
+}
+
+/**
+ * 连接器控件的查询根。
+ *
+ * 弹窗和 `/connectors/:id` 那一页有**同名**的输入框和勾选框（`conn-label`、
+ * `conn-tool`），而弹窗能盖在那一页上面。不分根的话 querySelector 先中的是底下那页，
+ * 于是在弹窗里填的账号名发不出去、勾的工具存的是别人那一份。
+ */
+function connRoot() {
+  return (state.plugins && document.querySelector('.gw-plugins')) || document
+}
+
+function paintPluginList() {
+  const box = document.getElementById('plugins-list')
+  if (box) box.innerHTML = pluginListRows()
+}
+
+/** 弹窗里翻到某个插件的详情。装完之后也走这条——装和管理落到同一屏。 */
+async function openPluginDetail(id, opts) {
+  if (!id || !state.plugins) return
+  Object.assign(state.plugins, { id, error: '' })
+  state.pluginDetail = null
+  render()
+  try {
+    // 市场那一份要重取：刚装完，「添加」得变成「管理」，「已安装」那一栏也得有它。
+    await Promise.all([loadPluginDetail(id), opts?.reloadMarket ? loadMarket() : null])
+  } catch (e) {
+    if (state.plugins) state.plugins.error = e.message
+  }
+  render()
+}
+
+/**
+ * 详情重取。弹窗和页面各存各的（见 loadPluginDetail），改完账号要刷的是**当前这一份**——
+ * 认错了的话，弹窗里断开一把连接，画面上那一行还在。
+ */
+function refreshConnectorDetail(id) {
+  return state.plugins ? loadPluginDetail(id) : loadConnectorDetail(id)
+}
+
 // ── 动作 ─────────────────────────────────────────────────────────────
 
 /** 返回 true 表示这一下已经处理掉了，app.js 那条链不用再往下走。 */
 async function connectorAct(act, btn) {
+  if (act === 'plugins-open') {
+    state.plugins = { q: '', tab: 'market', id: '', loading: true, error: '' }
+    state.pluginDetail = null
+    // 上一屏留下的那条 flash 别跟进弹窗——它说的是别处的事。
+    state.error = ''
+    state.notice = ''
+    // 先画一个空壳再去取：市场那一条要打一次网络，不先画的话点了半天没反应。
+    render()
+    try {
+      await loadMarket()
+    } catch (e) {
+      if (state.plugins) state.plugins.error = e.message
+    }
+    if (state.plugins) state.plugins.loading = false
+    render()
+    return true
+  }
+  if (act === 'plugins-close') {
+    // 底下停的是哪个连接器的详情页。空串 = 停在别处（对话、市场），没什么要补的。
+    const behind = connectorIdOfPath(state.path)
+    state.plugins = null
+    state.pluginDetail = null
+    // 弹窗里那条「已保存」也不该留到底下那页去。
+    state.error = ''
+    state.notice = ''
+    // 先关，别让人等一次网络往返。
+    render()
+    // 弹窗里刚做的改动（断开、卸载、改工具）只落在弹窗那一份上。底下正好是同一个
+    // 连接器的详情页时不补这一次，关掉之后那页还列着已经断掉的账号——点它会打到一个
+    // 不存在的连接上。取不到就维持原样：这一屏本来就是它自己加载的，没必要为一次
+    // 后台刷新弹一句错。
+    if (behind) {
+      try {
+        await loadConnectorDetail(behind)
+        render()
+      } catch {}
+    }
+    return true
+  }
+  if (act === 'plugins-back') {
+    if (state.plugins) Object.assign(state.plugins, { id: '', error: '' })
+    state.pluginDetail = null
+    render()
+    return true
+  }
+  if (act === 'plugins-tab') {
+    if (state.plugins) state.plugins.tab = btn.getAttribute('data-tab')
+    render()
+    return true
+  }
+  if (act === 'plugins-field') return true
+  if (act === 'plugins-detail') {
+    if (!state.plugins) return true
+    await openPluginDetail(btn.getAttribute('data-id'))
+    return true
+  }
   if (act === 'conn-price-save') {
     const pricing = { defaultMicros: dollarsToMicros(valueOf('price-default', '0')), byToolkit: {} }
     for (const c of state.connectors || []) {
@@ -541,10 +796,17 @@ async function connectorAct(act, btn) {
     try {
       await api('POST', `/me/connectors/${encodeURIComponent(id)}/install`)
       // 装完直接进详情：装了还没连的话它什么也干不了，下一步就在那一屏。
-      go(`/connectors/${encodeURIComponent(id)}`)
+      // 弹窗里装的就留在弹窗里——跳走一整页，对话那边的草稿和滚动位置都没了。
+      if (state.plugins) await openPluginDetail(id, { reloadMarket: true })
+      else go(`/connectors/${encodeURIComponent(id)}`)
     } catch (e) {
-      flash('err', e.message)
-      render()
+      if (state.plugins) {
+        state.plugins.error = e.message
+        render()
+      } else {
+        flash('err', e.message)
+        render()
+      }
     }
     return true
   }
@@ -553,9 +815,15 @@ async function connectorAct(act, btn) {
     if (!confirm(t('卸载会把你在它下面连的所有账号一起断掉。继续？'))) return true
     try {
       await api('DELETE', `/me/connectors/${encodeURIComponent(id)}/install`)
-      go('/connectors')
+      if (state.plugins) {
+        Object.assign(state.plugins, { id: '', error: '' })
+        state.pluginDetail = null
+        await loadMarket()
+        render()
+      } else go('/connectors')
     } catch (e) {
-      flash('err', e.message)
+      if (state.plugins) state.plugins.error = e.message
+      else flash('err', e.message)
       render()
     }
     return true
@@ -581,7 +849,7 @@ async function connectorAct(act, btn) {
     if (!confirm(t('断开这个账号？'))) return true
     try {
       await api('DELETE', `/me/connectors/${encodeURIComponent(connectorId)}/connections/${encodeURIComponent(id)}`)
-      await loadConnectorDetail(connectorId)
+      await refreshConnectorDetail(connectorId)
       flash('ok', t('已断开'))
     } catch (e) {
       flash('err', e.message)
@@ -596,7 +864,7 @@ async function connectorAct(act, btn) {
     const on = btn.checked === true
     try {
       await api('PATCH', `/me/connectors/${encodeURIComponent(connectorId)}/connections/${encodeURIComponent(id)}`, { mentionOnly: on })
-      await loadConnectorDetail(connectorId)
+      await refreshConnectorDetail(connectorId)
     } catch (e) {
       flash('err', e.message)
     }
@@ -606,14 +874,14 @@ async function connectorAct(act, btn) {
   if (act === 'conn-tool') return true
   if (act === 'conn-tools-save') {
     const connectorId = btn.getAttribute('data-connector')
-    const boxes = [...document.querySelectorAll('[data-act="conn-tool"]')]
+    const boxes = [...connRoot().querySelectorAll('[data-act="conn-tool"]')]
     const all = boxes.length && boxes.every((b) => b.checked)
     // 全勾上 = 空数组（后端口径：空 = 全开）。存一份「当前全部工具」的快照，
     // 供应商下次加了新工具就永远进不来了——那不是用户勾的意思。
     const enabledTools = all ? [] : boxes.filter((b) => b.checked).map((b) => b.getAttribute('data-tool'))
     try {
       await api('PUT', `/me/connectors/${encodeURIComponent(connectorId)}/tools`, { enabledTools })
-      await loadConnectorDetail(connectorId)
+      await refreshConnectorDetail(connectorId)
       flash('ok', t('已保存'))
     } catch (e) {
       flash('err', e.message)
@@ -751,7 +1019,7 @@ async function connectorAct(act, btn) {
 
 /** 弹窗里的输入框现读现取——它们不受控，render() 一来就会被换掉。 */
 function valueOf(name, fallback) {
-  const el = document.querySelector(`[data-input="${name}"]`)
+  const el = connRoot().querySelector(`[data-input="${name}"]`)
   return el ? String(el.value || '').trim() : fallback
 }
 
