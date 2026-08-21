@@ -37,13 +37,36 @@ function botStreamOf(botId) {
 }
 
 /**
- * 换了一条会话（席位重建过）——手上这桶事件连同它的摘要、补全标记一起作废。
+ * 换了一条会话（席位重建过）——这一行上属于旧会话的东西**全部**作废。
  *
- * 单独拎成一个函数是因为有两处要清（ensureChatSession 和 warmBotStreams），而漏清
- * 一个字段的后果都很隐蔽：漏 sum 是名单上挂着上一条会话的摘要，漏 hydrated 是新会话
- * 永远不去拉历史。
+ * 「全部」包括还在飞的那两样，它们才是真正咬人的：
+ *
+ * · **那条流**。留着它有两笔账。startChatStream 的「已经在跑」闸认的是
+ *   `row.sessionId === sessionId && row.ac`，而调用方紧接着就把 sessionId 改成新的
+ *   ——闸于是误触发、直接 return，**新会话一条流都开不出来**。同时旧流自己还活着：
+ *   它的读循环里 `isActive()` 已经是 false，两道 break 都不成立，于是继续往这只
+ *   （刚清空的）桶里灌旧会话的事件，画出来就是另一条对话。
+ *
+ * · **在飞的那次 hydrate**。它拉的是旧会话的历史。不清掉的话，hydrateChat 那道
+ *   「别拉两遍」的闸会把新会话挡在门外，并且返回旧会话那只 promise；旧的一醒来发现
+ *   串台就自己走了，于是**新会话的历史从此没人去拉**，界面永远停在流垫的那一轮。
+ *
+ * 数据那三样漏清也各有症状：漏 sum 是名单上挂着上一条会话的摘要，漏 hydrated 是
+ * 新会话永远不去拉历史。
  */
 function resetBotStream(row) {
+  if (row.ac) {
+    try {
+      row.ac.abort()
+    } catch {}
+    // 它可能正是「当前那条」。闩留着指向一个已经掐掉的流，后面谁也认不回来。
+    if (chatAbort === row.ac) {
+      chatAbort = null
+      chatStreamId = ''
+    }
+    row.ac = null
+  }
+  row.hydrating = null
   row.events.length = 0
   row.sum = { state: 'idle', lastAt: 0, lastText: '' }
   row.hydrated = false
@@ -202,10 +225,43 @@ const chatLive = new Map()
  * 尾巴容易压在下游缓冲里出不来，那正是「历史缺一截 + 永远正在处理」的成因。
  * `firstSeq` 是手上最靠前那条的 seq，也就是再往前翻的游标。
  *
- * 两个来源都会写它：`hydrateChat` 拉回第一页时写一次，流上的 `replay/done` 也带这两个
- * 字段。**只许往前推，不许往回缩**（见 replay/done 那段）——两条路谁先到不一定。
+ * **三个地方都写这一对**：`hydrateChat` 拉回第一页、`loadOlderChat` 往前翻、流上的
+ * `replay/done`。所以写入统一走 noteChatPage，别各写各的。
  */
 const chatPages = new Map()
+
+/**
+ * 记下「手上最靠前那条是谁」和「它前面还有没有」。
+ *
+ * 规矩只有一条：**谁知道得更早，谁说了算。**
+ *
+ * 三个写入方看到的窗口不一样大——流上只垫一轮（STREAM_TAIL_TURNS），HTTP 一次二十
+ * 轮，往前翻又是另一页——而谁先落地取决于网络。窄窗口晚到时如果照写，游标就被推回
+ * 「最后一轮的开头」，于是「加载更早的对话」去取的是一页手上全有的事件：归并那两道
+ * 闸（进桶比尾巴大、补历史比头小）会把它们全滤掉，按钮点了没反应。
+ *
+ * `hasMore` 必须跟着 `firstSeq` 一起走——那句「前面还有没有」问的是**这一条**之前。
+ * 拆开取会配出一对互相矛盾的值。
+ *
+ * `loading` 只有 loadOlderChat 说了算（它是唯一会把按钮置灰的人），别人不传就保持
+ * 原样：顺手写一个 `loading: false` 会把正在飞的那次翻页从界面上「解灰」，人一点就
+ * 又发一次。
+ */
+function noteChatPage(sessionId, next) {
+  const cur = chatPages.get(sessionId) || {}
+  const known = typeof cur.firstSeq === 'number' ? cur.firstSeq : null
+  const first = typeof next.firstSeq === 'number' ? next.firstSeq : null
+  // 带来了更早的游标就是它赢；一条游标都没带（空会话、续传）时，只有在我们本来也
+  // 什么都不知道的情况下才认它那句 hasMore。
+  const wins = first != null ? known == null || first < known : known == null
+  chatPages.set(sessionId, {
+    ...cur,
+    firstSeq: wins && first != null ? first : cur.firstSeq,
+    hasMore: wins && typeof next.hasMore === 'boolean' ? next.hasMore : cur.hasMore,
+    loading: next.loading !== undefined ? next.loading : Boolean(cur.loading),
+  })
+  scheduleLoadMorePaint()
+}
 
 /**
  * 每条会话排着的消息：`[{ id, text, mentions, images, createdAt }]`。
@@ -493,7 +549,12 @@ async function hydrateChat(botId, sessionId) {
     }
     // 拉回来这一路上，席位可能重建过会话——那这份历史属于另一条对话，认了就是串台。
     if (row.sessionId !== sessionId) return
-    const older = (data && data.events) || []
+    // **空 body 也是 200。** api() 在 body 为空时返回 null（Gateway 的 proxyJson 同样
+    // 把席位的空 body 转成 200 + null），下面那几个 data.xxx 会当场抛——而 hydrated
+    // 已经置位了，于是这个 Bot 从此不再重拉，永远停在流垫的那一轮。当成拉失败处理：
+    // 不置 hydrated，切走再切回来会重来一次。
+    if (!data) return
+    const older = data.events || []
     // **只收比手上最靠前那条还早的。** 流垫的那一轮和这一页必然重叠，而 seq 是日志
     // 行号、天然单调，所以「比头还小」既是去重也保证了插进去之后仍然有序。
     const head = row.events.length ? Number(row.events[0].seq) : Infinity
@@ -507,16 +568,7 @@ async function hydrateChat(botId, sessionId) {
     row.hydrated = true
     // 这些是**旧**事件，不能走 noteBotEvent（它按「刚到的最新」写）。
     refreshSum(row)
-    const cur = chatPages.get(sessionId) || {}
-    // 只许往前推：流上的 replay/done 也写这两个字段，谁先到不一定。
-    if (!(typeof cur.firstSeq === 'number' && typeof data.firstSeq === 'number' && cur.firstSeq <= data.firstSeq)) {
-      chatPages.set(sessionId, {
-        ...cur,
-        firstSeq: typeof data.firstSeq === 'number' ? data.firstSeq : cur.firstSeq,
-        hasMore: Boolean(data.hasMore),
-        loading: false,
-      })
-    }
+    noteChatPage(sessionId, { firstSeq: data.firstSeq, hasMore: data.hasMore })
     if (state.chatSessionId === sessionId) paintChat()
   })()
   row.hydrating = job
@@ -864,22 +916,10 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
             }
             // bot 明说历史放完了。它不是会话事件，不进事件桶。
             // 顺带说了这条会话此刻在不在跑——这句是权威，压过扫出来的那个结论。
+            // 续传（after>0）那次 bot 不给这两个值；流垫的又只有一轮，比 hydrateChat
+            // 那二十轮窄。两种情况都由 noteChatPage 挡住，别把已经知道的覆盖掉。
             if (typeof ev.firstSeq === 'number' || typeof ev.hasMore === 'boolean') {
-              const cur = chatPages.get(sessionId) || {}
-              // **只许往前推。** 流垫的是一轮，hydrateChat 拉的是二十轮，两条路谁先
-              // 到不一定。晚到的那条流如果把游标缩回「最后一轮的开头」，「加载更早的
-              // 对话」就会去取一页手上全有的事件——归并时一条不剩，按钮点了没反应。
-              const back = typeof cur.firstSeq === 'number' && typeof ev.firstSeq === 'number' && cur.firstSeq <= ev.firstSeq
-              if (!back) {
-                chatPages.set(sessionId, {
-                  ...cur,
-                  // 续传（after>0）那次 bot 不给这两个值，别把已有的覆盖掉。
-                  firstSeq: typeof ev.firstSeq === 'number' ? ev.firstSeq : cur.firstSeq,
-                  hasMore: typeof ev.hasMore === 'boolean' ? ev.hasMore : cur.hasMore,
-                  loading: false,
-                })
-                scheduleLoadMorePaint()
-              }
+              noteChatPage(sessionId, { firstSeq: ev.firstSeq, hasMore: ev.hasMore })
             }
             if (typeof ev.live === 'boolean') {
               chatLive.set(sessionId, ev.live)
@@ -1488,14 +1528,14 @@ async function loadOlderChat(sessionId) {
       chatAnchorHeight = thread ? thread.scrollHeight : 0
       list.unshift(...older)
     }
-    chatPages.set(sessionId, {
-      firstSeq: typeof data.firstSeq === 'number' ? data.firstSeq : page.firstSeq,
-      hasMore: Boolean(data.hasMore),
-      loading: false,
-    })
+    // 走 noteChatPage 而不是直接 set：这一页也可能比手上知道的窄——等这一跳的工夫
+    // hydrateChat 落了地，它那二十轮盖过了这里的一页，游标就不该再退回来。
+    // loading 归零由这里说了算，翻页这件事从头到尾只有它一个人管。
+    noteChatPage(sessionId, { firstSeq: data && data.firstSeq, hasMore: data && data.hasMore, loading: false })
   } catch (err) {
-    // 翻不动就把「加载更多」放回去，别把这一段历史永久锁死。
-    chatPages.set(sessionId, { ...page, loading: false })
+    // 翻不动就把「加载更多」放回去，别把这一段历史永久锁死。**读最新的那份**：
+    // page 是发请求之前的快照，照它写回去会把这期间 hydrateChat 记下的游标抹掉。
+    noteChatPage(sessionId, { loading: false })
     state.runtimeError = errText(err.message) || err.message
   }
   paintChat()
