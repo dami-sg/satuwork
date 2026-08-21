@@ -8,6 +8,7 @@ import { SQL as m0007 } from './0007-usage-charges.ts'
 import { SQL as m0008 } from './0008-llm-cache-write.ts'
 import { SQL as m0009 } from './0009-multiplier-precision.ts'
 import { SQL as m0010 } from './0010-machine-telemetry.ts'
+import { SQL as m0011 } from './0011-routines.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -49,6 +50,10 @@ export const MIGRATIONS: Migration[] = [
   { id: '0008-llm-cache-write', name: 'llm_calls 记下缓存写的 token', sql: m0008 },
   { id: '0009-multiplier-precision', name: '账本的倍率换成 double precision', sql: m0009 },
   { id: '0010-machine-telemetry', name: '机器自报的负载与日志占用，以及日志上限', sql: m0010 },
+  // 这条在分支上原本占的是 0010，和 main 上的机器遥测撞了（同 0006 那次）。**编号是
+  // 身份**：撞号意味着两套库各自记着「0010 跑过了」，跑的却是不同的东西，所以让路排到
+  // 最后。分支还没合进去，没有任何库应用过旧编号的这一条，改号是安全的。
+  { id: '0011-routines', name: '日常任务：routine 定义与每次跑的流水', sql: m0011 },
 ]
 
 /**

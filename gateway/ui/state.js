@@ -221,6 +221,16 @@ const state = {
   chatDrafts: {},
   /** 正在重放历史。期间只收不画，见 startChatStream。 */
   chatReplaying: false,
+  /**
+   * 日常任务（右栏那一列）。`routinesBotId` 记着这几条是谁的——换 Bot 时先按它清空，
+   * 免得上一颗 Bot 的任务留在屏上被人点。
+   */
+  routines: [],
+  routinesBotId: '',
+  /** 打开的那条的 id。空 = 右栏是列表形态。 */
+  routineOpen: '',
+  routineRuns: [],
+  routineError: '',
   /** 输入框那条「上下文占了多少」的浮层开着没有。 */
   chatCtxOpen: false,
 }

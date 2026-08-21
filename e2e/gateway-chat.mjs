@@ -490,6 +490,162 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(bots[0].id === catalogBotId, `status id ${bots[0] && bots[0].id}`)
       assert(!bots.some((b) => b.id === 'default'), 'status 不该有 default')
     })
+
+    // ── 日常任务 ────────────────────────────────────────────────────
+    //
+    // 定时那一半（到点自己跑）不在这里验：调度器最快也是秒级轮询，为它等一分钟不
+    // 值得。这里验的是**除了「谁来敲这一下」以外的整条路**——排期算得对不对、试跑
+    // 是不是真的把消息送进了席位的会话、跑完有没有记成 ok。到点那一下走的是同一个
+    // runRoutine，区别只有流水上的 trigger 一个字。
+    let routineId = ''
+
+    await test('建一条日常任务：没给时间就不排，给了才排在未来', async () => {
+      // 接口不替人发明时间：没有触发器 = 不排（`nextRunAt` 是 null）。界面上「新建」
+      // 那一下会带一个「每天 09:00」过来，那是界面的默认值，不是接口的。
+      const bare = await req(gwBase, 'POST', `/runtime/bots/${botId}/routines`, { token: adminTok, body: { name: '空的' } })
+      assert(bare.status === 201, `bare ${bare.status} ${bare.text}`)
+      assert((bare.json.routine.triggers || []).length === 0, `bare triggers ${JSON.stringify(bare.json.routine.triggers)}`)
+      assert(bare.json.routine.nextRunAt === null, `bare nextRunAt ${bare.json.routine.nextRunAt}`)
+      await req(gwBase, 'DELETE', `/runtime/routines/${bare.json.routine.id}`, { token: adminTok })
+
+      const r = await req(gwBase, 'POST', `/runtime/bots/${botId}/routines`, {
+        token: adminTok,
+        body: { name: '每日简报', tz: 'UTC', triggers: [{ kind: 'schedule', every: 'day', at: '09:00', weekday: 1, day: 1 }] },
+      })
+      assert(r.status === 201, `create ${r.status} ${r.text}`)
+      routineId = r.json.routine.id
+      const triggers = r.json.routine.triggers || []
+      assert(triggers.length === 1 && triggers[0].every === 'day' && triggers[0].at === '09:00', `triggers ${JSON.stringify(triggers)}`)
+      // 触发器自己没写时区，就落在请求带来的那个上（界面报的是浏览器时区）。
+      assert(triggers[0].tz === 'UTC', `tz ${triggers[0].tz}`)
+      assert(r.json.routine.nextRunAt > Date.now(), `nextRunAt ${r.json.routine.nextRunAt}`)
+      assert(r.json.routine.active === true, 'active')
+    })
+
+    await test('改时间：下一次跟着重算，算的是那个时区的那个点', async () => {
+      const r = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}`, {
+        token: adminTok,
+        body: { instruction: 'ping', triggers: [{ kind: 'schedule', every: 'day', at: '21:30', weekday: 1, day: 1, tz: 'UTC' }] },
+      })
+      assert(r.status === 200, `patch ${r.status} ${r.text}`)
+      assert(r.json.routine.instruction === 'ping', `instruction ${r.json.routine.instruction}`)
+      // 期望值在这儿**另算一遍**，不复用被测的那套：抄同一段代码来对答案，等于什么都没验。
+      const now = new Date()
+      const want = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 21, 30)
+      const expect = want > now.getTime() ? want : want + 86400000
+      assert(r.json.routine.nextRunAt === expect, `nextRunAt ${new Date(r.json.routine.nextRunAt).toISOString()} != ${new Date(expect).toISOString()}`)
+    })
+
+    await test('停用就不排下一次，重新启用又排上', async () => {
+      const off = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}`, { token: adminTok, body: { active: false } })
+      assert(off.status === 200, `off ${off.status} ${off.text}`)
+      assert(off.json.routine.nextRunAt === null, `off nextRunAt ${off.json.routine.nextRunAt}`)
+      // 名字和指令没传，就不该被这一下抹掉。
+      assert(off.json.routine.instruction === 'ping', `off instruction ${off.json.routine.instruction}`)
+      const on = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}`, { token: adminTok, body: { active: true } })
+      assert(on.json.routine.nextRunAt > Date.now(), `on nextRunAt ${on.json.routine.nextRunAt}`)
+    })
+
+    await test('触发器形状不对 → 400，而且没把已有的那个改坏', async () => {
+      const bad = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}`, {
+        token: adminTok,
+        body: { triggers: [{ kind: 'slack', channel: '#general' }] },
+      })
+      assert(bad.status === 400, `bad trigger ${bad.status} ${bad.text}`)
+      const still = await req(gwBase, 'GET', `/runtime/routines/${routineId}`, { token: adminTok })
+      assert((still.json.routine.triggers || []).length === 1, '原来那个触发器没了')
+    })
+
+    await test('字段越界也要 400，不能静静地换成默认值', async () => {
+      // `weekday: 7`（把周日写成 7）是最自然的手滑，本项目 0 才是周日。静默改成周一的
+      // 话，接口回 200、界面写着「每周一」，人只会以为自己记错了。
+      for (const trigger of [
+        { kind: 'schedule', every: 'week', at: '09:00', weekday: 7, day: 1 },
+        { kind: 'schedule', every: 'month', at: '09:00', weekday: 1, day: 99 },
+        { kind: 'schedule', every: 'day', at: '随便写写', weekday: 1, day: 1 },
+      ]) {
+        const r = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}`, { token: adminTok, body: { triggers: [trigger] } })
+        assert(r.status === 400, `${JSON.stringify(trigger)} → ${r.status} ${r.text}`)
+      }
+      // 反过来：**没写**的字段照旧给默认值，别逼调用方为「每天」填一个假的 weekday。
+      const ok = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}`, {
+        token: adminTok,
+        body: { triggers: [{ kind: 'schedule', every: 'day', at: '21:30', tz: 'UTC' }] },
+      })
+      assert(ok.status === 200, `省略字段 ${ok.status} ${ok.text}`)
+      assert(ok.json.routine.triggers[0].weekday === 1 && ok.json.routine.triggers[0].day === 1, '默认值没给上')
+    })
+
+    await test('试跑：消息真的进了席位的会话，那一轮的结局照实记下来', async () => {
+      const started = await req(gwBase, 'POST', `/runtime/routines/${routineId}/run`, { token: adminTok, body: {} })
+      assert(started.status === 200, `run ${started.status} ${started.text}`)
+      assert(started.json.run.status === 'running' && started.json.run.trigger === 'manual', `run ${JSON.stringify(started.json.run)}`)
+      const deadline = Date.now() + 30000
+      let last
+      while (Date.now() < deadline) {
+        const r = await req(gwBase, 'GET', `/runtime/routines/${routineId}`, { token: adminTok })
+        last = r
+        const run = (r.json.runs || [])[0]
+        if (run && run.status !== 'running') {
+          // **这里就该是 error。** 桩模型（E2E_STUB_LLM）不假装成功，那一轮的
+          // `turn/end` 带的是 `reason: 'error'`，流水必须照实记——这条断言守的正是
+          // 那个映射：曾经它只认 `reason.kind`，于是失败的轮次一律记成了绿勾。
+          assert(run.status === 'error', `run 结束成 ${run.status}：${run.error}`)
+          assert(String(run.error || '').includes('这一轮'), `error 文案 ${run.error}`)
+          assert(run.sessionId === sessionId, `run.sessionId ${run.sessionId} != ${sessionId}`)
+          return
+        }
+        await sleep(300)
+      }
+      assert(false, `试跑一直没跑完 ${last && last.text}`)
+    })
+
+    await test('一条任务不会同时跑两轮', async () => {
+      const first = await req(gwBase, 'POST', `/runtime/routines/${routineId}/run`, { token: adminTok, body: {} })
+      assert(first.status === 200, `first ${first.status} ${first.text}`)
+      const second = await req(gwBase, 'POST', `/runtime/routines/${routineId}/run`, { token: adminTok, body: {} })
+      // 挡住是常态。**但不能断言它一定 409**：桩模型跑得极快，第一条可能就在这两次
+      // 请求之间结束了，那时第二条能开跑才是对的。真正要守住的不变量是下面那句。
+      assert(second.status === 409 || second.status === 200, `second ${second.status} ${second.text}`)
+      const detail = await req(gwBase, 'GET', `/runtime/routines/${routineId}`, { token: adminTok })
+      const running = (detail.json.runs || []).filter((r) => r.status === 'running')
+      assert(running.length <= 1, `同时有 ${running.length} 轮在跑`)
+    })
+
+    await test('别人的日常任务看不见也删不掉 → 404', async () => {
+      const peek = await req(gwBase, 'GET', `/runtime/routines/${routineId}`, { token: memberTok })
+      assert(peek.status === 404, `peek ${peek.status} ${peek.text}`)
+      const kill = await req(gwBase, 'DELETE', `/runtime/routines/${routineId}`, { token: memberTok })
+      assert(kill.status === 404, `kill ${kill.status} ${kill.text}`)
+      const mine = await req(gwBase, 'GET', `/runtime/bots/${botId}/routines`, { token: adminTok })
+      assert((mine.json.routines || []).some((x) => x.id === routineId), '自己的那条应该还在')
+    })
+
+    await test('审计留得下「这个 Bot 会不会自己动、自己动的时候做什么」', async () => {
+      const r = await req(gwBase, 'GET', `/orgs/${orgId}/audit`, { token: adminTok })
+      assert(r.status === 200, `审计 ${r.status} ${r.text}`)
+      const events = r.json.events || r.json.items || []
+      assert(events.some((e) => e.action === 'routine.create'), '建日常任务没进审计')
+      // 开关和指令都要留痕：admin 事后要能回答「它昨晚为什么自己发了那封信」。
+      assert(events.some((e) => e.action === 'routine.active'), '开关没进审计')
+      const edited = events.find((e) => e.action === 'routine.update')
+      assert(edited && String(edited.detail?.instruction || '').includes('ping'), `指令改动没留下内容 ${JSON.stringify(edited)}`)
+      // 改名字不该进去，否则每一次失焦保存都刷一行，真正要紧的两行就淹了。
+      assert(!events.some((e) => e.action === 'routine.rename'), '改名字不该进审计')
+    })
+
+    await test('删掉之后就真的没有了，再改它是 404 不是 500', async () => {
+      const gone = await req(gwBase, 'DELETE', `/runtime/routines/${routineId}`, { token: adminTok })
+      assert(gone.status === 200, `delete ${gone.status} ${gone.text}`)
+      const after = await req(gwBase, 'GET', `/runtime/routines/${routineId}`, { token: adminTok })
+      assert(after.status === 404, `after ${after.status}`)
+      // 另一个标签页还开着这一条，失焦保存了一下：得是「没有这条」，不是一个 500。
+      const stale = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}`, { token: adminTok, body: { name: '改个名' } })
+      assert(stale.status === 404, `stale patch ${stale.status} ${stale.text}`)
+      const list = await req(gwBase, 'GET', `/runtime/bots/${botId}/routines`, { token: adminTok })
+      assert(!(list.json.routines || []).some((x) => x.id === routineId), '列表里还留着')
+    })
+
   } finally {
     if (botChild && !botChild._exited) {
       try {

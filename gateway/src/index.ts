@@ -5,6 +5,7 @@ import { Router, listen } from './http.ts'
 import { gatewayHome } from './home.ts'
 import { attach } from './routes.ts'
 import { attachDesktopUpgrade } from './desktop.ts'
+import { startRoutineScheduler } from './routines.ts'
 
 /**
  * Satuwork Gateway。控制面：公司、账号、套餐、席位、目录、JWT。
@@ -94,6 +95,11 @@ attach(router, db, keys)
 const server = listen(router)
 // 桌面的画面走 WebSocket，而升级请求不进 Router——它是 server 上的一个事件。
 attachDesktopUpgrade(server, db, keys)
+/**
+ * 日常任务的调度器。**这是这个进程里唯一一个自己会动的定时器**，所以它挂在这儿而
+ * 不是藏在某组路由里：停机时要有人明确地把它和它等着的那几条流一起掐掉。
+ */
+const stopRoutines = startRoutineScheduler(db)
 
 let closing = false
 /**
@@ -115,6 +121,7 @@ function shutdown() {
     process.exit(1)
   }
   closing = true
+  stopRoutines()
   server.close(() => {
     void db.close()
   })

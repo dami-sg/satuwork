@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineTriggers, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -454,6 +454,38 @@ export function instanceOf(r: Row): Instance {
     companyId: strOrNull(r.companyId),
     host: str(r.host),
     lastReadyAt: num(r.lastReadyAt),
+  }
+}
+
+export function routineOf(r: Row): Routine {
+  return {
+    id: str(r.id),
+    botId: str(r.botId),
+    accountId: str(r.accountId),
+    companyId: str(r.companyId),
+    name: str(r.name),
+    instruction: str(r.instruction),
+    active: Boolean(r.active),
+    triggers: parseRoutineTriggers(r.triggers),
+    nextRunAt: numOrNull(r.nextRunAt),
+    createdAt: num(r.createdAt),
+    updatedAt: num(r.updatedAt),
+  }
+}
+
+export function routineRunOf(r: Row): RoutineRun {
+  return {
+    id: str(r.id),
+    routineId: str(r.routineId),
+    botId: str(r.botId),
+    accountId: str(r.accountId),
+    companyId: str(r.companyId),
+    trigger: str(r.trigger) as RoutineRunTrigger,
+    status: str(r.status) as RoutineRunStatus,
+    sessionId: strOrNull(r.sessionId),
+    error: strOrNull(r.error),
+    startedAt: num(r.startedAt),
+    endedAt: numOrNull(r.endedAt),
   }
 }
 

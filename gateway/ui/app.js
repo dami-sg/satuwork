@@ -68,6 +68,9 @@ async function runConfirm() {
       flash('ok', '席位已清理')
       render()
       return
+    } else if (c.kind === 'routine-delete') {
+      await deleteRoutineNow(c.id)
+      return
     } else if (c.kind === 'delete-skill') {
       const base = catalogBase()
       await api('DELETE', `${base}/skills/${encodeURIComponent(c.id)}`)
@@ -205,6 +208,8 @@ document.getElementById('app').addEventListener('click', async (e) => {
   // 连接器那一屏的动作都在 pages-connectors.js 里。这条 if 链已经六百多行了，
   // 再往上堆只会让下一个人更难找。
   if (await connectorAct(act, btn)) return
+  // 右栏的日常任务同理，都在 pages-routines.js 里。
+  if (await routineAct(act, btn)) return
   if (act === 'go') {
     go(btn.getAttribute('data-href'))
     return
@@ -845,6 +850,13 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.runtimeError = ''
     state.runtimeMachine = null
     state.desktopRuntime = null
+    // 日常任务同理：它带着上一个人的任务名和运行记录，还有一个每四秒一次的轮询。
+    state.routines = []
+    state.routinesBotId = ''
+    state.routineOpen = ''
+    state.routineRuns = []
+    state.routineError = ''
+    syncRoutinePoll()
     state.me = null
     state.loginError = ''
     state.profileDraft = null
@@ -1686,6 +1698,23 @@ document.getElementById('app').addEventListener('input', (e) => {
 
 document.getElementById('app').addEventListener('change', async (e) => {
   const el = e.target
+  /**
+   * 日常任务的名字与指令。**收在 change 而不是 input 上**：这两处保存都要 render()
+   * （列表里那一行、下一次的时间都跟着变），而 render 会把输入框换掉——边打边存
+   * 等于每敲一个字丢一次焦点。change 在失焦时才来，那时人已经不在框里了。
+   */
+  if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.getAttribute('data-routine-field')) {
+    const id = state.routineOpen
+    const key = el.getAttribute('data-routine-field')
+    const row = id ? routineOpenRow() : null
+    if (row && row[key] !== el.value) await patchRoutine(id, { [key]: el.value })
+    return
+  }
+  // 触发器那一行的四个控件（频率、周几、几号、几点）走同一条路。
+  if (el.getAttribute && el.getAttribute('data-routine-trigger')) {
+    if (state.routineOpen) editRoutineTrigger(state.routineOpen, Number(el.getAttribute('data-i')), el.getAttribute('data-routine-trigger'), el.value)
+    return
+  }
   if (el instanceof HTMLInputElement && el.type === 'file' && el.getAttribute('data-skill-file')) {
     await takeSkillFile(el)
     return

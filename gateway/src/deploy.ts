@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { isUniqueViolation, releaseArch, type Account, type BotRelease, type Db, type Machine, type SeatRuntime } from './db.ts'
+import { canonicalTimezone, isUniqueViolation, releaseArch, type Account, type BotRelease, type Db, type Machine, type SeatRuntime } from './db.ts'
 import { signDesktopTicket, type JwtKeys } from './crypto.ts'
 import { botReleaseFile } from './releases.ts'
 
@@ -218,21 +218,13 @@ export function publicMachine(m: Machine) {
 export function normalizeTimezone(raw: string): string | null | undefined {
   const tz = raw.trim()
   if (!tz) return null
-  if (tz.length > 64 || !/^[A-Za-z0-9+_-]+(\/[A-Za-z0-9+_-]+)*$/.test(tz) || tz.includes('..')) return undefined
-  try {
-    // 认识的名字才留下，并且**一律归一到 Intl 的规范拼写**：`asia/shanghai` →
-    // `Asia/Shanghai`、`Asia/Calcutta` → `Asia/Kolkata`。这一步不是为了好看——期望
-    // 时区和管家自报的实际时区是按字符串比的（`timezonePending` 靠它），两边不走
-    // 同一套拼法，「改上了没有」就永远判错。管家自报的值在心跳里过的也是这个函数。
-    //
-    // 代价是别名会被换成规范名，而规范名有的是 tzdata 的 backward 链接。Debian 的
-    // tzdata 是全的；真裁过的机器上，管家会先查 /usr/share/zoneinfo 并把「这台机器上
-    // 没有这个时区」报回心跳，不会静默改不上。
-    const resolved = new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone
-    return resolved || tz
-  } catch {
-    return undefined
-  }
+  // 形状与「Intl 认不认」这两关都在 canonicalTimezone 里（日常任务的触发器用的是
+  // 同一个）。分两份写的话，两条路对同一个名字给出不同答案只是时间问题。
+  //
+  // 归一到规范拼写的代价是别名会被换掉（`Asia/Calcutta` → `Asia/Kolkata`），而规范名
+  // 有的是 tzdata 的 backward 链接。Debian 的 tzdata 是全的；真裁过的机器上，管家会先
+  // 查 /usr/share/zoneinfo 并把「这台机器上没有这个时区」报回心跳，不会静默改不上。
+  return canonicalTimezone(tz) || undefined
 }
 
 /**

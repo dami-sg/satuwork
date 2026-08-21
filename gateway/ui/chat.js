@@ -830,6 +830,8 @@ async function loadChatPage() {
   if (!(state.catalog || []).length) void loadCatalog().catch(() => {})
   const botId = chatBotIdOf(state.path)
   await loadDesktopRuntime(botId)
+  // 右栏那一列日常任务。**不 await**：它只画右栏，不该让正文晚一个 RTT 才出来。
+  void loadRoutines(botId)
   if (botId) await ensureChatSession(botId)
   // 名单上每个 Bot 都挂一条流。刷新页面之后也能立刻看出谁在干活、谁最近说了什么——
   // 只连当前这一个的话，那两列信息要等人挨个点进去才出得来。
