@@ -205,6 +205,22 @@ function messageText(msg) {
  * 落盘的是结构（`{type:'mention', kind, id, label}`，见 bot 的 session/types.ts），
  * 正文里一个字都没有——`messageText` 也是这么约定的。所以要显示成药丸只能从这里取。
  */
+/**
+ * 一颗点名药丸的内容：连接器图标 + `@名字`。
+ *
+ * **`@` 要画出来。** 人打的就是 `@Gmail`，不带的话它看着像个普通标签，而这一颗说的是
+ * 「这一轮点了名」——那正是它和附件药丸的区别。
+ *
+ * 图标只有候选清单里有（`/mentions` 的 `logo`）。消息里存的是 `{kind,id,label}`，所以
+ * 历史那条要按 id 回候选里查（候选在 loadChatPage 里就拉了）。查不到就不画图标：一颗
+ * 破图标比没有更糟，而名字本身已经说清是谁了。
+ */
+function mentionPill(m) {
+  const logo = m.logo || (state.mentionOptions || []).find((x) => x.id === m.id)?.logo || ''
+  const icon = logo ? `<img src="${esc(logo)}" alt="" onerror="this.remove()">` : ''
+  return `<span class="sw-mention">${icon}<span>@${esc(m.label)}</span>`
+}
+
 function messageMentions(msg) {
   const content = msg && msg.content
   if (!Array.isArray(content)) return []
@@ -690,6 +706,19 @@ async function loadChatPage() {
   state.mentionPick = null
   // 候选清空：换 Bot 之后连接没变，但换公司/换人之后就变了，重开一页重拉一次不亏。
   state.mentionOptions = null
+  /**
+   * 候选**这一页就拉**，不等人打 `@`。
+   *
+   * 历史消息里的点名药丸要画连接器的图标，而消息里只有 `{kind,id,label}`——图标得按 id
+   * 回这份候选里查。等打 `@` 才拉的话，刚进页面翻上去看昨天那条，药丸上是没有图标的，
+   * 打一次 `@` 之后又突然有了。**不 await**：它只影响药丸上那个小图标，不该把整页拖住。
+   */
+  void api('GET', '/mentions')
+    .then((r) => {
+      state.mentionOptions = r.mentions || []
+      paintChat()
+    })
+    .catch(() => {})
   // loadRuntimeBots 由 loadPage 统一拉（名单是全局侧栏，不只这一页要）。
   await loadRuntimeMachine()
   // 上下文占比要知道模型的窗口有多大。新日志的 request/header 自带，老日志没有，
@@ -1430,7 +1459,7 @@ function updateRow(el, b, streaming) {
   }
   if (mentBox && mentBox.getAttribute('data-sig') !== mentSig) {
     mentBox.setAttribute('data-sig', mentSig)
-    mentBox.innerHTML = ments.map((m) => `<span class="sw-mention"><span>${esc(m.label)}</span></span>`).join('')
+    mentBox.innerHTML = ments.map((m) => `${mentionPill(m)}</span>`).join('')
     mentBox.hidden = !ments.length
   }
 
@@ -3081,8 +3110,7 @@ function paintChatMentions() {
   box.hidden = !picked.length
   box.innerHTML = picked
     .map(
-      (m, i) => `<span class="sw-mention">
-        <span>${esc(m.label)}</span>
+      (m, i) => `${mentionPill(m)}
         <button type="button" class="sw-file-x" data-act="chat-mention-drop" data-i="${i}"
           aria-label="${esc(t('移除'))} ${esc(m.label)}">${ICON_X}</button>
       </span>`,
@@ -3112,6 +3140,7 @@ function paintMentionPick() {
         .map(
           (m, i) => `<button type="button" class="sw-pick${i === (pick.index || 0) ? ' is-on' : ''}"
         data-act="chat-mention-pick" data-id="${esc(m.id)}">
+        ${m.logo ? `<img class="sw-pick-logo" src="${esc(m.logo)}" alt="" onerror="this.remove()">` : ''}
         <span>${esc(m.label)}</span>
         ${m.mentionOnly ? `<small>${esc(t('仅 @ 时可用'))}</small>` : ''}
       </button>`,
