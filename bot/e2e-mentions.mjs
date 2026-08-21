@@ -19,6 +19,7 @@ import * as toolsPlugin from './src/tools/index.ts'
 import * as llmPlugin from './src/llm/index.ts'
 import * as agentPlugin from './src/agent/index.ts'
 import { AssistantMessageEventStream, emptyAssistant } from './src/llm/stream.ts'
+import { viaMentionOf } from './src/catalog/index.ts'
 import { SESSION_FORMAT_VERSION } from './src/session/types.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'satu-mention-'))
@@ -38,6 +39,21 @@ class FakeCatalog extends Service {
       'srv-notion': ['mcp_notion_create_page'],
     }
     this.mentionOnlyIds = new Set(['conn-personal'])
+    /** 重拉了几次。点名却没工具时 agent 会补拉一次目录（见 agent/index.ts）。 */
+    this.pulls = 0
+    /** 这一把「重拉之后才出现」——刚在浏览器里授权完、席位还没同步到的那个时序。 */
+    this.appearOnPull = ''
+  }
+  /** 真的 CatalogService 会去打 Gateway；这里只记一笔，顺便把「迟到的那把」放出来。 */
+  async pull() {
+    this.pulls += 1
+    const late = this.appearOnPull
+    if (!late) return true
+    this.appearOnPull = ''
+    const name = `mcp_${late.replace(/-/g, '_')}_send_email`
+    this.tools[late] = [name]
+    this.ctx.tools.register({ name, description: name, parameters: { type: 'object', properties: {} }, execute: async () => ({ text: 'ok' }) })
+    return true
   }
   get servers() {
     return Object.keys(this.tools).map((id) => ({ id, name: id, kind: 'HTTP', enabled: true, connected: true, tools: this.tools[id] }))
@@ -259,6 +275,65 @@ await ctx.agents
   const events = await ctx.sessions.events(sessionId)
   const all = JSON.stringify(events)
   out.cancelled = { 取消的那条没进日志: !all.includes('第二条') }
+}
+
+// ── 9. 点名了却没工具：先补拉一次目录，还是没有就把实情说给模型听 ────
+{
+  const say = async (id, label) => {
+    captured = null
+    await ctx.agents.send(sessionId, '查看邮件', [], [{ kind: 'connector', id, label }]).catch(() => {})
+    return { tools: toolNames(), system: captured?.systemPrompt ?? '' }
+  }
+
+  // 9a. 刚授权完、席位还没同步：补拉一次就该有了，也就不用跟模型解释什么。
+  ctx.catalog.appearOnPull = 'conn-late'
+  const before = ctx.catalog.pulls
+  const late = await say('conn-late', 'Gmail (late)')
+  out.late = {
+    补拉了一次: ctx.catalog.pulls === before + 1,
+    工具补回来了: late.tools.includes('mcp_conn_late_send_email'),
+    不用再跟模型解释: !late.system.includes('本轮被点名、但没挂上的连接'),
+  }
+
+  // 9b. 补拉了还是没有：**必须说出来**。不说的话模型会自己编一个替代方案——
+  // 线上真发生过，它开始教用户用虚拟桌面里的 Chrome 登邮箱。
+  const at = ctx.catalog.pulls
+  const ghost = await say('conn-ghost', 'Gmail (ghost)')
+  out.gap = {
+    也补拉了一次: ctx.catalog.pulls === at + 1,
+    跟模型说清楚了: ghost.system.includes('本轮被点名、但没挂上的连接'),
+    点了名的那把写出来了: ghost.system.includes('Gmail (ghost)'),
+    这一轮照样跑: ghost.tools.includes('mcp_notion_create_page'),
+  }
+}
+
+// ── 10. 「这一次是不是点名调的」这个标记，绝不许把工具调用弄失败 ─────
+//
+// 线上就是这么坏的：目录插件不能 inject agents（会绕出依赖环），原来写成
+// `ctx.agents?.mentionedIn?.()`，以为 `?.` 能兜住——可 cordis 的守卫是在**取属性那一刻**
+// 抛的，`?.` 挡的是取到之后的 null。于是 Gmail 的每一次调用都返回一句
+// `cannot get property "agents" without inject`，一个流水上的附加标记把整把工具打死了。
+{
+  const poisoned = { get agents() { throw new Error('cannot get property "agents" without inject') } }
+  const viaThrows = { reflect: { get() { throw new Error('炸') } } }
+  const viaOk = { reflect: { get: (n) => (n === 'agents' ? { mentionedIn: () => new Set(['srv-1']) } : undefined) } }
+  const noReflect = {}
+  // 抛出来也要接住：不接的话探针自己先死了，报出来的是「读不到 viaMention」，
+  // 而真正的失败（它抛了）反倒看不见。
+  const call = (c, sid, srv) => {
+    try {
+      return viaMentionOf(c, sid, srv)
+    } catch (e) {
+      return 'THROW: ' + e.message
+    }
+  }
+  out.viaMention = {
+    取不到就当没点名: call(poisoned, 's1', 'srv-1') === false,
+    reflect自己炸了也不许抛: call(viaThrows, 's1', 'srv-1') === false,
+    没有reflect也不许抛: call(noReflect, 's1', 'srv-1') === false,
+    点了名的照样认得出: call(viaOk, 's1', 'srv-1') === true,
+    没点那台不算: call(viaOk, 's1', 'srv-2') === false,
+  }
 }
 
 hold = null

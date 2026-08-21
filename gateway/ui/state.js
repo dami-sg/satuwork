@@ -383,6 +383,9 @@ function allowedHrefs() {
   // 不是功能。少了这一行，owner 直接输 /bots 会被 pathAllowed 踢回首页，全局 Bot
   // 目录就此没人改得动了——而他是唯一改得动的人。
   if (isOwner()) set.add('/bots')
+  // 员工菜单里没有连接器了（入口是名单底下那颗「插件」，见 MEMBER_NAV），但那两个页面
+  // 必须还进得去：OAuth 授权完，供应商把浏览器送回 /connectors/:id，落地就在这儿。
+  if (!isOwner()) set.add('/connectors')
   return set
 }
 

@@ -1587,6 +1587,12 @@ document.getElementById('app').addEventListener('input', (e) => {
     if (el.getAttribute('data-field') === 'q') paintConnectorPicks()
     return
   }
+  // 插件弹窗的搜索框。同样只重画清单那一块，不整页 render。
+  if (el.getAttribute('data-act') === 'plugins-field' && state.plugins) {
+    state.plugins.q = el.value
+    paintPluginList()
+    return
+  }
   if (el.getAttribute('data-act') === 'prov-field' && state.providerDraft) {
     state.providerDraft[el.getAttribute('data-field')] = el.value
     return

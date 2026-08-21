@@ -16,9 +16,11 @@ let chatStreamId = ''
  * assistant/message 正文」——正文留在席位机器上，Gateway 只有 sessionId 和计数。为了
  * 名单上一行灰字去破这条边界不划算，而流里本来就有全文。
  *
- * botId -> { sessionId, ac, events, sum }
+ * botId -> { sessionId, ac, events, sum, hydrated }
  * sum = { busy, lastAt, lastText }，**增量维护**：每次渲染名单都去 fold 一遍全部事件，
  * 几个 Bot 各七百多条，光滚个侧栏就能把 CPU 吃满。
+ * hydrated = 这个桶里的历史是不是已经用 HTTP 补全过（见 hydrateChat）。流上只垫一轮，
+ * 不补的话点进去只看得见最后那一问一答。
  */
 const botStreams = new Map()
 
@@ -28,10 +30,46 @@ const BOT_STREAM_MAX = 8
 function botStreamOf(botId) {
   let row = botStreams.get(botId)
   if (!row) {
-    row = { sessionId: '', ac: null, events: [], sum: { state: 'idle', lastAt: 0, lastText: '' } }
+    row = { sessionId: '', ac: null, events: [], sum: { state: 'idle', lastAt: 0, lastText: '' }, hydrated: false, hydrating: null }
     botStreams.set(botId, row)
   }
   return row
+}
+
+/**
+ * 换了一条会话（席位重建过）——这一行上属于旧会话的东西**全部**作废。
+ *
+ * 「全部」包括还在飞的那两样，它们才是真正咬人的：
+ *
+ * · **那条流**。留着它有两笔账。startChatStream 的「已经在跑」闸认的是
+ *   `row.sessionId === sessionId && row.ac`，而调用方紧接着就把 sessionId 改成新的
+ *   ——闸于是误触发、直接 return，**新会话一条流都开不出来**。同时旧流自己还活着：
+ *   它的读循环里 `isActive()` 已经是 false，两道 break 都不成立，于是继续往这只
+ *   （刚清空的）桶里灌旧会话的事件，画出来就是另一条对话。
+ *
+ * · **在飞的那次 hydrate**。它拉的是旧会话的历史。不清掉的话，hydrateChat 那道
+ *   「别拉两遍」的闸会把新会话挡在门外，并且返回旧会话那只 promise；旧的一醒来发现
+ *   串台就自己走了，于是**新会话的历史从此没人去拉**，界面永远停在流垫的那一轮。
+ *
+ * 数据那三样漏清也各有症状：漏 sum 是名单上挂着上一条会话的摘要，漏 hydrated 是
+ * 新会话永远不去拉历史。
+ */
+function resetBotStream(row) {
+  if (row.ac) {
+    try {
+      row.ac.abort()
+    } catch {}
+    // 它可能正是「当前那条」。闩留着指向一个已经掐掉的流，后面谁也认不回来。
+    if (chatAbort === row.ac) {
+      chatAbort = null
+      chatStreamId = ''
+    }
+    row.ac = null
+  }
+  row.hydrating = null
+  row.events.length = 0
+  row.sum = { state: 'idle', lastAt: 0, lastText: '' }
+  row.hydrated = false
 }
 
 /** 事件到了就地更新摘要。O(1)，不 fold。 */
@@ -57,6 +95,56 @@ function noteBotEvent(botId, ev) {
     sum.lastAt = Number(ev.time) || sum.lastAt
   }
   if (before !== sum.state + '|' + sum.lastAt + '|' + sum.lastText) scheduleRosterPaint()
+}
+
+/**
+ * 从桶里重新认一遍「最近一条消息」。
+ *
+ * `hydrateChat` 往桶的**开头**塞一段历史，这些事件不能走 noteBotEvent——那一个是按
+ * 「刚到的就是最新的」写的，会把名单上的摘要改成二十轮之前那句话。所以补完历史之后
+ * 走这里：从后往前找第一条有正文的消息，**比手上这条新才认**。
+ */
+function refreshSum(row) {
+  const sum = row.sum
+  for (let i = row.events.length - 1; i >= 0; i--) {
+    const ev = row.events[i] || {}
+    if (ev.type !== 'user/message' && ev.type !== 'assistant/message') continue
+    const text = messageText((ev.data || {}).message) || (ev.data || {}).text || ''
+    if (!text) continue
+    const at = Number(ev.time) || 0
+    if (at < sum.lastAt) return
+    sum.lastText = text.replace(/\s+/g, ' ').trim().slice(0, 120)
+    sum.lastAt = at || sum.lastAt
+    scheduleRosterPaint()
+    return
+  }
+}
+
+/**
+ * 往桶里追一条事件，**已经有的就不追**。返回它是不是新的。
+ *
+ * 桶按 seq 有序（seq 是会话日志的行号，天然单调），所以判据就是「比尾巴还大」。
+ *
+ * 这道闸是给两条路准备的：历史走 HTTP、实时走 SSE，而流上还垫了一轮
+ * （STREAM_TAIL_TURNS）用来给名单和第一帧兜底。那一轮和 hydrateChat 拉回来的最后
+ * 一轮**必然重叠**——HTTP 先到的话，流的重放段就是一段桶里全有的事件，照追不误的
+ * 结果是最后一问一答在屏幕上出现两遍。
+ *
+ * 反方向由 hydrateChat 那边的「比头还小才收」挡着。两头都挡上，谁先到就无所谓了。
+ */
+function pushBotEvent(botId, ev) {
+  const list = botStreamOf(botId).events
+  const seq = Number(ev && ev.seq)
+  if (Number.isFinite(seq)) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const last = Number(list[i] && list[i].seq)
+      if (!Number.isFinite(last)) continue
+      if (seq <= last) return false
+      break
+    }
+  }
+  list.push(ev)
+  return true
 }
 
 /** 关掉一个 Bot 的流。事件留着——切回去时就不用再重放一遍历史。 */
@@ -112,6 +200,40 @@ function messageText(msg) {
 }
 
 /**
+ * 消息里的 `@` 点名块。
+ *
+ * 落盘的是结构（`{type:'mention', kind, id, label}`，见 bot 的 session/types.ts），
+ * 正文里一个字都没有——`messageText` 也是这么约定的。所以要显示成药丸只能从这里取。
+ */
+/**
+ * 一颗点名药丸的内容：**有图标就画图标，没有才画那个 `@`**。
+ *
+ * 两者说的是同一件事——「这一颗是点名，不是随手带的附件」。图标把它说得更清楚（一眼
+ * 认出是哪一家），那就不必再顶一个 `@` 在前面；图标取不到时才轮到 `@` 顶上，不然药丸
+ * 退化成一个看不出来历的普通标签。
+ *
+ * 图标只有候选清单里有（`/mentions` 的 `logo`）。消息里存的是 `{kind,id,label}`，所以
+ * 历史那条要按 id 回候选里查（候选在 loadChatPage 里就拉了）。
+ *
+ * 图标 404 的那一下也要接住：`replaceWith('@')` 把它原地换成 `@`，不是删掉——删掉的话
+ * 那颗药丸既没图标也没 `@`。这里能直接写字符串是因为它不含引号，不像 connectorLogo
+ * 那段要把一整段 HTML 塞进属性（见 pages-connectors.js 里那个转义两次的坑）。
+ */
+function mentionPill(m) {
+  const logo = m.logo || (state.mentionOptions || []).find((x) => x.id === m.id)?.logo || ''
+  const head = logo ? `<img src="${esc(logo)}" alt="" onerror="this.replaceWith('@')">` : '@'
+  return `<span class="sw-mention">${head}<span>${esc(m.label)}</span>`
+}
+
+function messageMentions(msg) {
+  const content = msg && msg.content
+  if (!Array.isArray(content)) return []
+  return content
+    .filter((b) => b && b.type === 'mention' && b.label)
+    .map((b) => ({ kind: b.kind || 'connector', id: b.id || '', label: String(b.label) }))
+}
+
+/**
  * 每条会话「此刻在不在跑」——**bot 亲口说的那一份**，不是扫事件扫出来的。
  *
  * 扫出来的那个（fold 里的 status）有个前提：手上这份历史是完整的。而它经常不成立，
@@ -133,11 +255,47 @@ const chatLive = new Map()
 /**
  * 每条会话的翻页状态：`{ firstSeq, hasMore, loading }`。
  *
- * 打开对话只取最近几轮（流上的 `tail` 参数），往上翻再一页页往前推。以前是整段推——
- * 实测 1078 条，慢，而且尾巴容易压在下游缓冲里出不来，那正是「历史缺一截 + 永远正在
- * 处理」的成因。`firstSeq` 是手上最靠前那条的 seq，也就是再往前翻的游标。
+ * 打开对话只取最近几轮，往上翻再一页页往前推。以前是整段推——实测 1078 条，慢，而且
+ * 尾巴容易压在下游缓冲里出不来，那正是「历史缺一截 + 永远正在处理」的成因。
+ * `firstSeq` 是手上最靠前那条的 seq，也就是再往前翻的游标。
+ *
+ * **三个地方都写这一对**：`hydrateChat` 拉回第一页、`loadOlderChat` 往前翻、流上的
+ * `replay/done`。所以写入统一走 noteChatPage，别各写各的。
  */
 const chatPages = new Map()
+
+/**
+ * 记下「手上最靠前那条是谁」和「它前面还有没有」。
+ *
+ * 规矩只有一条：**谁知道得更早，谁说了算。**
+ *
+ * 三个写入方看到的窗口不一样大——流上只垫一轮（STREAM_TAIL_TURNS），HTTP 一次二十
+ * 轮，往前翻又是另一页——而谁先落地取决于网络。窄窗口晚到时如果照写，游标就被推回
+ * 「最后一轮的开头」，于是「加载更早的对话」去取的是一页手上全有的事件：归并那两道
+ * 闸（进桶比尾巴大、补历史比头小）会把它们全滤掉，按钮点了没反应。
+ *
+ * `hasMore` 必须跟着 `firstSeq` 一起走——那句「前面还有没有」问的是**这一条**之前。
+ * 拆开取会配出一对互相矛盾的值。
+ *
+ * `loading` 只有 loadOlderChat 说了算（它是唯一会把按钮置灰的人），别人不传就保持
+ * 原样：顺手写一个 `loading: false` 会把正在飞的那次翻页从界面上「解灰」，人一点就
+ * 又发一次。
+ */
+function noteChatPage(sessionId, next) {
+  const cur = chatPages.get(sessionId) || {}
+  const known = typeof cur.firstSeq === 'number' ? cur.firstSeq : null
+  const first = typeof next.firstSeq === 'number' ? next.firstSeq : null
+  // 带来了更早的游标就是它赢；一条游标都没带（空会话、续传）时，只有在我们本来也
+  // 什么都不知道的情况下才认它那句 hasMore。
+  const wins = first != null ? known == null || first < known : known == null
+  chatPages.set(sessionId, {
+    ...cur,
+    firstSeq: wins && first != null ? first : cur.firstSeq,
+    hasMore: wins && typeof next.hasMore === 'boolean' ? next.hasMore : cur.hasMore,
+    loading: next.loading !== undefined ? next.loading : Boolean(cur.loading),
+  })
+  scheduleLoadMorePaint()
+}
 
 /**
  * 每条会话排着的消息：`[{ id, text, mentions, images, createdAt }]`。
@@ -148,8 +306,26 @@ const chatPages = new Map()
  */
 const chatQueues = new Map()
 
-/** 打开一条会话先要几轮。人来是看最近说了什么的，更早的等他往上翻。 */
+/** 历史一页几轮。人来是看最近说了什么的，更早的等他往上翻。 */
 const CHAT_TAIL_TURNS = 20
+
+/**
+ * 流上垫几轮历史。
+ *
+ * **历史和实时拆成了两条路**：历史走 HTTP（`hydrateChat` / `loadOlderChat`，一次
+ * 请求一页，promise 落地就是「拿全了」），SSE 只管实时那一段。
+ *
+ * 为什么不是 0：
+ *
+ *   · 名单上那行灰字（最近一条消息 + 时间）要有个来源，垫一轮就够，而 `tail=0` 在
+ *     席位那边的含义是「整段推」（historySlice 的 turns=0 不切），正好相反；
+ *   · 点进一个 Bot 的**第一帧**要有东西可看。历史那次 HTTP 还在路上时，屏幕上先有
+ *     最后一问一答，比空白诚实。
+ *
+ * 为什么不是 20：名单上每个 Bot 都挂一条流（warmBotStreams），二十轮乘几个 Bot，
+ * 全在主线程上 JSON.parse——而那一堆事件最后只换来侧栏的一行字。
+ */
+const STREAM_TAIL_TURNS = 1
 
 /**
  * 用户消息开头那段「我上传了文件，在工作区里：」是 composeChatBody 自己拼的
@@ -186,6 +362,8 @@ function fold(events, live) {
   let assistant = null
   let tools = []
   let status = ''
+  // 空壳工具调用的 callId（见下面 tool/call）。它们的结果也要一起跳过。
+  const phantoms = new Set()
   for (const ev of events || []) {
     const type = ev.type
     const data = ev.data || {}
@@ -204,6 +382,10 @@ function fold(events, live) {
         text: up.text,
         // 附件列表拆出来单独画成药丸；正文只留人真正打的那句话。
         files: up.files,
+        // **点名要跟着消息留下来。** 它是这条消息的一部分（决定了这一轮的工具表），
+        // 不是输入框上一个发完就没的装饰。丢掉的话翻上去看昨天那条，「@ 了谁」就消失了，
+        // 而那正是「它为什么去读了我的邮箱」的唯一答案。
+        mentions: messageMentions(data.message),
         // **raw 不能省。** mergePending 靠「文字一模一样」认回执，而它手上那份是
         // 拼好的完整正文。只留拆过的 text，带附件的消息就永远认不回来——那条 pending
         // 销不掉，界面会一直挂着「正在思考」。
@@ -239,11 +421,21 @@ function fold(events, live) {
         assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
+      // **没有名字的不画。** 那是 bot 那边一个已经修掉的下标错位留下的空壳（见
+      // llm/gateway.ts 的 toolSlot），它从来没跑过、也跑不起来，pi 一句「找不到叫「」
+      // 的工具」就把它判失败了。可**已经写下的日志里还留着**，翻上去看昨天那轮，
+      // 每一轮开头都挂一颗红色的「tool · 失败」，点开里面什么都没有。
+      // 结果也一起跳过（见下面 tool/result）：不跳的话它会按「第一条还没有结果的」
+      // 认过去，把一次成功的调用标成失败。
+      if (!String(data.name || '').trim()) {
+        phantoms.add(data.callId)
+        continue
+      }
       // arguments 要留着：工具药丸的悬浮窗全靠它回答「这次到底拿什么跑的」。存的是
       // bot 那边 JSON.stringify 过的原串，展示时再 parse 一次做缩进（见 toolPopBody）。
       tools.push({
         callId: data.callId,
-        name: data.name || 'tool',
+        name: data.name,
         args: typeof data.arguments === 'string' ? data.arguments : '',
         result: null,
         failed: false,
@@ -251,6 +443,7 @@ function fold(events, live) {
       assistant.tools = tools
       assistant.endTime = at
     } else if (type === 'tool/result') {
+      if (phantoms.has(data.callId)) continue
       const hit =
         tools.find((x) => x.callId && x.callId === data.callId && x.result == null) ||
         tools.find((x) => x.result == null) ||
@@ -366,6 +559,74 @@ async function loadDesktopRuntime(botId) {
 }
 
 /**
+ * 把最近一页历史用**一次 HTTP** 拉回来，填进这个 Bot 的事件桶。
+ *
+ * 这是「历史」和「实时」拆成两条路里的那一条。以前两件事挤在同一条 SSE 上：连上先推
+ * 二十轮历史，推完发一条 `replay/done` 说「后面是实时的了」。挤在一起有三笔账：
+ *
+ *   · **「放完了没有」只能猜。** 历史和实时是同样的 `data:` 帧，客户端分不出来，只好
+ *     靠 replay/done 这个标记加三个定时器（REPLAY_QUIET/MAX/STALL）兜着。HTTP 不用
+ *     猜——promise 落地就是拿全了。
+ *   · **尾巴会压在下游缓冲里。** 实测 bot 报重放 1078 条、客户端只收到 1054 条，
+ *     replay/done 从没到达（见 bot 的 web/index.ts）。JSON body 没有这个失败模式：
+ *     要么整段拿到，要么抛。
+ *   · **名单上每个 Bot 都要开一条流**，二十轮乘几个 Bot 全在主线程上 parse，换来的
+ *     只是侧栏一行字。
+ *
+ * 和往上翻用的是同一个接口、同一个切片函数（席位那边的 historySlice），区别只是不带
+ * `before`——也就是「最新的一页」。
+ *
+ * **不 await 也能用**：调用方开完流就走，这边拉回来自己重画。屏幕上先是流垫的那一轮，
+ * 历史到了再从上面接进去。
+ */
+async function hydrateChat(botId, sessionId) {
+  const row = botStreamOf(botId)
+  if (!sessionId || row.sessionId !== sessionId || row.hydrated) return
+  // 两个入口都会叫它（切过去时一次、席位回来重连时一次），别拉两遍。
+  if (row.hydrating) return row.hydrating
+  const job = (async () => {
+    let data
+    try {
+      data = await api('GET', `/runtime/sessions/${encodeURIComponent(sessionId)}/history?turns=${CHAT_TAIL_TURNS}`)
+    } catch (err) {
+      // 席位没上线之类。**不置 runtimeError**：流那边正在为同一件事重试，两处都喊
+      // 会把「实例还没上线」和「连接断开」轮流刷在同一行上。留着 hydrated=false，
+      // 下次切过来再试，人也可以点顶上那个「加载更早的对话」自己重来。
+      return
+    } finally {
+      // 只清自己那一把。会话换过之后这里可能已经是**新一轮**的 job 了，清掉它就等于
+      // 把那道「别拉两遍」的闸打开。
+      if (row.hydrating === job) row.hydrating = null
+    }
+    // 拉回来这一路上，席位可能重建过会话——那这份历史属于另一条对话，认了就是串台。
+    if (row.sessionId !== sessionId) return
+    // **空 body 也是 200。** api() 在 body 为空时返回 null（Gateway 的 proxyJson 同样
+    // 把席位的空 body 转成 200 + null），下面那几个 data.xxx 会当场抛——而 hydrated
+    // 已经置位了，于是这个 Bot 从此不再重拉，永远停在流垫的那一轮。当成拉失败处理：
+    // 不置 hydrated，切走再切回来会重来一次。
+    if (!data) return
+    const older = data.events || []
+    // **只收比手上最靠前那条还早的。** 流垫的那一轮和这一页必然重叠，而 seq 是日志
+    // 行号、天然单调，所以「比头还小」既是去重也保证了插进去之后仍然有序。
+    const head = row.events.length ? Number(row.events[0].seq) : Infinity
+    const add = older.filter((ev) => Number(ev.seq) < head)
+    if (add.length) {
+      const thread = state.chatSessionId === sessionId ? document.getElementById('chat-thread') : null
+      // 往开头插东西会把视线甩走，和翻页是同一个补法（见 loadOlderChat）。
+      chatAnchorHeight = thread ? thread.scrollHeight : 0
+      row.events.unshift(...add)
+    }
+    row.hydrated = true
+    // 这些是**旧**事件，不能走 noteBotEvent（它按「刚到的最新」写）。
+    refreshSum(row)
+    noteChatPage(sessionId, { firstSeq: data.firstSeq, hasMore: data.hasMore })
+    if (state.chatSessionId === sessionId) paintChat()
+  })()
+  row.hydrating = job
+  return job
+}
+
+/**
  * 把当前会话换成这个 Bot 的。
  *
  * **换 Bot 的第一件事是清场，不是去拿新会话。** 原先是等新会话拿回来、比对出
@@ -393,7 +654,10 @@ async function ensureChatSession(botId) {
     state.chatFiles = kept.files
     chatAbort = warm.ac
     chatStreamId = warm.sessionId
+    // 先把手上有的画出来——流垫的那一轮已经在桶里，切过去是**这一帧**就有东西看。
     paintChat()
+    // 更早的那些走 HTTP 补。不 await：补回来自己重画，视线用 chatAnchorHeight 钉住。
+    void hydrateChat(botId, warm.sessionId)
     return
   }
   if (state.chatBotId !== botId) {
@@ -420,14 +684,17 @@ async function ensureChatSession(botId) {
     // 期间人又切走了：这次的结果已经不作数，认领了就会把新会话顶掉。
     if (state.chatBotId !== botId) return
     const row = botStreamOf(botId)
-    if (row.sessionId && row.sessionId !== sessionId) {
-      // 换了一条会话（席位重建过）——旧事件作废。
-      row.events.length = 0
-      row.sum = { state: 'idle', lastAt: 0, lastText: '' }
-    }
+    // 换了一条会话（席位重建过）——旧事件、旧摘要、旧的「历史补过了」一起作废。
+    if (row.sessionId && row.sessionId !== sessionId) resetBotStream(row)
+    row.sessionId = sessionId
     state.chatEvents = row.events
     state.chatSessionId = sessionId
     state.chatStatus = ''
+    // **两条路一起发，谁先到算谁的。** 历史走 HTTP，实时走 SSE（只垫一轮）；两边都
+    // 带 seq，hydrateChat 按「比头还小才收」归并，重叠的那一轮不会画两遍。
+    //
+    // 都不 await：多等一个 RTT 才切页面，人按下去那一下就是白等。
+    void hydrateChat(botId, sessionId)
     void startChatStream(sessionId, 0, botId)
   } catch (err) {
     const msg = String(err.message || '')
@@ -443,6 +710,19 @@ async function loadChatPage() {
   state.mentionPick = null
   // 候选清空：换 Bot 之后连接没变，但换公司/换人之后就变了，重开一页重拉一次不亏。
   state.mentionOptions = null
+  /**
+   * 候选**这一页就拉**，不等人打 `@`。
+   *
+   * 历史消息里的点名药丸要画连接器的图标，而消息里只有 `{kind,id,label}`——图标得按 id
+   * 回这份候选里查。等打 `@` 才拉的话，刚进页面翻上去看昨天那条，药丸上是没有图标的，
+   * 打一次 `@` 之后又突然有了。**不 await**：它只影响药丸上那个小图标，不该把整页拖住。
+   */
+  void api('GET', '/mentions')
+    .then((r) => {
+      state.mentionOptions = r.mentions || []
+      paintChat()
+    })
+    .catch(() => {})
   // loadRuntimeBots 由 loadPage 统一拉（名单是全局侧栏，不只这一页要）。
   await loadRuntimeMachine()
   // 上下文占比要知道模型的窗口有多大。新日志的 request/header 自带，老日志没有，
@@ -460,8 +740,12 @@ async function loadChatPage() {
 /**
  * 给名单上的每个 Bot 都开一条流（当前这个除外，它自己会开）。
  *
- * 串着来、不并发：每条流一上来都要重放整段历史，几个 Bot 同时灌会把主线程压住，
- * 而这些数据只是侧栏上的一行字，不该跟正文抢。
+ * 这些流**只为侧栏那一行字**：在不在跑、最近说了什么、什么时候说的。所以它们垫的
+ * 历史是 STREAM_TAIL_TURNS（一轮），不是打开对话要看的那二十轮——那二十轮改由
+ * hydrateChat 在人真的点进去时才拉。
+ *
+ * 串着来、不并发：拿 sessionId 那一跳是每个 Bot 一个请求，几个 Bot 同时发会跟正文
+ * 抢席位那边的连接，而这些数据只是侧栏上的一行字。
  */
 async function warmBotStreams() {
   for (const b of state.runtimeBots || []) {
@@ -474,10 +758,7 @@ async function warmBotStreams() {
       const data = await api('GET', '/runtime/bots/' + encodeURIComponent(b.id) + '/session')
       if (!data.sessionId) continue
       const r = botStreamOf(b.id)
-      if (r.sessionId && r.sessionId !== data.sessionId) {
-        r.events.length = 0
-        r.sum = { state: 'idle', lastAt: 0, lastText: '' }
-      }
+      if (r.sessionId && r.sessionId !== data.sessionId) resetBotStream(r)
       void startChatStream(data.sessionId, 0, b.id)
     } catch {
       // 席位没上线之类——名单上这一行就没有时间和摘要，不该让整页跟着出错。
@@ -559,8 +840,9 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
   }
   const t = token()
   const after = chatCursor(owner)
-  // 头一次连（手上还没有事件）才要 tail；续传时 after 说了算，要的是「补上错过的」。
-  const q = after != null ? '?after=' + encodeURIComponent(after) : '?tail=' + CHAT_TAIL_TURNS
+  // 头一次连（手上还没有事件）才要 tail，而且**只垫一轮**——打开对话要看的那二十轮
+  // 走 HTTP（hydrateChat）。续传时 after 说了算，要的是「补上错过的」。
+  const q = after != null ? '?after=' + encodeURIComponent(after) : '?tail=' + STREAM_TAIL_TURNS
   let res
   try {
     res = await fetch('/runtime/sessions/' + encodeURIComponent(sessionId) + '/events' + q, {
@@ -698,16 +980,10 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
             }
             // bot 明说历史放完了。它不是会话事件，不进事件桶。
             // 顺带说了这条会话此刻在不在跑——这句是权威，压过扫出来的那个结论。
+            // 续传（after>0）那次 bot 不给这两个值；流垫的又只有一轮，比 hydrateChat
+            // 那二十轮窄。两种情况都由 noteChatPage 挡住，别把已经知道的覆盖掉。
             if (typeof ev.firstSeq === 'number' || typeof ev.hasMore === 'boolean') {
-              const cur = chatPages.get(sessionId) || {}
-              chatPages.set(sessionId, {
-                ...cur,
-                // 续传（after>0）那次 bot 不给这两个值，别把已有的覆盖掉。
-                firstSeq: typeof ev.firstSeq === 'number' ? ev.firstSeq : cur.firstSeq,
-                hasMore: typeof ev.hasMore === 'boolean' ? ev.hasMore : cur.hasMore,
-                loading: false,
-              })
-              scheduleLoadMorePaint()
+              noteChatPage(sessionId, { firstSeq: ev.firstSeq, hasMore: ev.hasMore })
             }
             if (typeof ev.live === 'boolean') {
               chatLive.set(sessionId, ev.live)
@@ -735,7 +1011,12 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
             chatLive.set(sessionId, ev.type === 'turn/start')
           }
           if (owner) {
-            botStreamOf(owner).events.push(ev)
+            if (!pushBotEvent(owner, ev)) {
+              // 重复的——历史那条路已经收过这一条了。不进桶、不改摘要，但它证明流还
+              // 活着，重放的静默判定要跟着往后推，否则一段全是重复的重放会让闸提前开。
+              if (isActive() && state.chatReplaying) bumpReplayQuiet()
+              continue
+            }
             noteBotEvent(owner, ev)
           } else if (isActive()) {
             // 没有归属又不是当前会话的流，事件无处可放——**绝不能倒进 chatEvents**，
@@ -1166,6 +1447,26 @@ function updateRow(el, b, streaming) {
     void fillShots(strip)
   }
 
+  /**
+   * 这条消息 `@` 了谁。画在正文**上面**，和输入框里那排是同一种药丸——发出去前后
+   * 长得一样，人才认得出这就是刚才点的那个。
+   *
+   * 和附件缩略图一条路子：签名没变就不重画，否则流式那几帧会把它反复换掉。
+   */
+  const ments = b.mentions || []
+  const mentSig = ments.map((m) => m.label).join('|')
+  let mentBox = bubble.querySelector('.sw-mentions-in')
+  if (ments.length && !mentBox) {
+    mentBox = document.createElement('div')
+    mentBox.className = 'sw-mentions-in'
+    bubble.insertBefore(mentBox, bubble.firstChild)
+  }
+  if (mentBox && mentBox.getAttribute('data-sig') !== mentSig) {
+    mentBox.setAttribute('data-sig', mentSig)
+    mentBox.innerHTML = ments.map((m) => `${mentionPill(m)}</span>`).join('')
+    mentBox.hidden = !ments.length
+  }
+
   const tools = b.tools || []
   // 产出文件 + 上传的附件。两边是同一种东西（工作区里一个能点开的文件），
   // 用同一种药丸，点开走同一个预览。
@@ -1300,22 +1601,25 @@ async function loadOlderChat(sessionId) {
       'GET',
       `/runtime/sessions/${encodeURIComponent(sessionId)}/history?turns=${CHAT_TAIL_TURNS}&before=${page.firstSeq}`,
     )
-    const older = (data && data.events) || []
     const owner = botIdOfSession(sessionId)
     const list = owner ? botStreamOf(owner).events : state.chatEvents
+    // 和 hydrateChat 一个判据：只收比手上最靠前那条还早的。正常情况下 before=firstSeq
+    // 已经保证了这一点，这里挡的是两条路撞在一起的那几次（补历史和翻页同时在跑）。
+    const head = list.length ? Number(list[0].seq) : Infinity
+    const older = ((data && data.events) || []).filter((ev) => Number(ev.seq) < head)
     if (older.length) {
       const thread = document.getElementById('chat-thread')
       chatAnchorHeight = thread ? thread.scrollHeight : 0
       list.unshift(...older)
     }
-    chatPages.set(sessionId, {
-      firstSeq: typeof data.firstSeq === 'number' ? data.firstSeq : page.firstSeq,
-      hasMore: Boolean(data.hasMore),
-      loading: false,
-    })
+    // 走 noteChatPage 而不是直接 set：这一页也可能比手上知道的窄——等这一跳的工夫
+    // hydrateChat 落了地，它那二十轮盖过了这里的一页，游标就不该再退回来。
+    // loading 归零由这里说了算，翻页这件事从头到尾只有它一个人管。
+    noteChatPage(sessionId, { firstSeq: data && data.firstSeq, hasMore: data && data.hasMore, loading: false })
   } catch (err) {
-    // 翻不动就把「加载更多」放回去，别把这一段历史永久锁死。
-    chatPages.set(sessionId, { ...page, loading: false })
+    // 翻不动就把「加载更多」放回去，别把这一段历史永久锁死。**读最新的那份**：
+    // page 是发请求之前的快照，照它写回去会把这期间 hydrateChat 记下的游标抹掉。
+    noteChatPage(sessionId, { loading: false })
     state.runtimeError = errText(err.message) || err.message
   }
   paintChat()
@@ -1417,6 +1721,7 @@ function mergePending(folded, sessionId) {
       files: up.files,
       raw: p.text,
       images: p.images || [],
+      mentions: p.mentions || [],
       time: p.at,
       pending: true,
     })
@@ -2809,8 +3114,7 @@ function paintChatMentions() {
   box.hidden = !picked.length
   box.innerHTML = picked
     .map(
-      (m, i) => `<span class="sw-mention">
-        <span>${esc(m.label)}</span>
+      (m, i) => `${mentionPill(m)}
         <button type="button" class="sw-file-x" data-act="chat-mention-drop" data-i="${i}"
           aria-label="${esc(t('移除'))} ${esc(m.label)}">${ICON_X}</button>
       </span>`,
@@ -2840,6 +3144,7 @@ function paintMentionPick() {
         .map(
           (m, i) => `<button type="button" class="sw-pick${i === (pick.index || 0) ? ' is-on' : ''}"
         data-act="chat-mention-pick" data-id="${esc(m.id)}">
+        ${m.logo ? `<img class="sw-pick-logo" src="${esc(m.logo)}" alt="" onerror="this.remove()">` : ''}
         <span>${esc(m.label)}</span>
         ${m.mentionOnly ? `<small>${esc(t('仅 @ 时可用'))}</small>` : ''}
       </button>`,
@@ -3010,7 +3315,9 @@ async function sendChat() {
    * afterSeq 记住「此刻流走到哪儿了」，回执认领时只认它之后的——见 mergePending。
    */
   const afterSeq = (state.chatEvents || []).reduce((m, ev) => (ev.seq > m ? ev.seq : m), -1)
-  const pending = { sessionId, text: body, images, at: Date.now(), afterSeq }
+  // mentions 也带上：回执那几秒里那条消息要长成最终的样子，否则药丸会先没有、
+  // 等席位把事件送回来才突然冒出来——同一条消息在屏幕上跳两次。
+  const pending = { sessionId, text: body, images, mentions, at: Date.now(), afterSeq }
   state.chatPending = (state.chatPending || []).concat(pending)
   paintChat()
   try {
@@ -3396,8 +3703,22 @@ document.addEventListener('focusin', (e) => {
   else if (el && !el.closest('.sw-toolpop')) hideToolPop(0)
 })
 
-// 滚动时立刻收：浮层是 fixed 的，跟不上锚点，留在原地就是一块飘着的脏东西。
-window.addEventListener('scroll', () => hideToolPop(0), true)
+/**
+ * 滚动时立刻收：浮层是 fixed 的，跟不上锚点，留在原地就是一块飘着的脏东西。
+ *
+ * **但浮层自己滚不算。** 结果那一段有自己的滚动区（`.sw-toolpop pre`，最高 220px），
+ * 内容一长就得在里面滚着看——而这个监听器是捕获阶段挂在 window 上的，滚它也照收不误：
+ * 手一动窗口就没了，长输出永远看不完。这里按事件源头分一下：源头在浮层里就不收。
+ */
+window.addEventListener(
+  'scroll',
+  (e) => {
+    const el = e.target instanceof Element ? e.target : null
+    if (el && el.closest('.sw-toolpop')) return
+    hideToolPop(0)
+  },
+  true,
+)
 window.addEventListener('resize', () => hideToolPop(0))
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && toolPop && !toolPop.hidden) hideToolPop(0)

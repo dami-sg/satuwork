@@ -40,15 +40,31 @@ function mockComposio() {
     }
     if (url.pathname === '/toolkits') return send(200, TOOLKITS)
     if (url.pathname === '/tools') return send(200, TOOLS)
+    // 老的那条对「Composio 托管的 OAuth」已经不受理了，照着上游的原话打回——
+    // 我们要是又走回去，测试立刻红，而不是等到线上有人点「添加账号」才看见那句英文。
     if (url.pathname === '/connected_accounts' && req.method === 'POST') {
+      return send(400, {
+        error: {
+          message:
+            'Creating connections on this endpoint for Composio-managed OAuth auth configs is no longer supported. Use POST /api/v3/connected_accounts/link instead.',
+        },
+      })
+    }
+    if (url.pathname === '/connected_accounts/link' && req.method === 'POST') {
       let raw = ''
       req.on('data', (d) => { raw += d })
       req.on('end', () => {
         const body = JSON.parse(raw || '{}')
         const id = `ca_${++n}`
         accounts.set(id, 'INITIATED')
-        seen.initiated.push({ id, userId: body.connection?.user_id, callback: body.connection?.callback_url, authConfigId: body.auth_config?.id })
-        send(200, { id, redirect_url: `https://accounts.example.com/o/oauth2?ca=${id}` })
+        seen.initiated.push({
+          id,
+          userId: body.user_id,
+          callback: body.callback_url,
+          authConfigId: body.auth_config_id,
+          allowMultiple: body.allow_multiple === true,
+        })
+        send(200, { connected_account_id: id, redirect_url: `https://accounts.example.com/o/oauth2?ca=${id}` })
       })
       return
     }
@@ -293,6 +309,9 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
       assert(sent.userId.startsWith('sw_'), `externalUserId 应该是 sw_ 前缀，实际 ${sent.userId}`)
       assert(!sent.userId.includes('@'), '不能拿邮箱当 externalUserId')
       assert(sent.callback.includes('/oauth/connectors/callback?c='), `回调地址不对：${sent.callback}`)
+      // 不带 allow_multiple 的话，第二把 link 会把同一个 connected account 还回来——
+      // 两行本地记录共用一个 externalId，断开其中一个另一个跟着废。
+      assert(sent.allowMultiple === true, '没带 allow_multiple')
 
       const dup = await req(base, 'POST', `/me/connectors/${connectorId}/connections`, {
         token: memberTok,
@@ -317,12 +336,18 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
     })
 
     await test('回调不信参数：上游还没 ACTIVE 就仍然是 pending', async () => {
-      // 不能用 req()：fetch 默认跟着 302 走，看到的会是跳过去那一页的状态码。
       const cb = await fetch(`${base}/oauth/connectors/callback?c=${encodeURIComponent(firstConnId)}&status=success`, {
         redirect: 'manual',
       })
-      assert(cb.status === 302, `回调应该 302 回连接器页，实际 ${cb.status}`)
-      assert(cb.headers.get('location').startsWith('/connectors/'), `跳错地方了：${cb.headers.get('location')}`)
+      // 授权是在新开的那一页里做的，这一页的正事是关掉自己——不再跳回应用（跳回去等于
+      // 在旁边多开一个副本，而人正看着的那一页在另一个标签里）。
+      assert(cb.status === 200, `回调该自己渲染一页，实际 ${cb.status}`)
+      assert(!cb.headers.get('location'), `还在往回跳：${cb.headers.get('location')}`)
+      const page = await cb.text()
+      assert(page.includes('window.close'), '这一页不会关掉自己')
+      // 还没 ACTIVE 就别说「授权完成」，也别自动关——那句话得留在屏幕上让人读完。
+      assert(!page.includes('授权完成'), '上游还没确认就说成功了')
+      assert(!page.includes('setTimeout'), '没成功还自动关，人来不及看那句说明')
       const detail = await req(base, 'GET', `/me/connectors/${connectorId}`, { token: memberTok })
       const one = detail.json.connections.find((c) => c.id === firstConnId)
       assert(one.status === 'pending', `上游没 ACTIVE，我们不能自己变 active：${one.status}`)
@@ -330,7 +355,10 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
 
     await test('上游 ACTIVE 之后回调把它转正', async () => {
       mock.seen.activate(firstExternal)
-      await fetch(`${base}/oauth/connectors/callback?c=${encodeURIComponent(firstConnId)}`, { redirect: 'manual' })
+      const cb = await fetch(`${base}/oauth/connectors/callback?c=${encodeURIComponent(firstConnId)}`, { redirect: 'manual' })
+      const page = await cb.text()
+      assert(page.includes('授权完成'), '成了却没说成了')
+      assert(page.includes('setTimeout'), '成了就该自己关掉，别让人再点一次')
       const detail = await req(base, 'GET', `/me/connectors/${connectorId}`, { token: memberTok })
       const one = detail.json.connections.find((c) => c.id === firstConnId)
       assert(one.status === 'active', `应该转正了，实际 ${one.status}`)
@@ -770,6 +798,117 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
       assert(html.includes('合规未过'), '被禁的没写出原因')
       assert(!html.includes('conn-publish-open'), '员工不该看到「上架」')
       assert(ui.pathAllowed('/connectors'), '员工应该进得了 /connectors')
+    })
+
+    await test('界面：取不到 logo 时的兜底缩写不会漏成正文', async () => {
+      // onerror 里那段 JS 写在 HTML 属性里，只 JSON.stringify 一次是不够的：反斜杠对
+      // HTML 解析器没有意义，`\"` 里的引号会把属性收掉，后面半截 `GI"))">` 直接显示在
+      // 名字后面。市场里每张带 logo 的卡片都挂着一串乱码，就是这一处。
+      const { loadApp } = await import('./ui-dom.mjs')
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base, token: memberTok })
+      await ui.boot()
+      ui.state.path = '/connectors'
+      ui.state.market = [{ id: 'c1', toolkit: 'github', name: 'GitHub', description: '代码托管', logo: 'https://x/gh.png', blocked: false }]
+      ui.render()
+      const html = ui.html()
+      assert(html.includes('onerror='), 'logo 的兜底没画出来')
+      assert(!html.includes('\\"'), `属性里漏出了反斜杠转义：${html.slice(html.indexOf('onerror='), html.indexOf('onerror=') + 160)}`)
+      assert(html.includes('&quot;'), '兜底那段没按 HTML 属性转义')
+    })
+
+    await test('界面：插件弹窗——按钮在名单底下，点 Add 就装上，装完不跳页', async () => {
+      const { loadApp, el } = await import('./ui-dom.mjs')
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base, token: memberTok })
+      await ui.boot()
+      assert(ui.html().includes('data-act="plugins-open"'), '侧栏没有「插件」按钮')
+      assert(!/data-href="\/connectors"/.test(ui.html()), '菜单里还留着「连接器」那一行，和插件按钮重了')
+
+      await ui.fire('click', el('button', { 'data-act': 'plugins-open' }))
+      let html = ui.html()
+      assert(html.includes('gw-plugins'), '弹窗没开')
+      assert(html.includes('Gmail'), '弹窗里没有市场清单')
+      assert(html.includes(`data-act="conn-install" data-id="${connectorId}"`), '没装的应该给「添加」')
+
+      await ui.fire('click', el('button', { 'data-act': 'conn-install', 'data-id': connectorId }))
+      html = ui.html()
+      assert(ui.state.path === '/', `装完不该跳页，现在在 ${ui.state.path}`)
+      assert(html.includes('gw-plugins'), '装完弹窗被关掉了')
+      assert(ui.state.plugins.id === connectorId, '装完没落到详情上')
+      assert(html.includes('data-act="conn-add-account"'), '详情里没有「添加账号」——装完就该能连')
+      assert(html.includes('GMAIL_SEND_EMAIL'), '详情里没有工具开关')
+      // 弹窗和 /connectors/:id 两份详情分开存，否则关掉弹窗后底下那页画的是别人的账号。
+      assert(ui.state.connectorDetail == null, '弹窗把页面那份详情盖掉了')
+
+      await ui.fire('click', el('button', { 'data-act': 'plugins-close' }))
+      assert(!ui.html().includes('gw-plugins'), '关不掉')
+
+      // 装回去的这一笔要还原：下面还有测试在数装机量。
+      const del = await req(base, 'DELETE', `/me/connectors/${connectorId}/install`, { token: memberTok })
+      assert(del.status === 200, `复原卸载 ${del.status}`)
+    })
+
+    await test('界面：加账号开新标签页去授权，不把当前这一页顶掉', async () => {
+      const { loadApp, el } = await import('./ui-dom.mjs')
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base, token: memberTok })
+      await ui.boot()
+      await ui.fire('click', el('button', { 'data-act': 'plugins-open' }))
+      await ui.fire('click', el('button', { 'data-act': 'conn-install', 'data-id': connectorId }))
+      const before = ui.location.href
+
+      await ui.fire('click', el('button', { 'data-act': 'conn-add-account', 'data-id': connectorId }))
+      assert(ui.windowOpens.length === 1, `该开一个新标签页，实际开了 ${ui.windowOpens.length} 个`)
+      const tab = ui.windowOpens[0]
+      assert(tab.location.href.startsWith('https://accounts.example.com/'), `新页没送到授权地址：${tab.location.href}`)
+      assert(!tab.closed, '新页被关掉了')
+      // 反向标签劫持：授权页拿着 opener 就能把我们这一页换成钓鱼页。
+      assert(tab.opener === null, 'opener 没断')
+      // 这一边必须原封不动——弹窗多半盖在对话上，顶掉就等于把草稿和滚动位置一起扔了。
+      assert(ui.location.href === before, `当前这一页被顶掉了：${ui.location.href}`)
+      assert(ui.html().includes('gw-plugins'), '弹窗被关掉了')
+
+      // 复原：断掉刚发起的那把，再卸载。下面还有测试在数装机量和连接数。
+      const detail = await req(base, 'GET', `/me/connectors/${connectorId}`, { token: memberTok })
+      for (const c of detail.json.connections || []) {
+        await req(base, 'DELETE', `/me/connectors/${connectorId}/connections/${c.id}`, { token: memberTok })
+      }
+      const del = await req(base, 'DELETE', `/me/connectors/${connectorId}/install`, { token: memberTok })
+      assert(del.status === 200, `复原卸载 ${del.status}`)
+    })
+
+    await test('界面：关掉弹窗要把底下那页刷新；晚到的详情不许落盘', async () => {
+      const { loadApp, el } = await import('./ui-dom.mjs')
+      // 只把「取这个连接器的详情」这一条拖慢，其余照打真 Gateway。
+      let hold = 0
+      const fetchImpl = (path, init) => {
+        const go = () => fetch(base + path, init)
+        if (hold && path === `/me/connectors/${connectorId}`) return new Promise((r) => setTimeout(() => r(go()), hold))
+        return go()
+      }
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base, token: memberTok, fetchImpl })
+      await ui.boot()
+
+      // 弹窗盖在这个连接器的详情页上，而页面手上那份是过期的（多一把已经断掉的连接）。
+      // 弹窗里的改动只落在它自己那一份上，关掉时不补一次，那一行就会一直画着。
+      ui.state.path = `/connectors/${connectorId}`
+      ui.state.connectorDetail = {
+        connector: { id: connectorId, name: 'Gmail', toolkit: 'gmail', description: '', blocked: false },
+        install: { id: 'i1', enabledTools: [] },
+        connections: [{ id: 'ghost', label: '已经断掉的', scope: 'user', status: 'active', mentionOnly: false }],
+        tools: [],
+      }
+      await ui.fire('click', el('button', { 'data-act': 'plugins-open' }))
+      await ui.fire('click', el('button', { 'data-act': 'plugins-close' }))
+      assert(!ui.html().includes('已经断掉的'), '关掉弹窗之后，底下那页还画着弹窗里已经改掉的东西')
+
+      // 详情还在飞的时候退回清单：晚到的那一份不许写进来。写了就和 p.id 对不上，
+      // 弹窗永远停在「加载中…」，而且已经没有请求在飞，只能退出去重进。
+      hold = 300
+      await ui.fire('click', el('button', { 'data-act': 'plugins-open' }))
+      const inflight = ui.fire('click', el('button', { 'data-act': 'plugins-detail', 'data-id': connectorId }))
+      await ui.fire('click', el('button', { 'data-act': 'plugins-back' }))
+      await inflight
+      assert(ui.state.pluginDetail == null, '晚到的详情盖进来了')
+      assert(ui.html().includes('gw-plugins') && !ui.html().includes('加载中'), '弹窗停在「加载中…」')
     })
 
     await test('界面：员工的详情页画得出账号行、工具开关与「仅 @ 时可用」', async () => {

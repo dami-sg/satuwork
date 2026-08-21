@@ -142,19 +142,32 @@ export class ComposioProvider implements ConnectorProvider {
       .sort((a, b) => a.slug.localeCompare(b.slug))
   }
 
+  /**
+   * 发起授权走 **`/connected_accounts/link`**。
+   *
+   * 老的 `POST /connected_accounts` 对「Composio 托管的 OAuth」已经不受理了，回的是一句
+   * `Creating connections on this endpoint ... is no longer supported. Use POST
+   * /api/v3/connected_accounts/link instead.`——界面上就是那条红字。新的这条对所有认证
+   * 方式（含非 OAuth、自建配置）都是推荐路径，所以不留两条路。
+   *
+   * **`allow_multiple` 必须带。** 我们的口径是一个安装底下挂多把连接（`default`、
+   * `personal`……），而它们的 `user_id` 和 auth config 完全一样。不带这个标记的话，
+   * 第二次 link 会把**同一把** connected account 还给我们：两行本地记录共用一个
+   * externalId，断开其中一个另一个跟着废。要不要允许第二把由我们自己判（见
+   * `routes/connectors.ts` 里的 `def.multiAccount`），走到这里就是已经准了。
+   */
   async initiate(input: InitiateInput): Promise<InitiateResult> {
     const body = obj(
-      await this.call('POST', '/connected_accounts', {
+      await this.call('POST', '/connected_accounts/link', {
         body: {
-          auth_config: { id: input.authConfigId },
-          connection: {
-            user_id: input.externalUserId,
-            callback_url: input.callbackUrl,
-          },
+          auth_config_id: input.authConfigId,
+          user_id: input.externalUserId,
+          callback_url: input.callbackUrl,
+          allow_multiple: true,
         },
       }),
     )
-    const externalId = str(body.id || obj(body.connectedAccount).id)
+    const externalId = str(body.connected_account_id || body.connectedAccountId || body.id || obj(body.connectedAccount).id)
     if (!externalId) throw new ProviderError('Composio 没有返回连接 id', 0)
     const redirectUrl = redirectOf(body)
     if (!redirectUrl) throw new ProviderError('Composio 没有返回授权地址', 0)

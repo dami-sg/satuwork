@@ -106,6 +106,43 @@ export async function runMentions({ root, test, assert, log }) {
     assert(r.cancelKinds.已经开跑, '已经出队开跑的该说「已经开跑」，不能说没这条')
   })
 
+  await test('点名了却没工具：先补拉一次目录，补回来了就当无事发生', () => {
+    // 最常见的一种是「刚连上就来用」：连接是几十秒前在浏览器里授权的，而席位一分钟
+    // 才探一次目录。等下一轮探针的话，用户得到的是「我没有邮件工具」，然后他会以为
+    // 授权失败，回去把连接重做一遍。
+    assert(r.late.补拉了一次, '点名的连接没工具时没有补拉目录')
+    assert(r.late.工具补回来了, '补拉之后工具还是没进这一轮的工具表')
+    assert(r.late.不用再跟模型解释, '工具明明有了，还在跟模型说「没挂上」')
+  })
+
+  await test('补拉了还是没有：把实情说给模型听，别让它自己编替代方案', () => {
+    /**
+     * 不说这一句的代价是模型开始编。线上真发生过：用户 @Gmail (default) 说「查看
+     * 邮件」，那把连接的工具没挂上，模型一无所知，于是自己找了个替代方案——「你指定的
+     * Gmail 应该是指用桌面浏览器操作 Gmail」，接着去开虚拟桌面里的 Chrome。用户看到
+     * 的是一堆莫名其妙的 bash 调用，而真正的问题一个字都没提到。
+     */
+    assert(r.gap.也补拉了一次, '缺工具时没有补拉目录')
+    assert(r.gap.跟模型说清楚了, '点名的连接没挂上，模型那边一无所知')
+    assert(r.gap.点了名的那把写出来了, '没说清是哪一把没挂上')
+    assert(r.gap.这一轮照样跑, '为了这件事把整轮拦掉了——别的工具还是该给')
+  })
+
+  await test('「是不是点名调的」这个标记，绝不许把工具调用弄失败', () => {
+    /**
+     * 目录插件不能 inject agents（agents 那边 inject 了 catalog，绕一条环回来两边都起
+     * 不来）。原来写成 `ctx.agents?.mentionedIn?.()`，以为 `?.` 兜得住——可 cordis 的
+     * 守卫是在**取属性那一刻**抛的，`?.` 挡的是取到之后的 null。线上的表现是 Gmail 的
+     * 每一次调用都返回 `cannot get property "agents" without inject`：一个流水上的附加
+     * 标记，把整把工具打死了，而模型只能照着这句英文告诉用户「MCP 配置有问题」。
+     */
+    assert(r.viaMention.取不到就当没点名, 'ctx.agents 抛出来的异常没被接住')
+    assert(r.viaMention.reflect自己炸了也不许抛, 'reflect 出问题时还是会抛')
+    assert(r.viaMention.没有reflect也不许抛, '没有 reflect 的 ctx 会把调用弄失败')
+    assert(r.viaMention.点了名的照样认得出, '兜住异常的同时把功能也兜没了')
+    assert(r.viaMention.没点那台不算, '没点名的服务器被算成点了名')
+  })
+
   await test('取消掉的那条一个字都不留在日志里', () => {
     // 队列不写 JSONL：被取消的消息从没进过模型，写进去会让重放凭空多一条用户消息。
     assert(r.cancelled.取消的那条没进日志, '取消掉的消息进了 JSONL')

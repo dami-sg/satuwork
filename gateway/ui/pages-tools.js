@@ -129,7 +129,7 @@ function webToolsPanel() {
     (b) => b.implemented && (b.id === cfg.searchBackend || b.id === cfg.extractBackend) && !webPrice(b.id, 'search') && !webPrice(b.id, 'extract'),
   )
   return `
-    <div style="display: flex; flex-direction: column; gap: var(--space-5);">
+    <div style="display: flex; flex-direction: column; gap: var(--space-6);">
       <div class="gw-roles">
         <div class="satu-panel">
           <div>

@@ -193,7 +193,7 @@ export interface ConnectorProvider {
 |---|---|
 | `listToolkits` | `GET /toolkits` |
 | `listTools` | `GET /tools?toolkit_slug=` |
-| `initiate` | `connected_accounts.initiate({ user_id, auth_config_id })` → `redirect_url` |
+| `initiate` | `POST /connected_accounts/link { auth_config_id, user_id, callback_url, allow_multiple: true }` → `connected_account_id` + `redirect_url` |
 | `status` | `GET /connected_accounts/{id}` → `ACTIVE` / 其他 |
 | `execute` | `tools.execute(slug, { user_id, connected_account_id, arguments })` |
 
@@ -208,6 +208,16 @@ export interface ConnectorProvider {
 **用官方 SDK 还是裸 `fetch`：裸 fetch。** 接口就上面六个方法，而 `@composio/core` 会把
 一整套 provider 适配层拖进控制面——那些东西是给「agent 跑在你自己进程里」准备的，我们
 的 agent 跑在席位机器上。实现时逐条对着 API reference 钉版本，别照抄本文里的路径。
+
+**`initiate` 那一条踩过一次坑，记在这儿。** 老的 `POST /connected_accounts`（`auth_config`
+和 `connection` 两个嵌套对象）对「Composio 托管的 OAuth」已经不受理了，回的是一句
+`Use POST /api/v3/connected_accounts/link instead`，而那句英文会一路顶到员工的插件弹窗
+上。新的 `/connected_accounts/link` 对所有认证方式都是推荐路径，所以只留这一条。
+**`allow_multiple: true` 不能省**：一个安装底下的几把连接（`default`、`personal`……）
+`user_id` 和 auth config 完全一样，不带这个标记的话第二次 link 会把同一把 connected
+account 还回来，两行本地记录共用一个 externalId，断开其中一个另一个跟着废。允不允许
+第二把由我们自己判（§4 的 `multiAccount`），走到 provider 这一层就是已经准了。
+e2e 里的假 Composio 照着上游原话把老路打回（`e2e/connectors.mjs`），走回去立刻红。
 
 **换供应商时会变的只有 `composio.ts`。** 会不好受的地方提前说清楚：工具 slug
 （`GMAIL_SEND_EMAIL`）是 Composio 的命名，换家之后工具名会变，而工具名已经进了历史
@@ -232,7 +242,12 @@ export interface ConnectorProvider {
 
 1. Gateway 写 `connector_connections`（`status: 'pending'`），调 `provider.initiate`，
    `callbackUrl` 是 `{GATEWAY_URL}/oauth/connectors/callback`
-2. 响应给 `redirectUrl`，浏览器跳过去，在 Google 那边完成授权
+2. 响应给 `redirectUrl`，浏览器**新开一页**跳过去，在 Google 那边完成授权。不顶掉当前
+   这一页：插件弹窗多半是盖在对话上开的，整页跳走等于把草稿、滚动位置、刚选好的那颗
+   Bot 一起扔了，而人只是想加一个邮箱。新标签页要在**点击那一下里**就开出来（地址还得
+   先向后端要，`await` 之后再 open 会被拦截器当成非用户触发挡掉），被挡下来就退回整页跳
+   ——什么都不发生比换一页更糟。回到原来那一页时补取一次账号列表：授权发生在另一个
+   标签页里，这一边一个事件都收不到
 3. 供应商回调 `/oauth/connectors/callback`
 4. **Gateway 不信回调里带的任何状态**，拿 `connectionId` 回头调 `provider.status()`，
    `ACTIVE` 才把行改成 `active`。回调是从公网进来的，参数谁都能伪造；而这一步的产物是
@@ -378,6 +393,23 @@ Gmail (personal)」的纯文本，Bot 就分不清「用户点名了这把连接
 4. **顺序有意义。** 被点名的工具要排到工具表**最前**——表一长，模型就在前几个里选，
    排在第 40 位等于没点。这一条落在 `bridgeTools` 上：它收的必须是一份**有序清单**，
    不是一个名字集合，否则顺序在那里被 `ctx.tools.schemas()` 的注册顺序覆盖掉
+
+### 点名了、工具却不在表里
+
+两步，缺一不可（`bot/src/agent/index.ts` 的 `mentionGaps`）：
+
+1. **先补拉一次目录。** 最常见的一种是「刚连上就来用」——连接是几十秒前在浏览器里授权
+   的，而席位一分钟才探一次（`catalog.poll`）。等下一轮探针的话，用户得到的是一句「我
+   没有邮件工具」，然后他会以为授权失败，回去把连接重做一遍。只在有点名且确实缺工具时
+   才拉，不摊到每一轮上
+2. **拉完还是没有，就把实情写进这一轮的系统提示**：哪几把没挂上、不要另找办法代替、
+   直接告诉用户去「插件」里看看那把连接的状态。
+
+**不说这一句的代价是模型开始编。** 线上真发生过：用户 `@Gmail (default)` 说「查看邮件」，
+那把连接的工具没挂上，模型一无所知，于是自己找了个替代方案——「你指定的 Gmail 应该是指
+用桌面浏览器操作 Gmail」，接着去开虚拟桌面里的 Chrome。用户看到的是一屏莫名其妙的 bash
+调用，而真正的问题一个字都没提到。这段话**只进这一轮的系统提示**，不写进消息：重放时
+工具表可能已经好了，那时不该还带着它（不变量 7）。
 
 **Gateway 必须校验 mentions，不能原样透传。** 发消息是 Gateway 反代到席位的
 （`gateway-runtime.md` §12）；浏览器传上来的 `conn_xxx` 要逐个查：属不属于这个账号、
@@ -729,6 +761,26 @@ create index if not exists calls_account_time on connector_calls ("accountId","c
   - 市场：分组卡片，每张一个「安装 / 已安装」按钮，被公司禁的灰着并写明原因
   - 详情：账号列表（每行一个 label + 状态 + 「仅 `@` 时可用」开关 + 断开）、
     「添加账号」、工具开关（`n of m enabled`，展开是勾选列表）
+
+### 员工的入口是「插件」，不是菜单里那一行
+
+侧栏 Bot 名单底下、「新建 Bot」下面一颗**「插件」**按钮（`render.js` 的 `appView`），
+点开是弹窗 `pluginsModal()`（`pages-connectors.js`），不跳页：
+
+- 市场 / 已安装两个页签 + 搜索；每行一颗「添加」（未装）或「管理」（已装）
+- 「添加」= 安装，装完**留在同一个弹窗里**，直接翻到详情连账号、挑工具
+- 用的是和详情页同一套零件（`connectionRow` / `connectorToolsBox`），不另画一份
+
+**为什么不是菜单里一行。** 装插件是**为了把话说完**才做的事——「让它读一下我的邮件」
+说到一半才发现 Gmail 没装。跳走一整页，回来时草稿、滚动位置、刚选好的那颗 Bot 全没了。
+所以 `MEMBER_NAV` 又空了（同一件事留两个并排的入口，只会让人问这两个有什么不一样），
+但**页面没有撤**：`/connectors` 和 `/connectors/:id` 还在，OAuth 回调就落在那儿
+（§6 那个 302），所以 `allowedHrefs()` 里给非 owner 单独放行了 `/connectors`。
+
+弹窗的详情存在 `state.pluginDetail`，**和页面那份 `state.connectorDetail` 分开**：
+弹窗能盖在 `/connectors/:id` 上面，共用一个字段的话，在弹窗里翻了别的插件，关掉之后
+底下那页画的是别人的账号。同理，`conn-label` / `conn-tool` 这些控件两边同名，读值要
+限定在弹窗里（`connRoot()`），不然取到的是底下那页那一份。
 
 聊天那一侧（`gateway/ui/chat.js`）四件事：输入框打 `@` 弹选单（走 `/mentions`）、
 选中后在输入框里渲染成药丸、发送时把 `mentions` 一起带上、以及**排队 dock**。历史消息

@@ -498,14 +498,7 @@ export class CatalogService extends Service {
       parameters,
       execute: async (args, call) => {
         try {
-          /**
-           * 这一次是不是用户 `@` 点名的这台服务器。
-           *
-           * 只有这一侧知道答案（点名决定的是这一轮的工具表），所以由这里带给服务端，
-           * 让流水上记得住「人点的还是模型自己挑的」。`agents` 用可选取法，免得目录
-           * 插件为一个附加信息去 inject 它、绕出一条依赖环。
-           */
-          const viaMention = this.ctx.agents?.mentionedIn?.(call.sessionId ?? '')?.has(serverId) === true
+          const viaMention = viaMentionOf(this.ctx, call.sessionId ?? '', serverId)
           const text = await client.callTool(remoteName, args, viaMention ? { viaMention: true } : undefined)
           return { text }
         } catch (e) {
@@ -515,6 +508,32 @@ export class CatalogService extends Service {
     })
     this.mcpEffects.push(() => (fork as Dispose)())
     this.toolServer.set(name, serverId)
+  }
+}
+
+/**
+ * 这一次调用是不是用户 `@` 点名的这台服务器。
+ *
+ * 只有席位这一侧知道答案（点名决定的是这一轮的工具表），所以由这里带给 Gateway，
+ * 让流水上记得住「人点的还是模型自己挑的」。目录插件**不能 inject `agents`**——
+ * agents 那边 inject 了 catalog，绕一条依赖环回来两边都起不来。
+ *
+ * **`ctx.agents?.` 这种写法挡不住。** cordis 的 inject 守卫是在**取属性那一刻**抛的
+ * （`cannot get property "agents" without inject`），`?.` 挡的是取到之后的 null，不是
+ * 取的过程。线上就是这么坏的：Gmail 的每一次调用都返回这句英文，因为它在那个 try 里
+ * 被当成了「MCP 调用失败」——一个流水上的附加标记，把整个工具打死了。
+ *
+ * 所以两层保险：`reflect.get` 直接查服务表、不走 inject 那一层；外面再包一个 catch，
+ * **无论如何都不许从这里抛出去**。取不到就当没点名——大不了流水上少一个标记。
+ */
+export function viaMentionOf(ctx: Context, sessionId: string, serverId: string): boolean {
+  try {
+    const agents = (ctx as unknown as { reflect?: { get?: (name: string) => unknown } }).reflect?.get?.('agents') as
+      | { mentionedIn?: (id: string) => Set<string> | undefined }
+      | undefined
+    return agents?.mentionedIn?.(sessionId)?.has(serverId) === true
+  } catch {
+    return false
   }
 }
 

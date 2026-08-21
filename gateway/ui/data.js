@@ -218,6 +218,21 @@ async function loadConnectorDetail(id) {
   state.connectorDetail = await api('GET', `/me/connectors/${encodeURIComponent(id)}`)
 }
 
+/**
+ * 插件弹窗那一份详情。**和页面那份分开存**：弹窗能盖在 `/connectors/:id` 上面，共用
+ * 一个字段的话，在弹窗里翻了别的插件，关掉之后底下那页画的是别人的账号。
+ *
+ * **晚到的那一份不落盘。** 在弹窗里翻得快时两次请求会乱序回来（进 A、退出来、再进 B，
+ * A 的响应后到），而渲染那边是按 id 认的——盖错了就永远停在「加载中…」，且已经没有
+ * 请求在飞，只能退出去重进。弹窗中途被关掉也走这一条：state.plugins 没了，就别再往
+ * 一个已经不存在的屏上写数据。
+ */
+async function loadPluginDetail(id) {
+  const detail = await api('GET', `/me/connectors/${encodeURIComponent(id)}`)
+  if (state.plugins?.id !== id) return
+  state.pluginDetail = detail
+}
+
 async function loadSettings() {
   if (isOwner()) {
     state.settings = await api('GET', '/platform/settings')

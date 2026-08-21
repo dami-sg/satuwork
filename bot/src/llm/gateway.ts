@@ -188,6 +188,22 @@ async function consumeOpenAI(
   let partial: any = emptyAssistant(model)
   let started = false
   let textIndex = -1
+  /**
+   * 上游 `tool_calls[].index` → 我们 `content[]` 里的下标。
+   *
+   * **两个下标不是一回事。** 上游那个是「这是第几把工具」，我们这个数组里还躺着正文
+   * 块。拿前者当后者用会出两种事故，线上都见过：
+   *
+   * - 正文先来（`content[0]` 是文字），随后 `index:0` 的工具增量落到**正文块**上，
+   *   第一把工具就此消失——界面上不留任何痕迹，模型却以为自己调了。
+   * - 反过来，正文走的是 `reasoning_content`（这一路我们不收进 content），而上游按
+   *   整条消息给下标，工具从 `index:1` 起：`while` 循环为了填到 1，先在 0 位补出一个
+   *   **空壳** `{name:'', id:''}`。它照样会被 pi 拿去执行，找不到叫「」的工具，于是
+   *   每一轮开头都挂一颗红色的「tool · 失败」，点开里面什么都没有。
+   *
+   * 改成按 key 记账：**有增量才建块**，块建在数组末尾，两个下标各归各的。
+   */
+  const toolSlot = new Map<number, number>()
   const start = () => {
     if (started) return
     started = true
@@ -222,11 +238,15 @@ async function consumeOpenAI(
     if (Array.isArray(delta.tool_calls)) {
       start()
       for (const tc of delta.tool_calls) {
-        const idx = typeof tc.index === 'number' ? tc.index : partial.content.length
-        while (partial.content.length <= idx) {
-          const i = partial.content.length
+        // 没给 index 的（一次给全的非流式风格）按到达顺序排，各占一格。
+        const key = typeof tc.index === 'number' ? tc.index : toolSlot.size
+        let idx = toolSlot.get(key)
+        if (idx === undefined) {
+          // Number()：partial 是 any，直接赋值不会把 idx 从 number|undefined 收窄。
+          idx = Number(partial.content.length)
+          toolSlot.set(key, idx)
           partial.content.push({ type: 'toolCall', id: '', name: '', arguments: {} })
-          stream.push({ type: 'toolcall_start', contentIndex: i, partial })
+          stream.push({ type: 'toolcall_start', contentIndex: idx, partial })
         }
         const block = partial.content[idx]
         if (tc.id) block.id = tc.id
