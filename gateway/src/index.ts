@@ -96,12 +96,30 @@ const server = listen(router)
 attachDesktopUpgrade(server, db, keys)
 
 let closing = false
+/**
+ * 收工。**光 `server.close()` 是关不掉的。**
+ *
+ * 它只做两件事：停止接受新连接、等**已有的**连接自己结束。而这台服务上挂着的恰恰
+ * 都是不会自己结束的东西——对话的 SSE、桌面的 WebSocket、浏览器的 keep-alive。于是
+ * 进程停在一个最坏的状态：端口已经不听了（谁来都是 connection refused），进程却还
+ * 活着不退出。人在终端里按了 Ctrl-C，看着它不动，再按一次——上面那句 `if (closing)
+ * return` 把第二下也吃掉了，只剩 kill -9。线上遇到过一次，界面全挂而进程列表里一切
+ * 正常。
+ *
+ * 所以：连接**主动掐掉**，第二次按就立刻走，再加一道超时兜底（pg 池、定时器这些
+ * 还吊着事件循环时，也不能无限期挂着）。
+ */
 function shutdown() {
-  if (closing) return
+  if (closing) {
+    // 按第二下的人已经表达过一次「现在就停」，别再让他等。
+    process.exit(1)
+  }
   closing = true
   server.close(() => {
     void db.close()
   })
+  server.closeAllConnections?.()
+  setTimeout(() => process.exit(0), 3000).unref?.()
 }
 
 process.on('SIGINT', shutdown)

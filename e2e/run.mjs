@@ -32,6 +32,7 @@ import { runHistoryTime } from './history-time.mjs'
 import { runCompact } from './compact.mjs'
 import { runMaxSteps } from './max-steps.mjs'
 import { runToolCalls } from './toolcalls.mjs'
+import { runShutdown } from './shutdown.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
 import { uiSource } from './ui-dom.mjs'
@@ -2829,6 +2830,7 @@ async function main() {
     await runCompact({ root, test, assert, log })
     await runMaxSteps({ root, test, assert, log })
     await runToolCalls({ root, test, assert, log })
+    await runShutdown({ gwRoot, test, start, waitHttp, assert, log })
   } finally {
     killAll()
     try {
