@@ -614,6 +614,24 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       )
     })
 
+    await test('平台菜单是分组的，且分组没有吃掉任何一条入口', async () => {
+      // 十几条平铺是找不到落点的。分组之后要盯住两件事：**组还在**（有人把标题删了，
+      // 菜单就退回一根柱子），以及**条目一条不少**——漏一条的表现是那一页从此没有入口，
+      // 而页面还在、地址还通，翻遍界面也找不到它。
+      const ui = await boot(ownerToken)
+      const html = ui.html()
+      const groups = [...html.matchAll(/<div class="satu-navgroup">([\s\S]*?)<\/div>/g)].map((m) => m[1])
+      assert(groups.length >= 4, `平台菜单只剩 ${groups.length} 组，分组没生效`)
+      const titled = groups.filter((g) => g.includes('satu-group'))
+      assert(titled.length === groups.length - 1, '除了「概览」那一组，每组都该有标题')
+      const inGroups = groups.reduce((n, g) => n + (g.match(/class="satu-nav"/g) || []).length, 0)
+      const all = (html.match(/class="satu-nav"/g) || []).length
+      assert(inGroups === all, `有 ${all - inGroups} 条入口掉在了所有分组外面`)
+      // 「先看哪台机器出事，再谈给它发什么包」——这两条是一组里的一对，不能被拆散。
+      const machines = groups.find((g) => g.includes('机器管理'))
+      assert(machines && machines.includes('机器配置'), '机器管理和机器配置被分到了两组')
+    })
+
     await test('通联灯：后端没给 link 时说「状态未知」，不谎称「还没有配对」', async () => {
       // 前端比后端新一步时（浏览器读磁盘上的 app.js，Gateway 要重启才换代码）响应里
       // 没有 link 这个字段。原来的兜底是 `m.link || 'unpaired'`，于是一台心跳正常、

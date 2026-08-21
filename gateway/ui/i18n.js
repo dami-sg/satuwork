@@ -30,6 +30,14 @@ window.SATU_I18N = {
   'Bot 配置': 'Bot Config',
   'Skill 与 MCP': 'Skills & MCP',
   对话: 'Chat',
+  // 平台侧栏的组标题（OWNER_NAV_GROUPS）。「能力」在下面的通用短标签里已经有了。
+  客户: 'Customers',
+  基础设施: 'Infrastructure',
+  经营: 'Business',
+  // 这几条本来漏了，英文界面上是三块中文。
+  '全局 Skill 与 MCP': 'Global Skills & MCP',
+  工具配置: 'Tools',
+  连接器: 'Connectors',
 
   // ── 通用动作与短标签 ────────────────────────────────────────────────
   你: 'You',

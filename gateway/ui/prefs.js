@@ -265,31 +265,73 @@ const GEAR = [
   'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6 1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z',
 ]
 
-const OWNER_NAV = [
-  { href: '/', label: '概览', icon: 'overview' },
-  { href: '/companies', label: '公司', icon: 'company' },
-  // 机器管理在机器配置**上面**：先是「平台上有哪些机器、哪台出事了」，然后才是
-  // 「给它们发什么版本的包」。发布包那一页是给这一页服务的，不是反过来。
-  { href: '/machines', label: '机器管理', icon: 'machines' },
-  { href: '/releases', label: '机器配置', icon: 'bots' },
-  { href: '/users', label: '用户', icon: 'accounts' },
-  { href: '/providers', label: '供应商', icon: 'providers' },
-  { href: '/models', label: '模型配置', icon: 'models' },
-  // 工具配置紧跟模型配置：两者都是「Bot 能用什么」，只是一个是脑子一个是手。
-  { href: '/tools', label: '工具配置', icon: 'tools' },
-  { href: '/plans', label: '套餐', icon: 'plans' },
-  { href: '/orders', label: '购买与充值', icon: 'billing' },
-  { href: '/stats', label: '统计', icon: 'stats' },
-  // 全局 Skill / MCP：所有公司都看得见。跟公司侧共用同一套页面，差别只在
-  // catalogBase() 给出的接口前缀。
-  //
-  // **「全局 Bot」不在这份菜单里。** 平台这一侧管的是公司、机器、模型和钱，Bot 名录
-  // 是公司侧的东西；把它摆在平台菜单里，每次进来都要先分辨「这是全局的还是某家公司
-  // 的」。页面本身没有撤——全局 Bot 目录还得有人维护，而 owner 是唯一改得动它的人，
-  // 所以 allowedHrefs 里单独补了 /bots，直接输地址仍然进得去。
-  { href: '/skills', label: '全局 Skill 与 MCP', icon: 'skills' },
-  { href: '/connectors', label: '连接器', icon: 'providers' },
+/**
+ * 平台侧栏。**分组的，不是一条长名单。**
+ *
+ * 这一侧有十几个入口，平铺下来是一根找不到落点的柱子：机器、模型、套餐、公司混在
+ * 一起，每次都得从头读一遍才知道要点哪个。按「这一屏在管什么」切开之后，找东西先
+ * 认组再认条，一眼就能跳过四分之三。
+ *
+ * 组内顺序仍然有讲究，见各组注释；组的顺序按「多久看一次」排：先是客户和机器（天天
+ * 看），然后是能力（改一次管很久），最后是钱（月末才翻）。
+ *
+ * 第一组没有标题——「概览」就一条，给它盖个名字只是多一行字。
+ */
+const OWNER_NAV_GROUPS = [
+  { label: '', items: [{ href: '/', label: '概览', icon: 'overview' }] },
+  {
+    // 公司和用户是同一件事的两个粒度：一家公司里坐着哪些人。查一个人多半是从他所在
+    // 的公司找过去的，反过来也一样，所以这两条挨着。
+    label: '客户',
+    items: [
+      { href: '/companies', label: '公司', icon: 'company' },
+      { href: '/users', label: '用户', icon: 'accounts' },
+    ],
+  },
+  {
+    // 机器管理在机器配置**上面**：先是「平台上有哪些机器、哪台出事了」，然后才是
+    // 「给它们发什么版本的包」。发布包那一页是给这一页服务的，不是反过来。
+    label: '基础设施',
+    items: [
+      { href: '/machines', label: '机器管理', icon: 'machines' },
+      { href: '/releases', label: '机器配置', icon: 'bots' },
+    ],
+  },
+  {
+    // 这一组答的是同一个问题：**Bot 能用什么**。供应商是模型从哪来，模型配置是上了
+    // 哪些脑子，工具配置和全局 Skill / MCP 是手，连接器是它能登进哪些外部账号。
+    // 全局 Skill / MCP 跟公司侧共用同一套页面，差别只在 catalogBase() 给出的接口前缀。
+    label: '能力',
+    items: [
+      { href: '/providers', label: '供应商', icon: 'providers' },
+      { href: '/models', label: '模型配置', icon: 'models' },
+      { href: '/tools', label: '工具配置', icon: 'tools' },
+      { href: '/skills', label: '全局 Skill 与 MCP', icon: 'skills' },
+      { href: '/connectors', label: '连接器', icon: 'providers' },
+    ],
+  },
+  {
+    // 钱：卖什么、收了多少、用掉多少。统计留在这一组而不是跟着「概览」，是因为翻它
+    // 的时候多半正在对账，而不是在看今天平台好不好。
+    label: '经营',
+    items: [
+      { href: '/plans', label: '套餐', icon: 'plans' },
+      { href: '/orders', label: '购买与充值', icon: 'billing' },
+      { href: '/stats', label: '统计', icon: 'stats' },
+    ],
+  },
 ]
+
+/**
+ * 拍平的那一份。allowedHrefs() 只关心「这个角色能去哪些地址」，不关心分组；分了组
+ * 之后它照旧从这里读，省得每处都去展一遍。
+ *
+ * **「全局 Bot」不在这份菜单里。** 平台这一侧管的是公司、机器、模型和钱，Bot 名录
+ * 是公司侧的东西；把它摆在平台菜单里，每次进来都要先分辨「这是全局的还是某家公司
+ * 的」。页面本身没有撤——全局 Bot 目录还得有人维护，而 owner 是唯一改得动它的人，
+ * 所以 allowedHrefs 里单独补了 /bots，直接输地址仍然进得去。
+ */
+const OWNER_NAV = OWNER_NAV_GROUPS.flatMap((g) => g.items)
 
 const ADMIN_NAV = [
   { href: '/company', label: '公司/席位', icon: 'company' },
@@ -307,3 +349,13 @@ const ADMIN_NAV = [
  * 进来的东西——它是「我这个人有哪些账号」，不属于任何一颗 Bot。
  */
 const MEMBER_NAV = [{ href: '/connectors', label: '连接器', icon: 'providers' }]
+
+/**
+ * 公司侧和员工侧还是一整组。
+ *
+ * 公司管理员那八条本来就同属一件事（「我这家公司」），再切一刀只会切出「两条一组」
+ * 这种没有信息量的堆；员工只有一条。分组是给平台那一侧的长名单用的，短名单不需要。
+ * 侧栏只认这一种形状，所以这里把它们各自包成一组，渲染那边不必再分角色判一次。
+ */
+const ADMIN_NAV_GROUPS = [{ label: '公司', items: ADMIN_NAV }]
+const MEMBER_NAV_GROUPS = [{ label: '', items: MEMBER_NAV }]
