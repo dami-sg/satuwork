@@ -383,6 +383,48 @@ async function saveSettings(patch) {
 }
 
 /**
+ * 存一个模型的单价覆盖。`clear` = 撤掉这一条，回到目录价。
+ *
+ * 四项全空也当撤掉：空表和「有一条但四项都是 0」在服务端是一个意思
+ * （parseModelPricing 会把全 0 的丢掉），界面上不该多出一条看不出有什么用的记录。
+ */
+async function saveModelPrice(clear = false) {
+  const d = state.priceDraft
+  if (!d) return
+  const num = (v) => {
+    const raw = String(v ?? '').trim()
+    if (!raw) return 0
+    const n = Number(raw)
+    return Number.isFinite(n) && n >= 0 ? n : NaN
+  }
+  const next = { input: num(d.input), output: num(d.output), cacheRead: num(d.cacheRead), cacheWrite: num(d.cacheWrite) }
+  if (!clear && Object.values(next).some((n) => Number.isNaN(n))) {
+    state.priceError = '单价只能是不小于 0 的数字'
+    render()
+    return
+  }
+  const table = { ...(state.settings?.modelPricing || {}) }
+  const empty = clear || !Object.values(next).some((n) => n > 0)
+  if (empty) delete table[d.key]
+  else table[d.key] = next
+  state.busy = true
+  state.priceError = ''
+  render()
+  try {
+    const saved = await api('PUT', '/platform/settings', { ...state.settings, modelPricing: table })
+    state.settings = saved
+    if (state.me) state.me.settings = saved
+    state.priceDraft = null
+    flash('ok', empty ? '已撤掉覆盖，回到目录价' : '已保存单价')
+  } catch (err) {
+    state.priceError = err.message
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
+/**
  * 存倍率。服务端也校验区间——这里先挡一道，是为了让输入框里那个手滑的值
  * 当场退回上一个有效值，而不是先画出来再被一条错误提示纠正。
  */
@@ -588,7 +630,15 @@ async function saveCustomModel() {
       maxTokens: Number(d.maxTokens),
       reasoning: !!d.reasoning,
       input: d.image ? ['text', 'image'] : ['text'],
-      cost: { input: Number(d.costInput) || 0, output: Number(d.costOutput) || 0, cacheRead: 0, cacheWrite: 0 },
+      // 缓存两项留空就送 0 上去，服务端按「没填」处理、回落到输入价。
+      // 之前这里是硬编码的 0，于是自定义供应商的模型永远没有缓存价——缓存读按输入价
+      // 收，高估十倍，而且界面上连个能改的地方都没有。
+      cost: {
+        input: Number(d.costInput) || 0,
+        output: Number(d.costOutput) || 0,
+        cacheRead: Number(d.costCacheRead) || 0,
+        cacheWrite: Number(d.costCacheWrite) || 0,
+      },
     }]
     await putModels(state.modelsFor, next)
     state.modelDraft = null

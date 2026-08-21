@@ -13,8 +13,10 @@ import { type Account, type Company, type Db, type Invoice, type OrderKind, type
  *   套餐一到期就没有生效订单了，这个数当场归零——没用完也不结转。
  * - **单独充值**：`topups` 累加，不过期，用完为止。
  *
- * 消耗还没接：`llm_calls` 只记 token，不记钱，所以这里报的是「发下去多少」。
- * 等按量扣费落地，两个数各自减去自己承担的那部分即可，形状不用变。
+ * **这里报的是「发下去多少」，不是「还剩多少」。** 消耗在账本上（`usage_charges`），
+ * 由 `lib/meter.ts` 的 `budget()` 拿这两个数减去各自桶里已经花掉的部分。
+ * 分成两步是因为这两个数的变化频率差着几个数量级：发多少只有平台管理员动手时才变，
+ * 花多少每次调用都在动。
  */
 export async function balanceOf(db: Db, companyId: string) {
   const active = await db.activePaidOrder(companyId)

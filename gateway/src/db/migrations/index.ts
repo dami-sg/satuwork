@@ -4,6 +4,9 @@ import { SQL as m0003 } from './0003-seed-bot-templates.ts'
 import { SQL as m0004 } from './0004-connectors.ts'
 import { SQL as m0005 } from './0005-connector-bonus-split.ts'
 import { SQL as m0006 } from './0006-web-calls.ts'
+import { SQL as m0007 } from './0007-usage-charges.ts'
+import { SQL as m0008 } from './0008-llm-cache-write.ts'
+import { SQL as m0009 } from './0009-multiplier-precision.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -41,6 +44,9 @@ export const MIGRATIONS: Migration[] = [
   // 分支上原本占的是 0002，和 main 撞了。**迁移的编号是身份**，撞号意味着两套库
   // 各自记着「0002 跑过了」却跑的是不同的东西，所以让路排到最后。
   { id: '0006-web-calls', name: '网页工具的按次计量表', sql: m0006 },
+  { id: '0007-usage-charges', name: '计费账本：三条计费路唯一的钱', sql: m0007 },
+  { id: '0008-llm-cache-write', name: 'llm_calls 记下缓存写的 token', sql: m0008 },
+  { id: '0009-multiplier-precision', name: '账本的倍率换成 double precision', sql: m0009 },
 ]
 
 /**

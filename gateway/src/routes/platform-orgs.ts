@@ -11,7 +11,7 @@ import { requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
 import { type PlanSku } from '../db.ts'
 
 export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
-  const { db, keys } = ctx
+  const { db, keys, meter } = ctx
 
   router.get('/platform/orgs', async (req, res) => {
     const account = await requireUser(req, db, keys)
@@ -242,6 +242,9 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
         action: 'platform.order.create',
         detail: { id: order.id, kind: 'topup', amountMils, note, payStatus },
       })
+      // 余额变了。不作废记忆的话，刚充完钱的公司还要被熔断一会儿——而那一会儿正是
+      // 有人盯着屏幕等它恢复的时候。
+      meter.forget(company.id)
       json(res, 201, {
         order: publicPlanOrder(order, company),
         topup: topup ? publicTopup(topup, company, account) : null,
@@ -288,6 +291,7 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
       action: 'platform.order.create',
       detail: { id: order.id, planId: sku.id, planName: sku.name, period, seats, amountMils, bonusMils, payStatus },
     })
+    meter.forget(company.id)
     json(res, 201, { order: publicPlanOrder(order, company), invoice: publicInvoice(invoice) })
   })
 
@@ -320,6 +324,10 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
         action: 'platform.order.update',
         detail: { id: order.id, kind: 'topup', amountMils, note, payStatus },
       })
+      // 改单会把余额往两个方向推（改金额、把已付款退回未付款），两家都得作废：
+      // 换公司时老东家的余额也变了。
+      meter.forget(cur.companyId)
+      meter.forget(company.id)
       json(res, 200, {
         order: publicPlanOrder(order, company),
         topup: topup ? publicTopup(topup, company) : null,
@@ -362,6 +370,8 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
       action: 'platform.order.update',
       detail: { id: order.id, planId, planName, period, seats, amountMils, bonusMils, payStatus },
     })
+    meter.forget(cur.companyId)
+    meter.forget(company.id)
     json(res, 200, { order: publicPlanOrder(order, company), invoice: publicInvoice(invoice) })
   })
 

@@ -4,7 +4,7 @@
  * 从 routes.ts 拆出来的——那个文件曾经是 5700 行，前 1900 行全是这类帮手。
  */
 import { HttpError, type Req, bearer } from '../http.ts'
-import { JWT_TTL, KIND } from './validate.ts'
+import { JWT_TTL, KIND, usdMicros } from './validate.ts'
 import { type Account, type AccountStatus, type CatalogKind, type Db, type Machine, type Role } from '../db.ts'
 import { type JwtKeys, type JwtPayload, randomInviteToken, sha256Hex, signJwt, timingSafeToken, verifyJwt } from '../crypto.ts'
 
@@ -157,8 +157,20 @@ export function rangeQuery(req: Req): { from?: number; to?: number } {
 
 export function usagePayload(
   usage: { calls: number; promptTokens: number; completionTokens: number; byAccount: { accountId: string; calls: number; promptTokens: number; completionTokens: number; lastAt: number | null }[] },
-  opts: { seats: number; members: Account[]; includeMembers: boolean },
+  opts: {
+    seats: number
+    members: Account[]
+    includeMembers: boolean
+    /**
+     * 账本上每个人扣了多少微元。**含三条计费路**，不只是模型——「谁烧的钱」这个问题
+     * 按 token 是答不全的：一个人跑一天搜索、一次模型都不调，按 token 看他是零。
+     */
+    spentByAccount?: Map<string, number>
+    /** 这个范围内一共扣了多少微元。顶上那张「费用」卡用它。 */
+    spentMicros?: number
+  },
 ) {
+  const spent = opts.spentByAccount ?? new Map<string, number>()
   const byAccount = new Map(usage.byAccount.map((row) => [row.accountId, row]))
   /**
    * 名册上已经没有、但用量记录还在的那些人。
@@ -179,7 +191,7 @@ export function usagePayload(
           initial: '·',
           tasks: String(departed.reduce((n, r) => n + r.calls, 0)),
           tokens: String(departed.reduce((n, r) => n + r.promptTokens + r.completionTokens, 0)),
-          fail: '—',
+          amount: usdMicros(departed.reduce((n, r) => n + (spent.get(r.accountId) ?? 0), 0)),
           last: '—',
         }
   return {
@@ -187,7 +199,8 @@ export function usagePayload(
       { label: '任务执行', value: String(usage.calls), delta: '—' },
       { label: '输入 Tokens', value: String(usage.promptTokens), delta: '—' },
       { label: '输出 Tokens', value: String(usage.completionTokens), delta: '—' },
-      { label: '费用', value: '—', delta: '—' },
+      // 以前这里永远是 '—'（「按量扣费还没接」）。现在是真的。
+      { label: '费用', value: usdMicros(opts.spentMicros ?? 0), delta: '—' },
     ],
     daily: [] as unknown[],
     byAgent: [] as unknown[],
@@ -210,7 +223,7 @@ export function usagePayload(
                 initial,
                 tasks: String(row?.calls ?? 0),
                 tokens: String(tokens),
-                fail: '—',
+                amount: usdMicros(spent.get(m.id) ?? 0),
                 last: '—',
               }
             }),

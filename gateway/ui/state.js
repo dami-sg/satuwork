@@ -76,6 +76,9 @@ const state = {
   /** 正在编模型清单的那个自定义供应商 id。 */
   modelsFor: '',
   modelDraft: null,
+  /** 改价弹层：{ key, catalog, input, output, cacheRead, cacheWrite }。 */
+  priceDraft: null,
+  priceError: '',
   inviteOpen: false,
   inviteLink: '',
   inviteEmail: '',
@@ -131,6 +134,16 @@ const state = {
   skillFailure: '',
   billing: null,
   billingTab: 'sub',
+  /**
+   * 计费明细一页。**服务端分页**，不是前端切页——账本一家公司一天就能几千行。
+   *
+   * `cursors` 是往回翻用的游标栈：游标分页只知道「下一页从哪开始」，不记着来路就
+   * 只能单向走。栈顶是当前页的起点，null 表示第一页。
+   */
+  charges: null,
+  chargesLoading: false,
+  chargesKind: '',
+  chargesCursors: [null],
   billingAutoRenew: null,
   usage: null,
   usageRange: null,

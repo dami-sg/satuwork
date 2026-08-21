@@ -68,8 +68,19 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
   await client.connect()
   await client.query(`set search_path to ${SCHEMA}`)
 
+  /**
+   * 一次网页调用 = 一行 web_calls（事实）+ 一行 usage_charges（钱），按 refId 串。
+   *
+   * 金额从账本上取，不看 `web_calls.mils`——那一列从计费账本落地之后就停写了，
+   * 新行恒为 0（docs/billing.md §2）。单位也换了：厘 → 微元，1 mil = 1000 micros。
+   */
   const webCalls = async () =>
-    (await client.query('select kind, backend, units, mils, "createdAt" from web_calls order by "createdAt"')).rows
+    (
+      await client.query(
+        'select w.kind, w.backend, w.units, w."createdAt", coalesce(u."amountMicros", 0)::int as micros' +
+          ' from web_calls w left join usage_charges u on u."refId" = w.id order by w."createdAt"',
+      )
+    ).rows
 
   try {
     let token = ''
@@ -104,6 +115,15 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       )
       seatToken = secrets.rows[0].accessToken
       assert(seatToken.startsWith('sat_'), `席位票不对：${seatToken}`)
+
+      // 网页工具是要收钱的（下面配的是 8 厘一次），而余额熔断默认是开着的：
+      // 没有余额的公司连搜索都发不出去。先充一笔，这一份才测得到计费本身。
+      // 「余额为 0 会怎样」在 e2e/billing.mjs 里单独验。
+      const topup = await req(base, 'POST', '/platform/orders', {
+        token,
+        body: { companyId: org.json.company.id, kind: 'topup', amount: 10, payStatus: 'paid', note: 'web e2e' },
+      })
+      assert(topup.status === 201, `topup ${topup.status} ${topup.text}`)
     })
 
     await test('工具配置只有系统管理员看得见', async () => {
@@ -177,8 +197,8 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(r.json.hits.length === 2, `条数 ${r.json.hits.length}`)
       const rows = await webCalls()
       assert(rows.length === 1, `账目 ${rows.length} 条`)
-      // 8 厘 × 1 次 × 1.2 = 9.6 → 10
-      assert(rows[0].mils === 10, `金额 ${rows[0].mils}，应当是 10`)
+      // 8 厘 × 1 次 × 1.2 = 9.6 厘 = 9600 微元
+      assert(rows[0].micros === 9600, `金额 ${rows[0].micros} 微元，应当是 9600`)
       assert(rows[0].units === 1 && rows[0].kind === 'search', JSON.stringify(rows[0]))
     })
 
@@ -201,8 +221,9 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       const rows = await webCalls()
       const last = rows[rows.length - 1]
       assert(last.kind === 'extract' && last.units === 4, `units ${last.units}，失败那条不该算钱`)
-      // 8 × 4 × 1.2 = 38.4 → 38
-      assert(last.mils === 38, `金额 ${last.mils}，应当是 38`)
+      // 8 × 4 × 1.2 = 38.4 厘 = 38400 微元。**微元不会像厘那样把零头舍掉**——
+      // 这正是账本用微元的理由。
+      assert(last.micros === 38400, `金额 ${last.micros} 微元，应当是 38400`)
     })
 
     await test('后缀骗人的地址只收一次钱，也不把缓存那几条一起收了', async () => {
@@ -240,7 +261,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       const last = rows[rows.length - 1]
       assert(last.backend === 'document', `记在了 ${last.backend} 头上`)
       // 5 厘 × 1 条 × 1.2 = 6
-      assert(last.units === 1 && last.mils === 6, `文档那笔：${JSON.stringify(last)}`)
+      assert(last.units === 1 && last.micros === 6000, `文档那笔：${JSON.stringify(last)}`)
     })
 
     await test('一次调用里网页和文档各按各的价，分开落账', async () => {
@@ -256,7 +277,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(byBackend.tavily?.units === 1, `网页那笔：${JSON.stringify(byBackend.tavily)}`)
       assert(byBackend.document?.units === 1, `文档那笔：${JSON.stringify(byBackend.document)}`)
       // 8 × 1.2 = 9.6 → 10；5 × 1.2 = 6
-      assert(byBackend.tavily.mils === 10 && byBackend.document.mils === 6, `金额：${JSON.stringify(rows)}`)
+      assert(byBackend.tavily.micros === 9600 && byBackend.document.micros === 6000, `金额：${JSON.stringify(rows)}`)
     })
 
     await test('两把工具各配各的 provider，互不影响', async () => {
@@ -286,8 +307,8 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       const rows = (await webCalls()).slice(before)
       assert(rows.length === 2, `该落两笔，实际 ${rows.length}`)
       const byBackend = Object.fromEntries(rows.map((x) => [x.backend, x]))
-      assert(byBackend.firecrawl?.kind === 'search' && byBackend.firecrawl.mils === 24, `firecrawl 那笔：${JSON.stringify(byBackend.firecrawl)}`)
-      assert(byBackend.tavily?.kind === 'extract' && byBackend.tavily.mils === 10, `tavily 那笔：${JSON.stringify(byBackend.tavily)}`)
+      assert(byBackend.firecrawl?.kind === 'search' && byBackend.firecrawl.micros === 24000, `firecrawl 那笔：${JSON.stringify(byBackend.firecrawl)}`)
+      assert(byBackend.tavily?.kind === 'extract' && byBackend.tavily.micros === 9600, `tavily 那笔：${JSON.stringify(byBackend.tavily)}`)
 
       // 新配的密钥照旧不回显。
       const view = await req(base, 'GET', '/platform/tools/web', { token })
@@ -331,13 +352,13 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(put.status === 200, `改价 ${put.status}`)
       const rowsAfter = await webCalls()
       assert(
-        rowsBefore.every((r, i) => r.mils === rowsAfter[i].mils),
-        `改价把历史账改了：${JSON.stringify(rowsAfter.map((r) => r.mils))}`,
+        rowsBefore.every((r, i) => r.micros === rowsAfter[i].micros),
+        `改价把历史账改了：${JSON.stringify(rowsAfter.map((r) => r.micros))}`,
       )
       // 新的一笔按新价：100 × 1.2 = 120
       await req(base, 'POST', '/runtime/web/search', { token: seatToken, body: { query: 'after' } })
       const rows = await webCalls()
-      assert(rows[rows.length - 1].mils === 120, `新价没生效：${rows[rows.length - 1].mils}`)
+      assert(rows[rows.length - 1].micros === 120000, `新价没生效：${rows[rows.length - 1].micros}`)
     })
 
     await test('自检不记账——那是管理员在验配置，不是公司在用', async () => {
@@ -354,7 +375,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(first.json.ok === true && first.json.cached !== true, '第一次就说是缓存')
       const second = await req(base, 'POST', '/runtime/web/search', { token: seatToken, body: { query: '缓存这一条' } })
       assert(second.json.cached === true, '第二次没命中缓存')
-      assert(second.json.mils === 0, `命中缓存还报了价：${second.json.mils}`)
+      assert(second.json.amountMicros === 0, `命中缓存还报了价：${second.json.amountMicros}`)
       // 没打后端就没有这笔成本，记上去是虚报。
       assert((await webCalls()).length === before + 1, '命中缓存也记了账')
     })
@@ -405,14 +426,14 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
 
     await test('统计里有网页那一块，金额直接求和不重算', async () => {
       const rows = await webCalls()
-      const sum = rows.reduce((a, r) => a + r.mils, 0)
+      const sum = rows.reduce((a, r) => a + r.micros, 0)
       const r = await req(base, 'GET', `/platform/stats?from=0&to=${Date.now() + 1000}`, { token })
       assert(r.status === 200, `stats ${r.status} ${r.text}`)
       assert(r.json.web, '统计里没有网页那一块')
-      assert(r.json.web.totals.mils === sum, `金额 ${r.json.web.totals.mils}，账目求和是 ${sum}`)
+      assert(r.json.web.totals.amountMicros === sum, `金额 ${r.json.web.totals.amountMicros}，账目求和是 ${sum}`)
       assert(r.json.web.byBackend.some((b) => b.backend === 'tavily'), '按后端那张表里没有 tavily')
       // token 那边的合计不能把网页的钱混进去——两者不是一个量纲。
-      assert(r.json.totals.quotedUsd === 0 || !Number.isNaN(r.json.totals.quotedUsd), '模型合计被污染了')
+      assert(r.json.totals.amountMicros === 0, '网页那几笔混进了模型合计')
     })
 
     await test('闸与限流：SSRF、跳转不带凭据、文档边读边数、DDG 排队、Firecrawl 自托管', async () => {

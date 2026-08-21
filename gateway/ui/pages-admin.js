@@ -92,9 +92,47 @@ function hasRates(cost) {
   return Number(cost?.input) > 0 || Number(cost?.output) > 0
 }
 
+/** 平台覆盖表里有没有这一条。有就以它为准，目录里的价只是默认值。 */
+function priceOverride(provider, id) {
+  const table = state.settings?.modelPricing
+  if (!table || typeof table !== 'object') return null
+  return table[`${provider}/${id}`] || null
+}
+
+/**
+ * 实际生效的四项单价。**按字段合并，不是整份顶掉**——和服务端 `rateOf` 必须是同一
+ * 套规则，否则这一屏画的价和真收的价对不上，而对不上的时候没人会先怀疑界面。
+ * 0 读作「这一项没填」，用目录价。
+ */
+function effectiveCost(provider, id, cost) {
+  const base = cost && typeof cost === 'object' ? cost : {}
+  const o = priceOverride(provider, id) || {}
+  const pick = (k) => Number(o[k]) || Number(base[k]) || 0
+  return { input: pick('input'), output: pick('output'), cacheRead: pick('cacheRead'), cacheWrite: pick('cacheWrite') }
+}
+
 function ratePair(cost, factor) {
   if (!hasRates(cost)) return `<span title="${esc(t('目录里没有这个模型的价格', 'The catalog has no price for this model'))}">—</span>`
   return `${esc(money(Number(cost.input || 0) * factor))} / ${esc(money(Number(cost.output || 0) * factor))}`
+}
+
+/**
+ * 缓存那两项。**回落来的价要画成另一种样子**——它是按输入价算的，而缓存读通常便宜
+ * 一个数量级。看不出是回落的话，一个高估十倍的价会一直收下去，没人会去查。
+ */
+function cacheRatePair(cost, factor) {
+  if (!hasRates(cost)) return ''
+  const input = Number(cost.input || 0)
+  const read = Number(cost.cacheRead || 0)
+  const write = Number(cost.cacheWrite || 0)
+  const cell = (v, label) => {
+    const fell = !v
+    const shown = money((v || input) * factor)
+    return fell
+      ? `<span style="opacity: 0.55; border-bottom: 1px dotted currentColor;" title="${esc(t(`没填${label}单价，按输入价算`, `No ${label} price set; charged at the input rate`))}">${esc(shown)}</span>`
+      : esc(shown)
+  }
+  return `<div style="font-size: 11.5px; color: var(--muted-foreground); margin-top: 2px;">${t('缓存', 'cache')} ${cell(read, t('缓存读', 'cache read'))} / ${cell(write, t('缓存写', 'cache write'))}</div>`
 }
 
 /** 倍率输入。改完即存，和上面两个角色面板一样不设「保存」按钮。 */
@@ -154,11 +192,13 @@ function modelsPage() {
     .map((m) => {
       const isDaily = daily.provider === shown.provider && daily.model === m.id
       const isUtil = utility.provider === shown.provider && utility.model === m.id
-      const cost = m.cost && typeof m.cost === 'object' ? m.cost : {}
+      const cost = effectiveCost(shown.provider, m.id, m.cost)
+      const overridden = !!priceOverride(shown.provider, m.id)
       const actions = `
         <div class="satu-rowactions">
           ${isDaily ? `<span class="tag tag-accent">${t('日常')}</span>` : `<button type="button" class="satu-linkbtn" data-act="set-role" data-role="daily" data-provider="${esc(shown.provider)}" data-model="${esc(m.id)}">${t('设为日常')}</button>`}
           ${isUtil ? '<span class="tag tag-accent-2">utility</span>' : `<button type="button" class="satu-linkbtn" data-act="set-role" data-role="utility" data-provider="${esc(shown.provider)}" data-model="${esc(m.id)}">${t('设为 utility')}</button>`}
+          ${isOwner() ? `<button type="button" class="satu-linkbtn" data-act="model-price" data-provider="${esc(shown.provider)}" data-model="${esc(m.id)}">${overridden ? t('已改价') : t('改价')}</button>` : ''}
         </div>`
       return `<div class="satu-modelrow">
         <div class="satu-tasklink" style="cursor: default;">
@@ -168,8 +208,8 @@ function modelsPage() {
         <span style="font-size: 13px;">${esc(shown.name || shown.provider)}</span>
         <div class="gw-caps">${capTags(m)}</div>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(tokens(m.contextWindow))}${m.maxTokens ? t(` · 出 ${esc(tokens(m.maxTokens))}`, ` · out ${esc(tokens(m.maxTokens))}`) : ''}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${ratePair(cost, 1)}</span>
-        <span style="font-size: 13px; color: var(--foreground);">${ratePair(cost, mult)}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground);">${ratePair(cost, 1)}${cacheRatePair(cost, 1)}</span>
+        <span style="font-size: 13px; color: var(--foreground);">${ratePair(cost, mult)}${cacheRatePair(cost, mult)}</span>
         ${actions}
       </div>`
     })
@@ -201,9 +241,53 @@ function modelsPage() {
           </div>
           <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
             <div class="satu-modelhead">
-              <span>${t('模型')}</span><span>${t('供应商')}</span><span>${t('能力')}</span><span>${t('上下文 / 输出')}</span><span>${t('单价 / 1M tok')}</span><span>${t(`倍率单价 ×${mult}`, `Marked-up ×${mult}`)}</span><span></span>
+              <span>${t('模型')}</span><span>${t('供应商')}</span><span>${t('能力')}</span><span>${t('上下文 / 输出')}</span><span>${t('单价 / 1M tok', 'Price / 1M tok')}<br><span style="font-weight: 400; text-transform: none;">${t('输入 / 输出 · 缓存读 / 写', 'in / out · cache read / write')}</span></span><span>${t(`倍率单价 ×${mult}`, `Marked-up ×${mult}`)}</span><span></span>
             </div>
             ${modelRows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('选择已配置的供应商查看模型。')}</div>`}
+          </div>
+        </div>
+      </div>
+    </div>
+    ${modelPriceModal()}`
+}
+
+/**
+ * 单价覆盖。**目录里的价只是默认值**，这张表压在它上面。
+ *
+ * 存在的理由是两件真事：pi-ai 没收录价格的模型（目录里四项全是 0）得有地方补；
+ * 上游调价的那天不该等 pi-ai 发版才能跟上。
+ */
+function modelPriceModal() {
+  const d = state.priceDraft
+  if (!d) return ''
+  const field = (label, key, hint) => `
+    <div class="field">
+      <label>${esc(label)}</label>
+      <input class="input" type="number" min="0" step="0.01" data-act="price-field" data-field="${esc(key)}" value="${esc(d[key])}" placeholder="${esc(hint || '')}">
+    </div>`
+  return `
+    <div class="gw-modal-backdrop" data-act="model-price-close">
+      <div class="gw-modal" data-stop role="dialog" aria-modal="true" style="max-width: 560px;">
+        <div>
+          <h2 style="font-size: 20px; margin: 0 0 4px;">${t('改价')} · ${esc(d.key)}</h2>
+          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('每 100 万 token 多少美元，和内置目录同一个单位。留空的那一项就用目录价（占位符里显示的就是它），四项全留空 = 撤掉覆盖。', 'USD per 1M tokens, same unit as the built-in catalog. A blank field keeps the catalog price (shown as the placeholder); clearing all four drops the override.')}</p>
+        </div>
+        ${state.priceError ? `<div class="gw-flash gw-flash-err">${esc(state.priceError)}</div>` : ''}
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3);">
+          ${field(t('输入单价 / 1M'), 'input', String(d.catalog.input ?? 0))}
+          ${field(t('输出单价 / 1M'), 'output', String(d.catalog.output ?? 0))}
+          ${field(t('缓存读单价 / 1M'), 'cacheRead', String(d.catalog.cacheRead || d.catalog.input || 0))}
+          ${field(t('缓存写单价 / 1M'), 'cacheWrite', String(d.catalog.cacheWrite || d.catalog.input || 0))}
+        </div>
+        <div style="font-size: 12px; color: var(--muted-foreground);">
+          ${t('占位符是目录里的价。0 读作「没填」，不是「这一项免费」——要真免费，去掉这个模型的授权，别把单价填成 0。', 'Placeholders are the catalog prices. A 0 reads as "not set", not "free" — to actually stop offering a model, remove it, do not price it at 0.')}
+        </div>
+        <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('目录里也没有的缓存单价按输入价算。改价只影响之后的调用——已经落账的金额不会跟着变。', 'Cache prices missing from the catalog too fall back to the input rate. A price change only affects later calls; amounts already booked never move.')}</p>
+        <div style="display: flex; justify-content: space-between; gap: var(--space-2);">
+          <button type="button" class="satu-linkbtn" data-act="model-price-clear" ${state.busy ? 'disabled' : ''}>${t('撤掉覆盖')}</button>
+          <div style="display: flex; gap: var(--space-2);">
+            <button type="button" class="btn btn-ghost" data-act="model-price-close">${t('取消')}</button>
+            <button type="button" class="btn btn-primary" data-act="model-price-save" ${state.busy ? 'disabled' : ''}>${t('保存')}</button>
           </div>
         </div>
       </div>
@@ -283,9 +367,182 @@ function usage$(n) {
   return `$${x.toFixed(2)}`
 }
 
+/** 账本上的金额是**微元**（百万分之一美元）。显示时换成美元，运算永远用微元。 */
+function usageMicros$(n) {
+  const x = Number(n)
+  if (!Number.isFinite(x)) return '—'
+  return usage$(x / 1_000_000)
+}
+
 /** 精确的 token 数。tokens() 是给目录里的窗口用的，会四舍五入成 128K，统计不能那样。 */
 function exactTokens(n) {
   return Number(n || 0).toLocaleString('en-US')
+}
+
+/**
+ * 计费明细：一次调用一行。
+ *
+ * 这张表回答的是三个 `*-stats` 回答不了的那个问题——「这个月为什么是这个数」。
+ * 每行摊开当时的计量、当时的单价、当时的倍率，乘出来就是金额；改过价之后仍然对得上。
+ *
+ * `scope` 决定画不画公司那一列：平台看全平台要，公司自己看不要。
+ * `forOrg` 是「看的是哪一家」——owner 在公司详情页上看的不是自己的公司，
+ * 翻页时得把这个 id 带上，否则请求会打到 `/orgs//charges`。
+ */
+function chargeTable(scope, forOrg) {
+  const d = state.charges
+  const list = d?.charges || []
+  const kinds = [
+    { key: '', label: t('全部', 'All') },
+    { key: 'llm', label: t('模型', 'Model') },
+    { key: 'connector', label: t('连接器', 'Connector') },
+    { key: 'web', label: t('网页', 'Web') },
+  ]
+    .map(
+      (k) =>
+        `<button type="button" class="satu-assignee" style="padding: 4px 12px;" aria-pressed="${String((state.chargesKind || '') === k.key)}" data-act="charges-kind" data-kind="${esc(k.key)}" data-scope="${esc(scope)}" data-org="${esc(forOrg || '')}">${esc(k.label)}</button>`,
+    )
+    .join('')
+  const cols = scope === 'platform' ? '150px 1.2fr 1fr 1.6fr 1fr 100px' : '150px 1fr 1.6fr 1fr 100px'
+  const head = scope === 'platform'
+    ? `<span>${t('时间')}</span><span>${t('公司')}</span><span>${t('成员')}</span><span>${t('对象')}</span><span>${t('计量')}</span><span>${t('金额')}</span>`
+    : `<span>${t('时间')}</span><span>${t('成员')}</span><span>${t('对象')}</span><span>${t('计量')}</span><span>${t('金额')}</span>`
+  const rows = list
+    .map((c) => {
+      const who = `<span title="${esc(c.accountId)}">${esc(c.accountName)}${c.departed ? ` <span class="tag">${t('已离职', 'former')}</span>` : ''}</span>`
+      return `<div class="satu-billrow" style="grid-template-columns: ${cols}; align-items: start;">
+        <span style="font-size: 12.5px; color: var(--muted-foreground);">${esc(fmtTime(c.createdAt))}</span>
+        ${scope === 'platform' ? `<span style="font-size: 13px;">${esc(c.companyName)}</span>` : ''}
+        <span style="font-size: 13px;">${who}</span>
+        <div style="min-width: 0;">
+          <div style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere;">${esc(c.subject)}</div>
+          <div style="font-size: 11.5px; color: var(--muted-foreground);">${esc(kindLabel(c.kind))}${c.status !== 'ok' ? ` · ${esc(statusLabel(c.status))}` : ''}${c.unpriced ? ` · <span title="${esc(t('这次没查到单价，金额不是 0 而是算不出来', 'No price found; the 0 means unknown, not free'))}">${t('无单价', 'unpriced')}</span>` : ''}</div>
+        </div>
+        <div style="min-width: 0; font-size: 11.5px; color: var(--muted-foreground);">${chargeQuantity(c)}</div>
+        <div style="text-align: right;">
+          <div style="font-size: 13px; font-weight: 600;">${esc(usageMicros$(c.amountMicros))}</div>
+          ${c.amountMicros > 0 ? `<div style="font-size: 11px; color: var(--muted-foreground);">${t('赠送', 'bonus')} ${esc(usageMicros$(c.bonusMicros))}</div>` : ''}
+        </div>
+      </div>`
+    })
+    .join('')
+  const page = state.chargesCursors.length
+  const more = d?.hasMore
+  return `
+    <div style="display: flex; flex-direction: column; gap: var(--space-3);">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;">
+        <h2 style="font-size: 18px; margin: 0;">${t('计费明细')}</h2>
+        <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">${kinds}</div>
+      </div>
+      <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+        <div class="satu-billhead" style="grid-template-columns: ${cols};">${head}</div>
+        ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${state.chargesLoading ? t('加载中…') : t('这个范围里还没有计费记录。')}</div>`}
+      </div>
+      ${
+        // 只有真有第二页时才画翻页——不然就是两颗永远点不动的按钮（同公司那几张表）。
+        more || page > 1
+          ? `<div style="display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2);">
+              <span style="font-size: 12px; color: var(--muted-foreground);">${t(`第 ${page} 页`, `Page ${page}`)}</span>
+              <button type="button" class="btn btn-ghost" data-act="charges-prev" data-scope="${esc(scope)}" data-org="${esc(forOrg || '')}" ${page > 1 ? '' : 'disabled'}>${t('上一页')}</button>
+              <button type="button" class="btn btn-ghost" data-act="charges-next" data-scope="${esc(scope)}" data-org="${esc(forOrg || '')}" ${more ? '' : 'disabled'}>${t('下一页')}</button>
+            </div>`
+          : ''
+      }
+      <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('金额是写行那一刻按当时单价和倍率算的，之后改价不会追溯改动这些数。', 'Amounts are computed when the row is written, from the price and multiplier of that moment; later price changes are not retroactive.')}</p>
+    </div>`
+}
+
+function kindLabel(kind) {
+  if (kind === 'llm') return t('模型', 'Model')
+  if (kind === 'connector') return t('连接器', 'Connector')
+  if (kind === 'web') return t('网页', 'Web')
+  return kind
+}
+
+function statusLabel(status) {
+  const map = {
+    ok: t('成功', 'ok'),
+    failed: t('失败', 'failed'),
+    timeout: t('超时', 'timeout'),
+    denied: t('被拒', 'denied'),
+    error: t('出错', 'error'),
+  }
+  return map[status] || status
+}
+
+/**
+ * 计量那一格。**同时画计量和单价**——「4000 token × $1.00」比单看哪一个都有用，
+ * 而这一列存在的全部意义就是让人自己乘一遍对得上。
+ */
+function chargeQuantity(c) {
+  const q = c.quantity || {}
+  const p = c.unitPrice || {}
+  const lines = []
+  if (c.kind === 'llm') {
+    const line = (label, tok, rate) => (tok ? `${label} ${exactTokens(tok)} × ${money(rate)}` : '')
+    const cached = Number(q.cachedTokens || 0)
+    const written = Number(q.cacheWriteTokens || 0)
+    const fresh = Math.max(0, Number(q.promptTokens || 0) - cached - written)
+    lines.push(line(t('输入', 'in'), fresh, p.input))
+    if (cached) lines.push(line(t('缓存读', 'cache read'), cached, p.cacheRead))
+    if (written) lines.push(line(t('缓存写', 'cache write'), written, p.cacheWrite))
+    lines.push(line(t('输出', 'out'), Number(q.completionTokens || 0), p.output))
+  } else if (c.kind === 'web') {
+    const units = Number(q.units || 0)
+    lines.push(t(`${units} 条 × ${usageMicros$(p.unit)}`, `${units} units × ${usageMicros$(p.unit)}`))
+  } else {
+    lines.push(t(`1 次 × ${usageMicros$(p.unit)}`, `1 call × ${usageMicros$(p.unit)}`))
+  }
+  /**
+   * 倍率对**所有**按倍率报价的种类都要画出来，不只是模型。
+   *
+   * 这一列存在的全部意义是让人自己乘一遍对得上金额。以前倍率只加在模型那一支，
+   * 于是倍率 1.2 时网页那行写着「4 条 × $0.0080」（=$0.032）、旁边金额是 $0.0384——
+   * 对账的人会先怀疑金额算错了。
+   */
+  const mult = Number(c.multiplier)
+  if (Number.isFinite(mult) && mult !== 1) {
+    lines.push(t(`倍率 ×${trimNum(mult)}`, `multiplier ×${trimNum(mult)}`))
+  }
+  return lines.filter(Boolean).map((x) => `<div>${esc(x)}</div>`).join('') || '—'
+}
+
+/**
+ * 倍率的显示。库里那一列以前是 float4，`1.2` 读回来是 `1.2000000476837158`；
+ * 迁移 0009 换成了 double precision，但**老行还是那个数**，所以显示这一步仍要收一下。
+ * 六位小数够表达任何人手填得出来的倍率，多出来的位数只会让人以为是别的数。
+ */
+function trimNum(n) {
+  return String(Number(n.toFixed(6)))
+}
+
+/**
+ * 输入 token 里命中缓存的那一截。**是子集，不是加项**——所以画在输入那一格里面，
+ * 不另起一列：另起一列的话，两个数会被读成可以相加。
+ */
+/**
+ * 金额旁边那个角标。**「没单价」和「账本上没有行」要分开标**——前者去配置页能修，
+ * 后者是历史，补不回来。都不标的话，两种 $0 和真的 $0 长得一模一样。
+ */
+function amountNote(row) {
+  const bits = []
+  if (row.unpricedCalls) {
+    bits.push(`<span class="tag" title="${esc(t('有调用用的是没有单价的模型，金额没算进去'))}">${t('不全')}</span>`)
+  }
+  if (row.unledgeredCalls) {
+    bits.push(`<span class="tag" title="${esc(t(`${row.unledgeredCalls} 次调用在账本上没有记录，金额补不回来`, `${row.unledgeredCalls} call(s) have no ledger row; the amount cannot be reconstructed`))}">${t('无账本', 'no ledger')}</span>`)
+  }
+  return bits.length ? ` ${bits.join(' ')}` : ''
+}
+
+function cacheNote(row) {
+  const cached = Number(row.cachedTokens || 0)
+  const written = Number(row.cacheWriteTokens || 0)
+  if (!cached && !written) return ''
+  const bits = []
+  if (cached) bits.push(t(`读 ${exactTokens(cached)}`, `read ${exactTokens(cached)}`))
+  if (written) bits.push(t(`写 ${exactTokens(written)}`, `write ${exactTokens(written)}`))
+  return `<div style="font-size: 11.5px; opacity: 0.7;" title="${esc(t('这一截包含在左边的输入 token 里，单价另算', 'Included in the input tokens on the left; priced separately'))}">${t('缓存', 'cache')} ${bits.join(' · ')}</div>`
 }
 
 function statsPage() {
@@ -294,14 +551,17 @@ function statsPage() {
   const pill = (key, label) =>
     `<button type="button" class="btn ${state.statsRange === key ? 'btn-primary' : 'btn-ghost'}" data-act="stats-range" data-range="${key}">${label}</button>`
 
-  const totals = d?.totals || { calls: 0, promptTokens: 0, completionTokens: 0, costUsd: 0, quotedUsd: 0, unpricedCalls: 0 }
+  const totals = d?.totals || { calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, costMicros: 0, amountMicros: 0, unpricedCalls: 0, unledgeredCalls: 0 }
+  const hitRate = totals.promptTokens > 0 ? Math.round((totals.cachedTokens / totals.promptTokens) * 100) : 0
   const cards = [
     [t('调用次数'), exactTokens(totals.calls)],
     [t('输入 Tokens'), exactTokens(totals.promptTokens)],
     [t('输出 Tokens'), exactTokens(totals.completionTokens)],
-    [t('总 Tokens'), exactTokens(totals.promptTokens + totals.completionTokens)],
-    [t('成本价'), usage$(totals.costUsd)],
-    [t(`报价 ×${d?.multiplier ?? 1}`, `Quoted ×${d?.multiplier ?? 1}`), usage$(totals.quotedUsd)],
+    // 缓存读是 promptTokens 的子集，不是加项。单独一张卡，因为它直接解释「为什么
+    // token 涨了金额没怎么涨」——缓存读的单价通常低一个数量级。
+    [t('缓存命中'), `${hitRate}%`],
+    [t('原价'), usageMicros$(totals.costMicros)],
+    [t('已扣'), usageMicros$(totals.amountMicros)],
   ]
     .map(
       ([label, value]) => `<div class="satu-panel" style="gap: 4px;">
@@ -319,11 +579,11 @@ function statsPage() {
           <div style="font-size: 12px; color: var(--muted-foreground);">${c.lastAt ? esc(fmtTime(c.lastAt)) : t('无调用')}</div>
         </div>
         <span style="font-size: 13px;">${esc(exactTokens(c.calls))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(c.promptTokens))}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(c.promptTokens))}${cacheNote(c)}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(c.completionTokens))}</span>
         <span style="font-size: 13px; font-weight: 600;">${esc(exactTokens(c.promptTokens + c.completionTokens))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(usage$(c.costUsd))}</span>
-        <span style="font-size: 13px;">${esc(usage$(c.quotedUsd))}${c.unpricedCalls ? ` <span class="tag" title="${esc(t('这家公司有调用用的是没有单价的模型，金额没算进去'))}">${t('不全')}</span>` : ''}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(usageMicros$(c.costMicros))}</span>
+        <span style="font-size: 13px;">${esc(usageMicros$(c.amountMicros))}${amountNote(c)}</span>
       </div>`,
     )
     .join('')
@@ -336,22 +596,23 @@ function statsPage() {
           <div style="font-size: 12px; color: var(--muted-foreground);">${esc(m.provider)}</div>
         </div>
         <span style="font-size: 13px;">${esc(exactTokens(m.calls))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(m.promptTokens))}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(m.promptTokens))}${cacheNote(m)}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(m.completionTokens))}</span>
         <span style="font-size: 13px; font-weight: 600;">${esc(exactTokens(m.promptTokens + m.completionTokens))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${m.priced ? esc(usage$(m.costUsd)) : `<span title="${esc(t('目录里没有这个模型的单价'))}">—</span>`}</span>
-        <span style="font-size: 13px;">${m.priced ? esc(usage$(m.quotedUsd)) : '—'}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground);">${m.priced ? esc(usageMicros$(m.costMicros)) : `<span title="${esc(t('目录里没有这个模型的单价'))}">—</span>`}</span>
+        <span style="font-size: 13px;">${m.priced ? `${esc(usageMicros$(m.amountMicros))}${amountNote(m)}` : '—'}</span>
       </div>`,
     )
     .join('')
 
   const unpriced = d?.unpricedModels || []
+  const unledgered = d?.unledgeredModels || []
 
   /**
    * 网页工具按**次**算钱，跟 token 不是一个量纲，所以单开一块，不混进上面的合计。
    * 金额是写行那一刻的报价，这里只求和，不重算——重算会让改价追溯改动历史账单。
    */
-  const web = d?.web || { byCompany: [], byBackend: [], totals: { calls: 0, units: 0, mils: 0 } }
+  const web = d?.web || { byCompany: [], byBackend: [], totals: { calls: 0, units: 0, amountMicros: 0 } }
   const webRows = (web.byBackend || [])
     .map(
       (b) => `<div class="satu-statrow" style="grid-template-columns: 2fr 1fr 1fr 1fr 1fr;">
@@ -359,7 +620,7 @@ function statsPage() {
         <span style="font-size: 13px;">${esc(String(b.search))}</span>
         <span style="font-size: 13px;">${esc(String(b.extract))}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(String(b.units))}</span>
-        <span style="font-size: 13px; font-weight: 600;">${esc(usd(b.mils))}</span>
+        <span style="font-size: 13px; font-weight: 600;">${esc(usageMicros$(b.amountMicros))}</span>
       </div>`,
     )
     .join('')
@@ -369,7 +630,7 @@ function statsPage() {
       <div class="gw-page-inner">
         <div>
           <h1 style="font-size: 24px; margin: 0 0 4px;">${t('统计')}</h1>
-          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('各公司的 token 消耗。金额按模型单价折算，报价一列再乘单价倍率。', 'Token consumption per company. Amounts use model list prices; the quoted column also applies the price multiplier.')}</p>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('各公司的 token 消耗。「已扣」是账本上真实扣掉的钱（写行那一刻定价，改价不追溯）；「原价」是它除以当时的倍率倒推的。', 'Token consumption per company. "Charged" is what the ledger actually deducted (priced when written; later price changes are not retroactive); "list" divides it back out by the multiplier of the day.')}</p>
         </div>
         ${flashes()}
         <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
@@ -388,6 +649,13 @@ function statsPage() {
             ? `<div class="gw-flash gw-flash-err">${esc(t(`${unpriced.length} 个模型在目录里没有单价（${unpriced.slice(0, 3).join('、')}${unpriced.length > 3 ? ' …' : ''}），它们的调用没有计入金额。`, `${unpriced.length} model(s) have no price in the catalog (${unpriced.slice(0, 3).join(', ')}${unpriced.length > 3 ? ' …' : ''}); their calls are excluded from the amounts.`))}</div>`
             : ''
         }
+        ${
+          // 和「没单价」分开说：那个是配置漏了、现在就能补；这个是那段历史压根没记过
+          // 账（多半在计费账本上线之前），补不回来。混成一句话会让人去配置页白找。
+          unledgered.length
+            ? `<div class="gw-flash">${esc(t(`这个时间段里有 ${totals.unledgeredCalls} 次调用在计费账本上没有记录（${unledgered.slice(0, 3).join('、')}${unledgered.length > 3 ? ' …' : ''}），多半发生在账本上线之前。它们的 token 算数，金额补不回来——这里的 $0 不代表免费。`, `${totals.unledgeredCalls} call(s) in this range have no row in the billing ledger (${unledgered.slice(0, 3).join(', ')}${unledgered.length > 3 ? ' …' : ''}), most likely from before the ledger shipped. Their tokens count; the amounts cannot be reconstructed — the $0 here does not mean free.`))}</div>`
+            : ''
+        }
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3);">
           ${cards}
         </div>
@@ -395,7 +663,7 @@ function statsPage() {
           <h2 style="font-size: 18px; margin: 0;">${t('按公司')}</h2>
           <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
             <div class="satu-stathead">
-              <span>${t('公司')}</span><span>${t('调用')}</span><span>${t('输入')}</span><span>${t('输出')}</span><span>${t('总计')}</span><span>${t('成本价')}</span><span>${t('报价')}</span>
+              <span>${t('公司')}</span><span>${t('调用')}</span><span>${t('输入')}</span><span>${t('输出')}</span><span>${t('总计')}</span><span>${t('原价')}</span><span>${t('已扣')}</span>
             </div>
             ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${state.statsLoading ? t('统计中…') : t('这个时间段里没有调用。')}</div>`}
           </div>
@@ -404,7 +672,7 @@ function statsPage() {
           <div style="display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap;">
             <h2 style="font-size: 18px; margin: 0;">${t('网页工具')}</h2>
             <span style="font-size: 12px; color: var(--muted-foreground);">
-              ${t(`${web.totals.calls} 次调用 · ${web.totals.units} 条 · ${esc(usd(web.totals.mils))}`, `${web.totals.calls} calls · ${web.totals.units} units · ${esc(usd(web.totals.mils))}`)}
+              ${t(`${web.totals.calls} 次调用 · ${web.totals.units} 条 · ${esc(usageMicros$(web.totals.amountMicros))}`, `${web.totals.calls} calls · ${web.totals.units} units · ${esc(usageMicros$(web.totals.amountMicros))}`)}
             </span>
           </div>
           <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
@@ -418,11 +686,12 @@ function statsPage() {
           <h2 style="font-size: 18px; margin: 0;">${t('按模型')}</h2>
           <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
             <div class="satu-stathead" style="grid-template-columns: 2fr 1fr 1fr 1fr 1fr 1fr 1fr;">
-              <span>${t('模型')}</span><span>${t('调用')}</span><span>${t('输入')}</span><span>${t('输出')}</span><span>${t('总计')}</span><span>${t('成本价')}</span><span>${t('报价')}</span>
+              <span>${t('模型')}</span><span>${t('调用')}</span><span>${t('输入')}</span><span>${t('输出')}</span><span>${t('总计')}</span><span>${t('原价')}</span><span>${t('已扣')}</span>
             </div>
             ${modelRows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${state.statsLoading ? t('统计中…') : t('这个时间段里没有调用。')}</div>`}
           </div>
         </div>
+        ${chargeTable('platform')}
       </div>
     </div>`
 }
@@ -557,7 +826,7 @@ function providerModelsModal() {
           <div style="font-size: 12px; color: var(--muted-foreground);">${esc(m.id)}</div>
         </div>
         <span style="font-size: 12px; color: var(--muted-foreground);">${esc(tokens(m.contextWindow))} / ${esc(tokens(m.maxTokens))}</span>
-        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(money(m.cost?.input))} / ${esc(money(m.cost?.output))}</span>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(money(m.cost?.input))} / ${esc(money(m.cost?.output))}<br>${t('缓存', 'cache')} ${esc(money(m.cost?.cacheRead || m.cost?.input))} / ${esc(money(m.cost?.cacheWrite || m.cost?.input))}</span>
         <button type="button" class="satu-linkbtn" data-act="prov-model-del" data-model="${esc(m.id)}">${t('删除')}</button>
       </div>`,
     )
@@ -584,7 +853,10 @@ function providerModelsModal() {
             <div class="field"><label>${t('最大输出')}</label><input class="input" type="number" min="1" data-act="model-field" data-field="maxTokens" value="${esc(d.maxTokens)}"></div>
             <div class="field"><label>${t('输入单价 / 1M')}</label><input class="input" type="number" min="0" step="0.01" data-act="model-field" data-field="costInput" value="${esc(d.costInput)}"></div>
             <div class="field"><label>${t('输出单价 / 1M')}</label><input class="input" type="number" min="0" step="0.01" data-act="model-field" data-field="costOutput" value="${esc(d.costOutput)}"></div>
+            <div class="field"><label>${t('缓存读单价 / 1M')}</label><input class="input" type="number" min="0" step="0.01" data-act="model-field" data-field="costCacheRead" value="${esc(d.costCacheRead)}"></div>
+            <div class="field"><label>${t('缓存写单价 / 1M')}</label><input class="input" type="number" min="0" step="0.01" data-act="model-field" data-field="costCacheWrite" value="${esc(d.costCacheWrite)}"></div>
           </div>
+          <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('缓存那两项留空就按输入价算。缓存读通常便宜一个数量级，缓存写反而比输入贵——留空等于按最贵的收。', 'Leave the cache prices blank and they fall back to the input price. Cache reads are usually an order of magnitude cheaper and cache writes cost more than input, so blank means charging the highest rate.')}</p>
           <div class="satu-toggleRow">
             <div style="font-size: 13.5px; font-weight: 600;">${t('推理模型')}</div>
             <input type="checkbox" data-act="model-field" data-field="reasoning" ${d.reasoning ? 'checked' : ''}>

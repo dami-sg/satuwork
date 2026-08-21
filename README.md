@@ -31,6 +31,21 @@ Gateway 的业务数据在 PostgreSQL；宿主机端口用 **5434**（5432 一�
 本地测试包（过一层 Docker 打 Linux 包、传进本地 Gateway）见
 [docs/local-release.md](docs/local-release.md)。生产走 CI：推 `bot-v*` / `manager-v*` tag。
 
+## 计费
+
+模型（含缓存读写）、连接器、网页搜索都按次落在一张账本上，实时从「套餐赠送 → 账户
+余额」里扣，两个桶都空了就熔断这家公司所有要收钱的调用。口径、账本表、上线顺序见
+[docs/billing.md](docs/billing.md)。
+
+升级到带账本的版本之后**立刻**跑一次回填，否则历史花费在余额里不存在。
+**先起一次 Gateway**（迁移在进程启动时跑），再回填：
+
+```bash
+GATEWAY_DATABASE_URL=... node gateway/scripts/backfill-charges.mjs --dry-run
+```
+
+看一眼条数对不对，再去掉 `--dry-run` 真跑。脚本可以重复跑。
+
 ## 检查
 
 ```bash

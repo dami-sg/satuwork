@@ -37,6 +37,7 @@ import { uiSource } from './ui-dom.mjs'
 import { runCustomProvider } from './custom-provider.mjs'
 import { runStats } from './stats.mjs'
 import { runWebTools } from './web-tools.mjs'
+import { runBilling } from './billing.mjs'
 import { runMigrate } from './migrate.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
 import { runConnectors } from './connectors.mjs'
@@ -1564,6 +1565,8 @@ async function runGateway() {
       companyName: 'InviteCo',
       slug: 'inviteco',
       seats: 5,
+      // 这家专门用来验「没下过单的公司，账单屏上全是真的 0」。充了钱就没得验了。
+      topup: 0,
     })
     inviteOrg = reg.company.id
     inviteAdminTok = reg.token
@@ -1661,7 +1664,12 @@ async function runGateway() {
     assert(r.json.balance && r.json.balance.amount === '$0.00', `balance.amount ${r.json.balance && r.json.balance.amount}`)
     assert(r.json.balance.planBonus === '$0.00' && r.json.balance.planBonusExpires === '—', `planBonus ${r.json.balance.planBonus}`)
     assert(r.json.balance.topup === '$0.00', `topup ${r.json.balance.topup}`)
-    assert(r.json.balance.spentThisMonth === '—' && r.json.balance.alertAt === '—', 'spent/alert 未接')
+    // 已扣是真数（一分没花就是 $0.00），余额也是真数。预警线还没有设置项，仍是 —。
+    assert(r.json.balance.spentThisPeriod === '$0.00', `spentThisPeriod ${r.json.balance.spentThisPeriod}`)
+    assert(r.json.balance.left === '$0.00' && r.json.balance.leftMicros === 0, `left ${r.json.balance.left}`)
+    assert(r.json.balance.alertAt === '—', 'alertAt 未接')
+    // 余额是 0 而熔断默认开着：这一屏得说得出「调用会被停下来」。
+    assert(r.json.balance.enforce === true, `enforce ${r.json.balance.enforce}`)
     assert(r.json.mock !== true, 'mock:true')
     assert(!dumpHas(r.json, '$286'), '$286')
     assert(!dumpHas(r.json, '$1,150'), '$1,150')
@@ -1691,7 +1699,9 @@ async function runGateway() {
     assert(!dumpHas(numbers, '48.2M'), '48.2M')
     assert(Array.isArray(r.json.stats) && r.json.stats.length === 4, 'stats')
     for (const s of r.json.stats) {
-      assert(s.value === '0' || s.value === '—', `stat ${s.label}=${s.value}`)
+      // 「费用」这一格现在是真数了（账本上一分没有就是 $0.00），不再是那个万能的 —。
+      const want = s.label === '费用' ? ['$0.00'] : ['0', '—']
+      assert(want.includes(s.value), `stat ${s.label}=${s.value}`)
       assert(s.delta === '—' || s.delta == null, `delta ${s.label}=${s.delta}`)
     }
     assert(Array.isArray(r.json.daily) && r.json.daily.length === 0, 'daily empty')
@@ -1705,7 +1715,9 @@ async function runGateway() {
     assert(joiner, 'missing employee 加入者')
     assert(joiner.tasks === '0', `tasks ${joiner.tasks}`)
     assert(joiner.tokens === '0', `tokens ${joiner.tokens}`)
-    assert(joiner.fail === '—', `fail ${joiner.fail}`)
+    // 「失败率」那一列从来没接过，永远是 —。换成账本上真扣了多少。
+    assert(joiner.amount === '$0.00', `amount ${joiner.amount}`)
+    assert(joiner.fail === undefined, `fail 该没了：${joiner.fail}`)
     assert(joiner.last === '—', `last ${joiner.last}`)
     assert(joiner.initial === '加', `initial ${joiner.initial}`)
 
@@ -2794,6 +2806,7 @@ async function main() {
     await runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log })
     await runStats({ gwRoot, test, req, start, waitHttp, assert, log })
     await runWebTools({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runBilling({ gwRoot, test, req, start, waitHttp, assert, log })
     await runMigrate({ gwRoot, test, start, waitHttp, assert, log })
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
     await runConnectors({ root, gwRoot, test, req, start, waitHttp, assert, log })

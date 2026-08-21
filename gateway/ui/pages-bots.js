@@ -896,22 +896,49 @@ function skillsPage() {
 }
 
 
+/**
+ * 余额见底的横幅。
+ *
+ * **措辞跟着 enforce 走**：真会停下来和只是记账不拦截，是两件事。写死成「调用已暂停」
+ * 而实际没停，公司会去查一个不存在的故障；反过来更糟。
+ */
+function creditWarning(balance) {
+  const left = Number(balance.leftMicros)
+  if (!Number.isFinite(left)) return ''
+  const granted = Number(balance.grantedMicros) || 0
+  if (left > 0) {
+    // 见底之后才提醒等于没提醒——那时调用已经停了。一成是「还来得及去充」的量级。
+    if (!granted || left > granted * 0.1) return ''
+    return `<div class="gw-flash" style="margin: 0;">${esc(
+      t(`额度还剩不到一成（${balance.left}），用完之后需要计费的调用会停下来。`,
+        `Less than 10% of the credit is left (${balance.left}); billable calls stop when it runs out.`),
+    )}</div>`
+  }
+  const msg = balance.enforce
+    ? t('额度已用完，需要计费的调用（模型、连接器、网页搜索）已经停下来了。联系平台管理员充值后立刻恢复。',
+        'Out of credit. Billable calls — model, connector and web search — are stopped. They resume as soon as the platform tops you up.')
+    : t('额度已用完。平台目前没有开启熔断，调用还在继续，但这些钱是欠着的。',
+        'Out of credit. The platform has not switched on enforcement, so calls still go through — but they are being booked against a negative balance.')
+  return `<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(msg)}</div>`
+}
+
 function billingPage() {
   const data = state.billing || {
     plan: { name: '席位套餐', status: '生效中', cycle: '—', seats: '—', period: '—', renew: '—', amount: '—', autoRenew: false },
     invoices: [],
-    balance: { amount: '—', spentThisMonth: '—', alertAt: '—' },
+    balance: { amount: '—', spentThisPeriod: '—', alertAt: '—' },
     topups: [],
   }
   const plan = data.plan || {}
-  const tab = state.billingTab === 'topup' ? 'topup' : 'sub'
+  const tab = ['topup', 'usage'].includes(state.billingTab) ? state.billingTab : 'sub'
   const renewing = state.billingAutoRenew ?? !!plan.autoRenew
   const invoices = Array.isArray(data.invoices) ? data.invoices : []
   const topups = Array.isArray(data.topups) ? data.topups : []
-  const balance = data.balance || { amount: '—', spentThisMonth: '—', alertAt: '—' }
+  const balance = data.balance || { amount: '—', spentThisPeriod: '—', alertAt: '—' }
   const tabs = [
     { key: 'sub', label: '订阅' },
     { key: 'topup', label: '充值' },
+    { key: 'usage', label: '用量明细' },
   ]
     .map(
       (item) =>
@@ -991,9 +1018,11 @@ function billingPage() {
           <div class="satu-panel">
             <span class="satu-panel-title">${t('套餐赠送余额')}</span>
             <div style="display: flex; align-items: baseline; gap: var(--space-3); margin-top: 6px;">
-              <span style="font-family: var(--font-heading); font-size: 26px; line-height: 1;">${esc(balance.planBonus || '—')}</span>
+              <span style="font-family: var(--font-heading); font-size: 26px; line-height: 1;">${esc(balance.planBonusLeft || balance.planBonus || '—')}</span>
               <span style="font-size: 13px; color: var(--muted-foreground);">${bonusExpiry}</span>
             </div>
+            ${/* 发的和剩的是两个数。只报「发了多少」等于让人盯着一个永远不动的数猜自己还能用多久。 */ ''}
+            <div class="satu-kv"><span>${t('本期发放')}</span><span>${esc(balance.planBonus || '—')}</span></div>
             <div class="satu-kv"><span>${t('来源')}</span><span>${esc(plan.name || t('席位套餐'))}</span></div>
             <div class="satu-kv"><span>${t('当前周期')}</span><span>${esc(plan.period || '—')}</span></div>
             <p style="margin: auto 0 0; font-size: 12px; color: var(--muted-foreground);">${t('跟着套餐走：续订会重新发一笔，到期不结转。')}</p>
@@ -1001,22 +1030,23 @@ function billingPage() {
           <div class="satu-panel">
             <span class="satu-panel-title">${t('账户余额')}</span>
             <div style="display: flex; align-items: baseline; gap: var(--space-3); margin-top: 6px;">
-              <span style="font-family: var(--font-heading); font-size: 26px; line-height: 1;">${esc(balance.amount || '—')}</span>
-              <span style="font-size: 13px; color: var(--muted-foreground);">${t(`本月已用 ${esc(balance.spentThisMonth || '—')}`, `${esc(balance.spentThisMonth || '—')} used this month`)}</span>
+              <span style="font-family: var(--font-heading); font-size: 26px; line-height: 1;">${esc(balance.left || balance.amount || '—')}</span>
+              <span style="font-size: 13px; color: var(--muted-foreground);">${t(`本期已扣 ${esc(balance.spentThisPeriod || '—')}`, `${esc(balance.spentThisPeriod || '—')} charged this period`)}</span>
             </div>
             ${/* 合计里含左边那一笔，所以这儿把两笔各自摊开，省得看着像两个不相干的数。 */ ''}
             <div class="satu-kv">
               <span>${t('充值余额')}<span style="color: var(--muted-foreground); font-weight: 400;"> · ${t('不过期')}</span></span>
-              <span>${esc(balance.topup || '—')}</span>
+              <span>${esc(balance.topupLeft || balance.topup || '—')}</span>
             </div>
             <div class="satu-kv">
               <span>${t('套餐赠送余额')}<span style="color: var(--muted-foreground); font-weight: 400;"> · ${t('会过期')}</span></span>
-              <span>${esc(balance.planBonus || '—')}</span>
+              <span>${esc(balance.planBonusLeft || balance.planBonus || '—')}</span>
             </div>
-            <div class="satu-kv"><span>${t('余额预警线')}</span><span>${esc(balance.alertAt || '—')}</span></div>
+            <div class="satu-kv"><span>${t('扣费顺序')}</span><span>${t('先赠送，再充值', 'bonus first, then top-up')}</span></div>
             <p style="margin: auto 0 0; font-size: 12px; color: var(--muted-foreground);">${t('充值由平台代充：需要加额度请联系平台管理员。')}</p>
           </div>
-        </div>`
+        </div>
+        ${creditWarning(balance)}`
   const topupBody = `
         <div style="display: flex; flex-direction: column; gap: var(--space-6);">
           <div style="display: flex; flex-direction: column; gap: var(--space-3);">
@@ -1039,8 +1069,8 @@ function billingPage() {
         ${balanceCard}
         <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">${tabs}</div>
         ${flashes()}
-        ${tab === 'sub' ? subBody : topupBody}
-        <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('账单是公司产品层的事，不走 Bot 运行时。发票、扣款、充值都还没接，数字空着，不编。')}</p>
+        ${tab === 'sub' ? subBody : tab === 'topup' ? topupBody : chargeTable('org')}
+        <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('账单是公司产品层的事，不走 Bot 运行时。发票和在线支付还没接，那两处的数字空着，不编；余额和扣费是真的。')}</p>
       </div>
     </div>`
 }
@@ -1139,7 +1169,7 @@ function usagePage() {
         </div>
         <span style="font-size: 13px;">${esc(m.tasks)}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(m.tokens)}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(m.fail)}</span>
+        <span style="font-size: 13px;">${esc(m.amount || '—')}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(m.last)}</span>
       </div>`
     })
@@ -1184,12 +1214,14 @@ function usagePage() {
           <h2 style="font-size: 18px; margin: 0;">${t('成员用量')}</h2>
           <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
             <div class="satu-usagehead">
-              <span>${t('成员')}</span><span>${t('任务')}</span><span>Tokens</span><span>${t('失败率')}</span><span>${t('最近使用')}</span>
+              ${/* 「失败率」那一列永远是 —（从来没接过），换成真的能填上的东西。 */ ''}
+              <span>${t('成员')}</span><span>${t('任务')}</span><span>Tokens</span><span>${t('金额')}</span><span>${t('最近使用')}</span>
             </div>
             ${memberRows || empty(t('还没有成员。'))}
           </div>
         </div>
-        <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('费用还没有账单，显示 —。调用次数和 token 来自 Gateway 记下的 llm_calls，没有就 0。')}</p>
+        ${chargeTable((isAdmin() || isOwner()) && orgId() ? 'org' : 'me')}
+        <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('调用次数和 token 来自 Gateway 记下的 llm_calls；金额来自计费账本，一次调用一行。')}</p>
       </div>
     </div>`
 }

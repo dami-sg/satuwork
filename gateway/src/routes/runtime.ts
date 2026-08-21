@@ -91,7 +91,7 @@ async function ownBotOf(db: RouteCtx['db'], account: Account, id: string) {
 }
 
 export function attachRuntime(router: Router, ctx: RouteCtx) {
-  const { db, keys } = ctx
+  const { db, keys, meter } = ctx
 
   // ── 可见目录（全局 ∪ 本公司）────────────────────────────────────────
 
@@ -269,7 +269,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const account = await requireSeatOnly(req, db)
     const body = bodyOf(req)
     await webCall(res, () =>
-      runSearch(db, account, {
+      runSearch(db, meter, account, {
         query: String(body.query ?? ''),
         count: body.count == null ? undefined : Number(body.count),
         domains: Array.isArray(body.domains) ? body.domains.map(String) : [],
@@ -281,7 +281,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
 
   router.post('/runtime/web/extract', async (req, res) => {
     const account = await requireSeatOnly(req, db)
-    await webCall(res, () => runExtract(db, account, bodyOf(req).urls))
+    await webCall(res, () => runExtract(db, meter, account, bodyOf(req).urls))
   })
 
   router.get('/runtime/desktop', async (req, res) => {

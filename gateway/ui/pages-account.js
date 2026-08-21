@@ -386,25 +386,42 @@ function ordersPage() {
  * 两笔额度分开画，别加在一起：
  * 套餐赠送的跟着套餐到期清零，单独充的不过期——合成一个数就分不出哪部分会没。
  */
+/**
+ * 平台看某一家公司的额度。
+ *
+ * **大字是「还剩多少」，不是「发了多少」。** `state.balance` 报的是发放额（订单和充值
+ * 的和），账单接口那份 `balance` 才带着扣完之后的余数。只报发放额的话，界面上那个数
+ * 永远不动——而这一屏存在的理由正是回答「这家还能用多久」。
+ */
 function balancePanel() {
   const b = state.balance || { planBonusMils: 0, planBonusExpiresAt: null, topupMils: 0 }
+  const live = state.billing?.balance || null
+  const cell = (label, big, sub) => `<div>
+    <div style="font-size: 12px; color: var(--muted-foreground);">${esc(label)}</div>
+    <div style="font-family: var(--font-heading); font-size: 24px; line-height: 1.3;">${esc(big)}</div>
+    <div style="font-size: 12px; color: var(--muted-foreground);">${sub}</div>
+  </div>`
+  const expiry = b.planBonusExpiresAt
+    ? t(`${esc(dayISO(b.planBonusExpiresAt))} 到期，没用完清零`, `Expires ${esc(dayISO(b.planBonusExpiresAt))}, unused amount is cleared`)
+    : t('没有生效中的套餐')
+  const dry = live && Number(live.leftMicros) <= 0
   return `<div class="satu-panel">
     <span class="satu-panel-title">${t('额度')}</span>
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-4);">
-      <div>
-        <div style="font-size: 12px; color: var(--muted-foreground);">${t('套餐赠送余额')}</div>
-        <div style="font-family: var(--font-heading); font-size: 24px; line-height: 1.3;">${esc(usd(b.planBonusMils || 0))}</div>
-        <div style="font-size: 12px; color: var(--muted-foreground);">
-          ${b.planBonusExpiresAt ? t(`${esc(dayISO(b.planBonusExpiresAt))} 到期，没用完清零`, `Expires ${esc(dayISO(b.planBonusExpiresAt))}, unused amount is cleared`) : t('没有生效中的套餐')}
-        </div>
-      </div>
-      <div>
-        <div style="font-size: 12px; color: var(--muted-foreground);">${t('充值余额')}</div>
-        <div style="font-family: var(--font-heading); font-size: 24px; line-height: 1.3;">${esc(usd(b.topupMils || 0))}</div>
-        <div style="font-size: 12px; color: var(--muted-foreground);">${t('不过期，用完为止')}</div>
-      </div>
+      ${cell(
+        t('套餐赠送余额'),
+        live ? live.planBonusLeft : usd(b.planBonusMils || 0),
+        `${live ? `${t('本期发放')} ${esc(usd(b.planBonusMils || 0))} · ` : ''}${expiry}`,
+      )}
+      ${cell(
+        t('充值余额'),
+        live ? live.topupLeft : usd(b.topupMils || 0),
+        `${live ? `${t('累计充值')} ${esc(usd(b.topupMils || 0))} · ` : ''}${t('不过期，用完为止')}`,
+      )}
+      ${live ? cell(t('本期已扣'), live.spentThisPeriod, t('模型、连接器、网页搜索合计', 'model + connector + web search')) : ''}
     </div>
-    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('充值在「充值」页里做，跟套餐赠送分开记。')}</p>
+    ${dry ? `<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(live.enforce ? t('额度已用完，这家公司需要计费的调用已经停下来了。') : t('额度已用完。平台没开熔断，调用还在继续，钱是欠着的。'))}</div>` : ''}
+    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('充值在「充值」页里做，跟套餐赠送分开记。扣费顺序是先赠送后充值。')}</p>
   </div>`
 }
 

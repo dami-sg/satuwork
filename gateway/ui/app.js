@@ -920,7 +920,8 @@ document.getElementById('app').addEventListener('click', async (e) => {
   if (act === 'stats-range') {
     state.statsRange = btn.getAttribute('data-range')
     if (state.statsRange === 'month' && !state.statsMonth) state.statsMonth = thisMonth()
-    await loadStats()
+    // 汇总和底下那张计费明细一起换窗口。只刷汇总的话，同一屏上两张表会各说各的时间段。
+    await reloadStatsPage()
     return
   }
   if (act === 'prov-new') {
@@ -958,7 +959,9 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'prov-model-new') {
-    state.modelDraft = { id: '', name: '', contextWindow: 128000, maxTokens: 8192, costInput: 0, costOutput: 0, reasoning: false, image: false }
+    // 缓存那两项默认空：填 0 和「没填」在服务端是一个意思（回落到输入价），
+    // 但摆一个 0 在输入框里会让人以为缓存不要钱。
+    state.modelDraft = { id: '', name: '', contextWindow: 128000, maxTokens: 8192, costInput: 0, costOutput: 0, costCacheRead: '', costCacheWrite: '', reasoning: false, image: false }
     render()
     return
   }
@@ -969,6 +972,60 @@ document.getElementById('app').addEventListener('click', async (e) => {
   }
   if (act === 'prov-model-save') {
     await saveCustomModel()
+    return
+  }
+  if (act === 'model-price') {
+    const provider = btn.getAttribute('data-provider')
+    const model = btn.getAttribute('data-model')
+    const catalog = (state.catalog.find((p) => p.provider === provider)?.models || []).find((m) => m.id === model)?.cost || {}
+    const cur = state.settings?.modelPricing?.[`${provider}/${model}`] || {}
+    // 覆盖里没有的项留空，不预填目录价——预填之后一按保存，目录价就被抄成了覆盖，
+    // 上游再调价也不会跟着动了。占位符里给的才是目录价。
+    state.priceDraft = {
+      key: `${provider}/${model}`,
+      catalog,
+      input: cur.input ?? '',
+      output: cur.output ?? '',
+      cacheRead: cur.cacheRead ?? '',
+      cacheWrite: cur.cacheWrite ?? '',
+    }
+    state.priceError = ''
+    render()
+    return
+  }
+  if (act === 'model-price-close') {
+    state.priceDraft = null
+    render()
+    return
+  }
+  if (act === 'model-price-save') {
+    await saveModelPrice()
+    return
+  }
+  if (act === 'model-price-clear') {
+    await saveModelPrice(true)
+    return
+  }
+  if (act === 'charges-kind') {
+    const next = btn.getAttribute('data-kind') || ''
+    if (next === state.chargesKind) return
+    state.chargesKind = next
+    // 换筛选回第一页：停在第 3 页时改筛选，筛完只剩两页的话那一下是空的。
+    resetChargePaging()
+    await loadCharges(btn.getAttribute('data-scope'), btn.getAttribute('data-org') || '')
+    return
+  }
+  if (act === 'charges-next') {
+    const cursor = state.charges?.nextCursor
+    if (!cursor) return
+    state.chargesCursors.push(cursor)
+    await loadCharges(btn.getAttribute('data-scope'), btn.getAttribute('data-org') || '')
+    return
+  }
+  if (act === 'charges-prev') {
+    if (state.chargesCursors.length <= 1) return
+    state.chargesCursors.pop()
+    await loadCharges(btn.getAttribute('data-scope'), btn.getAttribute('data-org') || '')
     return
   }
   if (act === 'prov-model-del') {
@@ -1095,7 +1152,8 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'billing-tab') {
-    state.billingTab = btn.getAttribute('data-tab') === 'topup' ? 'topup' : 'sub'
+    const tab = btn.getAttribute('data-tab')
+    state.billingTab = ['topup', 'usage'].includes(tab) ? tab : 'sub'
     render()
     return
   }
@@ -1107,7 +1165,8 @@ document.getElementById('app').addEventListener('click', async (e) => {
   }
   if (act === 'usage-range') {
     state.usageRange = btn.getAttribute('data-range') || '近 30 天'
-    loadUsage()
+    // 明细也跟着换窗口——胶囊写着「近 7 天」而底下列着全时段，是两张表在互相拆台。
+    reloadUsagePage()
       .then(() => render())
       .catch((err) => {
         flash('err', err.message)
@@ -1537,6 +1596,10 @@ document.getElementById('app').addEventListener('input', (e) => {
     state.modelDraft[f] = el.type === 'checkbox' ? el.checked : el.value
     return
   }
+  if (el.getAttribute('data-act') === 'price-field' && state.priceDraft) {
+    state.priceDraft[el.getAttribute('data-field')] = el.value
+    return
+  }
   const nb = el.getAttribute('data-newbot')
   if (nb && state.newBot) {
     state.newBot = { ...state.newBot, [nb]: el.value }
@@ -1646,12 +1709,12 @@ document.getElementById('app').addEventListener('change', async (e) => {
   if (el.getAttribute?.('data-act') === 'stats-month') {
     state.statsMonth = el.value || thisMonth()
     state.statsRange = 'month'
-    await loadStats()
+    await reloadStatsPage()
     return
   }
   if (el.getAttribute?.('data-act') === 'stats-company') {
     state.statsCompany = el.value
-    await loadStats()
+    await reloadStatsPage()
     return
   }
   // select 和 checkbox 只发 change，草稿字段在这里也收一次。

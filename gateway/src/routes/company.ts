@@ -6,7 +6,8 @@ import { HttpError, json, type Router } from '../http.ts'
 import { INVITE_TTL, MIN_PASSWORD, RESET_LINK_TTL, hashPassword } from '../crypto.ts'
 import { accessUrlFor } from '../lib/catalog.ts'
 import { balanceOf } from '../lib/billing.ts'
-import { bodyOf, deployOptsOf, strField, usd } from '../lib/validate.ts'
+import { parseBilling } from '../db.ts'
+import { bodyOf, deployOptsOf, strField, usd, usdMicros } from '../lib/validate.ts'
 import { companyMachineOf, deploySeat, listSeatRuntime, publicMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
 import { companyStatusOf, emailOf, groupRoleOf, membersInCompany, phoneOf, publicAccount, publicCompany, publicGroup, publicPlan, publicSettings, roleOf, slugOf, stringIds, websiteOf } from '../lib/org.ts'
 import { desktopTicketFor, machineHostOf, machineHostResolver } from '../lib/machines.ts'
@@ -15,7 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { type AccountStatus, type CompanyStatus, type Group, type Role } from '../db.ts'
 
 export function attachCompany(router: Router, ctx: RouteCtx) {
-  const { db, keys, llm } = ctx
+  const { db, keys, llm, meter } = ctx
 
   // ── 公司 ────────────────────────────────────────────────────────────
 
@@ -527,6 +528,9 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     const invoices = await db.invoicesOfCompany(company.id)
     const topups = await db.topupsOfCompany(company.id)
     const balance = await balanceOf(db, company.id)
+    const budget = await meter.budget(company.id)
+    const billing = parseBilling((await db.platformSettings()).billing)
+    const spentThisPeriod = await db.chargeSpentSince(company.id, balance.planBonusStartAt ?? 0)
     json(res, 200, {
       plan: {
         name: active?.planName || '席位套餐',
@@ -551,14 +555,33 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
           paid: v.paidAt ? day(v.paidAt) : '—',
         })),
       // 两笔额度分开报：赠送的跟着套餐到期清零，充的不过期。合计只是给一眼看的。
+      //
+      // **发的和剩的是两个数。** planBonus / topup 是「发了多少」，left 那两个才是
+      // 「还剩多少」——按量扣费接上之后，只报发了多少等于让人看着一个永远不动的数
+      // 去猜自己还能用多久。
       balance: {
         amount: usd(balance.planBonusMils + balance.topupMils),
         planBonus: usd(balance.planBonusMils),
         planBonusExpires: balance.planBonusExpiresAt ? day(balance.planBonusExpiresAt) : '—',
         topup: usd(balance.topupMils),
-        // 按量扣费还没接，用了多少、预警线都还没有真数字，不编。
-        spentThisMonth: '—',
+        planBonusLeft: usdMicros(budget.bonusLeft),
+        topupLeft: usdMicros(budget.topupLeft),
+        left: usdMicros(budget.left),
+        leftMicros: budget.left,
+        // 「本期」= 当前套餐账期，不是自然月：赠送额度是按账期作废的，跟着它数才对得上
+        // 「还剩多少」。没有生效套餐时退回全部历史——那时也没有账期可言。
+        spentThisPeriod: usdMicros(spentThisPeriod),
+        // 预警线还没有设置项。不编一个数——编出来的阈值会被当成真的在生效。
         alertAt: '—',
+        // 余额见底会不会真的停下来。界面上那句提示的措辞得跟着它变。
+        enforce: billing.enforce,
+        /**
+         * 本期一共有过多少额度（发放 + 累计充值）。
+         *
+         * 给「还剩不到一成」那条预警当分母。分母不能用「当前余额」——那样算出来的
+         * 比例恒等于 100%。
+         */
+        grantedMicros: (balance.planBonusMils + balance.topupMils) * 1000,
       },
       topups: topups.map((v) => ({
         id: v.id,
@@ -584,14 +607,28 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     const seats = plan?.seats ?? 0
     const members = (await db.accountsOf(company.id)).filter((a) => a.role !== 'owner')
     const usage = await db.llmUsageOfCompany(company.id, range)
-    json(res, 200, usagePayload(usage, { seats, members, includeMembers: true }))
+    // 钱按人摊开要走账本，不能按 token 折——一个人跑一天搜索、一次模型都不调，
+    // 按 token 看他是零，而他确实花了钱。
+    const spentByAccount = new Map<string, number>()
+    let spentMicros = 0
+    for (const row of await db.chargeUsageBy(['accountId'], range, { companyId: company.id })) {
+      spentByAccount.set(row.accountId, (spentByAccount.get(row.accountId) ?? 0) + row.amountMicros)
+      spentMicros += row.amountMicros
+    }
+    json(res, 200, usagePayload(usage, { seats, members, includeMembers: true, spentByAccount, spentMicros }))
   })
 
   router.get('/me/stats', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const range = rangeQuery(req)
     const usage = await db.llmUsageOfAccount(account.id, range)
-    json(res, 200, usagePayload(usage, { seats: 0, members: [account], includeMembers: false }))
+    const mine = await db.chargeUsageBy(['accountId'], range, { accountId: account.id })
+    json(res, 200, usagePayload(usage, {
+      seats: 0,
+      members: [account],
+      includeMembers: false,
+      spentMicros: mine.reduce((n, r) => n + r.amountMicros, 0),
+    }))
   })
 
   router.put('/orgs/:id/plan', async (req, res) => {
