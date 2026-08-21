@@ -173,6 +173,17 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(card.includes('<textarea') && card.includes('data-edit="args.body"'), '正文没做成可编辑的多行框')
       assert(card.includes('你好，附件是报表。'), '正文没填进去')
       assert(card.includes('批准并发送'), `发信那张卡的按钮该说清楚它要干什么：${card.slice(-400)}`)
+      /**
+       * 第二颗按钮的范围是**一轮**，不是一条会话。
+       *
+       * 一个 Bot 一辈子只有一条会话，按会话放行等于永久通行证；按钮上的话必须跟真实
+       * 范围对得上，否则它就是在替人做一个他没同意的决定。
+       */
+      assert(card.includes('data-scope="turn"'), '「都批准」那颗按钮的范围不是一轮')
+      assert(card.includes('这一轮都批准') && !card.includes('这次对话都批准'), '按钮上的话还在说「这次对话」')
+      // 拒绝那一侧也有一颗带范围的，和批准那一对对称。
+      assert(card.includes('data-act="chat-deny" data-call="call_mail" data-scope="turn"'), '没有「这一轮别再试」那颗按钮')
+      assert(card.includes('这一轮别再试'), '拒绝那一侧缺了带范围的那颗')
       // 剥壳之后的工具名才认得出来，sw_run 谁也看不出是什么。
       assert(card.includes('GMAIL_SEND_EMAIL'), '卡片上没写真正要跑的那把工具')
 

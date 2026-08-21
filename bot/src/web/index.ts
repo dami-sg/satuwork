@@ -203,6 +203,7 @@ export function apply(ctx: Context, _config: Config = {}) {
     res.json({
       pending: ctx.policy.approvals.list(req.params.id),
       granted: ctx.policy.approvals.grantedIn(req.params.id),
+      blocked: ctx.policy.approvals.blockedIn(req.params.id),
     })
   })
 
@@ -231,7 +232,9 @@ export function apply(ctx: Context, _config: Config = {}) {
       res.json({ error: 'decision 只能是 approve 或 deny' })
       return
     }
-    const scope = body.scope === 'session' ? 'session' : 'once'
+    // `session` 是老前端的叫法，收下来按 `turn` 处理——那颗按钮的语义从来就是「这一轮」，
+    // 只是名字起错过一次。
+    const scope = body.scope === 'turn' || body.scope === 'session' ? 'turn' : 'once'
     const edits = body.edits && typeof body.edits === 'object' && !Array.isArray(body.edits) ? body.edits : undefined
     const r = ctx.policy.approvals.decide(req.params.id, req.params.callId, decision, scope, edits)
     if (r === 'ok') {

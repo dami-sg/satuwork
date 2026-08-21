@@ -180,21 +180,35 @@ const approvals = {}
   approvals.重复点会说已结束 = ctx.policy.approvals.decide('s6', callId, 'approve') === 'gone'
 }
 {
-  // 「这次对话都批准」：第二次同一把工具不该再问。
+  // 「这一轮都批准」：这一轮里第二次同一把工具不该再问，**但下一轮要重新问**。
   const running = call('s6', 'mcp_b_send_mail', { to: '1@2.3' })
   await settle()
-  ctx.policy.approvals.decide('s6', pendingOf('s6')[2].data.callId, 'approve', 'session')
+  ctx.policy.approvals.decide('s6', pendingOf('s6')[2].data.callId, 'approve', 'turn')
   await running
   const before = pendingOf('s6').length
   const second = await call('s6', 'mcp_b_send_mail', { to: '4@5.6' })
-  approvals.本会话内不再问 = pendingOf('s6').length === before && second.failed !== true
+  approvals.这一轮内不再问 = pendingOf('s6').length === before && second.failed !== true
   approvals.授权名单里有它 = ctx.policy.approvals.grantedIn('s6').includes('mcp_b_send_mail')
+  /**
+   * 轮末必须清掉。
+   *
+   * 一个 Bot 一辈子只有一条会话，所以按会话记的放行名单等于**永久**通行证——而按钮上
+   * 写的是「这一轮」。这条断言就是钉住这个差别。
+   */
+  ctx.emit('session/event', 's6', { seq: 0, time: Date.now(), type: 'turn/end', data: { turn: 1, reason: 'completed' } })
+  await settle(10)
+  approvals.轮末清掉了名单 = ctx.policy.approvals.grantedIn('s6').length === 0
+  const afterTurn = call('s6', 'mcp_b_send_mail', { to: '7@8.9' })
+  await settle()
+  approvals.下一轮重新问 = pendingOf('s6').length === before + 1
+  ctx.policy.approvals.decide('s6', pendingOf('s6').at(-1).data.callId, 'deny')
+  await afterTurn
   // 「这次对话都批准」必须在日志上留得下：否则后面那些不再弹卡片的调用就成了
   // 没有出处的放行，而审计要问的正是这个。
   const terminal = sessions.appended.filter(
     (e) => e.type === 'tool/approval' && e.sessionId === 's6' && e.data.state === 'approved',
   )
-  approvals.终态事件带范围 = terminal.some((e) => e.data.scope === 'session')
+  approvals.终态事件带范围 = terminal.some((e) => e.data.scope === 'turn')
   approvals.只批一次的也标了范围 = terminal.some((e) => e.data.scope === 'once')
   approvals.放行的理由写了出处 = sessions.appended.some(
     (e) => e.type === 'tool/policy' && e.data.outcome === 'approved' && e.data.reason.includes('此前已批准'),
@@ -237,6 +251,36 @@ const approvals = {}
   await running
   approvals.递归删被拒后没跑 = ran.bash === before + 1
 }
+{
+  // 「这一轮别再试了」：拒绝也能带范围，之后同一把工具**连卡片都不弹**，直接挡。
+  const before = ran.mcp_b_send_mail
+  const running = call('s6', 'mcp_b_send_mail', { to: 'nope@x' })
+  await settle()
+  const cards = pendingOf('s6').length
+  ctx.policy.approvals.decide('s6', pendingOf('s6').at(-1).data.callId, 'deny', 'turn')
+  const first = await running
+  approvals.拒绝并拦停_第一次没跑 = ran.mcp_b_send_mail === before && first.failed === true
+  approvals.拦停名单里有它 = ctx.policy.approvals.blockedIn('s6').includes('mcp_b_send_mail')
+  // 模型换个措辞再来一次：不该再弹卡片，也不该跑。
+  const again = await call('s6', 'mcp_b_send_mail', { to: 'nope2@x' })
+  approvals.再试不弹卡片 = pendingOf('s6').length === cards
+  approvals.再试也没跑 = ran.mcp_b_send_mail === before && again.failed === true
+  // 给模型的话要说清是「这一轮」，还要给出路——不然它只会换个说法再撞一次。
+  approvals.话里说了这一轮 = again.text.includes('这一轮') && again.text.includes('换一条')
+  approvals.留痕说了没有再问 = sessions.appended.some(
+    (e) => e.type === 'tool/policy' && e.data.reason.includes('已拒绝同一把工具，没有再问'),
+  )
+  // 轮末一起清掉：下一轮重新问。
+  ctx.emit('session/event', 's6', { seq: 0, time: Date.now(), type: 'turn/end', data: { turn: 2, reason: 'completed' } })
+  await settle(10)
+  approvals.轮末清掉了拦停名单 = ctx.policy.approvals.blockedIn('s6').length === 0
+  const next = call('s6', 'mcp_b_send_mail', { to: 'again@x' })
+  await settle()
+  approvals.下一轮又会问 = pendingOf('s6').length === cards + 1
+  ctx.policy.approvals.decide('s6', pendingOf('s6').at(-1).data.callId, 'deny')
+  await next
+}
+
 out.approvals = approvals
 
 // ── 6. 个人敏感信息：出站方向扫参数 ────────────────────────────────────
@@ -347,7 +391,7 @@ out.record = {
     'args.recipient_email': 'evil@attacker.test',
     '../etc/passwd': 'x',
   }
-  ctx.policy.approvals.decide('s6', pending.data.callId, 'approve', 'session', edits)
+  ctx.policy.approvals.decide('s6', pending.data.callId, 'approve', 'turn', edits)
   await running
   const sent = got.mcp_a_sw_run?.args ?? {}
   const terminal = sessions.appended.filter((e) => e.type === 'tool/approval' && e.data.state === 'approved').at(-1)
@@ -360,7 +404,7 @@ out.record = {
     终态事件记了改过哪几格: (terminal?.data.edited || []).join('、'),
     终态事件里是改后的那份: String(terminal?.data.arguments || '').includes('我核对过了'),
     // 改过的这一次不能变成整场放行。
-    改过就不给整场放行: !ctx.policy.approvals.grantedIn('s6').includes('mcp_a_sw_run'),
+    改过就不给顺带放行: !ctx.policy.approvals.grantedIn('s6').includes('mcp_a_sw_run'),
     留痕的理由写了改过: sessions.appended.some(
       (e) => e.type === 'tool/policy' && e.data.outcome === 'approved' && e.data.reason.includes('批准时改过'),
     ),
