@@ -128,6 +128,21 @@ export async function runMentions({ root, test, assert, log }) {
     assert(r.gap.这一轮照样跑, '为了这件事把整轮拦掉了——别的工具还是该给')
   })
 
+  await test('「是不是点名调的」这个标记，绝不许把工具调用弄失败', () => {
+    /**
+     * 目录插件不能 inject agents（agents 那边 inject 了 catalog，绕一条环回来两边都起
+     * 不来）。原来写成 `ctx.agents?.mentionedIn?.()`，以为 `?.` 兜得住——可 cordis 的
+     * 守卫是在**取属性那一刻**抛的，`?.` 挡的是取到之后的 null。线上的表现是 Gmail 的
+     * 每一次调用都返回 `cannot get property "agents" without inject`：一个流水上的附加
+     * 标记，把整把工具打死了，而模型只能照着这句英文告诉用户「MCP 配置有问题」。
+     */
+    assert(r.viaMention.取不到就当没点名, 'ctx.agents 抛出来的异常没被接住')
+    assert(r.viaMention.reflect自己炸了也不许抛, 'reflect 出问题时还是会抛')
+    assert(r.viaMention.没有reflect也不许抛, '没有 reflect 的 ctx 会把调用弄失败')
+    assert(r.viaMention.点了名的照样认得出, '兜住异常的同时把功能也兜没了')
+    assert(r.viaMention.没点那台不算, '没点名的服务器被算成点了名')
+  })
+
   await test('取消掉的那条一个字都不留在日志里', () => {
     // 队列不写 JSONL：被取消的消息从没进过模型，写进去会让重放凭空多一条用户消息。
     assert(r.cancelled.取消的那条没进日志, '取消掉的消息进了 JSONL')

@@ -19,6 +19,7 @@ import * as toolsPlugin from './src/tools/index.ts'
 import * as llmPlugin from './src/llm/index.ts'
 import * as agentPlugin from './src/agent/index.ts'
 import { AssistantMessageEventStream, emptyAssistant } from './src/llm/stream.ts'
+import { viaMentionOf } from './src/catalog/index.ts'
 import { SESSION_FORMAT_VERSION } from './src/session/types.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'satu-mention-'))
@@ -303,6 +304,35 @@ await ctx.agents
     跟模型说清楚了: ghost.system.includes('本轮被点名、但没挂上的连接'),
     点了名的那把写出来了: ghost.system.includes('Gmail (ghost)'),
     这一轮照样跑: ghost.tools.includes('mcp_notion_create_page'),
+  }
+}
+
+// ── 10. 「这一次是不是点名调的」这个标记，绝不许把工具调用弄失败 ─────
+//
+// 线上就是这么坏的：目录插件不能 inject agents（会绕出依赖环），原来写成
+// `ctx.agents?.mentionedIn?.()`，以为 `?.` 能兜住——可 cordis 的守卫是在**取属性那一刻**
+// 抛的，`?.` 挡的是取到之后的 null。于是 Gmail 的每一次调用都返回一句
+// `cannot get property "agents" without inject`，一个流水上的附加标记把整把工具打死了。
+{
+  const poisoned = { get agents() { throw new Error('cannot get property "agents" without inject') } }
+  const viaThrows = { reflect: { get() { throw new Error('炸') } } }
+  const viaOk = { reflect: { get: (n) => (n === 'agents' ? { mentionedIn: () => new Set(['srv-1']) } : undefined) } }
+  const noReflect = {}
+  // 抛出来也要接住：不接的话探针自己先死了，报出来的是「读不到 viaMention」，
+  // 而真正的失败（它抛了）反倒看不见。
+  const call = (c, sid, srv) => {
+    try {
+      return viaMentionOf(c, sid, srv)
+    } catch (e) {
+      return 'THROW: ' + e.message
+    }
+  }
+  out.viaMention = {
+    取不到就当没点名: call(poisoned, 's1', 'srv-1') === false,
+    reflect自己炸了也不许抛: call(viaThrows, 's1', 'srv-1') === false,
+    没有reflect也不许抛: call(noReflect, 's1', 'srv-1') === false,
+    点了名的照样认得出: call(viaOk, 's1', 'srv-1') === true,
+    没点那台不算: call(viaOk, 's1', 'srv-2') === false,
   }
 }
 

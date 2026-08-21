@@ -206,19 +206,23 @@ function messageText(msg) {
  * 正文里一个字都没有——`messageText` 也是这么约定的。所以要显示成药丸只能从这里取。
  */
 /**
- * 一颗点名药丸的内容：连接器图标 + `@名字`。
+ * 一颗点名药丸的内容：**有图标就画图标，没有才画那个 `@`**。
  *
- * **`@` 要画出来。** 人打的就是 `@Gmail`，不带的话它看着像个普通标签，而这一颗说的是
- * 「这一轮点了名」——那正是它和附件药丸的区别。
+ * 两者说的是同一件事——「这一颗是点名，不是随手带的附件」。图标把它说得更清楚（一眼
+ * 认出是哪一家），那就不必再顶一个 `@` 在前面；图标取不到时才轮到 `@` 顶上，不然药丸
+ * 退化成一个看不出来历的普通标签。
  *
  * 图标只有候选清单里有（`/mentions` 的 `logo`）。消息里存的是 `{kind,id,label}`，所以
- * 历史那条要按 id 回候选里查（候选在 loadChatPage 里就拉了）。查不到就不画图标：一颗
- * 破图标比没有更糟，而名字本身已经说清是谁了。
+ * 历史那条要按 id 回候选里查（候选在 loadChatPage 里就拉了）。
+ *
+ * 图标 404 的那一下也要接住：`replaceWith('@')` 把它原地换成 `@`，不是删掉——删掉的话
+ * 那颗药丸既没图标也没 `@`。这里能直接写字符串是因为它不含引号，不像 connectorLogo
+ * 那段要把一整段 HTML 塞进属性（见 pages-connectors.js 里那个转义两次的坑）。
  */
 function mentionPill(m) {
   const logo = m.logo || (state.mentionOptions || []).find((x) => x.id === m.id)?.logo || ''
-  const icon = logo ? `<img src="${esc(logo)}" alt="" onerror="this.remove()">` : ''
-  return `<span class="sw-mention">${icon}<span>@${esc(m.label)}</span>`
+  const head = logo ? `<img src="${esc(logo)}" alt="" onerror="this.replaceWith('@')">` : '@'
+  return `<span class="sw-mention">${head}<span>${esc(m.label)}</span>`
 }
 
 function messageMentions(msg) {
