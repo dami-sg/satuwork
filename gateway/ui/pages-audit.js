@@ -396,7 +396,8 @@ function companiesPage() {
   const cols = 'minmax(160px, 1.8fr) 84px minmax(90px, 1fr) minmax(120px, 1fr) minmax(150px, 1.4fr) minmax(110px, 1fr) 104px'
   const cell = (text) =>
     `<span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(text || '—')}</span>`
-  const rows = (state.orgs || [])
+  const view = pageSlice('companies', state.orgs)
+  const rows = view.rows
     .map((c) => {
       const plan = c.plan || {}
       return `<div class="satu-memberrow" style="cursor: pointer; grid-template-columns: ${cols};" data-act="go" data-href="/companies/${esc(c.id)}">
@@ -429,6 +430,7 @@ function companiesPage() {
             <span>${t('公司')}</span><span>${t('状态')}</span><span>${t('联系人')}</span><span>${t('电话')}</span><span>${t('联系邮箱')}</span><span>${t('订阅套餐')}</span><span>${t('到期时间')}</span>
           </div>
           ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有公司')}</div>`}
+          ${listPager('companies', view, '家')}
         </div>
       </div>
       ${orgCreateModal()}
@@ -525,12 +527,16 @@ function releaseRow(r, latest) {
 function releaseSection({ kind, title, hint, data, desired }) {
   const d = data || { releases: [], latest: null, desired: '' }
   const rows = d.releases || []
+  // 两个 tab 各翻各的：管家和 Bot 是两条独立的版本线，在管家那边翻到第 3 页，
+  // 切过去看 Bot 时没有理由也停在第 3 页。
+  const view = pageSlice(`releases:${kind}`, rows)
   const table = rows.length
     ? `<div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover); overflow: hidden;">
         <div class="satu-memberhead" style="grid-template-columns: 200px 90px 120px 1fr 150px;">
           <span>${t('版本')}</span><span>${t('大小')}</span><span>sha256</span><span>${t('下载地址')}</span><span>${t('时间')}</span>
         </div>
-        ${rows.map((r) => releaseRow(r, d.latest)).join('')}
+        ${view.rows.map((r) => releaseRow(r, d.latest)).join('')}
+        ${listPager(`releases:${kind}`, view, '版')}
       </div>`
     : `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground); border: 1px solid var(--border); border-radius: var(--radius-lg);">${t('还没有发布版本')}</div>`
   // 期望版本只有管家有：bot 是部署时挑版本，管家是机器自己去追一个目标版本。
