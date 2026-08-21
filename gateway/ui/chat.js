@@ -151,6 +151,36 @@ const chatQueues = new Map()
 /** 打开一条会话先要几轮。人来是看最近说了什么的，更早的等他往上翻。 */
 const CHAT_TAIL_TURNS = 20
 
+/**
+ * 用户消息开头那段「我上传了文件，在工作区里：」是 composeChatBody 自己拼的
+ * （同一个文件里，往下找）。这里把它认回来。
+ *
+ * **为什么值得认**：不认的话，附件在气泡里就是一行不能点的路径文本，而 Bot 生成的
+ * 文件早就是可以点开预览的药丸了——同一个东西，自己传上去的反而看不了，这说不通。
+ *
+ * 敢按文本认，是因为这段文本**是我们自己生成的**，格式由 composeChatBody 定死；
+ * 而且判据卡得很紧：首行必须整句相等（中英两版都列在下面，一条消息可能在另一种
+ * 语言下被打开），随后必须是连续的 `- \`uploads/…\`` 行。这和「拿正则去扫模型写的
+ * 散文猜路径」是两回事——那种一改措辞就散架，这种不会。
+ */
+const UPLOAD_LEADS = ['我上传了文件，在工作区里：', 'I uploaded some files. They are in the workspace at:']
+
+function splitUploads(text) {
+  const src = String(text == null ? '' : text)
+  const lead = UPLOAD_LEADS.find((x) => src.startsWith(x + '\n'))
+  if (!lead) return { text: src, files: [] }
+  const lines = src.slice(lead.length + 1).split('\n')
+  const files = []
+  let i = 0
+  for (; i < lines.length; i++) {
+    const m = /^- `(uploads\/[^`]+)`$/.exec(lines[i])
+    if (!m) break
+    files.push({ path: m[1], name: m[1].split('/').pop() || m[1] })
+  }
+  if (!files.length) return { text: src, files: [] }
+  return { text: lines.slice(i).join('\n').trim(), files }
+}
+
 function fold(events, live) {
   const blocks = []
   let assistant = null
@@ -167,9 +197,17 @@ function fold(events, live) {
       if (data.source && data.source.kind && data.source.kind !== 'user') continue
       assistant = null
       tools = []
+      const raw = messageText(data.message) || data.text || ''
+      const up = splitUploads(raw)
       blocks.push({
         kind: 'user',
-        text: messageText(data.message) || data.text || '',
+        text: up.text,
+        // 附件列表拆出来单独画成药丸；正文只留人真正打的那句话。
+        files: up.files,
+        // **raw 不能省。** mergePending 靠「文字一模一样」认回执，而它手上那份是
+        // 拼好的完整正文。只留拆过的 text，带附件的消息就永远认不回来——那条 pending
+        // 销不掉，界面会一直挂着「正在思考」。
+        raw,
         images: messageImages(data.message),
         time: at,
         seq: ev.seq,
@@ -181,6 +219,7 @@ function fold(events, live) {
         blocks.push(assistant)
       }
       if (text) assistant.text = text
+      assistant.endTime = at
     } else if (type === 'assistant/chunk') {
       const chunk = data.chunk || {}
       if (chunk.type === 'text-delta' && chunk.text) {
@@ -189,6 +228,7 @@ function fold(events, live) {
           blocks.push(assistant)
         }
         assistant.text += chunk.text
+        assistant.endTime = at
       }
     } else if (type === 'tool/call') {
       // 工具常常在助手吐出第一个字**之前**就开始跑（先查订单再回话）。以前只在已经有
@@ -199,8 +239,17 @@ function fold(events, live) {
         assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
-      tools.push({ callId: data.callId, name: data.name || 'tool', result: null, failed: false })
+      // arguments 要留着：工具药丸的悬浮窗全靠它回答「这次到底拿什么跑的」。存的是
+      // bot 那边 JSON.stringify 过的原串，展示时再 parse 一次做缩进（见 toolPopBody）。
+      tools.push({
+        callId: data.callId,
+        name: data.name || 'tool',
+        args: typeof data.arguments === 'string' ? data.arguments : '',
+        result: null,
+        failed: false,
+      })
       assistant.tools = tools
+      assistant.endTime = at
     } else if (type === 'tool/result') {
       const hit =
         tools.find((x) => x.callId && x.callId === data.callId && x.result == null) ||
@@ -213,10 +262,15 @@ function fold(events, live) {
         // 那段文本是写给模型的散文，措辞一改就扫不出来了。
         hit.files = Array.isArray(data.files) ? data.files : null
       }
+      if (assistant) assistant.endTime = at
     } else if (type === 'turn/start') {
       status = 'running'
     } else if (type === 'turn/end') {
       status = ''
+      // **这一轮真正收口的时刻。** 气泡下面那个时间要的是「输出完毕」而不是「开始
+      // 输出」，靠的就是它：比最后一条 chunk 准，也覆盖「只调工具、一个字没吐」的
+      // 那种轮次（那种轮里根本没有 chunk 可以取时间）。
+      if (assistant) assistant.endTime = at
     }
   }
   // bot 说过话就听它的：这份历史可能是截断的，而扫描对截断毫无抵抗力（见 chatLive）。
@@ -517,19 +571,35 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
       signal: ac.signal,
     })
   } catch (err) {
-    releaseChatStream(ac, owner)
     endReplay()
-    if (ac.signal.aborted) return
+    if (ac.signal.aborted) {
+      releaseChatStream(ac, owner)
+      return
+    }
+    // **连不上要接着退避重试，不能就此认输。** 见下面 503 那条的说明。
     state.runtimeError = '实例还没上线'
     paintChat()
-    return
+    return retryChatStream(sessionId, ac, attempt + 1)
   }
+  /**
+   * 503 = 席位此刻不在（Gateway 对席位的 fetch 抛了或没回 2xx，见 runtime.ts 的
+   * proxySse）。**这是「正在重启」，不是「坏了」**：每一次重新部署、每一次管家换版，
+   * 都必然有几秒钟落在这个窗口里。
+   *
+   * 以前这里直接 return，于是撞上这几秒的那次重连就是最后一次——流断了、也不再重来。
+   * 席位一分钟后好端端地回来了，页面却再也接不回去：消息 POST 走的是另一条请求，
+   * 照发照跑，回答经 SSE 送出来时没人在听。屏幕上就一直挂着「正在思考」——因为
+   * mergePending 手上那条 pending 只能靠 SSE 回来的 user/message 销账（见 mergePending）。
+   * bot 日志里那一轮明明写着 completed，这是那个「日志跑完了、网页还转着」的成因。
+   *
+   * 退避重试到第 6 次为止（约 24 秒），比重新部署那几秒宽裕得多；真的一直不回来，
+   * retryChatStream 会把「连接断开」摆到界面上。
+   */
   if (res.status === 503) {
-    releaseChatStream(ac, owner)
     endReplay()
     state.runtimeError = '实例还没上线'
     paintChat()
-    return
+    return retryChatStream(sessionId, ac, attempt + 1)
   }
   if (!res.ok || !res.body) {
     releaseChatStream(ac, owner)
@@ -967,10 +1037,62 @@ function fileChipHtml(f) {
   )
 }
 
-function chipHtml(x) {
+/**
+ * 一条工具痕迹。
+ *
+ * **不再挂 title**：原生 tooltip 要等一秒才出、只能显示一行纯文本，而且会和下面那个
+ * 悬浮窗同时冒出来。详情改由 sw-toolpop 给——参数和结果都在里面，那两样才是「它刚才
+ * 到底干了什么」的答案，尤其是失败的那几颗，以前只能去导出记录里翻。
+ *
+ * 详情**不塞进 data-***：一次 bash 的参数加输出动辄几 KB，进属性要转义、要整份重复
+ * 写进 DOM，而 chips 每次状态变化都重画一遍。改成 updateRow 把工具对象直接挂在节点上。
+ */
+function chipHtml(x, i) {
   const state_ = x.result == null ? 'running' : x.failed ? 'error' : 'done'
   const label = x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')
-  return `<span class="sw-chip" data-state="${state_}" title="${esc(x.name + ' · ' + label)}">${ICON_TOOL}<span>${esc(x.name)} · ${esc(label)}</span></span>`
+  return `<span class="sw-chip sw-toolchip" data-state="${state_}" data-i="${i}" tabindex="0">${ICON_TOOL}<span>${esc(x.name)} · ${esc(label)}</span></span>`
+}
+
+/**
+ * 正文里被**行内代码**点了名的产出文件。
+ *
+ * 判据是 markdown 源码里出现 `` `路径` ``，而不是去渲染后的 DOM 里找。两个理由：
+ * 一是它要参与 chips 那条的 sig（决定底下还摆哪几颗），必须在渲染之前就算得出来；
+ * 二是源码里的反引号是模型明确写下的「这是个路径」，比事后按文本匹配可靠。
+ *
+ * **不做模糊匹配**：只认整段相等的完整路径。截一半的、拼在句子里的一律不动——
+ * 那正是「拿正则扫散文猜路径」的老毛病，措辞一改就散架。
+ */
+function mentionedFiles(text, files) {
+  const src = String(text == null ? '' : text)
+  const set = new Set()
+  for (const f of files || []) if (f && f.path && src.includes('`' + f.path + '`')) set.add(f.path)
+  return set
+}
+
+/**
+ * 把正文里那几段路径原地换成可以点开的药丸。
+ *
+ * 模型写出来的是 `uploads/s-0189cf21-787b-4c33-a4d4-c3daf292da34/Receipt-2095.md`
+ * 这样一长串——占掉整行、看不出重点，而且不能点。换成药丸之后，「它生成了什么」
+ * 就在说这句话的地方，不用再往下找。
+ *
+ * **跳过代码块里的**：那里面的路径是给人抄去执行的命令的一部分，换成按钮就抄不走了。
+ */
+function inlineFileChips(host, files) {
+  const byPath = new Map((files || []).filter((f) => f && f.path).map((f) => [f.path, f]))
+  if (!byPath.size) return
+  for (const code of [...host.querySelectorAll('code')]) {
+    if (code.closest('pre')) continue
+    const hit = byPath.get(code.textContent.trim())
+    if (!hit) continue
+    const box = document.createElement('span')
+    box.innerHTML = fileChipHtml(hit)
+    const chip = box.firstElementChild
+    if (!chip) continue
+    chip.classList.add('sw-filechip-inline')
+    code.replaceWith(chip)
+  }
 }
 
 /** 一条消息的外壳。正文和工具条留空，交给 updateRow 填——它俩每帧都可能变。 */
@@ -978,7 +1100,10 @@ function rowShell(b, key) {
   const account = (state.me && state.me.account) || {}
   const avatar = b.kind === 'user' ? esc(initialOf(account)) : ICON_BOT
   // 时间戳两侧一致，都挂在气泡外面（见 chat.css 里 .sw-time 的说明）。
-  const time = b.time ? `<time class="sw-time" datetime="${new Date(b.time).toISOString()}">${esc(chatClock(b.time))}</time>` : ''
+  //
+  // 内容留空，交给 updateRow：助手那条**还在输出时是读秒**、输出完了才换成时刻，
+  // 而 rowShell 只在节点新建时跑一次，盯不住这个变化。
+  const time = '<time class="sw-time" hidden></time>'
   return (
     `<div class="sw-msg" data-role="${b.kind}" data-key="${key}"${b.pending ? ' data-pending="1"' : ''}>` +
     `<div class="sw-msg-avatar" aria-hidden="true">${avatar}</div>` +
@@ -1041,24 +1166,117 @@ function updateRow(el, b, streaming) {
     void fillShots(strip)
   }
 
+  const tools = b.tools || []
+  // 产出文件 + 上传的附件。两边是同一种东西（工作区里一个能点开的文件），
+  // 用同一种药丸，点开走同一个预览。
+  const outs = outputFiles(tools).concat(b.files || [])
+  // 正文里已经点了名的那些，就地换成药丸（见 inlineFileChips），底下那条就不再
+  // 重复摆一遍——同一个文件在一条消息里出现两次是噪音，而且下面那颗离它被提到的
+  // 那句话隔了好几行。
+  const inlined = mentionedFiles(b.text, outs)
+
   if (!String(b.text || '').trim() && streaming) {
     // 还没吐字。给一个空气泡里的三点——它就地长成正文，位置不跳。
     if (!md.querySelector('.sw-typing')) md.innerHTML = '<span class="sw-typing"><i></i><i></i><i></i></span>'
   } else {
     if (md.querySelector('.sw-typing')) md.innerHTML = ''
     syncMd(md, b.text, streaming)
+    if (inlined.size) inlineFileChips(md, outs)
   }
 
-  const tools = b.tools || []
-  const outs = outputFiles(tools)
+  // 底下只留没被正文点过名的。
+  const rest = outs.filter((f) => !inlined.has(f.path))
   const sig =
     tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|') +
     '#' +
-    outs.map((f) => f.path).join('|')
+    rest.map((f) => f.path).join('|')
   if (chips.getAttribute('data-sig') !== sig) {
     chips.setAttribute('data-sig', sig)
-    chips.innerHTML = tools.map(chipHtml).join('') + outs.map(fileChipHtml).join('')
-    chips.hidden = !tools.length && !outs.length
+    chips.innerHTML = tools.map(chipHtml).join('') + rest.map(fileChipHtml).join('')
+    chips.hidden = !tools.length && !rest.length
+    // 工具对象直接挂到节点上，悬浮窗按需取。顺序和 chipHtml 生成的顺序一一对应；
+    // 产出文件那几颗是 sw-filechip，不在这个选择器里，不会错位。
+    const nodes = chips.querySelectorAll('.sw-toolchip')
+    for (let i = 0; i < nodes.length; i++) nodes[i].__tool = tools[i]
+    // 这一批节点刚被换掉。开着的悬浮窗要么跟着换到新节点上，要么关掉——
+    // 「调用中 → 完成」正好是人盯着它看的那一刻，不该在那时候闪没。
+    refreshToolPop()
+  }
+  paintRowTime(el, b, streaming)
+}
+
+/**
+ * 气泡下面那一行时间。
+ *
+ * 还在输出时显示**读秒**，输出完了显示**收口的时刻**。
+ *
+ * 以前两种情况都显示「开始的时刻」，于是一轮跑了三分钟的对话，下面写着的是三分钟前
+ * 那个数字，而且从头到尾一动不动——既看不出它在跑，也看不出它跑了多久。而人在等的
+ * 时候最想知道的恰恰是「已经等了多久」。
+ *
+ * 只有助手那条读秒：status 是 'sending' 时（消息刚发出去、还没有回执）最后一条是
+ * 用户自己那句，给它挂个秒表没有意义。
+ */
+function paintRowTime(el, b, streaming) {
+  const node = el.querySelector('.sw-time')
+  if (!node) return
+  const running = Boolean(streaming) && b.kind === 'assistant' && Boolean(b.time)
+  if (running) {
+    node.hidden = false
+    node.setAttribute('data-running', '1')
+    node.setAttribute('data-since', String(b.time))
+    node.removeAttribute('datetime')
+    node.textContent = elapsedText(Date.now() - b.time)
+    return
+  }
+  // endTime 是这一块最后一条事件的时间（turn/end 最准）。老会话没有它——那时候
+  // 事件里也拿不出更好的答案，回落到开始时刻，和以前一个样，不会更差。
+  const at = b.endTime || b.time
+  node.removeAttribute('data-running')
+  node.removeAttribute('data-since')
+  if (!at) {
+    node.hidden = true
+    node.textContent = ''
+    return
+  }
+  node.hidden = false
+  node.setAttribute('datetime', new Date(at).toISOString())
+  node.textContent = chatClock(at)
+}
+
+/** 读秒的文本。一分钟以内就是秒，超过了给 m:ss——纯秒数到了几百就读不出来了。 */
+function elapsedText(ms) {
+  const s = Math.max(0, Math.round((Number(ms) || 0) / 1000))
+  if (s < 60) return s + 's'
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+}
+
+/**
+ * 读秒的心跳。
+ *
+ * 只在**屏幕上真有**一个读秒中的时间戳时才转，转完自己停——挂一个长明的
+ * setInterval 在这种页面上是白烧电，标签页在后台时尤其。
+ */
+let clockTimer = null
+function tickClocks() {
+  const nodes = document.querySelectorAll('.sw-time[data-running]')
+  if (!nodes.length) {
+    clearInterval(clockTimer)
+    clockTimer = null
+    return
+  }
+  for (const n of nodes) {
+    const since = Number(n.getAttribute('data-since')) || 0
+    if (since) n.textContent = elapsedText(Date.now() - since)
+  }
+}
+
+function ensureClockTick() {
+  const has = document.querySelector('.sw-time[data-running]')
+  if (has && !clockTimer) clockTimer = setInterval(tickClocks, 1000)
+  else if (!has && clockTimer) {
+    clearInterval(clockTimer)
+    clockTimer = null
   }
 }
 
@@ -1180,7 +1398,8 @@ function mergePending(folded, sessionId) {
   const fresh = folded.blocks.filter((b) => b.kind === 'user' && b.seq != null)
   const left = []
   for (const p of mine) {
-    const hit = fresh.findIndex((b) => b.seq > p.afterSeq && b.text === p.text)
+    // 比的是 raw（拼好的完整正文），不是显示用的 text——后者已经把附件那段拆走了。
+    const hit = fresh.findIndex((b) => b.seq > p.afterSeq && (b.raw != null ? b.raw : b.text) === p.text)
     if (hit >= 0) fresh.splice(hit, 1)
     else left.push(p)
   }
@@ -1189,7 +1408,18 @@ function mergePending(folded, sessionId) {
   }
   if (!left.length) return folded
   for (const p of left) {
-    folded.blocks.push({ kind: 'user', text: p.text, images: p.images || [], time: p.at, pending: true })
+    // 回执还没回来的那几秒也要长成最终的样子，否则附件会先以一行路径文本出现、
+    // 再突然变成药丸——同一条消息在屏幕上跳两次。
+    const up = splitUploads(p.text)
+    folded.blocks.push({
+      kind: 'user',
+      text: up.text,
+      files: up.files,
+      raw: p.text,
+      images: p.images || [],
+      time: p.at,
+      pending: true,
+    })
   }
   // 没回执之前也要有「正在想」：那一行是人按下回车之后唯一的进度反馈。
   if (!folded.status) folded.status = 'sending'
@@ -1270,6 +1500,7 @@ function paintChat() {
     if (grew > 0) thread.scrollTop += grew
   } else if (stick) thread.scrollTop = thread.scrollHeight
   paintChatChrome(folded)
+  ensureClockTick()
 }
 
 /** 抬头的在线灯、输入区的提示和中止按钮——都不重绘整页，就地改。 */
@@ -2079,10 +2310,50 @@ function switchLogSource(key) {
  * 大文件不预览：整个读进内存只为看一眼不值当，给下载就行。判断用响应头里的
  * content-length，在读 body **之前**——否则「太大所以不看」的代价是先下完它。
  */
+/**
+ * 文本类的扩展名。这几种取回来直接当文字看，比塞进 iframe 强——iframe 里的纯文本
+ * 不会换行、没有主题色、也没法选中复制成一段。
+ */
+const PREVIEW_TEXT_EXT = new Set([
+  'txt', 'log', 'csv', 'tsv', 'json', 'yml', 'yaml', 'xml', 'ini', 'toml', 'conf',
+  'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'css', 'scss', 'sh', 'bash', 'zsh', 'py',
+  'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'sql', 'env', 'gitignore', 'diff', 'patch',
+])
+
+/** 这几种在浏览器里没有原生渲染，得靠席位那边先提取成文本（见 fetchDocText）。 */
+const PREVIEW_DOC_EXT = new Set(['docx', 'xlsx', 'xlsm', 'pptx'])
+
+function extOf(name) {
+  const base = String(name || '').split('/').pop() || ''
+  const i = base.lastIndexOf('.')
+  return i > 0 ? base.slice(i + 1).toLowerCase() : ''
+}
+
+/**
+ * 这个文件用哪种方式看。
+ *
+ * **按扩展名判，不按 content-type**：席位那边对不在内联白名单里的一律回
+ * `application/octet-stream`（HTML、docx 都是），光看类型什么都分不出来。
+ */
+function previewKindOf(name, type) {
+  const ext = extOf(name)
+  if (String(type || '').startsWith('image/') || ['png','jpg','jpeg','gif','webp','avif','bmp','ico','svg'].includes(ext)) return 'image'
+  if (ext === 'pdf') return 'pdf'
+  if (ext === 'md' || ext === 'markdown') return 'markdown'
+  if (ext === 'html' || ext === 'htm') return 'html'
+  if (PREVIEW_TEXT_EXT.has(ext)) return 'text'
+  if (PREVIEW_DOC_EXT.has(ext)) return 'doc'
+  return ''
+}
+
+/** 文本类不该按图片那个尺度收：一份 2MB 的日志已经没人会在弹窗里读了。 */
+const PREVIEW_TEXT_MAX = 2 * 1024 * 1024
+
 async function openPreview(path, name) {
   if (!state.chatSessionId) return
   revokePreview()
-  state.preview = { path, name, loading: true, url: '', type: '', size: 0, error: '' }
+  const kind = previewKindOf(name || path, '')
+  state.preview = { path, name, loading: true, url: '', type: '', size: 0, error: '', kind, mode: 'view' }
   render()
   const url = '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/files?path=' + encodeURIComponent(path)
   const ac = new AbortController()
@@ -2099,23 +2370,97 @@ async function openPreview(path, name) {
     }
     const type = (res.headers.get('content-type') || '').split(';')[0].trim()
     const size = Number(res.headers.get('content-length') || 0)
-    // 席位那边判成不能内联的（SVG、HTML、未知格式）会带 attachment 回来。照办，
-    // 不去覆盖它——那张白名单就是干这个的。
-    const attachment = (res.headers.get('content-disposition') || '').includes('attachment')
-    if (attachment || (size && size > CHAT_PREVIEW_MAX)) {
+    const k = kind || previewKindOf(name || path, type)
+    const cap = k === 'markdown' || k === 'html' || k === 'text' ? PREVIEW_TEXT_MAX : CHAT_PREVIEW_MAX
+    /**
+     * **不再拿 content-disposition 当「能不能看」的判据。**
+     *
+     * 席位那张白名单回答的是「这段字节能不能带着自己的 MIME 在浏览器里跑起来」——
+     * HTML 不在里面，理由是它带得动 `<script>`，内联渲染等于让上传者在 Gateway 的源
+     * 上执行代码。那个理由是对的，白名单不动。
+     *
+     * 但**我们并不是让它在 Gateway 的源上跑**：字节取回来变成 blob，塞进一个
+     * `sandbox` 不带任何 allow-* 的 iframe——脚本、表单、同源、导航全关，里面的
+     * `<script>` 一行都不会执行。Gateway 那一跳还压了一条同样含义的 CSP
+     * （见 lib/runtime.ts 的 proxyDownload），直接把文件地址粘到地址栏也一样跑不起来。
+     *
+     * 所以这里改成按**扩展名**决定看法，只有真的没法看的（未知格式）才回落到下载。
+     */
+    if (!k || (size && size > cap)) {
       ac.abort()
       if (!state.preview || state.preview.path !== path) return
-      state.preview = { path, name, loading: false, url: '', type, size, error: '', tooBig: true }
+      state.preview = { path, name, loading: false, url: '', type, size, error: '', kind: k, mode: 'view', tooBig: true }
       render()
+      return
+    }
+    if (k === 'doc') {
+      const blob = await res.blob()
+      if (!state.preview || state.preview.path !== path) return
+      state.preview = { path, name, loading: false, url: '', type, size: blob.size, error: '', kind: k, mode: 'view', docLoading: true }
+      render()
+      void fetchDocText(path, name)
       return
     }
     const blob = await res.blob()
     if (!state.preview || state.preview.path !== path) return
-    state.preview = { path, name, loading: false, url: URL.createObjectURL(blob), type, size: blob.size, error: '' }
+    const next = { path, name, loading: false, url: '', type, size: blob.size, error: '', kind: k, mode: 'view' }
+    if (k === 'markdown' || k === 'html' || k === 'text') {
+      next.text = await blob.text()
+      // HTML 要一个**自称 text/html** 的 blob，iframe 才会当页面渲染。原始响应是
+      // octet-stream（白名单没放行它），照搬只会得到一个下载。重打类型是安全的：
+      // 保护来自 iframe 的 sandbox，不来自这个 MIME。
+      // **charset 不能省。** 这个 blob 是从 JS 字符串造的，就是 UTF-8；不写的话浏览器
+      // 会按自己的默认编码猜，中文当场变成一片乱码（实测就是这样）。
+      if (k === 'html') next.url = URL.createObjectURL(new Blob([next.text], { type: 'text/html; charset=utf-8' }))
+    } else if (k === 'pdf') {
+      // **类型钉死。** 下面那个 iframe 不带 sandbox（不带才有 PDF 阅读器，见
+      // previewBody），所以绝不能让这段字节有机会被当成 HTML 解释。blob 的 type
+      // 就是浏览器认的 Content-Type：写死 application/pdf，一个改名成 .pdf 的
+      // HTML 只会交给 PDF 阅读器然后解析失败，而不是变成一个页面跑起来。
+      next.url = URL.createObjectURL(new Blob([await blob.arrayBuffer()], { type: 'application/pdf' }))
+    } else {
+      next.url = URL.createObjectURL(blob)
+    }
+    state.preview = next
   } catch (err) {
     if (ac.signal.aborted) return
     if (!state.preview || state.preview.path !== path) return
-    state.preview = { path, name, loading: false, url: '', type: '', size: 0, error: err.message }
+    state.preview = { path, name, loading: false, url: '', type: '', size: 0, error: err.message, kind, mode: 'view' }
+  }
+  render()
+  // 刚画出来的 Markdown 里可能有代码块 / 公式 / mermaid，和聊天气泡一样要过一遍。
+  if (state.preview && state.preview.kind === 'markdown' && window.satuMd) {
+    const host = document.querySelector('.sw-preview-md')
+    if (host) window.satuMd.enhance(host)
+  }
+}
+
+/**
+ * Word / Excel / PPT：浏览器打不开，让席位提取成 Markdown 再看。
+ *
+ * 走的是 `read` 工具用的同一套提取（bot 的 workspace/extract.ts），所以这里看到的
+ * 和模型读到的是同一份东西——这一点本身就有用：内容对不上时能一眼看出是提取的问题
+ * 还是模型的问题。
+ *
+ * **老席位没有这个接口**，那时候如实退回「下载下来看吧」，而不是转个圈就空在那儿。
+ */
+async function fetchDocText(path, name) {
+  const url =
+    '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/files?path=' + encodeURIComponent(path) + '&as=text'
+  try {
+    const res = await fetch(url, { headers: authHeaders({ accept: 'application/json' }) })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    if (!state.preview || state.preview.path !== path) return
+    state.preview.docLoading = false
+    state.preview.text = String((data && data.text) || '')
+    state.preview.docNote = String((data && data.note) || '')
+    if (!state.preview.text) state.preview.tooBig = true
+  } catch {
+    if (!state.preview || state.preview.path !== path) return
+    state.preview.docLoading = false
+    state.preview.tooBig = true
+    state.preview.docNote = t('这个席位还不支持把 Office 文档提取出来预览（要更新 Bot 版本）。')
   }
   render()
 }
@@ -2156,25 +2501,90 @@ async function downloadWorkspaceFile(path, name) {
   }
 }
 
+/** 渲染视图和原文之间的切换。只有两者都成立的类型才给，别摆一颗按不动的按钮。 */
+function previewTabs(p) {
+  const both = (p.kind === 'markdown' || p.kind === 'html') && !p.tooBig && !p.error && !p.loading
+  if (!both) return ''
+  const tab = (mode, label) =>
+    `<button type="button" class="sw-preview-tab" data-act="preview-mode" data-mode="${mode}"` +
+    `${p.mode === mode ? ' data-on="1"' : ''}>${esc(label)}</button>`
+  return `<div class="sw-preview-tabs">${tab('view', t('预览'))}${tab('source', t('原文'))}</div>`
+}
+
+/**
+ * 内容自己加载完之前先转圈。
+ *
+ * 取字节那一段有 p.loading 管，但**字节到手不等于看得见**：iframe 里的 PDF 阅读器、
+ * 大图的解码，都还要一会儿，而那段时间框里是纯白的——和「坏了」长得一模一样。
+ *
+ * 清除用内联 onload：它随 HTML 字符串走，每次整页重绘都自动带上。挂 JS 监听的话，
+ * 任何一次无关的 render() 都会把节点换掉、监听丢掉，圈就永远转下去。
+ */
+const DONE_JS = "this.parentNode.removeAttribute('data-busy')"
+
+function busyBox(inner) {
+  return `<div class="sw-preview-load" data-busy="1"><span class="sw-preview-spin" aria-hidden="true"></span>${inner}</div>`
+}
+
+function spinNote(text) {
+  return `<p class="sw-preview-note"><span class="sw-preview-spin" aria-hidden="true"></span>${esc(text)}</p>`
+}
+
+function previewBody(p) {
+  if (p.loading) return spinNote(t('正在取文件…'))
+  if (p.error) return `<p class="sw-preview-note sw-preview-err">${esc(p.error)}</p>`
+  if (p.docLoading) return spinNote(t('正在提取文档内容…'))
+  if (p.tooBig) {
+    const why = p.docNote || t('这个文件不适合在浏览器里打开（太大，或者是不认识的格式）。下载下来看吧。')
+    return `<p class="sw-preview-note">${esc(why)}</p>`
+  }
+  if (p.kind === 'image') {
+    return busyBox(
+      `<img class="sw-preview-img" src="${esc(p.url)}" alt="${esc(p.name)}" ` +
+        `onload="${DONE_JS}" onerror="${DONE_JS}">`,
+    )
+  }
+  if (p.kind === 'pdf') {
+    /**
+     * PDF 交给浏览器自带的阅读器，**这个 iframe 不能带 sandbox**。
+     *
+     * 带上就是一片白：sandbox 的 opaque origin 会把 PDF 阅读器整个挡掉，页面根本
+     * 起不来。这不是新问题，之前一直是这么写的——只是没人点过 PDF。实测对照过
+     * `sandbox=""` / 无 sandbox / `<embed>` 三种，只有不带 sandbox 的那两种能起阅读器。
+     *
+     * 去掉它安全吗：安全，因为**类型是钉死的**。上面 openPreview 把这段字节重新包成
+     * 了 `application/pdf` 的 blob，浏览器只会把它交给 PDF 阅读器，没有任何路径能让它
+     * 被当成 HTML 解释——而 sandbox 在这里防的正是「HTML 跑起脚本」。
+     */
+    return busyBox(`<iframe class="sw-preview-frame" src="${esc(p.url)}" title="${esc(p.name)}" onload="${DONE_JS}"></iframe>`)
+  }
+  if (p.kind === 'html' && p.mode === 'view') {
+    /**
+     * **`sandbox` 一个 allow-* 都不能加。** 这是让 HTML 能被预览的全部依据：没有
+     * allow-scripts 就没有脚本执行，没有 allow-same-origin 就是 opaque origin，
+     * 拿不到 Gateway 这一侧的任何东西。加任何一项都会把这条推翻。
+     *
+     * 和上面 PDF 那条的差别就在这里：HTML **要**当页面跑，所以必须锁死；PDF 不当
+     * 页面跑，锁死反而只剩一片白。
+     */
+    return busyBox(
+      `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}" onload="${DONE_JS}"></iframe>`,
+    )
+  }
+  if (p.kind === 'markdown' && p.mode === 'view') {
+    // satuMd 对原始 HTML 一律转义、链接只放行白名单协议（见 markdown.js 开头第 3 条），
+    // 所以这段 innerHTML 是安全的——和聊天气泡里渲染模型输出走的是同一条路。
+    const md = window.satuMd
+    const html = md ? md.render(String(p.text || '')) : ''
+    if (md) return `<div class="sw-preview-md sw-md">${html}</div>`
+  }
+  // 其余一律看原文：Markdown/HTML 的「原文」页、纯文本、以及提取出来的 Office 文档。
+  return `<pre class="sw-preview-src">${esc(String(p.text || ''))}</pre>`
+}
+
 function previewModal() {
   const p = state.preview
   if (!p) return ''
-  let body
-  if (p.loading) {
-    body = `<p class="sw-preview-note">${t('正在取文件…')}</p>`
-  } else if (p.error) {
-    body = `<p class="sw-preview-note sw-preview-err">${esc(p.error)}</p>`
-  } else if (p.tooBig) {
-    body = `<p class="sw-preview-note">${t('这个文件不适合在浏览器里打开（太大，或者是不能安全内联的格式）。下载下来看吧。')}</p>`
-  } else if (p.type.startsWith('image/')) {
-    body = `<img class="sw-preview-img" src="${esc(p.url)}" alt="${esc(p.name)}">`
-  } else {
-    /**
-     * PDF 与纯文本走 iframe。`sandbox` 不带任何 allow-*：脚本、表单、同源全关。
-     * blob: 本来就是 opaque origin，这条是叠在上面的第二道——两道都便宜。
-     */
-    body = `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}"></iframe>`
-  }
   const meta = p.size ? fileSize(p.size) : ''
   return `<div class="gw-modal-backdrop" data-act="preview-close">
     <div class="gw-modal sw-preview" data-stop>
@@ -2184,13 +2594,27 @@ function previewModal() {
           <p><code>${esc(p.path)}</code>${meta ? ' · ' + esc(meta) : ''}</p>
         </div>
         <div class="sw-preview-acts">
+          ${previewTabs(p)}
           <button type="button" class="btn" data-act="preview-download" data-path="${esc(p.path)}" data-name="${esc(p.name)}">${t('下载')}</button>
           <button type="button" class="btn btn-ghost btn-icon" aria-label="${esc(t('关闭'))}" data-act="preview-close">${svg(['M18 6 6 18', 'M6 6l12 12'], 16)}</button>
         </div>
       </div>
-      <div class="sw-preview-body">${body}</div>
+      <div class="sw-preview-body" data-flow="${p.error || p.loading || p.docLoading || p.tooBig || p.kind === 'image' ? 'center' : 'top'}">${previewBody(p)}</div>
     </div>
   </div>`
+}
+
+/** 切「预览 / 原文」。只改一个字段，字节早就在手上了，不用再取一次。 */
+function setPreviewMode(mode) {
+  if (!state.preview || state.preview.mode === mode) return
+  state.preview.mode = mode === 'source' ? 'source' : 'view'
+  render()
+  // 渲染出来的 Markdown 里可能有代码块、公式、mermaid——和聊天气泡一样要 enhance 一次，
+  // 否则代码不高亮、公式显示 TeX 原文。
+  if (state.preview.mode === 'view' && window.satuMd) {
+    const host = document.querySelector('.sw-preview-md')
+    if (host) window.satuMd.enhance(host)
+  }
 }
 
 function logsModal() {
@@ -2633,11 +3057,30 @@ async function sendChat() {
   }
 }
 
+/**
+ * 中止这一轮。
+ *
+ * 以前是 `catch {}` 一把吞掉。三种完全不同的情况在界面上长得一模一样——请求没发出去、
+ * 席位不认这条会话、这一轮其实早就结束了——都是「点了没反应」，连往哪儿查都给不出。
+ *
+ * **它止不住已经开跑的工具。** bot 那边 `agent.abort()` 掐的是模型那条流，而工具的
+ * execute 拿不到这个信号（bot/src/agent/index.ts 的 bridgeTools 没接）。所以点在一颗
+ * `bash·调用中` 上时，这里是成功的，画面却要等 bash 自己跑完——最长十分钟。这句如实
+ * 说出来，别让人对着一个其实生效了的按钮反复点。
+ */
 async function abortChat() {
-  if (!state.chatSessionId) return
+  const sessionId = state.chatSessionId
+  if (!sessionId) return
+  const stillRunning = Boolean(document.querySelector('.sw-toolchip[data-state="running"]'))
   try {
-    await api('POST', '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/abort', {})
-  } catch {}
+    const r = await api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/abort', {})
+    if (r && r.aborted === false) flash('err', t('这一轮已经结束了'))
+    else if (stillRunning) flash('ok', t('已中止；正在跑的那个工具要等它自己收尾'))
+    render()
+  } catch (err) {
+    flash('err', t('没能中止：') + (err && err.message ? err.message : ''))
+    render()
+  }
 }
 
 async function updateOrgRuntime() {
@@ -2797,3 +3240,165 @@ async function cancelQueued(id) {
     render()
   }
 }
+
+/* ── 工具痕迹的悬浮窗 ────────────────────────────────────────────────────
+ *
+ * 药丸上只有「工具名 · 状态」，而人真正想知道的是**它拿什么参数跑的、跑出了什么**。
+ * 失败的那几颗尤其——以前想知道为什么失败，只能去「导出记录」里翻整段 JSON。
+ *
+ * 浮层挂在 body 上，不放进气泡里：气泡有自己的圆角和 overflow，浮层长在里面会被裁掉
+ * 一角；而且最后一条消息贴着输入框时，往上弹还是往下弹得按视口算，气泡内的坐标系
+ * 算不出来。
+ *
+ * 鼠标移开有一小段宽限，且移到浮层上算「还在看」——否则一个能滚动的浮层，人刚要伸手
+ * 去滚它就没了。
+ */
+const TOOLPOP_HIDE_MS = 160
+const TOOLPOP_MAX_CHARS = 4000
+let toolPop = null
+let toolPopAnchor = null
+let toolPopHost = null
+let toolPopIndex = -1
+let toolPopHideTimer = null
+
+function toolPopEl() {
+  if (toolPop) return toolPop
+  toolPop = document.createElement('div')
+  toolPop.className = 'sw-toolpop'
+  toolPop.hidden = true
+  toolPop.addEventListener('mouseenter', () => clearTimeout(toolPopHideTimer))
+  toolPop.addEventListener('mouseleave', () => hideToolPop(TOOLPOP_HIDE_MS))
+  document.body.appendChild(toolPop)
+  return toolPop
+}
+
+/** 参数是 bot 那边 stringify 过的原串。能 parse 就缩进展示，不能就原样——不猜格式。 */
+function prettyArgs(raw) {
+  const text = String(raw == null ? '' : raw).trim()
+  if (!text) return ''
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    return text
+  }
+}
+
+/** 超长就截断并说清楚截了多少。悄悄截掉会让人以为工具真的只输出了这么点。 */
+function clip(text) {
+  const s = String(text == null ? '' : text)
+  if (s.length <= TOOLPOP_MAX_CHARS) return s
+  return s.slice(0, TOOLPOP_MAX_CHARS) + '\n\n…（还有 ' + (s.length - TOOLPOP_MAX_CHARS) + ' 个字符，完整内容见「导出记录」）'
+}
+
+function toolPopBody(x) {
+  const label = x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')
+  const state_ = x.result == null ? 'running' : x.failed ? 'error' : 'done'
+  const args = prettyArgs(x.args)
+  const rows = [
+    `<div class="sw-toolpop-head"><span class="sw-toolpop-name">${esc(x.name)}</span>` +
+      `<span class="sw-toolpop-state" data-state="${state_}">${esc(label)}</span></div>`,
+  ]
+  // 参数为空是常事（now、ls 这种），那就不摆一个空框——空框看着像「读不出来」。
+  if (args) rows.push(`<div class="sw-toolpop-k">${esc(t('参数'))}</div><pre>${esc(clip(args))}</pre>`)
+  if (x.result == null) {
+    rows.push(`<div class="sw-toolpop-wait">${esc(t('还在跑，结果出来后这里会填上'))}</div>`)
+  } else {
+    const out = String(x.result || '').trim()
+    rows.push(
+      `<div class="sw-toolpop-k">${esc(x.failed ? t('错误') : t('结果'))}</div>` +
+        (out ? `<pre>${esc(clip(out))}</pre>` : `<div class="sw-toolpop-wait">${esc(t('（没有输出）'))}</div>`),
+    )
+  }
+  return rows.join('')
+}
+
+/**
+ * 定位。先填内容再量高度——内容是刚换的，没量过就不知道往上弹放不放得下。
+ * 放不下就翻到下面，两边都不够时贴住视口，宁可挡一点也不要跑到屏幕外面去。
+ */
+function placeToolPop(chip) {
+  const pop = toolPopEl()
+  const r = chip.getBoundingClientRect()
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  pop.style.maxWidth = Math.min(520, vw - 24) + 'px'
+  const box = pop.getBoundingClientRect()
+  const above = r.top >= box.height + 12
+  let top = above ? r.top - box.height - 8 : r.bottom + 8
+  if (!above && top + box.height > vh - 8) top = Math.max(8, vh - box.height - 8)
+  let left = r.left
+  if (left + box.width > vw - 12) left = vw - 12 - box.width
+  if (left < 12) left = 12
+  pop.style.top = Math.max(8, top) + 'px'
+  pop.style.left = left + 'px'
+  pop.setAttribute('data-side', above ? 'top' : 'bottom')
+}
+
+function showToolPop(chip) {
+  const x = chip.__tool
+  if (!x) return
+  clearTimeout(toolPopHideTimer)
+  const pop = toolPopEl()
+  // 同一颗药丸重复触发（鼠标在药丸里移动）就别重画了，否则滚动位置每帧都被重置。
+  if (toolPopAnchor !== chip || pop.hidden) {
+    toolPopAnchor = chip
+    toolPopHost = chip.parentElement
+    toolPopIndex = Number(chip.getAttribute('data-i'))
+    pop.innerHTML = toolPopBody(x)
+    pop.hidden = false
+    placeToolPop(chip)
+  }
+}
+
+function hideToolPop(delay) {
+  clearTimeout(toolPopHideTimer)
+  const run = () => {
+    if (toolPop) toolPop.hidden = true
+    toolPopAnchor = null
+    toolPopHost = null
+    toolPopIndex = -1
+  }
+  if (!delay) run()
+  else toolPopHideTimer = setTimeout(run, delay)
+}
+
+/**
+ * chips 重画之后把浮层接到新节点上。
+ *
+ * 节点是 innerHTML 整体换掉的，原来那个 anchor 已经脱离文档。按容器 + 下标重新认一次
+ * ——「调用中 → 完成」正是人盯着它看的那一刻，那时候浮层闪没最难受。认不回来才关。
+ */
+function refreshToolPop() {
+  if (!toolPop || toolPop.hidden) return
+  if (toolPopAnchor && document.contains(toolPopAnchor)) return
+  const list = toolPopHost ? toolPopHost.querySelectorAll('.sw-toolchip') : []
+  const next = toolPopIndex >= 0 ? list[toolPopIndex] : null
+  if (!next || !next.__tool) return hideToolPop(0)
+  toolPopAnchor = next
+  toolPop.innerHTML = toolPopBody(next.__tool)
+  placeToolPop(next)
+}
+
+document.addEventListener('mouseover', (e) => {
+  const el = e.target instanceof Element ? e.target : null
+  if (!el) return
+  const chip = el.closest('.sw-toolchip')
+  if (chip) return showToolPop(chip)
+  if (el.closest('.sw-toolpop')) return
+  if (toolPop && !toolPop.hidden) hideToolPop(TOOLPOP_HIDE_MS)
+})
+
+// 键盘也要能看。药丸带 tabindex，Tab 到就出，离开就收。
+document.addEventListener('focusin', (e) => {
+  const el = e.target instanceof Element ? e.target : null
+  const chip = el && el.closest('.sw-toolchip')
+  if (chip) showToolPop(chip)
+  else if (el && !el.closest('.sw-toolpop')) hideToolPop(0)
+})
+
+// 滚动时立刻收：浮层是 fixed 的，跟不上锚点，留在原地就是一块飘着的脏东西。
+window.addEventListener('scroll', () => hideToolPop(0), true)
+window.addEventListener('resize', () => hideToolPop(0))
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && toolPop && !toolPop.hidden) hideToolPop(0)
+})

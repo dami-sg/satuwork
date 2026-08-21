@@ -269,9 +269,18 @@ verify_seat_listener() {
   # 等 30 秒。**新建席位第一次起屏比想象的慢**：adduser、daemon-reload、Xvfb 就绪、
   # 上一轮残留的端口释放，叠起来轻松过十秒——等太短会把「慢」判成「坏」。
   for _ in $(seq 1 120); do
-    pid=$(ss -ltnp 2>/dev/null | grep -E ":${port}\b" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+    # **末尾的 `|| true` 不能省。** 端口空着时 grep 退出 1，pipefail 把整条管道判成
+    # 非零，脚本开头的 set -e 当场终止——而「端口还没起来」正是这个循环存在的理由，
+    # 于是第一圈就炸。就这么炸过：部署报 502，stderr 只剩「第 272 行失败（退出码
+    # 1）」，底下那段「超时不算失败、让 systemd 继续拉」一次都没跑到。
+    # （`|| true` 要写在命令替换**里面**：errtrace 会让 ERR trap 在子 shell 里先响，
+    # 写在外面的 `|| pid=` 拦不住那一声。顺带也挡掉 head -1 提前关管道给 grep 的
+    # SIGPIPE——那同样是非零。）
+    pid=$(ss -ltnp 2>/dev/null | grep -E ":${port}\b" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)
     if [ -n "${pid:-}" ]; then
-      owner=$(ps -o user:32= -p "$pid" 2>/dev/null | tr -d ' ')
+      # 同上：pid 是上一条 ss 抓的，进程完全可能在这一瞬已经退了，ps 于是非零。
+      # 那时该走下面「被别人占着」的 ${owner:-?} 分支，而不是让整个部署崩掉。
+      owner=$(ps -o user:32= -p "$pid" 2>/dev/null | tr -d ' ' || true)
       [ "$owner" = "$LINUX_USER" ] && return 0
       # 端口被**别人**占着：这是确定的错误，而且没人去动它就永远不会自己好。
       # 这一条必须让部署失败——否则又变成「部署成功但连进去是另一套 VNC」。

@@ -321,9 +321,79 @@
 .sw-send:hover { background: var(--color-accent-600); }
 .sw-send:active { background: var(--color-accent-700); }
 .sw-send svg { display: block; }
-/* 停止态换成中性的深色：它不是「往前走一步」，不该继续顶着主操作的品牌色。 */
-.sw-send[data-state='stop'] { background: var(--color-neutral-800); color: var(--color-neutral-100); }
-.sw-send[data-state='stop']:hover { background: var(--color-neutral-900); }
+/* 停止态。
+ *
+ * 意图是「中性、退到主操作后面」，但**不能用 --color-neutral-***：那套色阶在暗色主题
+ * 里是翻过来的（--color-neutral-800 在暗色下是 #e0dcd3，几乎是白的），于是这颗按钮在
+ * 暗色界面上变成一颗刺眼的白球，比它要让位的主操作还抢眼。
+ *
+ * 改用语义色 --secondary / --border：这一组两套主题都朝同一个方向走，和消息里的工具
+ * 药丸、附件按钮是同一种「次要控件」的底色，停止态因此看着像本来就在那儿的东西。 */
+.sw-send[data-state='stop'] {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.sw-send[data-state='stop']:hover {
+  background: var(--muted);
+  color: var(--foreground);
+  box-shadow: inset 0 0 0 1px var(--muted-foreground);
+}
+.sw-send[data-state='stop']:active { background: var(--secondary); }
+
+/* 工具痕迹的悬浮窗。挂在 body 上，位置由 placeToolPop 算（见 chat.js）。 */
+.sw-toolpop {
+  position: fixed;
+  z-index: 60;
+  max-width: 520px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.sw-toolpop[hidden] { display: none; }
+.sw-toolpop-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.sw-toolpop-name {
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+.sw-toolpop-state {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 11px;
+}
+.sw-toolpop-state[data-state='error'] { background: var(--color-accent-100); color: var(--color-accent-800); }
+.sw-toolpop-k {
+  margin: 8px 0 4px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.sw-toolpop-k:first-of-type { margin-top: 0; }
+.sw-toolpop-wait { color: var(--muted-foreground); }
+/* 结果可能很长，所以给它自己的滚动区，而不是让浮层长到屏幕外面去。 */
+.sw-toolpop pre {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 药丸本身要看得出「可以看详情」。 */
+.sw-toolchip { cursor: help; }
+.sw-toolchip:hover, .sw-toolchip:focus-visible { background: var(--muted); }
 .sw-composer-tip {
   display: flex;
   align-items: center;
@@ -905,3 +975,103 @@
 .sw-pick:hover, .sw-pick.is-on { background: var(--secondary); }
 .sw-pick small { margin-left: auto; color: var(--muted-foreground); font-size: 11px; }
 .sw-pick-empty { padding: 8px; font-size: 12px; color: var(--muted-foreground); }
+
+/* ── 预览弹窗：多种看法 ──────────────────────────────────────────────────
+ *
+ * 图片、提示、转圈这几种要居中；文本和渲染出来的 Markdown 要**顶部对齐并且能滚**
+ * ——一份长文档在居中的框里，人打开看到的是正中间那一段，得往上拖才找得到开头。 */
+.sw-preview-body[data-flow='top'] {
+  display: block;
+  align-items: initial;
+  justify-content: initial;
+  /* --space-5 不存在（这套只有 1/2/3/4/6/8）。写了它整条 padding 会被判为无效
+     直接丢掉，结果就是原文顶着框边——已经这么翻过一次车了。 */
+  padding: var(--space-4) var(--space-6);
+}
+/* iframe（PDF / HTML 预览）要占满整框，所以那一档不吃上面的内边距。
+   注意是 `:has(.sw-preview-load)` 不是 `:has(> .sw-preview-frame)`——iframe 现在裹在
+   转圈容器里，不再是直接子元素。 */
+.sw-preview-body[data-flow='top']:has(.sw-preview-load) { padding: 0; }
+
+.sw-preview-src {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 渲染出来的 Markdown 借聊天气泡那一套排版（.sw-md），这里只管容器。 */
+.sw-preview-md { max-width: 78ch; margin: 0 auto; color: var(--foreground); }
+
+/* 「预览 / 原文」。做成一对连体的小段，而不是两颗独立按钮——它们是同一个东西的
+   两种看法，不是两个操作。 */
+.sw-preview-tabs {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--secondary);
+  margin-right: var(--space-2);
+}
+.sw-preview-tab {
+  border: 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.sw-preview-tab:hover { color: var(--foreground); }
+.sw-preview-tab[data-on='1'] {
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: var(--shadow-2xs);
+}
+
+/* 内容自己加载完之前的转圈。iframe / img 一 load 就把 data-busy 摘掉（见 chat.js
+   的 DONE_JS），转圈跟着消失——CSS 只认这个属性，不需要再管一遍状态。 */
+/* 居中同时兼顾两种内容：iframe 自己是 100%×100% 铺满，图片按比例缩在中间。 */
+.sw-preview-load {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sw-preview-load > .sw-preview-spin { display: none; }
+.sw-preview-load[data-busy] > .sw-preview-spin {
+  display: block;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  margin: -11px 0 0 -11px;
+}
+.sw-preview-spin {
+  display: inline-block;
+  vertical-align: -3px;
+  width: 22px;
+  height: 22px;
+  margin-right: var(--space-2);
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--muted-foreground);
+  animation: sw-spin 700ms linear infinite;
+}
+.sw-preview-note > .sw-preview-spin { width: 14px; height: 14px; border-width: 2px; }
+@keyframes sw-spin { to { transform: rotate(360deg); } }
+/* 动效敏感的人不该被一个转不停的圈晃。留一个静止的环，位置和含义都还在。 */
+@media (prefers-reduced-motion: reduce) {
+  .sw-preview-spin { animation: none; }
+}
+
+/* 正文里就地替换出来的文件药丸（见 chat.js 的 inlineFileChips）。
+   它长在一行文字中间，所以要跟着基线走，也不能因为文件名长就把这一行撑开。 */
+.sw-filechip-inline {
+  vertical-align: -3px;
+  margin: 0 1px;
+  max-width: min(34ch, 100%);
+}

@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { humanSize, looksBinary, WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
-import type { WorkspaceFile } from './index.ts'
+import type { ToolCall, WorkspaceFile } from './index.ts'
 
 /**
  * 工作区工具：read / write / edit / ls / find / grep / bash。
@@ -136,9 +136,15 @@ async function* filesUnder(target: string): AsyncGenerator<string> {
   yield* walkFiles(target, { left: MAX_WALK_FILES })
 }
 
-/** 跑一条命令。永远 resolve；退出码非零是业务结果，由调用方写进文本。 */
-function runCommand(command: string, cwd: string, timeout: number) {
-  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string; bytes: number; timedOut: boolean; error?: string }>(
+/**
+ * 跑一条命令。永远 resolve；退出码非零是业务结果，由调用方写进文本。
+ *
+ * `abort` 是这一轮的中止信号（界面上那颗停止按钮）。**必须在这里响应**：不接的话，
+ * 一条跑十分钟的命令按了停止也停不下来，而那正是人最想停它的时候。杀法和超时那条
+ * 完全一样——杀整个进程组，否则 bash fork 出去的那些会活下来。
+ */
+function runCommand(command: string, cwd: string, timeout: number, abort?: AbortSignal) {
+  return new Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string; bytes: number; timedOut: boolean; aborted: boolean; error?: string }>(
     (done) => {
       // detached：拿到自己的进程组。否则超时只杀得掉 bash，它 fork 出去的
       // （`npm run dev &`、管道里的子进程）会活下来，端口和 CPU 一起留着。
@@ -151,28 +157,43 @@ function runCommand(command: string, cwd: string, timeout: number) {
       let out = ''
       let bytes = 0
       let timedOut = false
+      let aborted = false
       const collect = (buf: Buffer) => {
         bytes += buf.length
         if (out.length < MAX_OUTPUT_CHARS) out += buf.toString('utf8')
       }
       child.stdout?.on('data', collect)
       child.stderr?.on('data', collect)
-      const timer = setTimeout(() => {
-        timedOut = true
+      // 杀整个进程组（spawn 时 detached，所以它有自己的组）。只杀 bash 的话，
+      // `npm run dev &` 这类 fork 出去的会留下来，端口和 CPU 一起占着。
+      const killTree = () => {
         try {
           process.kill(-child.pid!, 'SIGKILL')
         } catch {
           child.kill('SIGKILL')
         }
+      }
+      const timer = setTimeout(() => {
+        timedOut = true
+        killTree()
       }, timeout)
-      child.on('error', (e) => {
+      const onAbort = () => {
+        aborted = true
+        killTree()
+      }
+      // 已经是 aborted 的信号不会再发事件——那种情况要当场杀，否则这条命令会在一个
+      // 早就被喊停的轮次里安安静静跑满十分钟。
+      if (abort) {
+        if (abort.aborted) onAbort()
+        else abort.addEventListener('abort', onAbort, { once: true })
+      }
+      const settle = (r: { code: number | null; signal: NodeJS.Signals | null; error?: string }) => {
         clearTimeout(timer)
-        done({ code: null, signal: null, out, bytes, timedOut, error: e.message })
-      })
-      child.on('close', (code, signal) => {
-        clearTimeout(timer)
-        done({ code, signal, out, bytes, timedOut })
-      })
+        abort?.removeEventListener('abort', onAbort)
+        done({ ...r, out, bytes, timedOut, aborted })
+      }
+      child.on('error', (e) => settle({ code: null, signal: null, error: e.message }))
+      child.on('close', (code, signal) => settle({ code, signal }))
     },
   )
 }
@@ -188,13 +209,13 @@ export function apply(ctx: Context, config: Config = {}) {
   /** 统一把业务失败收成文本。管道故障（真异常）继续往上抛，由 ToolService 标 failed。 */
   const tool = (
     def: { name: string; description: string; parameters: Record<string, unknown> },
-    execute: (args: any) => Promise<string | { text: string; files: WorkspaceFile[] }> | string,
+    execute: (args: any, call: ToolCall) => Promise<string | { text: string; files: WorkspaceFile[] }> | string,
   ) => {
     ctx.tools.register({
       ...def,
-      async execute(args) {
+      async execute(args, call) {
         try {
-          const out = await execute((args ?? {}) as any)
+          const out = await execute((args ?? {}) as any, call)
           return typeof out === 'string' ? { text: out } : out
         } catch (e) {
           // 越界是模型写错了路径，跟「文件不存在」同类——告诉它，让它改，
@@ -536,19 +557,21 @@ export function apply(ctx: Context, config: Config = {}) {
         required: ['command'],
       },
     },
-    async ({ command, cwd, timeout }: { command?: string; cwd?: string; timeout?: number }) => {
+    async ({ command, cwd, timeout }: { command?: string; cwd?: string; timeout?: number }, call: ToolCall) => {
       if (!command?.trim()) fail('缺少 command 参数')
       const dir = resolveIn(cwd)
       const info = await stat(dir).catch(() => fail(`工作目录不存在：${show(dir)}`))
       if (!info.isDirectory()) fail(`${show(dir)} 不是目录。`)
       const ms = Math.max(1000, Math.min(Math.floor(timeout || defaultTimeout), MAX_TIMEOUT))
 
-      const { code, signal, out, bytes, timedOut, error } = await runCommand(command, dir, ms)
+      const { code, signal, out, bytes, timedOut, aborted, error } = await runCommand(command, dir, ms, call?.signal)
       if (error) fail(`无法执行：${error}`)
 
       const body = out.trim() || '（没有输出）'
       const cut = bytes > Buffer.byteLength(out) ? `\n…（输出已截断，共 ${humanSize(bytes)}）` : ''
       // 退出码非零是**业务**结果，不是管道故障：模型要看到它并自己决定下一步。
+      // 被中止要单独说：让模型知道这条命令没跑完，别拿半截输出当结论。
+      if (aborted) return `命令已被中止（用户点了停止）。已经产生的输出：\n${body}${cut}`
       if (timedOut) return `命令超时（${ms} 毫秒）已被终止。\n${body}${cut}`
       if (code === 0) return `${body}${cut}`
       const how = code === null ? `被信号 ${signal} 终止` : `退出码 ${code}`
