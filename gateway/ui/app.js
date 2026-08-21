@@ -44,6 +44,9 @@ async function runConfirm() {
     } else if (c.kind === 'remove-machine') {
       await doRemoveMachine(machineTarget(c.scope, c.orgId, c.machineId))
       return
+    } else if (c.kind === 'vacuum-logs') {
+      await doVacuumLogs(machineTarget(c.scope, c.orgId, c.machineId))
+      return
     } else if (c.kind === 'delete-bot') {
       const base = catalogBase()
       const data = await api('DELETE', `${base}/bots/${encodeURIComponent(c.id)}`)
@@ -150,6 +153,7 @@ document.getElementById('app').addEventListener('submit', (e) => {
   if (form.getAttribute('data-form') === 'add-release') return addRelease(e)
   if (form.getAttribute('data-form') === 'machine-capacity') return saveCapacity(e)
   if (form.getAttribute('data-form') === 'machine-timezone') return saveTimezone(e)
+  if (form.getAttribute('data-form') === 'machine-log-cap') return saveLogCap(e)
   if (form.getAttribute('data-form') === 'machine-company') return saveMachineCompany(e)
   if (form.getAttribute('data-form') === 'cred') {
     e.preventDefault()
@@ -352,6 +356,10 @@ document.getElementById('app').addEventListener('click', async (e) => {
   }
   if (act === 'upgrade-manager') {
     await upgradeManager(btn)
+    return
+  }
+  if (act === 'machine-logs-vacuum') {
+    vacuumLogs(btn)
     return
   }
   if (act === 'machine-bot-update') {

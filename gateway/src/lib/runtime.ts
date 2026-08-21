@@ -162,6 +162,15 @@ export async function proxyJson(
    * 而界面需要知道，所以由这一跳补上去，**不覆盖**席位已有的字段。
    */
   extra?: Record<string, unknown>,
+  /**
+   * 等席位/管家多久，毫秒。默认 15 秒——够任何一条「取一份状态」的接口。
+   *
+   * **有一类调用必须自己给一个更大的数**：那一头做的是真活儿（清 journal 要先
+   * rotate 再删文件），而不是查一份现成的数据。用默认值的后果不是「慢」，是**假的
+   * 失败**：Gateway 在 15 秒掐断连接、回一句「实例还没上线」，而机器上那件事正干得
+   * 好好的，人看着报错就会再点一次。
+   */
+  timeoutMs = 15000,
 ) {
   // authorization 上只能是席位票。bot 不认机器票了，回落到 smt_ 只会换回 401，
   // 而且会让人以为「票带了但没生效」，比空着更难查。
@@ -177,7 +186,7 @@ export async function proxyJson(
         ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
   } catch {
     throw new HttpError(503, INSTANCE_DOWN)

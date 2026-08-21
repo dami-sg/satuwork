@@ -1109,6 +1109,110 @@ async function saveTimezone(e) {
 }
 
 /**
+ * 设这台机器的 journal 上限。
+ *
+ * 和改时区一条路——填进去只是**下指令**，真正清 journal 的是机器上的管家，下一轮
+ * 心跳才认。所以提示语说的是「等机器认」，不是「已生效」。
+ *
+ * 留空 = 不再指定，跟管家默认的 1024 MB 走；填 0 = 这台机器不自动清。两者不一样，
+ * 别在前端把空串折成 0。
+ */
+async function saveLogCap(e) {
+  e.preventDefault()
+  const form = e.target
+  const s = machineScope(form)
+  const logCapMb = String(new FormData(form).get('logCapMb') || '').trim()
+  state.busy = true
+  render()
+  try {
+    const data = await api('PUT', `${s.base}/log-cap`, { logCapMb })
+    await s.reload()
+    flash(
+      'ok',
+      !logCapMb
+        ? t('不再指定上限，跟管家默认的 1024 MB 走', 'Cap cleared — the manager falls back to its 1024 MB default')
+        : logCapMb === '0'
+          ? t('已下指令：这台机器不自动清日志', 'Instruction sent: this machine will not auto-clean its journal')
+          : data.pending
+            ? t(`已下指令：上限 ${logCapMb} MB，等机器认`, `Instruction sent: ${logCapMb} MB cap, waiting for the machine`)
+            : t(`上限改为 ${logCapMb} MB`, `Cap set to ${logCapMb} MB`),
+    )
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
+/**
+ * 立刻清一次这台机器的日志。
+ *
+ * **先问一句**：这一下会在机器上永久删掉最老的那截 journal，而那截日志往往正是
+ * 「昨天夜里为什么崩的」的唯一材料。平时不需要按——超了管家自己会清。
+ */
+function vacuumLogs(el) {
+  const s = machineScope(el)
+  if (!s.machineId) return
+  const card = machineCardOf(s)
+  const logs = card && card.machine && card.machine.telemetry && card.machine.telemetry.logs
+  state.confirm = {
+    title: t('立刻清理这台机器的日志？'),
+    body:
+      (logs
+        ? t(
+            `现在 journal 占 ${fmtBytes(logs.journalBytes)}，会清到上限的六成左右。`,
+            `The journal is ${fmtBytes(logs.journalBytes)} now; it will be trimmed to about 60% of the cap.`,
+          )
+        : '') +
+      t(
+        '最老的那截日志会被永久删掉——排查中的机器请先把日志看完再清。超过上限时管家本来就会自己清，平时不必按这里。',
+        'The oldest entries are deleted for good — read what you need first. The manager already cleans up on its own once the cap is exceeded.',
+      ),
+    label: '清理',
+    kind: 'vacuum-logs',
+    scope: s.scope,
+    orgId: s.orgId,
+    machineId: s.machineId,
+  }
+  render()
+}
+
+/** 真去清。慢是正常的：journalctl 要先轮转再删文件，接口那头等得比别处久。 */
+async function doVacuumLogs(s) {
+  state.busy = true
+  render()
+  try {
+    const data = await api('POST', `${s.base}/logs/vacuum`, {})
+    await s.reload()
+    // **把管家刚量的那份贴上去。** reload 拿回来的是 Gateway 手上那份，它来自上一轮
+    // 心跳（最多 30 秒前），也就是清理**之前**的数字——不贴的话，横幅写着「腾出
+    // 3.4 GB」，同一屏上 journal 那行还是「4.0 GB / 超过上限」，两句话互相打架，
+    // 人只会以为没清成再点一次。
+    const card = machineCardOf(s)
+    if (data && data.logs && card && card.machine) {
+      card.machine.telemetry = { ...(card.machine.telemetry || { metrics: null }), logs: data.logs }
+    }
+    const v = data && data.vacuum
+    if (v && v.error) flash('err', v.error)
+    else if (v) {
+      flash(
+        'ok',
+        t(
+          `已清理：${fmtBytes(v.before)} → ${fmtBytes(v.after)}，腾出 ${fmtBytes(v.freed)}`,
+          `Cleaned: ${fmtBytes(v.before)} → ${fmtBytes(v.after)}, freed ${fmtBytes(v.freed)}`,
+        ),
+      )
+    } else flash('ok', t('已清理'))
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.busy = false
+    render()
+  }
+}
+
+/**
  * 给这台机器钉一个新的管家版本。
  *
  * 只是下指令——换版、自检、失败回滚都在机器上做，所以提示语说的是「等机器换版」。

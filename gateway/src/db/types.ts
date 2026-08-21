@@ -6,6 +6,10 @@
  * 会把整个 3000 行的 Db 类拖进依赖图。
  */
 
+import type { MachineTelemetry } from '../lib/telemetry.ts'
+
+export type { MachineTelemetry }
+
 export type Role = 'owner' | 'admin' | 'member'
 
 /**
@@ -232,6 +236,33 @@ export interface Machine {
   timezone: string | null
   /** 管家心跳自报的机器**实际**时区。期望和实际分开，界面才说得清「改上了没有」。 */
   currentTimezone: string | null
+  /**
+   * 管家心跳自报的负载与日志占用（CPU、内存、各块盘、出网流量、journal 有多大）。
+   *
+   * 只存**最近一份**，不建流水表：这一格答的是「这台机器现在怎么样」。按 30 秒一行
+   * 存下去，一台机器一个月就是八万多行，换来的是一条谁也不会去查的曲线——要趋势那
+   * 是监控系统的活儿。
+   *
+   * 空 = 还没报过（老管家，或者刚起来还没采到第一份）。**心跳里两份都缺时整格不
+   * 动**，不写一份空的进来盖掉上一轮（见 telemetryOf）。
+   */
+  telemetry: MachineTelemetry | null
+  /**
+   * 上面那份是什么时候**收到**的（Gateway 的钟），不是机器自报的采样时刻。
+   *
+   * 和 heartbeatAge 同一个理由：机器的钟可能是歪的，而界面上那句「3 分钟前」必须准。
+   */
+  telemetryAt: number | null
+  /**
+   * 这台机器的 journal 上限，MB。超过了管家自己清（`journalctl --vacuum-size`）。
+   *
+   * 和 `timezone`、`desiredManagerVersion` 一样是**期望值**：写在这里只是下指令，
+   * 真正动手的是机器上的管家，心跳把它带下去。
+   *
+   * 空 = 没人指定过，跟管家的默认走（1 GB）；`0` = 明确不要它动 journal。两者不能
+   * 合并——空当成 0 就把清理静默关掉了，而盘写满时连日志都写不进去。
+   */
+  logCapMb: number | null
   /**
    * 这台机器要追的管家版本。空 = 跟平台的全局期望版本走。
    *

@@ -1033,6 +1033,28 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
           timezone: null,
           currentTimezone: null,
           arch: 'arm64',
+          // 机器自报的负载与日志占用。**盘故意画到 92%**：这一页最该一眼看见的就是
+          // 一台快写满的机器，而颜色分档（75/90）只有真有个超线的值才验得到。
+          telemetry: {
+            metrics: {
+              uptime: 3 * 86400 + 3600,
+              cpu: { cores: 8, usage: 0.23, load1: 1.8 },
+              memory: { total: 16 * 1024 ** 3, used: 9 * 1024 ** 3, usage: 0.56, swapTotal: 0, swapUsed: 0 },
+              disks: [{ mount: '/', total: 100 * 1024 ** 3, used: 92 * 1024 ** 3, free: 8 * 1024 ** 3, usage: 0.92 }],
+              net: { txBytes: 42 * 1024 ** 3, rxBytes: 10 * 1024 ** 3, txRate: 1.2 * 1024 ** 2, rxRate: 2048, interfaces: ['eth0'] },
+            },
+            logs: {
+              journalBytes: 3.4 * 1024 ** 3,
+              varLogBytes: 3.6 * 1024 ** 3,
+              capMb: 1024,
+              capSource: 'default',
+              top: [{ path: '/var/log/syslog', size: 120 * 1024 ** 2 }],
+              lastVacuum: { at: Date.now() - 3600_000, before: 4 * 1024 ** 3, after: 600 * 1024 ** 2, freed: 3.4 * 1024 ** 3, keepMb: 614, error: '' },
+            },
+          },
+          telemetryAt: Date.now() - 12000,
+          telemetryAge: 12000,
+          logCapMb: null,
           ...(over || {}),
         },
         accounts: 3,
@@ -1047,7 +1069,22 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         timezonePending: false,
         company: { id: 'c1', name: 'UI-SMOKE-公司', slug: 'smoke', status: 'active' },
       })
-      const orphan = { ...machine({ id: 'ffffffff-0000-4000-8000-000000000000', host: null, paired: false, link: 'unpaired', lastHeartbeatAt: null, heartbeatAge: null, managerVersion: null }), company: null }
+      const orphan = {
+        ...machine({
+          id: 'ffffffff-0000-4000-8000-000000000000',
+          host: null,
+          paired: false,
+          link: 'unpaired',
+          lastHeartbeatAt: null,
+          heartbeatAge: null,
+          managerVersion: null,
+          // 没配对的机器什么都不报。这一台在下面用来验「没报」和「报了 0」画得不一样。
+          telemetry: null,
+          telemetryAt: null,
+          telemetryAge: null,
+        }),
+        company: null,
+      }
 
       ui.state.path = '/machines'
       ui.state.allMachines = [machine(), orphan]
@@ -1057,6 +1094,13 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(list.includes('UI-SMOKE-公司'), '列表没画出归属公司')
       assert(list.includes('未分配'), '没派给公司的机器没标出来——它恰恰是这一页要看见的那种')
       assert(list.includes('data-href="/machines/ffffffff-0000-4000-8000-000000000000"'), '行点不进详情')
+      // 负载那一格画的是**最吃紧的那一项**（这台是盘 92%），并且要进最响的那一档
+      // 颜色——这张表存在的意义就是在机器写满之前看见它。
+      assert(/satu-meter" data-level="hot"/.test(list), '92% 的盘没进最响那一档，红线就白划了')
+      assert(list.includes('盘 / 92%'), `列表里没写出最吃紧的那一项：${list.slice(list.indexOf('satu-meter') - 200, list.indexOf('satu-meter') + 200)}`)
+      // 没报过的那台给「—」，不给 0%：失联机器的 0% 和空闲机器的 0% 看着一样、
+      // 结论正相反。
+      assert(!/satu-meter[^>]*><span style="width: 0\.0%/.test(list), '没报过的机器被画成了 0%')
 
       ui.state.path = '/machines/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
       ui.state.machineDetail = {
@@ -1091,6 +1135,64 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       // 出错的那个要比正常的显眼：这一页就是用来找坏掉那个的。
       assert(/tag-accent">运行中/.test(detail) === false, '正常的不该占着最扎眼的那档标签')
       assert(detail.includes('tag-accent-2">运行中'), 'ready 该是安静的那一档')
+      // ── 负载与日志：这一页新加的两块 ────────────────────────────────
+      assert(detail.includes('机器负载'), '详情页没有负载那块')
+      assert(detail.includes('8 核') && detail.includes('23%'), `CPU 那行不对：${detail.slice(detail.indexOf('机器负载'), detail.indexOf('机器负载') + 600)}`)
+      assert(detail.includes('92%'), '磁盘占用没画出来')
+      assert(detail.includes('MB/s'), '出网速率没画出来')
+      // 数是机器自报的、隔一轮心跳才来一次，所以必须先说清楚它有多新——不然一台失联
+      // 机器上的「CPU 5%」看着和好机器一模一样。
+      assert(/采样于/.test(detail), '没说这份数是什么时候采的')
+      assert(detail.includes('日志占用'), '详情页没有日志那块')
+      assert(detail.includes('data-form="machine-log-cap"'), '改日志上限的表单没接上')
+      assert(detail.includes('data-act="machine-logs-vacuum"'), '手动清理的按钮没接上')
+      // 超过上限要写出来：这一格是「管家会自己清」还是「它不清」，处置完全不同。
+      assert(detail.includes('超过上限'), '3.4 GB 的 journal 压着 1024 MB 的上限，没说它超了')
+      // 算不出百分比时**只说一遍**。原先条子和数值格各写一句「取样中」，同一行里
+      // 出现两遍；空心虚线的槽负责占位，话由数值格去说。
+      // 每次都从 machine() 现造一份并深拷一层：下面几段各改各的那一格，共用同一个
+      // 对象的话，前一段的改动会跟着漏进后一段，断言就成了看运气。
+      const variant = (tweak) => {
+        const card = { ...machine(), seatList: [], companies: [] }
+        card.machine = JSON.parse(JSON.stringify(card.machine))
+        tweak(card.machine)
+        return card
+      }
+      const asIs = ui.state.machineDetail
+
+      ui.state.machineDetail = variant((m) => {
+        m.telemetry.metrics.cpu.usage = null
+      })
+      ui.render()
+      const half = ui.html()
+      assert((half.match(/取样中/g) || []).length === 1, `「取样中」出现了 ${(half.match(/取样中/g) || []).length} 次，该只有一次`)
+      assert(half.includes('data-level="none"'), '算不出来的那一格该画空心虚线槽，不能画成实心的 0%')
+
+      // 上限为 0（这台机器不自动清）同样没有百分比可算，但机器一直在正常上报——
+      // 写成「取样中」会让人跑去查一件根本没坏的事。
+      ui.state.machineDetail = variant((m) => {
+        m.telemetry.logs.capMb = 0
+        m.logCapMb = 0
+      })
+      ui.render()
+      const uncapped = ui.html()
+      assert(uncapped.includes('不限'), 'journal 那行没写「不限」')
+      assert(!uncapped.includes('取样中'), '上限为 0 被说成了「取样中」')
+
+      // 机器上用 SATUWORK_LOG_CAP_MB 钉死时，期望值永远追不上实际值、pending 恒为真
+      // ——那句「这里改不动它」必须排在前面，否则它恰好在唯一需要它的场景下画不出来。
+      ui.state.machineDetail = variant((m) => {
+        m.telemetry.logs.capSource = 'env'
+        m.telemetry.logs.capMb = 2048
+        m.logCapMb = 900
+      })
+      ui.render()
+      const env = ui.html()
+      assert(env.includes('SATUWORK_LOG_CAP_MB'), '本机钉死那句话没画出来')
+      assert(!env.includes('已下指令，机器现在用的是'), '本机钉死时不该一直说「等机器认」')
+
+      ui.state.machineDetail = asIs
+      ui.render()
       assert(detail.includes('data-form="machine-capacity"'), '改容量的表单没接上')
       assert(detail.includes('data-form="machine-company"'), '改归属的表单没接上')
       // 上面有 Bot 也删得掉（登记跟着一起没），所以按钮**不该**是禁的——以前禁掉的

@@ -246,6 +246,11 @@ export function machineOf(r: Row): Machine {
     timezone: strOrNull(r.timezone),
     currentTimezone: strOrNull(r.currentTimezone),
     desiredManagerVersion: strOrNull(r.desiredManagerVersion),
+    // 自报数据整格可能是空（老管家从不报）。空就是 null，别用 `{}` 顶——那样界面
+    // 得再判一次「里头两项是不是都没有」，而「没报过」本来就是一个干净的状态。
+    telemetry: r.telemetry == null ? null : (jsonOf(r.telemetry) as Machine['telemetry']),
+    telemetryAt: numOrNull(r.telemetryAt),
+    logCapMb: numOrNull(r.logCapMb),
     removedAt: numOrNull(r.removedAt),
     token: str(r.token || ''),
   }

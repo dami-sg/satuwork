@@ -5,6 +5,8 @@ import { attachUpgrade, proxyIntercept } from './proxy.ts'
 import { bootChallenge, pairIfNeeded } from './pair.ts'
 import { diagnose } from './diag.ts'
 import { botUnit, clampLines, followLogs, MANAGER_UNIT, recentLogs } from './logs.ts'
+import { checkLogs, defaultKeepMb, logUsage, setDesiredCapMb, startLogWatch, vacuum } from './logdisk.ts'
+import { metrics, startMetrics } from './metrics.ts'
 import { deploySeat, removeSeat, seat, seatsWithLiveness, type SeatSpec } from './seats.ts'
 import { confirmVersion, maybeUpgrade, refreshConfirmScript, upgradeError } from './upgrade.ts'
 import { currentTimezone, maybeSetTimezone, timezoneError } from './timezone.ts'
@@ -151,8 +153,37 @@ router.get('/health', async (req, res) => {
     // 的话，「没指定过」和「指定了但改失败」在外面看着一样。
     timezone: currentTimezone() || null,
     timezoneError: timezoneError() || null,
+    // 负载和日志占用都读**最近一次采样**，不现算：CPU 和出网速率是两次采样之差，
+    // 现算给不出数；量一遍 /var/log 要走几千个文件，不该挂在一条探活路由上。
+    metrics: metrics() ?? null,
+    logs: logUsage() ?? null,
     seats: await seatsWithLiveness(),
   })
+})
+
+/**
+ * 机器负载与日志占用。
+ *
+ * 心跳里已经带着同一份了——这条路给的是「我现在就想看」：心跳 30 秒一轮，而人盯着
+ * 一台正在出事的机器时，等下一轮和等一分钟没区别。
+ */
+router.get('/metrics', async (req, res) => {
+  requireMachine(req)
+  json(res, 200, { metrics: metrics() ?? null, logs: logUsage() ?? null })
+})
+
+/**
+ * 立刻清一次日志。平时不需要按——超过上限时看守自己会清（见 logdisk.ts）。
+ *
+ * 它存在是为了两种时候：盘已经快满了，等不了下一轮检查；以及刚把上限调小，想当场
+ * 看到效果。`keepMb` 不给就用和自动清理同一个目标，免得两条路清出两种结果。
+ */
+router.post('/logs/vacuum', async (req, res) => {
+  requireMachine(req)
+  const raw = (req.body as { keepMb?: unknown })?.keepMb
+  const keep = raw == null ? defaultKeepMb() : Number(raw)
+  if (!Number.isFinite(keep) || keep < 0) throw new HttpError(400, 'keepMb is invalid')
+  json(res, 200, { vacuum: await vacuum(keep), logs: logUsage() ?? null })
 })
 
 router.get('/seats', async (req, res) => {
@@ -254,6 +285,11 @@ if (!state) {
 // 什么样就一直是什么样，改了也只有重装才拿得到。dryRun 下不碰宿主机的 /usr/local/bin。
 if (!boot.dryRun) refreshConfirmScript()
 
+// 负载采样和日志看守**在配对之前就起**：这两件事只关乎这台机器本身，不需要 Gateway
+// 同意。一台还没配上（或者被移除之后还没人来收拾）的机器，日志照样在涨。
+startMetrics()
+startLogWatch()
+
 const HEARTBEAT_MS = 30_000
 
 /**
@@ -288,6 +324,10 @@ async function heartbeat(): Promise<void> {
         // 升级和改时区都可能失败，而 Gateway 只有一格 lastError。升级失败更要命
         // （机器版本会卡住），所以它优先；两者都好的时候这里是 null。
         upgradeError: upgradeError() || timezoneError() || null,
+        // 负载和日志占用**搭心跳上报**，不另开一条上行：机器本来就每 30 秒敲一次门，
+        // 再加一条定时 POST 只是多一个会失败、会重试、会被防火墙拦住的东西。
+        metrics: metrics() ?? null,
+        logs: logUsage() ?? null,
         seats: await seatsWithLiveness(),
       }),
       signal: AbortSignal.timeout(15_000),
@@ -306,13 +346,16 @@ async function heartbeat(): Promise<void> {
     }
     // 心跳通了才算「这个版本活过来了」。confirm timer 看的就是这个标记。
     confirmVersion()
-    const reply = (await res.json()) as { timezone?: string | null; removed?: boolean }
+    const reply = (await res.json()) as { timezone?: string | null; removed?: boolean; logCapMb?: number | null }
     // 被移除了：停席位、清配对、停自己。这一支之后不再做别的活儿。
     if (reply.removed) {
       clearInterval(timer)
       await standDown(state, boot.dryRun)
       return
     }
+    // 日志上限改了就当场量一遍：把上限从 4G 调到 500M 的人，等的就是那一下，
+    // 而定时检查半小时才轮一次。没改就不动——每轮心跳都走一遍 /var/log 太贵。
+    if (setDesiredCapMb(reply as Record<string, unknown>)) await checkLogs()
     // 时区在前：它便宜、不重启进程，而 maybeUpgrade 成功那一支会把自己重启掉，
     // 排在它后面的活儿这一轮就不一定跑得到了。
     await maybeSetTimezone(reply.timezone)

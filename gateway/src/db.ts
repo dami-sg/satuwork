@@ -1826,6 +1826,10 @@ export class Db {
       // 时区默认不管：没人指定之前，机器装成什么样就是什么样。
       timezone: null as string | null,
       currentTimezone: null as string | null,
+      // 自报数据等第一次心跳；日志上限空着 = 跟管家的默认走（**不是** 0，0 是「别清」）。
+      telemetry: null as Machine['telemetry'],
+      telemetryAt: null as number | null,
+      logCapMb: null as number | null,
       // 新登记的机器当然在册。墓碑只由 markMachineRemoved 立。
       removedAt: null as number | null,
     }
@@ -1833,7 +1837,7 @@ export class Db {
       const row: Machine = { ...base, token: randomMachineToken() }
       try {
         await this.run(
-          'insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", "managerVersion", protocol, "lastError", arch, "desiredManagerVersion", "maxAccounts", timezone, "currentTimezone", token) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          'insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", "managerVersion", protocol, "lastError", arch, "desiredManagerVersion", "maxAccounts", timezone, "currentTimezone", "logCapMb", token) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
           [
             row.id,
             row.host,
@@ -1849,6 +1853,7 @@ export class Db {
             row.maxAccounts,
             row.timezone,
             row.currentTimezone,
+            row.logCapMb,
             row.token,
           ],
         )
@@ -1986,6 +1991,9 @@ export class Db {
         | 'maxAccounts'
         | 'timezone'
         | 'currentTimezone'
+        | 'telemetry'
+        | 'telemetryAt'
+        | 'logCapMb'
       >
     >,
   ): Promise<Machine> {
@@ -2006,9 +2014,12 @@ export class Db {
       maxAccounts: patch.maxAccounts === undefined ? cur.maxAccounts : patch.maxAccounts,
       timezone: patch.timezone === undefined ? cur.timezone : patch.timezone,
       currentTimezone: patch.currentTimezone === undefined ? cur.currentTimezone : patch.currentTimezone,
+      telemetry: patch.telemetry === undefined ? cur.telemetry : patch.telemetry,
+      telemetryAt: patch.telemetryAt === undefined ? cur.telemetryAt : patch.telemetryAt,
+      logCapMb: patch.logCapMb === undefined ? cur.logCapMb : patch.logCapMb,
     }
     await this.run(
-      'update machines set host=?, "companyId"=?, "lastHeartbeatAt"=?, "pairedAt"=?, "managerVersion"=?, protocol=?, "lastError"=?, arch=?, "desiredManagerVersion"=?, "maxAccounts"=?, timezone=?, "currentTimezone"=? where id=?',
+      'update machines set host=?, "companyId"=?, "lastHeartbeatAt"=?, "pairedAt"=?, "managerVersion"=?, protocol=?, "lastError"=?, arch=?, "desiredManagerVersion"=?, "maxAccounts"=?, timezone=?, "currentTimezone"=?, telemetry=?, "telemetryAt"=?, "logCapMb"=? where id=?',
       [
         next.host,
         next.companyId,
@@ -2022,6 +2033,10 @@ export class Db {
         next.maxAccounts,
         next.timezone,
         next.currentTimezone,
+        // jsonb 那一列要的是文本，pg 的参数绑定不会替我们把对象序列化。
+        next.telemetry == null ? null : JSON.stringify(next.telemetry),
+        next.telemetryAt,
+        next.logCapMb,
         id,
       ],
     )

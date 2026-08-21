@@ -877,6 +877,7 @@ function machineCard(orgId, card) {
            那条答的不是同一个问题，所以两个都要能选。 */ ''}
       ${m.paired ? `<button type="button" class="satu-linkbtn" data-act="machine-logs" data-id="${esc(orgId)}" data-machine="${esc(m.id)}">${t('查看日志')}</button>` : ''}
     </span></div>
+    ${machineLoadRow(m)}
     ${timezoneRow(orgId, m, card)}
     ${managerVersionRow(orgId, m, card)}
     ${botVersionRow(orgId, card)}
@@ -889,6 +890,28 @@ function machineCard(orgId, card) {
       <button type="submit" class="btn" ${state.busy ? 'disabled' : ''}>${t('保存')}</button>
     </form>
   </div>`
+}
+
+/**
+ * 负载与日志占用，**只读一行**。
+ *
+ * 这张卡答的是「这家公司手上有几台、够不够用」，不是运维台——所以这里只把最吃紧的
+ * 那一项和 journal 的大小摆出来，改上限、手动清理这些动作都在平台的机器详情页
+ * （那一页才是为「这台机器怎么了」准备的）。两处共用同一批渲染函数（见
+ * pages-machines.js），免得同一台机器在两个页面上说两种话。
+ *
+ * 机器没报过就整行不画：一行「—」占着地方却什么也没说。
+ */
+function machineLoadRow(m) {
+  const load = (m.telemetry && m.telemetry.metrics) || null
+  const logs = (m.telemetry && m.telemetry.logs) || null
+  if (!load && !logs) return ''
+  const age = m.telemetryAge == null ? '' : sinceMs(m.telemetryAge)
+  return `<div class="satu-kv"><span>${t('负载')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
+    ${load ? machineLoadCell(m) : ''}
+    ${logs ? `<span style="font-size: 13px; color: var(--muted-foreground);">${t('日志')} ${esc(fmtBytes(logs.journalBytes))}</span>` : ''}
+    ${age ? `<span style="font-size: 12px; color: var(--muted-foreground);">· ${esc(age)}</span>` : ''}
+  </span></div>`
 }
 
 /**
