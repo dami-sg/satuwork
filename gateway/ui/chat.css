@@ -440,20 +440,42 @@
 .sw-approval-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 /* 卡片里的按钮比页面上的小一号：它长在气泡里，用标准尺寸会把整条消息撑变形。 */
 .sw-approval-acts .btn { padding: 5px 12px; font-size: 12px; }
-.sw-approval-done { margin-top: 8px; color: var(--muted-foreground); }
 /* 点完到终态事件回来之间。按钮留在原地但点不动——挪走或者变灰闪一下，都会让人
    以为自己点空了。 */
 .sw-approval[data-busy='1'] .sw-approval-acts { pointer-events: none; opacity: 0.5; }
-/* 已经有结论的卡片退到背景里去：它不再需要人做什么，但要留着，因为「谁批的、
-   批了什么」正是事后要翻的东西。 */
-.sw-approval[data-state='approved'],
-.sw-approval[data-state='denied'],
-.sw-approval[data-state='timeout'],
-.sw-approval[data-state='aborted'],
-.sw-approval[data-state='expired'] {
-  border-left-color: var(--border);
-  background: transparent;
+
+/* 有结论的确认收成一颗药丸，和工具痕迹排在一起（.sw-toolchip 那套样式全都继承）。
+   这里只把盾牌调到和工具图标一样大——它原本是给卡片抬头用的，14px 在药丸里偏大。 */
+.sw-approvalchip svg { width: 12px; height: 12px; }
+
+/* ── 发信那张定制卡 ────────────────────────────────────────────────────
+   排得像一封信：左边一列标签，右边是内容；主题一行、正文一块。**不做成表单控件的
+   堆叠**——那看着像「填一张表」，而人在这儿干的事是「读一遍再改两句」。 */
+.sw-mail { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.sw-mail-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sw-mail-body { display: flex; flex-direction: column; gap: 4px; }
+/* 标签列固定宽：三格标签对齐，眼睛沿着一条竖线往下扫。 */
+.sw-mail-k {
+  flex: none;
+  width: 44px;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
 }
+.sw-mail-v {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.sw-mail-input, .sw-mail-text { font-size: 12.5px; padding: 5px 8px; }
+.sw-mail-input { flex: 1; min-width: 0; }
+/* 正文用正文字体，不用等宽：它是要读的一段话，不是代码。纵向可拉，长信不必在一个
+   小窗口里滚。 */
+.sw-mail-text { width: 100%; resize: vertical; line-height: 1.6; }
+/* 悬浮窗里按表单摆的那几格。 */
+.sw-toolpop-field { margin-top: 4px; }
+.sw-toolpop-field > span { font-size: 11px; color: var(--muted-foreground); }
 
 /* 药丸本身要看得出「可以看详情」。 */
 .sw-toolchip { cursor: help; }

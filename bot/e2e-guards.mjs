@@ -60,6 +60,8 @@ await new Promise((r) => setTimeout(r, 50))
 
 /** 每把工具记一次「我真的跑了」。被拦的那些这个数字必须是 0。 */
 const ran = {}
+/** 工具真正收到的那份参数。**「改过的内容有没有真的发出去」只能从这里看。** */
+const got = {}
 const tool = (name, risk) => {
   ran[name] = 0
   ctx.tools.register({
@@ -67,8 +69,9 @@ const tool = (name, risk) => {
     description: name,
     parameters: { type: 'object', properties: {} },
     ...(risk ? { risk } : {}),
-    execute: async () => {
+    execute: async (args) => {
       ran[name] += 1
+      got[name] = args
       return { text: 'ok' }
     },
   })
@@ -84,6 +87,9 @@ tool('mcp_a_send_mail', ['external', 'write'])
 tool('mcp_b_send_mail', ['external', 'write'])
 // 没标 risk：按 UNKNOWN_RISK（external + write）算。
 tool('mystery')
+// 元工具那层壳：真正的工具名在参数里（见 gateway/src/lib/tool-search.ts）。
+tool('mcp_a_sw_run', ['external', 'write'])
+tool('mcp_a_send_email', ['external', 'write'])
 
 ctx.plugin(policy)
 await new Promise((r) => setTimeout(r, 50))
@@ -305,7 +311,65 @@ out.record = {
   都带上了理由: policyEvents.every((e) => Boolean(e.data.reason)),
 }
 
-// ── 9. 策略够得着目录的那个接缝 ────────────────────────────────────────
+// ── 9. 定制审批：发信那张卡，以及改过的内容真的发出去了 ─────────────────
+{
+  const { formOf, unwrapCall, isEmailSend } = await import('./src/policy/forms.ts')
+  const mail = {
+    tool: 'GMAIL_SEND_EMAIL',
+    args: { recipient_email: 'a@b.c', subject: '二季度报表', body: '你好，附件是报表。', is_html: false },
+  }
+  const wrapped = { name: 'mcp_a_sw_run', arguments: JSON.stringify(mail) }
+  const form = formOf(wrapped)
+  const byLabel = (f, label) => f.fields.find((x) => x.label === label)
+  out.form = {
+    剥得开元工具的壳: unwrapCall(wrapped).tool,
+    认出是发信: form.kind,
+    // 套了壳的字段路径要带前缀，写回时才落到真正那份参数上。
+    正文的路径: byLabel(form, '正文')?.key,
+    正文可改: byLabel(form, '正文')?.editable === true && byLabel(form, '正文')?.multiline === true,
+    主题可改: byLabel(form, '主题')?.editable === true,
+    // 收件人**不给改**：能改收件人的话，「审一眼」就变成了「在这儿写封信」。
+    收件人不可改: !byLabel(form, '收件人')?.editable,
+    其它参数也摆出来: Boolean(byLabel(form, 'is_html')),
+    没套壳的直接认: formOf({ name: 'mcp_a_send_email', arguments: JSON.stringify(mail.args) }).fields.find((x) => x.label === '正文')?.key,
+    查邮件不算发信: isEmailSend('GMAIL_FETCH_EMAILS'),
+    发信算: isEmailSend('GMAIL_SEND_EMAIL'),
+    不是邮件的退回通用卡: formOf({ name: 'mcp_a_send_mail', arguments: '{"foo":1}' }).kind,
+  }
+
+  // 真跑一遍：在卡片上把正文改掉，看工具收到的是哪一份。
+  const running = call('s6', 'mcp_a_sw_run', mail)
+  await settle()
+  const pending = pendingOf('s6').at(-1)
+  const edits = {
+    'args.body': '你好，报表在附件里，数字我核对过了。',
+    // 只读那格也一起送上来：席位必须**不认**它——浏览器能送任何东西。
+    'args.recipient_email': 'evil@attacker.test',
+    '../etc/passwd': 'x',
+  }
+  ctx.policy.approvals.decide('s6', pending.data.callId, 'approve', 'session', edits)
+  await running
+  const sent = got.mcp_a_sw_run?.args ?? {}
+  const terminal = sessions.appended.filter((e) => e.type === 'tool/approval' && e.data.state === 'approved').at(-1)
+  out.edits = {
+    卡片上带着表单: pending.data.form?.kind === 'email',
+    改过的正文真的发出去了: sent.body === edits['args.body'],
+    只读的收件人没被改: sent.recipient_email === 'a@b.c',
+    表单外的键一概不收: !('../etc/passwd' in sent) && !('../etc/passwd' in (got.mcp_a_sw_run ?? {})),
+    别的参数原样留着: sent.subject === '二季度报表' && sent.is_html === false,
+    终态事件记了改过哪几格: (terminal?.data.edited || []).join('、'),
+    终态事件里是改后的那份: String(terminal?.data.arguments || '').includes('我核对过了'),
+    // 改过的这一次不能变成整场放行。
+    改过就不给整场放行: !ctx.policy.approvals.grantedIn('s6').includes('mcp_a_sw_run'),
+    留痕的理由写了改过: sessions.appended.some(
+      (e) => e.type === 'tool/policy' && e.data.outcome === 'approved' && e.data.reason.includes('批准时改过'),
+    ),
+    // 卡片上那句话说的是剥壳之后那把工具，不是 sw_run。
+    理由说的是真工具: pending.data.reason.includes('GMAIL_SEND_EMAIL'),
+  }
+}
+
+// ── 10. 策略够得着目录的那个接缝 ───────────────────────────────────────
 //
 // **类型检查看不见这一处。** 策略拿 `reflect.get('catalog')` 取服务，再 `as` 成一个
 // 带 serverOf 的形状——目录那边把这个方法删掉、或者压根没加上，tsc 一声不吭，而运行时
@@ -319,7 +383,7 @@ out.record = {
   }
 }
 
-// ── 10. 纯函数：命令扫描与 MCP 风险推断 ────────────────────────────────
+// ── 11. 纯函数：命令扫描与 MCP 风险推断 ────────────────────────────────
 const net = (command) => networkCommand(JSON.stringify({ command }))
 out.shell = {
   curl: net('curl https://x'),

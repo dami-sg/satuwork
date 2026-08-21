@@ -91,6 +91,107 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(tools[0].result === '搜到了', `结果配错了：${tools[0].result}`)
     })
 
+    await test('确认卡：还等着的摊开，有结论的收成药丸', async () => {
+      /**
+       * 摊开是给「你要批的到底是什么」用的——参数看不见就只能凭信任点。可人点完之后
+       * 它就只是一条痕迹了，还占着半屏参数的话，往上翻这一轮会被几张已经作废的卡片挡住。
+       */
+      const ui = await boot()
+      const ev = (seq, type, data) => ({ seq, time: 1, type, data })
+      const approval = (seq, callId, state) =>
+        ev(seq, 'tool/approval', {
+          callId,
+          name: 'mcp_github_default_sw_run',
+          arguments: '{"tool":"GITHUB_FIND_REPOSITORIES","args":{"per_page":50}}',
+          reason: 'mcp_github_default_sw_run 会往外部系统写入或发送内容',
+          state,
+          ...(state === 'pending' ? { expiresAt: 2 } : {}),
+        })
+      const folded = ui.fold([
+        ev(1, 'turn/start', { turn: 1 }),
+        ev(2, 'tool/call', { turn: 1, step: 1, callId: 'call_a', name: 'mcp_github_default_sw_run', arguments: '{}' }),
+        approval(3, 'call_a', 'pending'),
+        approval(4, 'call_a', 'approved'),
+        approval(5, 'call_b', 'pending'),
+      ])
+      const apps = folded.blocks.find((b) => b.kind === 'assistant')?.approvals || []
+      assert(apps.length === 2, `两条确认该各留一条：${JSON.stringify(apps.map((a) => a.state))}`)
+      // 同一个 callId 来两条（pending 之后是终态），取最后一条。
+      assert(apps[0].state === 'approved' && apps[1].state === 'pending', JSON.stringify(apps.map((a) => a.state)))
+
+      const chip = ui.approvalChipHtml(apps[0], 1)
+      assert(chip.includes('sw-approvalchip'), '收起来的那条没画成药丸')
+      assert(chip.includes('已批准'), `药丸上没写结论：${chip}`)
+      // 药丸上**不许**带参数：整段 JSON 摊在气泡里，正是这次要收掉的东西。
+      assert(!chip.includes('GITHUB_FIND_REPOSITORIES'), '药丸把参数也带出来了')
+      assert(chip.includes('data-i="1"'), `下标要接在工具药丸后面数：${chip}`)
+
+      // 参数没丢，只是挪进了悬浮窗——和工具痕迹同一个交互。
+      const pop = ui.toolPopBody(ui.approvalPop(apps[0]))
+      assert(pop.includes('GITHUB_FIND_REPOSITORIES'), '悬浮窗里看不到当时批的参数')
+      assert(pop.includes('会往外部系统写入'), '悬浮窗里没说为什么要确认')
+
+      // 还等着的那条照旧摊开，按钮都在。
+      const card = ui.approvalHtml(apps[1])
+      assert(card.includes('data-act="chat-approve"') && card.includes('data-act="chat-deny"'), '等着的那张卡没有按钮')
+      assert(card.includes('GITHUB_FIND_REPOSITORIES'), '等着的那张卡没把参数摆出来')
+      assert(ui.approvalState(apps[0]) === 'approved', '状态认错了')
+    })
+
+    await test('发信的确认走定制卡：能读、能改，别的参数也露着', async () => {
+      /**
+       * 通用卡把整份 JSON 摊出来，而人在批一封信时要看的是「发给谁、写了什么」。更要紧
+       * 的是**得能改**：模型起草的正文十有八九要动一两句，只能批准/拒绝的话，人就得
+       * 拒掉再去跟它解释，而它下一稿仍然是它写的。
+       */
+      const ui = await boot()
+      const form = {
+        kind: 'email',
+        tool: 'GMAIL_SEND_EMAIL',
+        fields: [
+          { key: 'args.recipient_email', label: '收件人', value: 'a@b.c' },
+          { key: 'args.subject', label: '主题', value: '二季度报表', editable: true },
+          { key: 'args.body', label: '正文', value: '你好，附件是报表。', editable: true, multiline: true },
+          { key: 'args.is_html', label: 'is_html', value: 'false' },
+        ],
+      }
+      const card = ui.approvalHtml({
+        callId: 'call_mail',
+        name: 'mcp_gmail_default_sw_run',
+        args: '{}',
+        reason: 'GMAIL_SEND_EMAIL 会往外部系统写入或发送内容',
+        state: 'pending',
+        form,
+      })
+      assert(card.includes('sw-approval-mail'), '发信没走定制卡')
+      assert(card.includes('收件人') && card.includes('a@b.c'), '收件人没摆出来')
+      // 只读的那几格照样露着：藏起来的话，人以为自己看到了这封信的全部。
+      assert(card.includes('is_html'), '别的参数被藏起来了')
+      // 收件人不能改：那是「在这儿写封信」，不是「审一眼要发出去的东西」。
+      assert(!card.includes('data-edit="args.recipient_email"'), '收件人被做成可改的了')
+      assert(card.includes('data-edit="args.subject"'), '主题不让改')
+      assert(card.includes('<textarea') && card.includes('data-edit="args.body"'), '正文没做成可编辑的多行框')
+      assert(card.includes('你好，附件是报表。'), '正文没填进去')
+      assert(card.includes('批准并发送'), `发信那张卡的按钮该说清楚它要干什么：${card.slice(-400)}`)
+      // 剥壳之后的工具名才认得出来，sw_run 谁也看不出是什么。
+      assert(card.includes('GMAIL_SEND_EMAIL'), '卡片上没写真正要跑的那把工具')
+
+      // 认不出的 kind 一律退回通用卡——新增一种表单不该让老版本白屏。
+      const generic = ui.approvalHtml({
+        callId: 'c2', name: 'mcp_x_y', args: '{"a":1}', reason: 'x', state: 'pending',
+        form: { kind: '将来才有的一种', tool: 'X', fields: [] },
+      })
+      assert(!generic.includes('sw-approval-mail') && generic.includes('sw-approval-args'), '认不出的 kind 没退回通用卡')
+
+      // 收起来那颗药丸上写真工具名，改过还要标一笔。
+      const chip = ui.approvalChipHtml({ callId: 'call_mail', name: 'mcp_gmail_default_sw_run', state: 'approved', form, edited: ['正文'] }, 0)
+      assert(chip.includes('GMAIL_SEND_EMAIL'), `药丸上还是壳的名字：${chip}`)
+      assert(chip.includes('已改'), '改过的没在药丸上标出来')
+      const pop = ui.toolPopBody(ui.approvalPop({ callId: 'call_mail', name: 'x', args: '{}', state: 'approved', form, edited: ['正文'] }))
+      assert(pop.includes('批准时改过') && pop.includes('正文'), '悬浮窗没说这次改过哪几格')
+      assert(pop.includes('你好，附件是报表。'), '悬浮窗里看不到最终发出去的内容')
+    })
+
     await test('消息里的 @ 点名要留在气泡上，别发完就没', async () => {
       // 点名是消息的一部分（它决定了这一轮的工具表），不是输入框上一个发完就没的装饰。
       // 丢掉的话翻上去看昨天那条，「@ 了谁」就消失了——而那正是「它为什么去读了我的
