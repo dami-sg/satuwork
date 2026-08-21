@@ -746,6 +746,32 @@ export class Db {
     }
   }
 
+  /**
+   * 每日调用数，给用量屏那根日线。
+   *
+   * **按看的人所在时区切天。** 服务端不知道那是哪个时区（同 `/platform/stats` 的窗口
+   * 一样由前端算好传上来），所以切桶之前先把时间平移 `offsetMs`——不平移的话，东八区
+   * 早上八点之前的调用会落进前一天，整条日线左移一格，而这种错在图上看不出来。
+   *
+   * 返回的是桶号（平移之后的天序号），不是日期字符串：日期怎么写是显示的事，
+   * 而且 SQL 里格式化日期还得再引入一次时区。
+   */
+  async llmDailyBy(
+    column: 'companyId' | 'accountId',
+    value: string,
+    range?: { from?: number; to?: number },
+    offsetMs = 0,
+  ): Promise<{ bucket: number; calls: number }[]> {
+    const r = this.llmRangeSql(range)
+    const rows = await this.many(
+      `select floor(("createdAt" + ?) / 86400000.0)::bigint as bucket, count(*) as calls
+       from llm_calls where "${column}" = ?${r.sql}
+       group by bucket order by bucket`,
+      [offsetMs, value, ...r.args],
+    )
+    return rows.map((row) => ({ bucket: num(row.bucket), calls: num(row.calls) }))
+  }
+
   llmUsageOfCompany(companyId: string, range?: { from?: number; to?: number }): Promise<LlmUsage> {
     return this.llmUsageBy('companyId', companyId, range)
   }
@@ -769,6 +795,7 @@ export class Db {
   async llmUsageByCompanyModel(
     range?: { from?: number; to?: number },
     companyId?: string,
+    accountId?: string,
   ): Promise<CompanyModelUsage[]> {
     const r = this.llmRangeSql(range)
     let where = `where 1=1${r.sql}`
@@ -776,6 +803,11 @@ export class Db {
     if (companyId) {
       where += ' and "companyId" = ?'
       args.push(companyId)
+    }
+    // 员工自己那一屏按人过滤：同一段聚合，只是范围小一圈。
+    if (accountId) {
+      where += ' and "accountId" = ?'
+      args.push(accountId)
     }
     /**
      * `unledgeredCalls`：这一组里**账本上根本没有对应行**的调用数。
@@ -794,7 +826,7 @@ export class Db {
               coalesce(sum(case when u.id is null then 1 else 0 end), 0) as "unledgeredCalls",
               max(l."createdAt") as "lastAt"
        from llm_calls l left join usage_charges u on u."refId" = l.id
-       ${where.replace(/"(companyId|createdAt)"/g, 'l."$1"')}
+       ${where.replace(/"(companyId|accountId|createdAt)"/g, 'l."$1"')}
        group by l."companyId", l.provider, l.model
        order by l."companyId", l.provider, l.model`,
       args,
@@ -1321,10 +1353,10 @@ export class Db {
    * **只 sum，不按当前单价重算**——金额在写行那一刻就定死了（docs/billing.md §2）。
    */
   async chargeUsageBy(
-    columns: ('companyId' | 'accountId' | 'kind' | 'subject')[],
+    columns: ('companyId' | 'accountId' | 'botId' | 'kind' | 'subject')[],
     range?: { from?: number; to?: number },
     filter?: { companyId?: string; accountId?: string },
-  ): Promise<{ companyId: string | null; accountId: string; kind: string; subject: string; calls: number; amountMicros: number; bonusMicros: number; costMicros: number; unpricedCalls: number; lastAt: number | null }[]> {
+  ): Promise<{ companyId: string | null; accountId: string; botId: string | null; kind: string; subject: string; calls: number; amountMicros: number; bonusMicros: number; costMicros: number; unpricedCalls: number; lastAt: number | null }[]> {
     const cols = columns.map((c) => `"${c}"`).join(', ')
     const r = this.llmRangeSql(range)
     let where = `where 1=1${r.sql}`
@@ -1353,6 +1385,9 @@ export class Db {
     return rows.map((row) => ({
       companyId: columns.includes('companyId') ? strOrNull(row.companyId) : null,
       accountId: columns.includes('accountId') ? str(row.accountId) : '',
+      // 模型那条路还填不上 botId（`/v1/*` 收到的请求里没有会话这个概念，见 lib/meter.ts），
+      // 所以这一维只覆盖填得上的那些调用。null 原样留着，由上层决定怎么标。
+      botId: columns.includes('botId') ? strOrNull(row.botId) : null,
       kind: columns.includes('kind') ? str(row.kind) : '',
       subject: columns.includes('subject') ? str(row.subject) : '',
       calls: num(row.calls),

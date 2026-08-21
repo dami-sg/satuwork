@@ -1079,7 +1079,9 @@ function usageMeter(name, value, pct, alt, mono) {
   const font = mono ? ' font-family: ui-monospace, SFMono-Regular, Menlo, monospace;' : ''
   return `<div style="display: flex; flex-direction: column; gap: 5px;">
       <div style="display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3);">
-        <span style="min-width: 0; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;${font}">${esc(name)}</span>
+        ${/* 面板窄，长名字（provider/model）必然被省略号切掉——把全名挂在 title 上，
+              悬停能看全，不然「zaicodingplan/glm-…」两行长得一模一样。 */ ''}
+        <span title="${esc(name)}" style="min-width: 0; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;${font}">${esc(name)}</span>
         <span style="flex: none; font-size: 12.5px; color: var(--muted-foreground);">${esc(value)}</span>
       </div>
       <div class="satu-meter"><div class="satu-meterfill" data-alt="${alt ? 'true' : 'false'}" style="width: ${Number(pct) || 0}%;"></div></div>
@@ -1096,6 +1098,7 @@ function usagePage() {
     ],
     daily: [],
     byAgent: [],
+    byKind: [],
     byModel: [],
     quota: [],
     seats: 0,
@@ -1107,6 +1110,7 @@ function usagePage() {
   const daily = Array.isArray(data.daily) ? data.daily : []
   const byAgent = Array.isArray(data.byAgent) ? data.byAgent : []
   const byModel = Array.isArray(data.byModel) ? data.byModel : []
+  const byKind = Array.isArray(data.byKind) ? data.byKind : []
   const byMember = Array.isArray(data.byMember) ? data.byMember : []
   const seats = Number(data.seats) || 0
   const empty = (msg) =>
@@ -1148,13 +1152,18 @@ function usagePage() {
           <div class="satu-bars">${cols}</div>`
       })()
     : `<span class="satu-panel-title">${t('每日任务执行量')}</span>
-          ${empty(t('还没有每日用量。实例上报之后会画在这里。'))}`
+          ${empty(t('这个时间段里还没有调用。'))}`
   const agentBody = byAgent.length
     ? byAgent.map((a) => usageMeter(a.name, a.value, a.pct, false, false)).join('')
-    : empty('还没有按 Bot 的用量。')
+    // 「没有数」和「这一维盖不全」是两件事。模型调用还带不上 Bot 标识（Gateway 收到的
+    // 是一个 OpenAI 兼容请求，里面没有会话这个概念），所以这一块空着多半不是没用过。
+    : empty(t('模型调用还没带上 Bot 标识，这里只数带得上的那些（连接器）。'))
   const modelBody = byModel.length
     ? byModel.map((m) => usageMeter(m.name, m.value, m.pct, true, true)).join('')
-    : empty('还没有按模型的用量。')
+    : empty(t('这个时间段里还没有模型调用。'))
+  const kindBody = byKind.length
+    ? byKind.map((k) => usageMeter(k.name, k.value, k.pct, false, false)).join('')
+    : empty(t('这个时间段里还没有计费记录。'))
   const memberRows = byMember
     .map((m) => {
       // 「已离职员工」是服务端兜出来的合计行，不是某个人——它的名字要翻译，真人的
@@ -1195,13 +1204,19 @@ function usagePage() {
           ${dailyBody}
         </div>
         <div class="satu-agentpair">
+          ${/* 按类型排在最前：模型 / 连接器 / 网页三条路是**盖得全**的那一维，
+                钱就是从这三处出去的。另外两块各自只覆盖一部分。 */ ''}
           <div class="satu-panel">
-            <span class="satu-panel-title">${t('按 Bot')}</span>
-            ${agentBody}
+            <span class="satu-panel-title">${t('按类型')}</span>
+            ${kindBody}
           </div>
           <div class="satu-panel">
             <span class="satu-panel-title">${t('按模型')}</span>
             ${modelBody}
+          </div>
+          <div class="satu-panel">
+            <span class="satu-panel-title">${t('按 Bot')}</span>
+            ${agentBody}
           </div>
         </div>
         <div class="satu-panel">
@@ -1221,7 +1236,6 @@ function usagePage() {
           </div>
         </div>
         ${chargeTable((isAdmin() || isOwner()) && orgId() ? 'org' : 'me')}
-        <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('调用次数和 token 来自 Gateway 记下的 llm_calls；金额来自计费账本，一次调用一行。')}</p>
       </div>
     </div>`
 }

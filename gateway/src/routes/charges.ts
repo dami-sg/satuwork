@@ -44,10 +44,16 @@ function limitOf(raw: string | null): number {
  *
  * **金额同时给微元和美元。** 微元是权威值（整数，能直接相加），美元是给人看的——
  * 让前端自己去跟浮点数较劲，各处的小数位就会各不相同（同 publicPlanSku 的处理）。
+ *
+ * **单价和倍率只给平台自己。** 它们合起来就是我们的成本价和加价率；客户那边要的是
+ * 「用了多少、扣了多少」，中间怎么定价的不是他们的事。所以对非 owner 这两个字段
+ * 整个不出现在响应里——只在界面上不画的话，翻开 devtools 就都在（docs/billing.md §9）。
+ * 计量（`quantity`）和金额照给：那是他们自己的消耗和真扣掉的钱。
  */
 export function publicCharge(
   v: UsageCharge,
   names?: { accounts: Map<string, Account>; companies: Map<string, Company> },
+  opts?: { withPrice?: boolean },
 ) {
   const who = names?.accounts.get(v.accountId)
   const org = v.companyId ? names?.companies.get(v.companyId) : undefined
@@ -66,8 +72,9 @@ export function publicCharge(
     subject: v.subject,
     status: v.status,
     quantity: v.quantity,
-    unitPrice: v.unitPrice,
-    multiplier: v.multiplier,
+    // 展开而不是给 undefined：JSON.stringify 会丢掉 undefined 的键，但类型上
+    // 「可能没有这个字段」比「值可能是 undefined」更贴近实际发出去的东西。
+    ...(opts?.withPrice ? { unitPrice: v.unitPrice, multiplier: v.multiplier } : {}),
     amountMicros: v.amountMicros,
     amount: v.amountMicros / 1_000_000,
     bonusMicros: v.bonusMicros,
@@ -111,7 +118,7 @@ export function attachCharges(router: Router, ctx: RouteCtx) {
       companies: new Map((await db.companies()).map((c) => [c.id, c])),
     }
     json(res, 200, {
-      charges: p.list.map((row) => publicCharge(row, names)),
+      charges: p.list.map((row) => publicCharge(row, names, { withPrice: true })),
       limit: p.limit,
       hasMore: p.hasMore,
       nextCursor: p.nextCursor,
@@ -138,7 +145,7 @@ export function attachCharges(router: Router, ctx: RouteCtx) {
       companies: new Map([[company.id, company]]),
     }
     json(res, 200, {
-      charges: p.list.map((row) => publicCharge(row, names)),
+      charges: p.list.map((row) => publicCharge(row, names, { withPrice: account.role === 'owner' })),
       limit: p.limit,
       hasMore: p.hasMore,
       nextCursor: p.nextCursor,
@@ -163,7 +170,7 @@ export function attachCharges(router: Router, ctx: RouteCtx) {
     if (own) companies.set(own.id, own)
     const names = { accounts: new Map([[account.id, account]]), companies }
     json(res, 200, {
-      charges: p.list.map((row) => publicCharge(row, names)),
+      charges: p.list.map((row) => publicCharge(row, names, { withPrice: account.role === 'owner' })),
       limit: p.limit,
       hasMore: p.hasMore,
       nextCursor: p.nextCursor,

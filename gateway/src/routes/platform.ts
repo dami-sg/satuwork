@@ -276,11 +276,27 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
 
     const rows = await db.llmUsageByCompanyModel(range, companyId || undefined)
     const webRows = await db.webUsageByCompanyBackend(range, companyId || undefined)
+    const connectorRows = await db.connectorUsage({ companyId: companyId || undefined }, range)
     const multiplier = parsePriceMultiplier((await db.platformSettings()).priceMultiplier)
 
     /** 账本里模型那一类的钱，按 (公司, 模型) 摊开。key 和下面 token 那份对齐。 */
     const charged = new Map<string, { amountMicros: number; costMicros: number; unpricedCalls: number }>()
+    /**
+     * 三条路各自的钱。**上面那两张卡（原价 / 已扣）要的是三条路的和**——月底从余额里
+     * 扣掉的是这个数，只报模型那一份的话，卡上的钱比账单少，而少掉的那截在这一屏上
+     * 没有任何地方能对出来。
+     *
+     * 这里数的是账本行本身，不是领域表：钱只在账本里（docs/billing.md §2），
+     * 模型 / 连接器 / 网页三条路在这张表上是同一个口径，直接按 kind 分堆就行。
+     */
+    const byKind = new Map<string, { calls: number; amountMicros: number; costMicros: number }>()
     for (const c of await db.chargeUsageBy(['companyId', 'kind', 'subject'], range, { companyId: companyId || undefined })) {
+      const k = byKind.get(c.kind) ?? { calls: 0, amountMicros: 0, costMicros: 0 }
+      k.calls += c.calls
+      k.amountMicros += c.amountMicros
+      k.costMicros += c.costMicros
+      byKind.set(c.kind, k)
+
       if (c.kind !== 'llm') continue
       const key = `${c.companyId ?? ''}|${c.subject}`
       const cur = charged.get(key) ?? { amountMicros: 0, costMicros: 0, unpricedCalls: 0 }
@@ -397,6 +413,32 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       { calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, amountMicros: 0, costMicros: 0, unpricedCalls: 0, unledgeredCalls: 0 },
     )
 
+    /**
+     * 连接器按**次**算钱，和网页工具一样不进 token 合计，单开一块。
+     *
+     * `byConnector` 在库里是按 (连接器, 连接名) 分的——同一个 Gmail 连了三个账号就是
+     * 三行。这一屏是平台视角，看的是「哪个连接器花了钱」，所以把连接名合并掉；
+     * 谁用的、哪一把连接，在连接器那一页和计费明细里。
+     */
+    const byConnector = new Map<string, { connector: string; calls: number; amountMicros: number }>()
+    for (const c of connectorRows.byConnector) {
+      const cur = byConnector.get(c.connector) ?? { connector: c.connector, calls: 0, amountMicros: 0 }
+      cur.calls += c.calls
+      cur.amountMicros += c.amountMicros
+      byConnector.set(c.connector, cur)
+    }
+    const zero = { calls: 0, amountMicros: 0, costMicros: 0 }
+    const kind = (k: string) => byKind.get(k) ?? zero
+    const spend = {
+      llm: kind('llm'),
+      connector: kind('connector'),
+      web: kind('web'),
+      all: [...byKind.values()].reduce(
+        (a, x) => ({ calls: a.calls + x.calls, amountMicros: a.amountMicros + x.amountMicros, costMicros: a.costMicros + x.costMicros }),
+        { ...zero },
+      ),
+    }
+
     json(res, 200, {
       from: range.from ?? null,
       to: range.to ?? null,
@@ -413,6 +455,16 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       unledgeredModels: [...unledgeredModels],
       // 网页工具按次算钱，跟 token 不是一个量纲，所以单开一块，不混进上面的合计。
       web: webStats(webRows, companies),
+      // 连接器同理：按次收，和 token 不是一个量纲。
+      connector: {
+        byConnector: [...byConnector.values()].sort((a, b) => b.amountMicros - a.amountMicros || b.calls - a.calls),
+        totals: { calls: connectorRows.total.calls, amountMicros: connectorRows.total.amountMicros },
+      },
+      /**
+       * 三条路各自的钱和它们的和。`totals` 里那两个金额是**模型那一条**，两处不一样，
+       * 所以分开给：卡上要账单口径的总数，按公司 / 按模型那两张表要的是模型这一条。
+       */
+      money: spend,
     })
   })
 

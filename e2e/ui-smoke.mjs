@@ -578,6 +578,18 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(html.includes('4 条 × $0.0080'), `计量那格没画出来：${html.slice(0, 200)}`)
       assert(html.includes('倍率 ×1.2'), '网页那一行漏了倍率')
       assert(!html.includes('1.2000000476837158'), '倍率的小数位没收干净')
+
+      /**
+       * 同一张表，公司那边只画消耗。单价和倍率是平台怎么定价的，摊在客户面前
+       * 等于把成本价一起交出去了；「扣了多少」照画——那是真花掉的钱。
+       */
+      ui.state.me = { account: { role: 'admin', email: 'a@x' }, company: { id: 'o1' }, settings: ui.state.settings }
+      ui.render()
+      const orgHtml = ui.html()
+      assert(orgHtml.includes('4 条'), '公司侧连消耗都没画')
+      assert(!orgHtml.includes('× $0.0080'), '公司侧把单价画出来了')
+      assert(!orgHtml.includes('倍率'), '公司侧把倍率画出来了')
+      assert(orgHtml.includes('$0.038'), '公司侧不该连金额一起藏掉')
     })
 
     await test('catalogBase：owner 走 /platform，公司管理员走 /orgs/:id', async () => {

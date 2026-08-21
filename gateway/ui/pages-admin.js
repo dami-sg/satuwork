@@ -392,6 +392,11 @@ function exactTokens(n) {
 function chargeTable(scope, forOrg) {
   const d = state.charges
   const list = d?.charges || []
+  /**
+   * 单价和倍率只画给平台自己看。公司那边（管理员、员工）看到的是「用了多少、扣了多少」，
+   * 中间那一步怎么定价的是平台的事——把倍率摊在客户面前，等于把成本价一起交出去了。
+   */
+  const withPrice = isOwner()
   const kinds = [
     { key: '', label: t('全部', 'All') },
     { key: 'llm', label: t('模型', 'Model') },
@@ -404,13 +409,16 @@ function chargeTable(scope, forOrg) {
     )
     .join('')
   const cols = scope === 'platform' ? '150px 1.2fr 1fr 1.6fr 1fr 100px' : '150px 1fr 1.6fr 1fr 100px'
+  // 金额那一列的数字是右对齐的，表头也得跟着右对齐——否则「金额」两个字停在列的
+  // 左边、数字停在右边，读的人得横着找一下才知道这一列叫什么。
+  const amountHead = `<span style="text-align: right;">${t('金额')}</span>`
   const head = scope === 'platform'
-    ? `<span>${t('时间')}</span><span>${t('公司')}</span><span>${t('成员')}</span><span>${t('对象')}</span><span>${t('计量')}</span><span>${t('金额')}</span>`
-    : `<span>${t('时间')}</span><span>${t('成员')}</span><span>${t('对象')}</span><span>${t('计量')}</span><span>${t('金额')}</span>`
+    ? `<span>${t('时间')}</span><span>${t('公司')}</span><span>${t('成员')}</span><span>${t('对象')}</span><span>${t('计量')}</span>${amountHead}`
+    : `<span>${t('时间')}</span><span>${t('成员')}</span><span>${t('对象')}</span><span>${t('计量')}</span>${amountHead}`
   const rows = list
     .map((c) => {
       const who = `<span title="${esc(c.accountId)}">${esc(c.accountName)}${c.departed ? ` <span class="tag">${t('已离职', 'former')}</span>` : ''}</span>`
-      return `<div class="satu-billrow" style="grid-template-columns: ${cols}; align-items: start;">
+      return `<div class="satu-billrow" style="grid-template-columns: ${cols}; align-items: start; font-variant-numeric: tabular-nums;">
         <span style="font-size: 12.5px; color: var(--muted-foreground);">${esc(fmtTime(c.createdAt))}</span>
         ${scope === 'platform' ? `<span style="font-size: 13px;">${esc(c.companyName)}</span>` : ''}
         <span style="font-size: 13px;">${who}</span>
@@ -418,7 +426,7 @@ function chargeTable(scope, forOrg) {
           <div style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere;">${esc(c.subject)}</div>
           <div style="font-size: 11.5px; color: var(--muted-foreground);">${esc(kindLabel(c.kind))}${c.status !== 'ok' ? ` · ${esc(statusLabel(c.status))}` : ''}${c.unpriced ? ` · <span title="${esc(t('这次没查到单价，金额不是 0 而是算不出来', 'No price found; the 0 means unknown, not free'))}">${t('无单价', 'unpriced')}</span>` : ''}</div>
         </div>
-        <div style="min-width: 0; font-size: 11.5px; color: var(--muted-foreground);">${chargeQuantity(c)}</div>
+        <div style="min-width: 0; font-size: 11.5px; color: var(--muted-foreground);">${chargeQuantity(c, withPrice)}</div>
         <div style="text-align: right;">
           <div style="font-size: 13px; font-weight: 600;">${esc(usageMicros$(c.amountMicros))}</div>
           ${c.amountMicros > 0 ? `<div style="font-size: 11px; color: var(--muted-foreground);">${t('赠送', 'bonus')} ${esc(usageMicros$(c.bonusMicros))}</div>` : ''}
@@ -448,7 +456,9 @@ function chargeTable(scope, forOrg) {
             </div>`
           : ''
       }
-      <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('金额是写行那一刻按当时单价和倍率算的，之后改价不会追溯改动这些数。', 'Amounts are computed when the row is written, from the price and multiplier of that moment; later price changes are not retroactive.')}</p>
+      ${/* 这句讲的是单价和倍率怎么定死的，只对看得见那两样的人有意义；
+            公司那边看到的是「用了多少、扣了多少」，不需要一句解释定价的话垫底。 */ ''}
+      ${withPrice ? `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('金额是写行那一刻按当时单价和倍率算的，之后改价不会追溯改动这些数。', 'Amounts are computed when the row is written, from the price and multiplier of that moment; later price changes are not retroactive.')}</p>` : ''}
     </div>`
 }
 
@@ -471,15 +481,18 @@ function statusLabel(status) {
 }
 
 /**
- * 计量那一格。**同时画计量和单价**——「4000 token × $1.00」比单看哪一个都有用，
- * 而这一列存在的全部意义就是让人自己乘一遍对得上。
+ * 计量那一格。**平台侧同时画计量和单价**——「4000 token × $1.00」比单看哪一个都有用，
+ * 对平台来说这一列存在的全部意义就是让人自己乘一遍对得上金额。
+ *
+ * `withPrice` 为假时只画消耗（token 数、条数、次数）：公司那边看到的是自己被扣了多少，
+ * 单价和倍率是平台怎么定价的，不摊在客户面前。金额那一列照画——那是真扣掉的钱。
  */
-function chargeQuantity(c) {
+function chargeQuantity(c, withPrice) {
   const q = c.quantity || {}
   const p = c.unitPrice || {}
   const lines = []
   if (c.kind === 'llm') {
-    const line = (label, tok, rate) => (tok ? `${label} ${exactTokens(tok)} × ${money(rate)}` : '')
+    const line = (label, tok, rate) => (tok ? `${label} ${exactTokens(tok)}${withPrice ? ` × ${money(rate)}` : ''}` : '')
     const cached = Number(q.cachedTokens || 0)
     const written = Number(q.cacheWriteTokens || 0)
     const fresh = Math.max(0, Number(q.promptTokens || 0) - cached - written)
@@ -489,19 +502,22 @@ function chargeQuantity(c) {
     lines.push(line(t('输出', 'out'), Number(q.completionTokens || 0), p.output))
   } else if (c.kind === 'web') {
     const units = Number(q.units || 0)
-    lines.push(t(`${units} 条 × ${usageMicros$(p.unit)}`, `${units} units × ${usageMicros$(p.unit)}`))
+    lines.push(withPrice
+      ? t(`${units} 条 × ${usageMicros$(p.unit)}`, `${units} units × ${usageMicros$(p.unit)}`)
+      : t(`${units} 条`, `${units} units`))
   } else {
-    lines.push(t(`1 次 × ${usageMicros$(p.unit)}`, `1 call × ${usageMicros$(p.unit)}`))
+    lines.push(withPrice
+      ? t(`1 次 × ${usageMicros$(p.unit)}`, `1 call × ${usageMicros$(p.unit)}`)
+      : t('1 次', '1 call'))
   }
   /**
-   * 倍率对**所有**按倍率报价的种类都要画出来，不只是模型。
-   *
-   * 这一列存在的全部意义是让人自己乘一遍对得上金额。以前倍率只加在模型那一支，
+   * 带单价的那一版里，倍率对**所有**按倍率报价的种类都要画出来，不只是模型：
+   * 这一列的意义是让人自己乘一遍对得上金额。以前倍率只加在模型那一支，
    * 于是倍率 1.2 时网页那行写着「4 条 × $0.0080」（=$0.032）、旁边金额是 $0.0384——
-   * 对账的人会先怀疑金额算错了。
+   * 对账的人会先怀疑金额算错了。不画单价的那一版里它没有对手，一起收起来。
    */
   const mult = Number(c.multiplier)
-  if (Number.isFinite(mult) && mult !== 1) {
+  if (withPrice && Number.isFinite(mult) && mult !== 1) {
     lines.push(t(`倍率 ×${trimNum(mult)}`, `multiplier ×${trimNum(mult)}`))
   }
   return lines.filter(Boolean).map((x) => `<div>${esc(x)}</div>`).join('') || '—'
@@ -521,18 +537,22 @@ function trimNum(n) {
  * 不另起一列：另起一列的话，两个数会被读成可以相加。
  */
 /**
- * 金额旁边那个角标。**「没单价」和「账本上没有行」要分开标**——前者去配置页能修，
+ * 金额下面那个角标。**「没单价」和「账本上没有行」要分开标**——前者去配置页能修，
  * 后者是历史，补不回来。都不标的话，两种 $0 和真的 $0 长得一模一样。
+ *
+ * 画在数字**下面一行**而不是后面：这一列是右对齐的数字列，角标跟在数字后面会把
+ * 数字往左顶，顶多少取决于角标有多长——于是同一列里 `$4.02`、`$0`、`$0.0034`
+ * 各停在各自的位置，一列数字读起来不再是一列。和上面的「缓存」那行同一个办法。
  */
 function amountNote(row) {
   const bits = []
   if (row.unpricedCalls) {
-    bits.push(`<span class="tag" title="${esc(t('有调用用的是没有单价的模型，金额没算进去'))}">${t('不全')}</span>`)
+    bits.push(`<span title="${esc(t('有调用用的是没有单价的模型，金额没算进去'))}">${t('不全')}</span>`)
   }
   if (row.unledgeredCalls) {
-    bits.push(`<span class="tag" title="${esc(t(`${row.unledgeredCalls} 次调用在账本上没有记录，金额补不回来`, `${row.unledgeredCalls} call(s) have no ledger row; the amount cannot be reconstructed`))}">${t('无账本', 'no ledger')}</span>`)
+    bits.push(`<span title="${esc(t(`${row.unledgeredCalls} 次调用在账本上没有记录，金额补不回来`, `${row.unledgeredCalls} call(s) have no ledger row; the amount cannot be reconstructed`))}">${t('无账本', 'no ledger')}</span>`)
   }
-  return bits.length ? ` ${bits.join(' ')}` : ''
+  return bits.length ? `<div style="font-size: 11.5px; opacity: 0.7;">${bits.join(' · ')}</div>` : ''
 }
 
 function cacheNote(row) {
@@ -553,20 +573,54 @@ function statsPage() {
 
   const totals = d?.totals || { calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, costMicros: 0, amountMicros: 0, unpricedCalls: 0, unledgeredCalls: 0 }
   const hitRate = totals.promptTokens > 0 ? Math.round((totals.cachedTokens / totals.promptTokens) * 100) : 0
+  /**
+   * 网页工具按**条**收、连接器按**次**收，跟 token 不是一个量纲，所以下面各有各的表；
+   * 但钱是同一笔——月底从余额里扣掉的是三条路的和。上面这两张金额卡因此报的是**总数**，
+   * 而不只是模型那一份：只报模型的话，卡上的数字比账单小，少掉的那截在这一屏上找不着。
+   */
+  const zero = { calls: 0, amountMicros: 0, costMicros: 0 }
+  const spend = d?.money || { llm: zero, connector: zero, web: zero, all: zero }
+  const web = d?.web || { byCompany: [], byBackend: [], totals: { calls: 0, units: 0, amountMicros: 0 } }
+  const conn = d?.connector || { byConnector: [], totals: { calls: 0, amountMicros: 0 } }
+  /**
+   * 金额卡底下那行拆分。**只有真有两条以上的路花了钱才画**——单独一条路的时候，
+   * 这一行就是把上面那个数原样抄一遍。
+   */
+  const split = (pick) => {
+    const parts = [
+      [t('模型', 'model'), spend.llm],
+      [t('网页', 'web'), spend.web],
+      [t('连接器', 'connector'), spend.connector],
+    ].filter(([, m]) => pick(m) > 0)
+    // 每一截自己不许断行：卡只有 150px 宽，不管的话会在「网页」和它的金额之间折，
+    // 折出来的下一行以一个孤零零的 $0.050 开头，看着像另一个数。
+    return parts.length > 1
+      ? parts.map(([label, m]) => `<span style="white-space: nowrap;">${esc(label)} ${esc(usageMicros$(pick(m)))}</span>`).join(' · ')
+      : ''
+  }
+  // 调用次数那张卡数的是模型调用（下面的 token 都是它的）。另外两条路的次数挂在底下，
+  // 免得「6 次网页调用」在这一屏上只能靠翻表数出来。
+  const nowrap = (x) => `<span style="white-space: nowrap;">${esc(x)}</span>`
+  const otherCalls = [
+    web.totals.calls ? nowrap(t(`网页 ${exactTokens(web.totals.calls)}`, `web ${exactTokens(web.totals.calls)}`)) : '',
+    conn.totals.calls ? nowrap(t(`连接器 ${exactTokens(conn.totals.calls)}`, `connector ${exactTokens(conn.totals.calls)}`)) : '',
+  ].filter(Boolean)
   const cards = [
-    [t('调用次数'), exactTokens(totals.calls)],
+    [t('调用次数'), exactTokens(totals.calls), otherCalls.length ? t(`另有 ${otherCalls.join(' · ')}`, `plus ${otherCalls.join(' · ')}`) : ''],
     [t('输入 Tokens'), exactTokens(totals.promptTokens)],
     [t('输出 Tokens'), exactTokens(totals.completionTokens)],
     // 缓存读是 promptTokens 的子集，不是加项。单独一张卡，因为它直接解释「为什么
     // token 涨了金额没怎么涨」——缓存读的单价通常低一个数量级。
     [t('缓存命中'), `${hitRate}%`],
-    [t('原价'), usageMicros$(totals.costMicros)],
-    [t('已扣'), usageMicros$(totals.amountMicros)],
+    [t('原价'), usageMicros$(spend.all.costMicros), split((m) => m.costMicros)],
+    [t('已扣'), usageMicros$(spend.all.amountMicros), split((m) => m.amountMicros)],
   ]
     .map(
-      ([label, value]) => `<div class="satu-panel" style="gap: 4px;">
+      ([label, value, note]) => `<div class="satu-panel" style="gap: 4px;">
         <span style="font-size: 12px; color: var(--muted-foreground);">${esc(label)}</span>
         <span style="font-size: 22px; font-weight: 600;">${esc(value)}</span>
+        ${/* note 是上面拼好的 HTML（每一截自带 nowrap），里面的文字已经转义过了。 */ ''}
+        ${note ? `<span style="font-size: 11.5px; color: var(--muted-foreground);">${note}</span>` : ''}
       </div>`,
     )
     .join('')
@@ -579,11 +633,11 @@ function statsPage() {
           <div style="font-size: 12px; color: var(--muted-foreground);">${c.lastAt ? esc(fmtTime(c.lastAt)) : t('无调用')}</div>
         </div>
         <span style="font-size: 13px;">${esc(exactTokens(c.calls))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(c.promptTokens))}${cacheNote(c)}</span>
+        <div style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(c.promptTokens))}${cacheNote(c)}</div>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(c.completionTokens))}</span>
         <span style="font-size: 13px; font-weight: 600;">${esc(exactTokens(c.promptTokens + c.completionTokens))}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(usageMicros$(c.costMicros))}</span>
-        <span style="font-size: 13px;">${esc(usageMicros$(c.amountMicros))}${amountNote(c)}</span>
+        <div style="font-size: 13px;">${esc(usageMicros$(c.amountMicros))}${amountNote(c)}</div>
       </div>`,
     )
     .join('')
@@ -596,11 +650,11 @@ function statsPage() {
           <div style="font-size: 12px; color: var(--muted-foreground);">${esc(m.provider)}</div>
         </div>
         <span style="font-size: 13px;">${esc(exactTokens(m.calls))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(m.promptTokens))}${cacheNote(m)}</span>
+        <div style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(m.promptTokens))}${cacheNote(m)}</div>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(exactTokens(m.completionTokens))}</span>
         <span style="font-size: 13px; font-weight: 600;">${esc(exactTokens(m.promptTokens + m.completionTokens))}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${m.priced ? esc(usageMicros$(m.costMicros)) : `<span title="${esc(t('目录里没有这个模型的单价'))}">—</span>`}</span>
-        <span style="font-size: 13px;">${m.priced ? `${esc(usageMicros$(m.amountMicros))}${amountNote(m)}` : '—'}</span>
+        <div style="font-size: 13px;">${m.priced ? `${esc(usageMicros$(m.amountMicros))}${amountNote(m)}` : '—'}</div>
       </div>`,
     )
     .join('')
@@ -609,10 +663,10 @@ function statsPage() {
   const unledgered = d?.unledgeredModels || []
 
   /**
-   * 网页工具按**次**算钱，跟 token 不是一个量纲，所以单开一块，不混进上面的合计。
-   * 金额是写行那一刻的报价，这里只求和，不重算——重算会让改价追溯改动历史账单。
+   * 网页工具和连接器都按**次**算钱，跟 token 不是一个量纲，所以各自单开一块，
+   * 不混进 token 那几列。金额是写行那一刻的报价，这里只求和，不重算——
+   * 重算会让改价追溯改动历史账单。（`web` / `conn` 在上面取，金额卡也要用。）
    */
-  const web = d?.web || { byCompany: [], byBackend: [], totals: { calls: 0, units: 0, amountMicros: 0 } }
   const webRows = (web.byBackend || [])
     .map(
       (b) => `<div class="satu-statrow" style="grid-template-columns: 2fr 1fr 1fr 1fr 1fr;">
@@ -625,12 +679,22 @@ function statsPage() {
     )
     .join('')
 
+  const connRows = (conn.byConnector || [])
+    .map(
+      (c) => `<div class="satu-statrow" style="grid-template-columns: 2fr 1fr 1fr;">
+        <span style="font-size: 13.5px; font-weight: 600;">${esc(c.connector)}</span>
+        <span style="font-size: 13px;">${esc(exactTokens(c.calls))}</span>
+        <span style="font-size: 13px; font-weight: 600;">${esc(usageMicros$(c.amountMicros))}</span>
+      </div>`,
+    )
+    .join('')
+
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
         <div>
           <h1 style="font-size: 24px; margin: 0 0 4px;">${t('统计')}</h1>
-          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('各公司的 token 消耗。「已扣」是账本上真实扣掉的钱（写行那一刻定价，改价不追溯）；「原价」是它除以当时的倍率倒推的。', 'Token consumption per company. "Charged" is what the ledger actually deducted (priced when written; later price changes are not retroactive); "list" divides it back out by the multiplier of the day.')}</p>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('各公司的 token 消耗。「已扣」是账本上真实扣掉的钱（写行那一刻定价，改价不追溯）；「原价」是它除以当时的倍率倒推的。上面那两张金额卡是模型、网页工具、连接器三条路的合计，下面几张表各只管自己那一条。', 'Token consumption per company. "Charged" is what the ledger actually deducted (priced when written; later price changes are not retroactive); "list" divides it back out by the multiplier of the day. The two amount cards sum all three paths — models, web tools and connectors — while each table below covers only its own.')}</p>
         </div>
         ${flashes()}
         <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
@@ -680,6 +744,20 @@ function statsPage() {
               <span>${t('后端')}</span><span>${t('搜索')}</span><span>${t('提取')}</span><span>${t('计费条数')}</span><span>${t('报价')}</span>
             </div>
             ${webRows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${state.statsLoading ? t('统计中…') : t('这个时间段里没有网页调用。')}</div>`}
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: var(--space-3);">
+          <div style="display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap;">
+            <h2 style="font-size: 18px; margin: 0;">${t('连接器')}</h2>
+            <span style="font-size: 12px; color: var(--muted-foreground);">
+              ${t(`${conn.totals.calls} 次调用 · ${esc(usageMicros$(conn.totals.amountMicros))}`, `${conn.totals.calls} calls · ${esc(usageMicros$(conn.totals.amountMicros))}`)}
+            </span>
+          </div>
+          <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+            <div class="satu-stathead" style="grid-template-columns: 2fr 1fr 1fr;">
+              <span>${t('连接器')}</span><span>${t('调用')}</span><span>${t('已扣')}</span>
+            </div>
+            ${connRows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${state.statsLoading ? t('统计中…') : t('这个时间段里没有连接器调用。')}</div>`}
           </div>
         </div>
         <div style="display: flex; flex-direction: column; gap: var(--space-3);">
