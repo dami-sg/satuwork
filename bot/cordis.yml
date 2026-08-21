@@ -51,13 +51,9 @@
 - name: './src/tools/workspace.ts'
 
 # 网页：搜索与提取。后端和密钥都在 Gateway（/runtime/web/*），这边只做形状与摘要。
-# 排在 workspace 之后——落盘要往工作区写。
+# 排在 workspace 之后——web_extract 的 save 要往工作区写。
 - name: './src/web-search/index.ts'
 - name: './src/tools/web.ts'
-
-# 文档：PDF / Word / Excel。**和 web_extract 分开的两把工具**——那条花提取后端的额度，
-# 这条只花带宽、不需要配任何后端，失败方式也不一样（扫描件没有文字层）。
-- name: './src/tools/document.ts'
 
 # 翻自己的历史：history_read / history_search。只读，走 sessions 服务不碰文件系统。
 # 它是上下文压缩的前提——压掉的那一段还调得回来，压缩才不是有损的。

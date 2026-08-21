@@ -10,7 +10,7 @@ import { companyMachineOf, deploySeat, publicSeatRuntime } from '../deploy.ts'
 import { defaultBotModel, publicBot, publicCatalog, publicSkill, runtimeServer } from '../lib/catalog.ts'
 import { kindOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
 import { WebToolError } from '../web-tools.ts'
-import { runDocument, runExtract, runSearch } from '../web-service.ts'
+import { runExtract, runSearch } from '../web-service.ts'
 import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
 
 export function attachRuntime(router: Router, ctx: RouteCtx) {
@@ -115,17 +115,6 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   router.post('/runtime/web/extract', async (req, res) => {
     const account = await requireSeatOnly(req, db)
     await webCall(res, () => runExtract(db, account, bodyOf(req).urls))
-  })
-
-  /**
-   * 文档（PDF / Word / Excel）的字节。`document_read` 走这条。
-   *
-   * 和 extract 分开是因为它们是两件事：extract 花的是提取后端的额度，这条花的是我们
-   * 自己的带宽——**不需要配任何后端**，一套刚装好的部署读 PDF 也是通的。
-   */
-  router.post('/runtime/web/document', async (req, res) => {
-    const account = await requireSeatOnly(req, db)
-    await webCall(res, () => runDocument(db, account, bodyOf(req).urls))
   })
 
   router.get('/runtime/desktop', async (req, res) => {

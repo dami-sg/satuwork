@@ -16,7 +16,6 @@ import { WorkspaceService } from './src/workspace/index.ts'
 import { ToolService } from './src/tools/index.ts'
 import { WebSearchService, fileNameFor, sanitize } from './src/web-search/index.ts'
 import * as webTools from './src/tools/web.ts'
-import * as docTools from './src/tools/document.ts'
 
 const out = {}
 const LONG = 'x'.repeat(50_000)
@@ -52,8 +51,6 @@ function buildPdf(text) {
 }
 
 const PDF = buildPdf('SATU-PDF-BODY-LINE')
-/** 没有文字层的那种——模拟扫描件。 */
-const BLANK_PDF = buildPdf('')
 
 /** 摘要该成功还是该炸。用来验回退那条路。 */
 let summaryBroken = false
@@ -97,9 +94,17 @@ const server = createServer(async (req, res) => {
       if (url.includes('fail')) return { url, ok: false, error: '抓取失败：HTTP 404' }
       if (url.includes('verylong')) return { url, ok: true, title: '超长页', markdown: VERY_LONG, chars: VERY_LONG.length }
       if (url.includes('long')) return { url, ok: true, title: '长页', markdown: LONG, chars: LONG.length }
-      // web_extract 只管网页：撞见文档要把模型指到 document_read，正文一个字节都不下。
       if (url.includes('.pdf')) {
-        return { url, ok: false, error: '这是一份 PDF 文档，不是网页。用 document_read 读它——那把工具会把原件存进工作区，再把正文取出来。' }
+        // `evil-ext` 那条模拟一个被顶掉/被冒充的 Gateway：ext 是外部输入，直接拼进
+        // 文件名就是一条写路径。
+        const ext = url.includes('evil-ext') ? '/../../escaped.txt' : '.pdf'
+        return {
+          url,
+          ok: true,
+          title: 'paper.pdf',
+          contentType: 'application/pdf',
+          document: { contentType: 'application/pdf', ext, base64: PDF.toString('base64'), bytes: PDF.length },
+        }
       }
       if (url.includes('huge')) return { url, ok: true, title: '巨页', markdown: HUGE, chars: HUGE.length }
       if (url.includes('evil')) {
@@ -113,20 +118,6 @@ const server = createServer(async (req, res) => {
       return { url, ok: true, title: '短页', markdown: `# 短页\n\n这是 ${url} 的正文。`, chars: 30 }
     })
     return json(200, { ok: true, backend: 'stub', pages, elapsedMs: 300 })
-  }
-  if (req.url === '/runtime/web/document') {
-    const pages = body.urls.map((url) => {
-      if (url.includes('not-a-doc')) return { url, ok: false, error: '这个地址返回的是网页，不是文档。用 web_extract 读它。' }
-      if (url.includes('empty')) {
-        // 扫描件：有文件、没文字层。
-        return { url, ok: true, title: 'scan.pdf', contentType: 'application/pdf', document: { contentType: 'application/pdf', ext: '.pdf', base64: BLANK_PDF.toString('base64'), bytes: BLANK_PDF.length } }
-      }
-      // `evil-ext` 那条模拟一个被顶掉/被冒充的 Gateway：ext 是外部输入，直接拼进
-      // 文件名就是一条写路径。
-      const ext = url.includes('evil-ext') ? '/../../escaped.txt' : '.pdf'
-      return { url, ok: true, title: 'paper.pdf', contentType: 'application/pdf', document: { contentType: 'application/pdf', ext, base64: PDF.toString('base64'), bytes: PDF.length } }
-    })
-    return json(200, { ok: true, pages, elapsedMs: 120 })
   }
   if (req.url === '/v1/chat/completions') {
     summaryCalls += 1
@@ -170,7 +161,6 @@ ctx.plugin(FakeCatalog)
 ctx.plugin(FakeRoster)
 ctx.plugin(WebSearchService)
 ctx.plugin(webTools)
-ctx.plugin(docTools)
 await new Promise((r) => setTimeout(r, 80))
 
 const call = (name, args) =>
@@ -314,23 +304,23 @@ const call = (name, args) =>
   }
 }
 
-// ── 11. PDF：走 document_read，先落盘再提正文 ─────────────────────────
+// ── 11. PDF：先落盘，再提正文 ─────────────────────────────────────────
 {
-  const r = await call('document_read', { urls: ['https://a.test/paper.pdf'] })
+  const r = await call('web_extract', { urls: ['https://a.test/paper.pdf'] })
   const one = r.files?.[0]
   out.pdf = {
     // 文档的原件一定落盘，跟 save 参数无关——人多半还要自己打开看。
     没给save也落了盘: !!one && one.name.endsWith('.pdf'),
     文件真在: !!one && existsSync(join(root, one.path)),
     正文提出来了: r.text.includes('SATU-PDF-BODY-LINE'),
-    报了大小: /KB/.test(r.text),
+    标了是文档: r.text.includes('文档'),
     没置位: !r.failed,
   }
 }
 
 // ── 12. Gateway 给的 ext 是外部输入，不能拿它拼路径 ──────────────────
 {
-  const r = await call('document_read', { urls: ['https://a.test/evil-ext.pdf'] })
+  const r = await call('web_extract', { urls: ['https://a.test/evil-ext.pdf'] })
   const one = r.files?.[0]
   out.evilExt = {
     // 白名单之外的后缀落成 .bin，路径不出 web/ 目录。
@@ -341,25 +331,7 @@ const call = (name, args) =>
   }
 }
 
-// ── 13. 两把工具各管各的，撞了要互相指路 ─────────────────────────────
-{
-  const wrong = await call('web_extract', { urls: ['https://a.test/paper.pdf'] })
-  const other = await call('document_read', { urls: ['https://a.test/not-a-doc.html'] })
-  const blank = await call('document_read', { urls: ['https://a.test/empty-scan.pdf'] })
-  out.split = {
-    网页工具指向文档工具: wrong.text.includes('document_read'),
-    // 指路是业务失败，不是管道故障——模型换把工具就好了。
-    指路不置位: !wrong.failed,
-    没把正文塞进来: !wrong.text.includes('<web_content'),
-    文档工具指回网页工具: other.text.includes('web_extract'),
-    // 扫描件：有文件没文字层，必须明说，不能返回一片空白——空白会让模型以为文件
-    // 坏了，反复重试同一条路。这句话是 workspace/extract.ts 说的，它的措辞更准。
-    扫描件说清楚: blank.text.includes('没有文字层'),
-    扫描件仍落盘: blank.text.includes('已保存：'),
-  }
-}
-
-// ── 14. 落盘文件名 ────────────────────────────────────────────────────
+// ── 13. 落盘文件名 ────────────────────────────────────────────────────
 out.fileName = {
   形状: fileNameFor('https://www.nodejs.org/blog/v24', 'Node.js 24 发布说明', new Date(2026, 7, 20)),
   坏地址也能出名字: fileNameFor('not a url', '', new Date(2026, 7, 20)),

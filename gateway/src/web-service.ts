@@ -13,9 +13,7 @@ import {
   backendOf,
   fetchDocument,
   looksLikeDocument,
-  probeDocument,
   stubFetchDocument,
-  stubProbeDocument,
   needsSecret,
   type BackendConfig,
   type Extracted,
@@ -257,10 +255,8 @@ export interface ExtractResult {
   mils: number
 }
 
-/** e2e 里不打网络，文档那两步换成假的；生产走真的。 */
-const stubbed = process.env.E2E_STUB_WEB === '1'
-const probeDoc = stubbed ? async (url: string) => stubProbeDocument(url) : probeDocument
-const fetchDoc = stubbed ? async (url: string) => stubFetchDocument(url) : fetchDocument
+/** e2e 里不打网络，文档那一步换成假的；生产走真的 fetchDocument。 */
+const fetchDoc = process.env.E2E_STUB_WEB === '1' ? async (url: string) => stubFetchDocument(url) : fetchDocument
 
 /** 文档的标题只能从地址里取——PDF 里的元数据不一定有，也不一定对。 */
 function docTitle(url: string): string {
@@ -300,29 +296,20 @@ export async function runExtract(db: Db, account: Account, rawUrls: unknown): Pr
       // 命中缓存这一次没打后端，也就没有这笔成本。
       if (hit) return { page: hit, billable: null }
       try {
-        /**
-         * **这把工具只管网页。** 撞见 PDF / Word / Excel 就把模型指到 document_read 上，
-         * 正文一个字节都不下。
-         *
-         * 认它只能看 content-type：后缀两个方向都会骗人——`.pdf` 结尾其实是登录墙的
-         * HTML，或者一个没有后缀的地址返回的是 application/pdf。所以先按后缀筛掉绝大
-         * 多数普通网页（省一次往返），像文档的才去探一次响应头。
-         *
-         * 这一趟只读了头就把连接排空了，没花提取后端的钱，所以不计费。
-         */
+        // 看着像文档就自己取字节：提取后端对着一份 PDF 要么给空、要么给乱码。
         if (looksLikeDocument(url)) {
-          const ext = await probeDoc(url)
-          if (ext) {
+          const doc = await fetchDoc(url)
+          if (doc) {
+            // 文档不进缓存：base64 一份就有好几 MB，64 条能把进程撑爆。
+            // **记在 document 头上，不记在提取后端头上**：这一趟是我们自己下的文件，
+            // 提取后端一次都没被调用。记错了，统计里「按后端」那张表就在撒谎。
             return {
-              page: {
-                url,
-                ok: false,
-                error: `这是一份 ${ext.slice(1).toUpperCase()} 文档，不是网页。用 document_read 读它——那把工具会把原件存进工作区，再把正文取出来。`,
-              },
-              billable: null,
+              page: { url, ok: true, title: docTitle(url), contentType: doc.contentType, document: doc },
+              billable: WEB_DOCUMENT,
             }
           }
-          // 后缀骗人（`.pdf` 结尾其实是 HTML），落回正常那条路。
+          // 后缀骗人（.pdf 结尾其实是 HTML），落回正常那条路——这一趟只读了响应头，
+          // 后端那次才是要付钱的那次，所以这里不额外计一笔。
         }
         const got: Extracted = await backend.extract!(url, cfg)
         const page: ExtractedPage = {
@@ -355,62 +342,6 @@ export async function runExtract(db: Db, account: Account, rawUrls: unknown): Pr
   let mils = 0
   for (const [name, units] of byBackend) mils += await meter(db, account, 'extract', name, units)
   return { backend: id, pages, elapsedMs, mils }
-}
-
-export interface DocumentPage {
-  url: string
-  ok: boolean
-  title?: string
-  contentType?: string
-  document?: { contentType: string; ext: string; base64: string; bytes: number }
-  error?: string
-}
-
-export interface DocumentResult {
-  pages: DocumentPage[]
-  elapsedMs: number
-  mils: number
-}
-
-/**
- * 取一份网上的文档（PDF / Word / Excel）的字节。`document_read` 走这条。
- *
- * **不需要提取后端**：字节是我们自己下的，Tavily 之流全程没参与。所以一套还没配任何
- * 搜索后端的部署，读 PDF 也是通的——这正是把它从 web_extract 里拆出来的好处之一。
- *
- * 也**不进缓存**：一份 base64 就有好几 MB，64 条能把进程撑爆。
- */
-export async function runDocument(db: Db, account: Account, rawUrls: unknown): Promise<DocumentResult> {
-  const urls = parseExtractUrls(rawUrls)
-  const { web } = await settingsOf(db)
-  await checkQuota(db, account.companyId, web)
-  const started = Date.now()
-  const done = await Promise.all(
-    urls.map(async (url): Promise<{ page: DocumentPage; billable: boolean }> => {
-      try {
-        const doc = await fetchDoc(url)
-        if (!doc) {
-          // 探回来是网页：说清楚，并把模型指回 web_extract。**不计费**，没下东西。
-          return {
-            page: { url, ok: false, error: '这个地址返回的是网页，不是文档。用 web_extract 读它。' },
-            billable: false,
-          }
-        }
-        return {
-          page: { url, ok: true, title: docTitle(url), contentType: doc.contentType, document: doc },
-          billable: true,
-        }
-      } catch (e) {
-        return {
-          page: { url, ok: false, error: e instanceof WebToolError ? e.hint : (e as Error).message },
-          billable: false,
-        }
-      }
-    }),
-  )
-  const units = done.filter((d) => d.billable).length
-  const mils = await meter(db, account, 'extract', WEB_DOCUMENT, units)
-  return { pages: done.map((d) => d.page), elapsedMs: Date.now() - started, mils }
 }
 
 /**

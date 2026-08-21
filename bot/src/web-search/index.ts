@@ -60,6 +60,8 @@ export interface ExtractedPage {
   markdown?: string
   chars?: number
   error?: string
+  /** PDF / Word / Excel：Gateway 给的是字节，正文要在这边提。 */
+  document?: { contentType: string; ext: string; base64: string; bytes: number }
 }
 
 export interface ExtractOut {
@@ -109,25 +111,6 @@ export async function search(args: {
 
 export async function extract(urls: string[]): Promise<ExtractOut> {
   return callGateway<ExtractOut>('/runtime/web/extract', { urls })
-}
-
-export interface DocumentPage {
-  url: string
-  ok: boolean
-  title?: string
-  contentType?: string
-  document?: { contentType: string; ext: string; base64: string; bytes: number }
-  error?: string
-}
-
-export interface DocumentOut {
-  pages: DocumentPage[]
-  elapsedMs: number
-}
-
-/** 取一份网上的文档的字节。和 extract 分开：那条花提取后端的额度，这条只花带宽。 */
-export async function fetchDocuments(urls: string[]): Promise<DocumentOut> {
-  return callGateway<DocumentOut>('/runtime/web/document', { urls })
 }
 
 /**

@@ -235,20 +235,6 @@ function tooLarge(bytes: number): WebToolError {
   return new WebToolError(`doc too large ${bytes}`, `这份文档至少有 ${mb} MB，超过 10 MB 不取。`)
 }
 
-/**
- * 只看响应头判断是不是文档，**不读正文**，无论如何都把连接排空。
- *
- * `web_extract` 用它：那把工具只管网页，撞见 PDF 要能认出来并把模型指到
- * `document_read` 上。认这件事只能看 content-type——后缀会骗人，两个方向都会。
- */
-export async function probeDocument(url: string): Promise<string | null> {
-  const res = await safeFetch(url, { timeoutMs: EXTRACT_TIMEOUT_MS })
-  const ctype = (res.headers.get('content-type') || '').split(';')[0]!.trim().toLowerCase()
-  await res.body?.cancel().catch(() => {})
-  if (!res.ok) throw new WebToolError(`doc HTTP ${res.status}`, `抓取失败：HTTP ${res.status}`)
-  return DOC_TYPES[ctype] ?? null
-}
-
 export async function fetchDocument(url: string): Promise<FetchedDocument | null> {
   const res = await safeFetch(url, { timeoutMs: EXTRACT_TIMEOUT_MS })
   if (!res.ok) {
@@ -577,10 +563,6 @@ const stubTavily: WebBackend = {
  * 所以由这个开关顶替：URL 里带 `fake-doc` 就当成「后缀骗人」，返回 null 让它落回
  * 正常那条路。要钉的是**落回之后只收一次钱**，不是 content-type 怎么读。
  */
-export function stubProbeDocument(url: string): string | null {
-  return url.includes('fake-doc') ? null : '.pdf'
-}
-
 export function stubFetchDocument(url: string): FetchedDocument | null {
   if (url.includes('fake-doc')) return null
   const buf = Buffer.from(`%PDF-1.4 stub ${url}`)
