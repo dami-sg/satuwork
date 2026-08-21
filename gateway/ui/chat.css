@@ -468,11 +468,28 @@
   white-space: nowrap;
   font-size: 12.5px;
 }
-.sw-mail-input, .sw-mail-text { font-size: 12.5px; padding: 5px 8px; }
-.sw-mail-input { flex: 1; min-width: 0; }
-/* 正文用正文字体，不用等宽：它是要读的一段话，不是代码。纵向可拉，长信不必在一个
-   小窗口里滚。 */
-.sw-mail-text { width: 100%; resize: vertical; line-height: 1.6; }
+.sw-mail-input, .sw-mail-text { font-size: 12.5px; }
+/* 单行那格保持药丸：`.input` 全站就是这个样子（主题、口令、名字都一样），
+   在这儿单独改成方角反而突兀。 */
+.sw-mail-input { flex: 1; min-width: 0; padding: 5px 12px; }
+/**
+ * 正文那格**要把 .input 的药丸圆角换掉**。
+ *
+ * `.input` 的 `border-radius: 999px` 是给单行控件用的——高度一固定，999px 就是两头
+ * 半圆。多行 textarea 高上去之后，同一个值会把边框摊成一个椭圆，正文从弧线里溢出来
+ * （截图里就是那样）。textarea 要的是矩形圆角，和 `textarea.satu-code`（soul.md、
+ * Skill 编辑器）同一个口径。
+ *
+ * 字体不跟 `.satu-code` 那条走等宽：那几处编辑的是代码和提示词，而这儿是一封要发出去
+ * 的信——读的是话，不是字符对齐。
+ */
+.sw-mail-text {
+  width: 100%;
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  resize: vertical;
+  line-height: 1.6;
+}
 /* 悬浮窗里按表单摆的那几格。 */
 .sw-toolpop-field { margin-top: 4px; }
 .sw-toolpop-field > span { font-size: 11px; color: var(--muted-foreground); }
