@@ -7,7 +7,7 @@ import { HttpError, bearer, json, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
 import { KIND, bodyOf, deployOptsOf, strField } from '../lib/validate.ts'
 import type { Account, CatalogItem } from '../db.ts'
-import { companyMachineOf, deploySeat, publicSeatRuntime, releaseSeats } from '../deploy.ts'
+import { companyMachineOf, deploySeat, publicSeatRuntime, purgeBot } from '../deploy.ts'
 import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
 import { LEGACY_BOT_ICONS, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer } from '../lib/catalog.ts'
 import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
@@ -448,27 +448,35 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
    *
    * 只删目录项的话，机器上那套 systemd 单元还在跑、还占着 slot 和端口，而库里已经没有
    * 任何东西指向它了——下一个人的席位起不来，现场没有一条线索指回这次删除。
+   *
+   * **席位拆不掉也照删。** 以前是拆不掉就 502、什么都不删，而管家拆席位是「先停单元
+   * 再收拾目录」：中间任何一步出岔子，Bot 已经聊不了了，删除却每次都以同一个理由
+   * 失败——界面上于是永远挂着一颗既用不了也删不掉的 Bot。现在那行席位留成墓碑
+   * （slot 不会被下一个人分走），Bot 该删的全删，回执里说清还剩几个席位要清理。
    */
   router.delete('/runtime/bots/:id', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const item = await ownBotOf(db, account, req.params.id)
-    const seat = await db.seatRuntime(account.id, item.id)
-    if (seat) {
-      try {
-        await releaseSeats(db, [seat])
-      } catch (e) {
-        throw new HttpError(502, `席位没拆干净，先重试或者联系管理员：${(e as Error).message}`)
-      }
-      await db.deleteSeatRuntimeOf(account.id, item.id)
-    }
-    await db.deleteCatalog(item.id)
+    const { released, failed } = await purgeBot(db, item.id)
     await db.audit({
       companyId: account.companyId!,
       accountId: account.id,
       action: 'bot.delete',
-      detail: { id: item.id, name: item.name, seat: seat?.seatId ?? null },
+      detail: {
+        id: item.id,
+        name: item.name,
+        seats: released.map((s) => s.seatId),
+        // 拆不掉的那些要留在审计里：机器详情页上那条「出错、没有 Bot 名」的席位
+        // 是从哪来的，只有这里答得上。
+        orphans: failed.map((f) => ({ seatId: f.seat.seatId, error: f.error })),
+      },
     })
-    json(res, 200, { deleted: true, id: item.id })
+    json(res, 200, {
+      deleted: true,
+      id: item.id,
+      seats: released.length,
+      orphans: failed.map((f) => ({ seatId: f.seat.seatId, error: f.error })),
+    })
   })
 
   router.get('/runtime/bots/:id/session', async (req, res) => {

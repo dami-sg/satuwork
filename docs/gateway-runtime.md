@@ -564,7 +564,8 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/orgs/:id/bots` | 该公司看得见的**全局** Bot，加上模版改版前留下、已停用的老公司 Bot（只读 / 可删）。员工自建的不在里面 |
 | GET/PUT | `/orgs/:id/bot-template` | 公司 Bot 模版。读：公司里所有人（员工建 Bot 那一屏要显示继承了什么）。写：公司 admin，每次保存 `version` 加一 |
 | POST | `/orgs/:id/bot-template/redeploy` | admin：把本公司已部署的席位挨个重铺一遍（会断对话）。平时不用——席位自己在盯版本号 |
-| CRUD | `/runtime/bots` `/runtime/bots/:id` | 员工自己的 Bot。POST/PATCH **只收身份字段**（名字、头像、简介、开场白、追加提示词），底座一概不收；DELETE 连席位一起拆 |
+| CRUD | `/runtime/bots` `/runtime/bots/:id` | 员工自己的 Bot。POST/PATCH **只收身份字段**（名字、头像、简介、开场白、追加提示词），底座一概不收；DELETE 连席位一起拆，会话索引、实例地址、分组里的引用一并清掉（账本和审计不动）。席位拆不掉时 Bot 照删，那行席位留成待清理并回在 `orphans` 里 |
+| DELETE | `/platform/machines/:id/seats/:seatId` | `owner`：清理一条**没有主人的席位**（Bot 已删、当时没拆掉）。Bot 还在的席位 409——那是「删 Bot」的事 |
 | GET | `/orgs/:id/sessions` | 会话索引检索，公司 admin |
 | GET | `/orgs/:id/sessions/:sessionId` | **现场**向机器拉全文，Gateway 不存，公司 admin |
 | GET | `/orgs/:id/audit` | 公司审计，公司 admin |

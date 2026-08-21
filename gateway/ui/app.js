@@ -46,18 +46,24 @@ async function runConfirm() {
       return
     } else if (c.kind === 'delete-bot') {
       const base = catalogBase()
-      await api('DELETE', `${base}/bots/${encodeURIComponent(c.id)}`)
-      flash('ok', '已删除')
+      const data = await api('DELETE', `${base}/bots/${encodeURIComponent(c.id)}`)
+      flashDeletedBot(data)
       go('/bots')
       return
     } else if (c.kind === 'delete-my-bot') {
       // 席位在服务端一起拆（见 routes/runtime.ts）。名册要重拉：侧栏那一行得当场消失。
-      await api('DELETE', `/runtime/bots/${encodeURIComponent(c.id)}`)
+      const data = await api('DELETE', `/runtime/bots/${encodeURIComponent(c.id)}`)
       state.bot = null
       state.botDraft = null
       await loadRuntimeBots().catch(() => {})
-      flash('ok', '已删除')
+      flashDeletedBot(data)
       go('/')
+      return
+    } else if (c.kind === 'clean-seat') {
+      await api('DELETE', `/platform/machines/${encodeURIComponent(c.machineId)}/seats/${encodeURIComponent(c.seatId)}`)
+      await loadMachineDetail(c.machineId).catch(() => {})
+      flash('ok', '席位已清理')
+      render()
       return
     } else if (c.kind === 'delete-skill') {
       const base = catalogBase()
@@ -456,6 +462,24 @@ document.getElementById('app').addEventListener('click', async (e) => {
     openLogs(`${(bot && bot.name) || id} · ${t('席位上的 bot 服务，跟着滚')}`, [
       { key: 'bot', label: t('Bot 运行时'), url: '/runtime/logs?follow=1&lines=300&botId=' + encodeURIComponent(id) },
     ])
+    return
+  }
+  if (act === 'clean-seat') {
+    const machineId = btn.getAttribute('data-machine') || ''
+    const seatId = btn.getAttribute('data-seat') || ''
+    if (!machineId || !seatId) return
+    state.confirm = {
+      title: '清理这个席位？',
+      body: t(
+        `它的 Bot 已经删了，机器上那套单元当时没拆掉——${seatId} 还占着一个槽位和一组端口。清理会再拆一次；机器还没恢复的话会失败，隔一会儿再来即可。`,
+        `Its bot is already deleted but the units on the machine were never torn down — ${seatId} still holds a slot and its ports. This retries the teardown; if the machine is still down it fails and you can try again later.`,
+      ),
+      label: '清理',
+      kind: 'clean-seat',
+      machineId,
+      seatId,
+    }
+    render()
     return
   }
   if (act === 'machine-logs') {

@@ -287,7 +287,7 @@ const SEAT_STATUS = {
 /** 这台机器上跑着谁。出事时第一眼看的就是它，所以 lastError 直接摊在行里，不藏。 */
 function machineSeatsPanel(card) {
   const seats = card.seatList || []
-  const cols = 'minmax(150px, 1.6fr) minmax(120px, 1.2fr) 90px 72px minmax(140px, 1.2fr) 80px'
+  const cols = 'minmax(150px, 1.6fr) minmax(120px, 1.2fr) 90px 72px minmax(140px, 1.2fr) 108px'
   const rows = seats
     .map((s) => {
       // 认不出来的状态照原样显示，别硬塞进某一档——多出一个状态时，屏幕上要看得见
@@ -304,7 +304,13 @@ function machineSeatsPanel(card) {
         <span class="tag ${st.tag}">${t(st.label)}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(String(s.slot))}</span>
         <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(s.lastError || '')}">${esc(s.lastError || s.botVersion || t('未部署'))}</span>
-        <button type="button" class="satu-linkbtn" data-act="machine-logs" data-scope="platform" data-machine="${esc(card.machine.id)}" data-seat="${esc(s.seatId)}">${t('日志')}</button>
+        <span style="display: flex; gap: var(--space-3); justify-content: flex-end;">
+          <button type="button" class="satu-linkbtn" data-act="machine-logs" data-scope="platform" data-machine="${esc(card.machine.id)}" data-seat="${esc(s.seatId)}">${t('日志')}</button>
+          ${/* 「清理」只画在没有主人的席位上（orphan 由接口给，见 withSeatNames）。
+               Bot 还在的席位从这里掀掉，员工那边只会看到聊天忽然 503，界面上却什么
+               都没变——服务端也挡着，这里不画是为了不让人对着一颗会报错的按钮猜。 */ ''}
+          ${s.orphan ? `<button type="button" class="satu-linkbtn" style="color: var(--color-accent-800);" data-act="clean-seat" data-machine="${esc(card.machine.id)}" data-seat="${esc(s.seatId)}">${t('清理')}</button>` : ''}
+        </span>
       </div>`
     })
     .join('')

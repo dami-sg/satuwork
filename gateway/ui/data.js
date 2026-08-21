@@ -47,6 +47,26 @@ function flash(kind, msg) {
   state.notice = kind === 'ok' ? text : ''
 }
 
+/**
+ * 删完一颗 Bot 之后说什么。
+ *
+ * Bot 一定是删掉了（服务端不会因为拆不动席位就把删除否掉，见 deploy.ts 的
+ * purgeBot），但机器上可能还留着几个没拆干净的席位。**那种情况要说出来**：那些
+ * 席位还占着端口和槽位，得有人去机器详情页点「清理」——一句「已删除」会让这件事
+ * 谁也不知道。
+ */
+function flashDeletedBot(data) {
+  const orphans = (data && data.orphans) || []
+  if (!orphans.length) return flash('ok', '已删除')
+  flash(
+    'err',
+    t(
+      `Bot 已删除，但机器上还有 ${orphans.length} 个席位没拆干净：${orphans[0].error || ''}`,
+      `The bot is deleted, but ${orphans.length} seat(s) could not be torn down: ${orphans[0].error || ''}`,
+    ),
+  )
+}
+
 function groupCatalog(rows) {
   const map = new Map()
   for (const m of rows || []) {
