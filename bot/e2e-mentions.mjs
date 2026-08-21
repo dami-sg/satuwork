@@ -327,10 +327,21 @@ await ctx.agents
       return 'THROW: ' + e.message
     }
   }
+  /**
+   * **三态，不是两态。** 取不到 agents 时返回的是 `undefined`——「我这会儿答不上来」，
+   * 不是「人没点名」。这个区别有后果：Gateway 拿这个标记强制「仅 @ 时可用」的连接
+   * （gateway/src/routes/mcp.ts），报 false 就等于替用户说他没点名，于是上面那次故障的
+   * 后果会从「流水少个标记」升级成「这把连接彻底用不了」。
+   *
+   * 不变的那一条仍然是这几行的主题：**无论如何都不许抛**。
+   */
   out.viaMention = {
-    取不到就当没点名: call(poisoned, 's1', 'srv-1') === false,
-    reflect自己炸了也不许抛: call(viaThrows, 's1', 'srv-1') === false,
-    没有reflect也不许抛: call(noReflect, 's1', 'srv-1') === false,
+    取不到时是undefined: call(poisoned, 's1', 'srv-1') === undefined,
+    reflect自己炸了也不许抛: call(viaThrows, 's1', 'srv-1') === undefined,
+    没有reflect也不许抛: call(noReflect, 's1', 'srv-1') === undefined,
+    一次都没抛出来: [poisoned, viaThrows, noReflect].every(
+      (c) => !String(call(c, 's1', 'srv-1')).startsWith('THROW'),
+    ),
     点了名的照样认得出: call(viaOk, 's1', 'srv-1') === true,
     没点那台不算: call(viaOk, 's1', 'srv-2') === false,
   }

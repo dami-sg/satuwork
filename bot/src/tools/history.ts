@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock, Message, SessionEvent } from '../session/types.ts'
+import type { ToolRisk } from './index.ts'
 
 /**
  * 翻自己的历史：`history_read` 按时间区间读原文，`history_search` 按关键词找。
@@ -152,7 +153,7 @@ function render(rows: Row[], note: string): string {
 
 export function apply(ctx: Context) {
   const tool = (
-    def: { name: string; description: string; parameters: Record<string, unknown> },
+    def: { name: string; description: string; parameters: Record<string, unknown>; risk?: ToolRisk[] },
     execute: (args: any, sessionId: string) => Promise<string>,
   ) => {
     ctx.tools.register({
@@ -180,6 +181,7 @@ export function apply(ctx: Context) {
   tool(
     {
       name: 'history_read',
+      risk: ['read'],
       description:
         '按时间区间读回这条会话更早的原始对话。上下文里那段“对话摘要”覆盖的内容、或者要核对用户当时的原话时用它。时间按本机时区。',
       parameters: {
@@ -214,6 +216,7 @@ export function apply(ctx: Context) {
   tool(
     {
       name: 'history_search',
+      risk: ['read'],
       description:
         '在这条会话的全部历史里按关键词找，包括已经被摘要压缩掉的那一段。找到之后可以用 history_read 把那个时间点前后的原文调出来。',
       parameters: {

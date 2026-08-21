@@ -11,6 +11,15 @@ import { callerAccountId, requireBootstrapMachine, requireInternalCaller, requir
 import { instanceHostOf, sourceIpOf } from '../lib/runtime.ts'
 import { type Machine } from '../db.ts'
 
+/**
+ * 席位报上来的 guard / outcome 只认这两张表里的值。
+ *
+ * 和 `gateway/src/lib/catalog.ts` 的 BOT_GUARD_IDS 是同一套键，外加 `escalate`
+ * ——转人工不是一条开关，但它和那三条走同一条上报路。
+ */
+const GUARD_IDS = new Set(['high-risk', 'pii', 'no-external', 'escalate'])
+const GUARD_OUTCOMES = new Set(['blocked', 'approved', 'denied', 'timeout', 'redacted', 'escalated'])
+
 export function attachInternal(router: Router, ctx: RouteCtx) {
   const { db } = ctx
 
@@ -259,6 +268,53 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       updatedAt: intField(body, 'updatedAt'),
     })
     json(res, 200, { session })
+  })
+
+  /**
+   * 行为边界的表态。席位那边每拦一次、每批一次都往这里报一条。
+   *
+   * **它是这三个开关对管理员的全部价值。** 只拦不报的话，界面上开关开着、
+   * 而没有任何一处回答得了「上个月拦了几次、拦的是谁、批的是谁」——那时候它是个
+   * 心理安慰，不是一条合规证据。
+   *
+   * 用 `requireInternalCaller`：席位票 `sat_` 只能报自己那个账号（body 里的 accountId
+   * 对它不作数），管家的机器票能替本机任意席位报。和会话索引那条是同一套口径。
+   *
+   * **落审计，不落新表。** 审计表已经有公司、账号、动作、详情、时间这五样，
+   * 而这条记录要的就是这五样；另起一张表意味着「操作记录」那一屏要查两处，
+   * 而人不会记得去第二处翻。
+   */
+  router.post('/internal/guard-events', async (req, res) => {
+    const caller = await requireInternalCaller(req, db)
+    const body = bodyOf(req)
+    const accountId = callerAccountId(caller, () => strField(body, 'accountId'))
+    const account = await db.account(accountId)
+    if (!account || account.companyId !== caller.companyId) throw new HttpError(403, '账号不属于这家公司')
+
+    const guard = strField(body, 'guard')
+    const outcome = strField(body, 'outcome')
+    // 白名单，不是原样收下：`action` 会进审计的检索面，让上报方自己定义动作名，
+    // 那一栏迟早会长出十几种拼写。
+    if (!GUARD_IDS.has(guard)) throw new HttpError(400, 'guard 不认识')
+    if (!GUARD_OUTCOMES.has(outcome)) throw new HttpError(400, 'outcome 不认识')
+
+    const event = await db.audit({
+      companyId: caller.companyId,
+      accountId,
+      action: `bot.guard.${outcome}`,
+      detail: {
+        guard,
+        tool: strField(body, 'tool', false),
+        botId: strField(body, 'botId', false),
+        sessionId: strField(body, 'sessionId', false),
+        callId: strField(body, 'callId', false),
+        // **理由是席位那边生成的一句中文，不含被拦下来的原值**（见 policy/pii.ts）。
+        // 把刚拦住的号码抄进审计，等于挡了门又从窗户递出去。
+        reason: strField(body, 'reason', false).slice(0, 500),
+        at: intField(body, 'at') ?? Date.now(),
+      },
+    })
+    json(res, 200, { event })
   })
 
   /**

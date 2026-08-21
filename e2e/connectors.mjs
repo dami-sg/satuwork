@@ -520,6 +520,51 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
       assert(stats.status === 200, `stats ${stats.status}`)
     })
 
+    await test('「仅 @ 时可用」：服务端也拦，但席位没表态时放行', async () => {
+      /**
+       * 这道门以前只在席位那一侧（工具表里不放它），那是遮掩不是强制——模型直接报出
+       * 工具名照样调得到。补上服务端这一道之后，判据只能是**席位明确说了没点名**：
+       * `viaMention` 是席位自报的，取不到 `agents` 时它报的是「不知道」，老席位干脆
+       * 不发这个字段。把「没说」当成「没点名」的话，一次取不到服务就会让用户明明
+       * `@` 了自己的邮箱、却每次都被回一句「这一轮没有点名它」。
+       */
+      await req(base, 'PATCH', `/me/connectors/${connectorId}/connections/${firstConnId}`, {
+        token: memberTok,
+        body: { mentionOnly: true },
+      })
+      const cat = await req(base, 'GET', '/runtime/catalog', { token: seatTok })
+      const path = new URL(cat.json.servers.find((x) => x.connector === 'gmail').endpoint).pathname
+      const send = (id, meta) =>
+        req(base, 'POST', path, {
+          token: seatTok,
+          body: {
+            jsonrpc: '2.0',
+            id,
+            method: 'tools/call',
+            params: { name: 'SEND_EMAIL', arguments: {}, ...(meta ? { _meta: meta } : {}) },
+          },
+        })
+
+      const before = mock.seen.executed.length
+      const notNamed = await send(40, { viaMention: false })
+      assert(notNamed.json.result.isError, '席位说了没点名，还是让它调了')
+      assert(mock.seen.executed.length === before, '被拒的不该打到上游')
+
+      const named = await send(41, { viaMention: true })
+      assert(!named.json.result.isError, `点了名的该放行：${named.text}`)
+
+      // 老席位 / 席位那一刻答不上来：字段整个不出现。放行，只在日志里留一行。
+      const silent = await send(42, undefined)
+      assert(!silent.json.result.isError, `席位没表态时不该拦：${silent.text}`)
+
+      await req(base, 'PATCH', `/me/connectors/${connectorId}/connections/${firstConnId}`, {
+        token: memberTok,
+        body: { mentionOnly: false },
+      })
+      const plain = await send(43, undefined)
+      assert(!plain.json.result.isError, `关掉 mentionOnly 之后该照常调：${plain.text}`)
+    })
+
     await test('工具不在子集里：拒掉，且不打上游', async () => {
       await req(base, 'PUT', `/me/connectors/${connectorId}/tools`, {
         token: memberTok,

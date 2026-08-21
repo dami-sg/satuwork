@@ -29,7 +29,34 @@ export interface BotRecord {
   /** 挂上的 Skill / MCP 目录 id。公司 Bot 从 Gateway 同步下来。 */
   skills?: string[]
   mcps?: string[]
+  /**
+   * 公司模版上的行为边界。**只存开关**，标题和说明留在界面那边（见
+   * gateway/src/lib/catalog.ts 的 BOT_GUARD_IDS）。
+   *
+   * 没有这个字段（老 Gateway、或者本机自建的 Bot）时按**全开**算，不是全关：
+   * 降级成「一条都不拦」等于让一次版本回退悄悄拆掉全公司的边界。
+   */
+  guards?: Record<string, boolean>
+  /** 什么情况下该转人工。模版上的一段自由文本，进系统提示词，也是硬触发的说明。 */
+  escalate?: string
+  /** 这份底座是模版的第几版。排错时回答「这台跟上了没有」。 */
+  templateVersion?: number
   createdAt: number
+}
+
+/** 行为边界的出厂值：三条全开。和 Gateway 的 DEFAULT_BOT_GUARDS 是同一套键。 */
+export const DEFAULT_GUARDS: Record<string, boolean> = { 'high-risk': true, pii: true, 'no-external': true }
+
+/** 这个 Bot 的行为边界。缺字段一律按开算——见 BotRecord.guards 上的说明。 */
+export function guardsOf(bot: { guards?: Record<string, boolean> } | undefined): Record<string, boolean> {
+  const raw = bot?.guards
+  const out: Record<string, boolean> = { ...DEFAULT_GUARDS }
+  if (raw && typeof raw === 'object') {
+    for (const key of Object.keys(out)) {
+      if (typeof raw[key] === 'boolean') out[key] = raw[key]
+    }
+  }
+  return out
 }
 
 const ICONS = new Set(['bot', 'chat', 'chart', 'pen', 'deal', 'code'])
@@ -149,6 +176,9 @@ export class AgentRegistry extends Service {
     enabled?: boolean
     skills?: string[]
     mcps?: string[]
+    guards?: Record<string, boolean>
+    escalate?: string
+    templateVersion?: number
   }): BotRecord {
     const id = input.remoteId
     const current = this.col.get(id)
@@ -169,6 +199,12 @@ export class AgentRegistry extends Service {
       sessionId: current?.sessionId,
       skills: Array.isArray(input.skills) ? input.skills : current?.skills,
       mcps: Array.isArray(input.mcps) ? input.mcps : current?.mcps,
+      // 没下发就沿用上一次同步到的那份，再没有才回落全开（guardsOf 干的活）。
+      // 一次「目录里这个字段暂时没了」不该表现成边界被拆掉。
+      guards: input.guards ?? current?.guards,
+      escalate: typeof input.escalate === 'string' ? input.escalate : current?.escalate,
+      templateVersion:
+        typeof input.templateVersion === 'number' ? input.templateVersion : current?.templateVersion,
       createdAt: current?.createdAt ?? Date.now(),
     }
     this.col.put(id, next)

@@ -1,7 +1,7 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { gatewayToken, gatewayUrl } from '../llm/gateway.ts'
-import type { BotRecord } from '../registry/index.ts'
-import { mcpToolName, McpHttpClient, type JsonRpcTool } from './mcp.ts'
+import { guardsOf, type BotRecord } from '../registry/index.ts'
+import { mcpToolName, mcpToolRisk, McpHttpClient, type JsonRpcTool } from './mcp.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -21,6 +21,16 @@ interface RemoteBot {
   origin?: 'company' | 'global' | 'local'
   skills?: string[]
   mcps?: string[]
+  /**
+   * 公司模版上的行为边界与转人工条件。
+   *
+   * **Gateway 一直在发**（见 gateway/src/lib/catalog.ts 的 publicBot），这边不声明就
+   * 读进来即丢：管理员在界面上把开关拨了、版本号也跟着涨了，而席位上那三条边界纹丝
+   * 不动——最难查的一类，因为每一处看起来都对。
+   */
+  guards?: Record<string, boolean>
+  escalate?: string
+  templateVersion?: number
 }
 
 export interface ModelRole {
@@ -165,6 +175,17 @@ export class CatalogService extends Service {
     return out
   }
 
+  /**
+   * 这把工具属于哪台 MCP 服务器。策略要拿它去查「这台在不在这个 Bot 的允许集合里」
+   * （见 policy/index.ts 的 checkExternal）。
+   *
+   * 单独开一个访问器而不是把 `toolServer` 放开：那张表是注册流程的内部账本，
+   * 谁都能改的话，「工具属于哪台服务器」就有了第二个真相。
+   */
+  serverOf(toolName: string): string | undefined {
+    return this.toolServer.get(toolName)
+  }
+
   status() {
     return {
       gateway: this.configured ? gatewayUrl() : null,
@@ -177,6 +198,13 @@ export class CatalogService extends Service {
         origin: b.origin,
         remoteId: b.remoteId ?? null,
         enabled: b.enabled,
+        /**
+         * 这台席位上生效的行为边界。**排错时第一个要问的就是它**：管理员改了模版，
+         * 席位跟没跟上、跟上的是哪一份，光看 templateVersion 只知道版本号对不对，
+         * 看不出这三个开关到底是开是关。
+         */
+        guards: guardsOf(b),
+        escalate: b.escalate ?? '',
       })),
       skills: this.ctx.storage.collection<CachedSkill>('skills').list().map((r) => ({
         id: r.value.id,
@@ -407,6 +435,10 @@ export class CatalogService extends Service {
       enabled: b.enabled !== false,
       skills: Array.isArray(b.skills) ? b.skills : [],
       mcps: Array.isArray(b.mcps) ? b.mcps : [],
+      // 模版的三样。没有这一行，「保存即生效」对行为边界就是句空话。
+      guards: b.guards,
+      escalate: b.escalate,
+      templateVersion: typeof b.templateVersion === 'number' ? b.templateVersion : this.templateVersion,
     })
   }
 
@@ -492,14 +524,31 @@ export class CatalogService extends Service {
         ? tool.inputSchema
         : { type: 'object', properties: {} }
     const remoteName = tool.name
+    const perm = this.ctx.storage.collection<CachedServer>('mcp-servers').get(serverId)?.perm ?? '只读'
     const fork = this.ctx.tools.register({
       name,
       description: tool.description || remoteName,
       parameters,
+      // 目录里配的 perm + 远端工具名里的动词，只叠加不相减（见 mcp.ts 的 mcpToolRisk）。
+      // 不标注的话它们会落到 UNKNOWN_RISK 上——那是「外部 + 写」，于是**每一次** MCP
+      // 调用都要弹一张确认卡。
+      risk: mcpToolRisk(perm, remoteName),
       execute: async (args, call) => {
         try {
+          /**
+           * **三态，不是两态。** `undefined` = 这台席位这一刻答不上来「人点没点名」
+           * （见 viaMentionOf）。以前它跟「没点名」是同一个值，那时无所谓——那个标记
+           * 只用来给流水归因。现在 Gateway 拿它当「仅 @ 时可用」的判据，两者合成一个
+           * false 就意味着：席位这边一次取不到服务，用户点了名的连接会被服务端拒掉，
+           * 而错误信息说的是「这一轮没有点名它」。所以答不上来就**什么都不报**，
+           * 让 Gateway 自己决定怎么办。
+           */
           const viaMention = viaMentionOf(this.ctx, call.sessionId ?? '', serverId)
-          const text = await client.callTool(remoteName, args, viaMention ? { viaMention: true } : undefined)
+          const text = await client.callTool(
+            remoteName,
+            args,
+            viaMention === undefined ? undefined : { viaMention },
+          )
           return { text }
         } catch (e) {
           return { text: `MCP 调用失败：${(e as Error).message}`, failed: true }
@@ -524,16 +573,25 @@ export class CatalogService extends Service {
  * 被当成了「MCP 调用失败」——一个流水上的附加标记，把整个工具打死了。
  *
  * 所以两层保险：`reflect.get` 直接查服务表、不走 inject 那一层；外面再包一个 catch，
- * **无论如何都不许从这里抛出去**。取不到就当没点名——大不了流水上少一个标记。
+ * **无论如何都不许从这里抛出去**。
+ *
+ * 取不到时返回 `undefined`——**不是 `false`**。这个区别现在有后果：Gateway 用这个标记
+ * 强制「仅 @ 时可用」的连接（routes/mcp.ts），报 false 就等于替用户说「他没点名」，
+ * 于是上面那次故障的后果从「流水少个标记」升级成「这把连接彻底用不了」。答不上来就
+ * 什么都不报，让 Gateway 按「不知道」处理。
  */
-export function viaMentionOf(ctx: Context, sessionId: string, serverId: string): boolean {
+export function viaMentionOf(ctx: Context, sessionId: string, serverId: string): boolean | undefined {
   try {
     const agents = (ctx as unknown as { reflect?: { get?: (name: string) => unknown } }).reflect?.get?.('agents') as
       | { mentionedIn?: (id: string) => Set<string> | undefined }
       | undefined
-    return agents?.mentionedIn?.(sessionId)?.has(serverId) === true
+    const named = agents?.mentionedIn?.(sessionId)
+    // **取不到 agents 就是 undefined，不是 false。** 这两个值现在有了不同的后果：
+    // false 是「我看过了，人没点名」，undefined 是「我这会儿答不上来」。
+    if (!named) return undefined
+    return named.has(serverId)
   } catch {
-    return false
+    return undefined
   }
 }
 

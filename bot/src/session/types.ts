@@ -165,6 +165,56 @@ export interface SessionEventMap {
   'assistant/chunk': { turn: number; step: number; chunk: StreamChunk }
   'assistant/message': { turn: number; step: number; message: Message; usage: Usage }
 
+  /**
+   * 一次**行为边界的表态**（v5.1 起）。
+   *
+   * 拦下来的调用在 `tool/result` 上已经是一条 failed 了，但那条只说「这次没跑成」，
+   * 说不出「是公司的哪条边界挡的、谁批的、批的时候是什么理由」。合规要问的恰恰是
+   * 后面这些，而它们必须能从日志重建——审计那一屏、以后的季度报表都从这里派生，
+   * 不从工具结果的散文里正则。
+   *
+   * 加一种事件不是破坏性变更（同 `session/compact` 的理由：老版本读到不认识的 type
+   * 会跳过），所以不动 SESSION_FORMAT_VERSION。
+   */
+  'tool/policy': {
+    callId: string
+    /** 工具名。审计里「拦了什么」就靠它，别指望事后从 callId 反查。 */
+    name: string
+    guard: 'high-risk' | 'pii' | 'no-external' | 'escalate'
+    outcome: 'blocked' | 'approved' | 'denied' | 'timeout' | 'redacted' | 'escalated'
+    reason: string
+  }
+
+  /**
+   * 一次**等人拍板**的高风险调用（v5.1 起）。
+   *
+   * 和上面那条 `tool/policy` 分开，因为它们回答的是两个问题：`tool/policy` 是留档
+   * （拦了什么、为什么），这一条是**界面上的一次交互**——一张带「批准 / 拒绝」的卡片，
+   * 而卡片必须能从日志重建：刷新页面、换个标签页、断线重连之后，那次还在等的确认
+   * 不能就此消失（工具那边还在 await，人这边却再也看不到入口）。
+   *
+   * 同一个 callId 会出现两条：先 `pending`，人点了之后再来一条终态。界面按 callId
+   * 认，取最后一条。
+   */
+  'tool/approval': {
+    callId: string
+    name: string
+    /** 参数原串。**给人看的**，卡片上要显示「到底拿什么跑」。 */
+    arguments: string
+    /** 为什么需要确认，一句话。「这会往外发东西」和「这会删掉文件」不是一回事。 */
+    reason: string
+    state: 'pending' | 'approved' | 'denied' | 'timeout' | 'aborted'
+    /** 批准的范围：只这一次，还是这条会话里同一把工具都放行。 */
+    scope?: 'once' | 'session'
+    /**
+     * pending 事件上带：过了这个时刻席位自动按不执行处理，并补一条终态事件。
+     *
+     * **界面不拿它判卡片死活**：那是席位的钟，浏览器那边是另一台机器的钟，两边差几十
+     * 秒是常态。判据用日志行号（seq），见 gateway/ui/chat.js 的 approvalDead。
+     */
+    expiresAt?: number
+  }
+
   'tool/call': { turn: number; step: number; callId: string; name: string; arguments: string }
   'tool/result': {
     turn: number

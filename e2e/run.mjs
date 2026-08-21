@@ -32,6 +32,7 @@ import { runHistoryTime } from './history-time.mjs'
 import { runCompact } from './compact.mjs'
 import { runMaxSteps } from './max-steps.mjs'
 import { runToolCalls } from './toolcalls.mjs'
+import { runGuards } from './guards.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
 import { uiSource } from './ui-dom.mjs'
@@ -642,6 +643,62 @@ async function runGateway() {
     assert(pullEv, '缺 session.pull')
     assert(pullEv.detail && pullEv.detail.sessionId === 's-audit-early', 'pull detail sessionId')
     assert(!dumpHas(pullEv, UNIQUE), '审计里有正文')
+  })
+
+  await test('行为边界的表态落进审计', async () => {
+    const adminMe = await req(base, 'GET', '/me', { token })
+    const adminId = adminMe.json.account.id
+
+    const ok = await req(base, 'POST', '/internal/guard-events', {
+      token: orgMachineTok,
+      body: {
+        companyId: orgId,
+        accountId: adminId,
+        sessionId: 's-audit-early',
+        botId: 'bot-audit',
+        callId: 'call-1',
+        tool: 'mcp_gmail_send_email',
+        guard: 'no-external',
+        outcome: 'blocked',
+        reason: '这个 Bot 没有被授权使用 mcp_gmail_send_email 所在的外部系统',
+        at: 1_700_000_200_000,
+      },
+    })
+    assert(ok.status === 200, `guard-events ${ok.status} ${ok.text}`)
+
+    const audit = await req(base, 'GET', `/orgs/${orgId}/audit`, { token })
+    const hit = (audit.json.events || []).find((e) => e.action === 'bot.guard.blocked')
+    assert(hit, '拦截没进审计')
+    // 「拦了什么、哪条边界拦的」是管理员唯一会问的两个问题，两样都得在详情里。
+    assert(hit.detail && hit.detail.guard === 'no-external', `guard ${JSON.stringify(hit.detail)}`)
+    assert(hit.detail.tool === 'mcp_gmail_send_email', `tool ${JSON.stringify(hit.detail)}`)
+    assert(hit.accountId === adminId, `accountId ${hit.accountId}`)
+
+    // action 是按白名单拼的，不是原样收 body——那一栏进检索面，让上报方自己定义
+    // 动作名的话，迟早会长出十几种拼写。
+    const bogus = await req(base, 'POST', '/internal/guard-events', {
+      token: orgMachineTok,
+      body: { companyId: orgId, accountId: adminId, guard: '我自己编的', outcome: 'blocked', tool: 'x' },
+    })
+    assert(bogus.status === 400, `不认识的 guard 拿到 ${bogus.status}`)
+    const bogusOutcome = await req(base, 'POST', '/internal/guard-events', {
+      token: orgMachineTok,
+      body: { companyId: orgId, accountId: adminId, guard: 'pii', outcome: '随便写的', tool: 'x' },
+    })
+    assert(bogusOutcome.status === 400, `不认识的 outcome 拿到 ${bogusOutcome.status}`)
+
+    // 别家公司的账号：报不进来。租户边界和会话索引那条是同一套口径。
+    const outsider = await req(base, 'POST', '/internal/guard-events', {
+      token: orgMachineTok,
+      body: {
+        companyId: orgId,
+        accountId: '00000000-0000-4000-8000-000000000000',
+        guard: 'pii',
+        outcome: 'blocked',
+        tool: 'x',
+      },
+    })
+    assert(outsider.status === 403, `跨公司上报拿到 ${outsider.status}`)
   })
 
   await test('会话列表翻页：不漏行不重复，同一毫秒也分得开', async () => {
@@ -2829,6 +2886,7 @@ async function main() {
     await runCompact({ root, test, assert, log })
     await runMaxSteps({ root, test, assert, log })
     await runToolCalls({ root, test, assert, log })
+    await runGuards({ root, test, assert, log })
   } finally {
     killAll()
     try {

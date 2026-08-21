@@ -1,0 +1,216 @@
+/**
+ * 行为边界：模版上那三个开关的**执行点**。探针在 bot/e2e-guards.mjs。
+ *
+ * 为什么值得单开一个套件：这一层坏了**不报错**。开关照样存、界面照样画着开着的样子，
+ * 而工具照跑——日志、状态码、类型检查全都干干净净。只有对着一条真的调用跑一遍，
+ * 才看得出「拦」这件事到底有没有发生。
+ */
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+
+function runProbe(root) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-guards.mjs')], {
+      cwd: join(root, 'bot'),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (err += d))
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('探针 30 秒没跑完'))
+    }, 30000)
+    child.on('error', reject)
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
+      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
+      try {
+        resolve(JSON.parse(line.slice('__RESULT__'.length)))
+      } catch (e) {
+        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
+      }
+    })
+  })
+}
+
+const all = (obj) => Object.entries(obj).filter(([, v]) => v !== true).map(([k]) => k)
+
+export async function runGuards({ root, test, assert, log }) {
+  log('\n# guards')
+  const r = await runProbe(root)
+
+  await test('三条开关开着：该放的放、该拦的拦', () => {
+    const bad = all(r.onGuards)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
+  })
+
+  await test('被拦的调用一次都没跑到工具里', () => {
+    // 这条才是重点。「返回了一句拒绝」和「那封邮件没发出去」是两件事，
+    // 而只有后者算数——拦截必须发生在 execute 之前，不是之后的道歉。
+    assert(r.blockedNeverRan.mcp_b_send_mail === 0, `没授权的 MCP 还是跑了 ${r.blockedNeverRan.mcp_b_send_mail} 次`)
+    assert(r.blockedNeverRan.mystery === 0, `没标注风险的工具还是跑了 ${r.blockedNeverRan.mystery} 次`)
+    assert(r.bashRuns === 2, `bash 跑的次数不对（应当只有 ls 和 git status 两次）：${r.bashRuns}`)
+  })
+
+  await test('拒绝的那句话说得出是什么挡的、下一步能干什么', () => {
+    // 一句没有出路的拒绝，模型多半会原样再调一次，然后在步数硬顶里空转到底。
+    assert(r.deniedText.includes('行为边界'), `没说是谁挡的：${r.deniedText}`)
+    assert(r.deniedText.includes('模版'), `没给出路：${r.deniedText}`)
+  })
+
+  await test('bash：本地命令照跑，联网的挡下', () => {
+    const bad = all(r.bash)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
+  })
+
+  await test('开关关掉就该真的放行', () => {
+    const bad = all(r.offGuards)
+    assert(!bad.length, `关了还在拦：${bad.join('、')}`)
+  })
+
+  await test('认不出来的一律按拦处理', () => {
+    // 老 Gateway 没下发 guards、名册里没有这颗 Bot、会话读不到——这三种最该保守的
+    // 情况，早先版本走的是同一条「mcps 是 undefined 就放行」的分支，全部一路放行。
+    const bad = all(r.failClosed)
+    assert(!bad.length, `这几条没有 fail closed：${bad.join('、')}`)
+  })
+
+  await test('高风险确认：调用真的停在执行前等人拍板', () => {
+    const a = r.approvals
+    // 「等的时候没跑」是这一条的全部意义。返回一句「需要确认」然后照跑，
+    // 和没有这个开关是一样的。
+    assert(a.等的时候没跑, '等确认的时候工具已经跑了')
+    assert(a.发了pending事件 && a.队列里能查到, '没有一条能让界面画出卡片的 pending')
+    // 「Bot 想调用 send_email，批准吗」本身没有信息量——人要批的是「发给谁、写了什么」。
+    assert(a.卡片上有参数, '卡片上没有参数')
+    assert(a.卡片上有理由, '卡片上没说为什么要确认')
+    assert(a.批准返回ok && a.批准后真的跑了, '批准之后那次调用没继续跑下去')
+    assert(a.队列已清空, '批准完了还挂在待办里')
+  })
+
+  await test('拒绝 / 超时 / 停止：三种都不许放行，而且分开说', () => {
+    const a = r.approvals
+    assert(a.拒绝后没跑, '拒绝了还是跑了')
+    assert(a.拒绝的话说清了别重试, '拒绝的措辞没让模型换个做法')
+    assert(a.重复点会说已结束, '重复点击被当成一次新的批准')
+    // 到点按不执行处理。反过来（超时即批准）意味着人只要离开工位，边界就自动消失。
+    assert(a.超时没跑 && a.超时说的是没人回应, '超时的处理不对')
+    assert(a.停止后没跑 && a.停止说的是被停止, '点了停止之后确认没有当场断掉')
+  })
+
+  await test('「这次对话都批准」之后不再重复问，但日志上留得下出处', () => {
+    assert(r.approvals.本会话内不再问, '批过一次还在问')
+    assert(r.approvals.授权名单里有它, '本会话的放行名单没记上')
+    // 少了这两条，之后那些不再弹卡片的调用在日志里就是一串没有来由的 approved，
+    // 而「为什么这次没问我」正是事后翻记录要问的。
+    assert(r.approvals.终态事件带范围 && r.approvals.只批一次的也标了范围, '终态事件没记下批准的范围')
+    assert(r.approvals.放行的理由写了出处, '靠本会话授权放行的那次，理由里没写出处')
+  })
+
+  await test('bash 按命令判要不要确认，不按它那份最坏情况的 risk', () => {
+    // bash 的 risk 是并集（写 + 毁 + 外联）。照并集判的话每条 ls 都要弹卡片，
+    // 人会在第三次之后学会闭眼点批准——那时候这个开关就真的没用了。
+    assert(r.approvals.普通命令不问, '普通命令也在弹确认')
+    assert(r.approvals.递归删要问, 'rm -rf 没有要求确认')
+    assert(r.approvals.递归删被拒后没跑, '拒绝之后命令还是跑了')
+  })
+
+  await test('个人敏感信息：出站方向真的被拦下', () => {
+    const p = r.pii
+    assert(p.带身份证被拦 && p.没跑到工具里, '带身份证的调用还是发出去了')
+    assert(p.带手机号被拦 && p.带银行卡被拦, '手机号或银行卡没拦住')
+    assert(p.说清了是哪一类, '拒绝的话没说是哪一类敏感信息')
+    // 拒绝的那句话会进模型上下文、会话日志和审计。把刚拦下来的号码抄进去，
+    // 等于挡了一道门、又从窗户递出去。
+    assert(p.没有把号码抄回去, '把拦下来的号码原样抄回给模型了')
+    assert(p.干净的参数放行, '干净的参数也被拦了')
+    assert(p.本地写不受影响, '这条边界说的是「不外发」，不该管本地写')
+  })
+
+  await test('敏感信息的识别带校验位，不是纯正则', () => {
+    const s = r.piiScan
+    assert(s.真身份证.includes('身份证号') && !s.校验位错的身份证.length, '身份证没走校验位')
+    assert(s.真卡号.includes('银行卡号') && !s.过不了Luhn的长号.length, '银行卡没走 Luhn')
+    // 这三条是「误伤一次，用户就学会把开关关掉」的那几种。
+    // 18 位正好是身份证候选的长度。候选和「验过的」混在一个数组里的话，18 位的卡号
+    // 会先被身份证的正则捞走、校验位一算不是、又被当成「已经认过」跳掉——Luhn 根本
+    // 跑不到，于是**唯独 18 位的卡号一张都拦不住**。
+    assert(s.十八位卡号.includes('银行卡号'), '18 位银行卡号没认出来')
+    assert(
+      s.十八位的真身份证只算身份证.join() === '身份证号',
+      `真身份证被重复归类：${s.十八位的真身份证只算身份证.join('、')}`,
+    )
+    assert(!s.毫秒时间戳.length, '毫秒时间戳被当成了卡号')
+    assert(!s.订单号.length, '订单号被当成了证件号')
+    assert(!s.座机不算.length, '座机号被当成了手机号')
+    // 邮箱有意不算：算进去的话，发邮件、查联系人这类连接器整个不能用了。
+    assert(!s.邮箱不算.length, '邮箱被算成了敏感信息')
+  })
+
+  await test('升级人工：撞墙三次就该交出去，而且留痕', () => {
+    const e = r.escalate
+    assert(e.前两次只是拦, '第一次撞墙就喊转人工，太早了')
+    assert(e.第三次改口转人工, '连着撞三次还在让它继续重试')
+    assert(e.自动升级留了记录 && e.转人工留了记录, '转人工没有留下记录')
+    assert(e.有转人工的工具, 'escalate_to_human 没注册')
+    // 转人工是模型撞墙之后唯一的出口，它自己不能被任何一条边界挡住。
+    assert(e.转人工本身不被拦, '转人工这把工具自己被边界挡了')
+  })
+
+  await test('每次拦截都在会话日志里留下一条 tool/policy', () => {
+    assert(r.record.条数 > 0, '一条都没留')
+    assert(r.record.第一条 && r.record.第一条.guard === 'no-external', `第一条不对：${JSON.stringify(r.record.第一条)}`)
+    assert(r.record.第一条.outcome === 'blocked', `outcome 不对：${r.record.第一条.outcome}`)
+    // 审计那一屏问的是「拦了什么、为什么」，两样都得能从日志重建。
+    assert(r.record.都带上了工具名 && r.record.都带上了理由, '记录里缺工具名或理由')
+  })
+
+  await test('命令扫描：认名字，不认花样', () => {
+    assert(r.shell.curl === 'curl' && r.shell.绝对路径的curl === 'curl', '直白的 curl 都没认出来')
+    assert(r.shell.环境变量前缀 === 'curl', '加个环境变量前缀就绕过去了')
+    assert(r.shell.git状态 === null && r.shell.npm跑脚本 === null, '把本地用法也拦了')
+    assert(r.shell.git克隆 === 'git clone' && r.shell.npm安装 === 'npm install', '联网子命令没认出来')
+    assert(r.shell.内联python === 'python3 -c', '内联解释器里的联网代码没认出来')
+    assert(r.shell.解析不出来不拦 === null, '参数不是合法 JSON 时不该由边界来报错')
+  })
+
+  await test('命令扫描：交给另一个 shell 跑的那一段也要展开', () => {
+    // 只看每段第一个词的话，`bash -c "curl …"` 的头是 bash，两张表里都没有它，
+    // 于是整条命令一路放行——而这不是绕法，是模型要用 shell 语法时自己写出来的形状。
+    assert(r.shell.嵌套bash === 'curl', 'bash -c 里的 curl 没认出来')
+    assert(r.shell.嵌套sh === 'wget', 'sh -c 里的 wget 没认出来')
+    assert(r.shell.组合标志的zsh === 'curl', '-lc 这种组合标志没认出来')
+    assert(r.shell.eval === 'curl', 'eval 里的 curl 没认出来')
+    assert(r.destructive.嵌套的递归删 === 'rm -rf', 'bash -c 里的 rm -rf 没要求确认')
+    assert(r.destructive.嵌套的强制推送 === 'git push', 'sh -c 里的强制推送没要求确认')
+    assert(r.destructive.普通删不算 === null && r.destructive.ls不算 === null, '把日常命令也拦成毁东西的了')
+  })
+
+  await test('子命令前面垫着带值的标志时照样认得出', () => {
+    // `git -C /repo push`、`npm --prefix ./app install` 比裸写还常见；
+    // 「第一个不以 - 开头的词」拿到的是那个路径，子命令就永远匹配不上。
+    assert(r.shell.git带C === 'git push', 'git -C 之后的 push 没认出来')
+    assert(r.shell.npm带prefix === 'npm install', 'npm --prefix 之后的 install 没认出来')
+    // 反过来也不能过头：扫遍全部参数找关键字会把这种查询也拦下来。
+    assert(r.shell.git日志里搜push === null, 'git log --grep push 被当成了推送')
+  })
+
+  await test('策略够得着目录：serverOf 这个接缝类型检查看不见，得靠断言守着', () => {
+    // 策略是 `reflect.get('catalog') as { serverOf?… }` 取的服务——目录那边没有这个
+    // 方法，tsc 一声不吭，而运行时每一次 mcp_* 调用都会被判成「不属于任何已授权的
+    // MCP 服务器」：边界一条没关，Bot 却连一把连接器都用不了。
+    assert(r.seam.目录给得出serverOf, 'CatalogService 上没有 serverOf，策略够不着 MCP 的归属')
+    assert(r.seam.策略认得出未注册的服务器, '认不出归属时没有 fail closed')
+  })
+
+  await test('MCP 风险：perm 是权威，动词只往严了推', () => {
+    assert(!r.mcpRisk.只读的查询.includes('write'), '只读的查询被判成写')
+    // 连接器合成出来的服务器 perm 默认就是「只读」，而里面躺着 SEND_EMAIL——
+    // 只信 perm 的话，「对外发送前先确认」这条边界对连接器整个失效。
+    assert(r.mcpRisk.只读服务器上的发送.includes('write'), '只读服务器上的 SEND 没被判成写')
+    assert(r.mcpRisk.删除.includes('destructive'), 'DELETE 没被判成破坏性')
+  })
+}

@@ -13,7 +13,7 @@ import type { ImageRef, Mention } from '../agent/index.ts'
  * 所以下面不需要任何「服务还在吗」的防御判断。
  */
 export const name = 'satu-web'
-export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace']
+export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace', 'policy']
 
 export interface Config {
 }
@@ -189,6 +189,46 @@ export function apply(ctx: Context, _config: Config = {}) {
     // 拦不住一条其实早就被取消掉的消息。
     res.status = r === 'started' ? 409 : 404
     res.json({ error: r === 'started' ? '已经开始执行' : '没有这条排队消息' })
+  })
+
+  /**
+   * 还等着人拍板的高风险调用。
+   *
+   * **刷新页面之后要能回到那张卡片。** 卡片本身是从会话事件里折出来的（`tool/approval`
+   * 的 pending），但「它现在还等不等」只有这个进程知道：等待方是一个内存里的 Promise，
+   * 进程重启、或者已经超时之后，日志上那条 pending 还在，点它却什么都不会发生。所以
+   * 界面拿这条路核对一次——列表里没有的，那张卡片就该画成灰的。
+   */
+  ctx.server.get('/api/sessions/:id/approvals', async (req, res) => {
+    res.json({
+      pending: ctx.policy.approvals.list(req.params.id),
+      granted: ctx.policy.approvals.grantedIn(req.params.id),
+    })
+  })
+
+  /**
+   * 批准 / 拒绝一次调用。**这一下直接放行那次工具执行**，不是发一句话给模型再由它决定。
+   *
+   * 已经结束的那条回 **409**，不是静默成功：两个标签页各点一次、或者点的同时正好超时，
+   * 是必然会撞上的竞态。回 200 的话人会以为自己批准了什么，而那次调用其实早就被按
+   * 拒绝处理掉了。
+   */
+  ctx.server.post('/api/sessions/:id/approvals/:callId', async (req, res) => {
+    const body = (await req.json().catch(() => ({}))) as { decision?: string; scope?: string }
+    const decision = body.decision === 'approve' ? 'approve' : body.decision === 'deny' ? 'deny' : ''
+    if (!decision) {
+      res.status = 400
+      res.json({ error: 'decision 只能是 approve 或 deny' })
+      return
+    }
+    const scope = body.scope === 'session' ? 'session' : 'once'
+    const r = ctx.policy.approvals.decide(req.params.id, req.params.callId, decision, scope)
+    if (r === 'ok') {
+      res.json({ ok: true, decision, scope })
+      return
+    }
+    res.status = 409
+    res.json({ error: '这条确认已经结束了' })
   })
 
   /** 中止当前这一轮。 */

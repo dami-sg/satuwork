@@ -80,11 +80,18 @@ function noteBotEvent(botId, ev) {
   const before = sum.state + '|' + sum.lastAt + '|' + sum.lastText
   if (ev.type === 'turn/start') sum.state = 'busy'
   else if (ev.type === 'turn/end') sum.state = 'idle'
-  // **「待人工处理」还没有数据源。** 系统里的「需审批」目前只是 MCP 的配置项
-  // （routes.ts 的 MCP_PERMS），运行时并没有「停下来等人点头」这件事——bot 要么在跑，
-  // 要么跑完了。等哪天 bot 会为此发一条事件（比如 turn 挂起等审批），在这里加一行
-  // `sum.state = 'review'` 就接上了，点的样式和三态判断都已经在位。
-  else if (ev.type === 'user/message' || ev.type === 'assistant/message') {
+  // **「待人工处理」现在有数据源了。** 高风险确认会让那次工具调用真的停在席位上等人
+  // 拍板（policy/approvals.ts），席位为此发一条 `tool/approval`。名单上那颗点因此有了
+  // 第三态：不是在跑，也不是跑完了，而是**在等你**——而人多半正在别的 Bot 那一屏，
+  // 名单是他唯一会瞥到的地方。
+  else if (ev.type === 'tool/approval') {
+    // 终态**只把 review 翻回 busy**，不碰别的状态。无条件写 busy 是错的：点了停止那一
+    // 下，`agent.abort()` 不等已经开跑的工具（见 bot 的 bridgeTools），于是 turn/end
+    // 完全可能排在这条终态前面到达——那样这颗点会从「空闲」被翻回「正在执行」，然后
+    // 一直停在那儿，直到下一轮开始。
+    if ((ev.data || {}).state === 'pending') sum.state = 'review'
+    else if (sum.state === 'review') sum.state = 'busy'
+  } else if (ev.type === 'user/message' || ev.type === 'assistant/message') {
     const text = messageText((ev.data || {}).message) || (ev.data || {}).text || ''
     if (text) {
       sum.lastText = text.replace(/\s+/g, ' ').trim().slice(0, 120)
@@ -456,6 +463,39 @@ function fold(events, live) {
         hit.files = Array.isArray(data.files) ? data.files : null
       }
       if (assistant) assistant.endTime = at
+    } else if (type === 'tool/approval') {
+      /**
+       * 高风险确认。**挂在助手那一块上，不另起一块。**
+       *
+       * 另起一块的话，卡片会插在正在跑的这一轮中间：上面是已经吐出来的正文、下面是
+       * 后续的正文，而工具药丸和它的结果分属两块——`tool/result` 按 callId 认药丸，
+       * 认不回去就会把一次成功的调用标成失败。挂在块上，位置就在那颗药丸底下，
+       * 也正是人要找它的地方。
+       */
+      if (!assistant) {
+        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        blocks.push(assistant)
+      }
+      const list = assistant.approvals || (assistant.approvals = [])
+      const cur = list.find((a) => a.callId === data.callId)
+      if (cur) {
+        // 同一个 callId 会来两条：先 pending，人点了之后再来终态。取最后一条。
+        cur.state = data.state || cur.state
+        if (data.scope) cur.scope = data.scope
+      } else {
+        list.push({
+          callId: data.callId,
+          name: data.name || '',
+          args: typeof data.arguments === 'string' ? data.arguments : '',
+          reason: data.reason || '',
+          state: data.state || 'pending',
+          expiresAt: Number(data.expiresAt) || 0,
+          // 这条 pending 落在日志的第几行。核对现况时拿它跟快照的水位比——
+          // **不拿时间比**，那是两台机器各自的钟（见 approvalDead）。
+          seq: ev.seq,
+        })
+      }
+      assistant.endTime = at
     } else if (type === 'turn/start') {
       status = 'running'
     } else if (type === 'turn/end') {
@@ -621,9 +661,61 @@ async function hydrateChat(botId, sessionId) {
     refreshSum(row)
     noteChatPage(sessionId, { firstSeq: data.firstSeq, hasMore: data.hasMore })
     if (state.chatSessionId === sessionId) paintChat()
+    void syncApprovals(botId, sessionId)
   })()
   row.hydrating = job
   return job
+}
+
+/**
+ * 核对一遍「哪几条确认还真的等着」。
+ *
+ * 卡片本身是从会话事件折出来的，可日志只说「那时候它在等」。**等待方是席位进程里的
+ * 一个 Promise**：席位重启过、或者那条早就超时而这台浏览器当时没连着，日志上那条
+ * pending 就永远停在那儿——人点下去什么都不会发生，只换回一句 409。
+ *
+ * 所以拉一次现况，比它早的 pending 只要不在清单里就画成失效。**「比它早」按 seq 算，
+ * 不按时间算**：事件上的 time 是席位盖的，而「现在几点」是浏览器这边的——两台机器的
+ * 钟差几十秒是常态（虚拟机漂移），席位慢一点的话，拉取之后新冒出来的确认会显得比快照
+ * 还早，于是一张真的在等的卡片被画成失效、按钮消失，人只能眼看着它五分钟后超时。
+ * seq 是会话日志的行号，两边看到的是同一个数，没有这个问题。
+ *
+ * 水位取在**发请求之前**：那之后落下的事件，席位的回执里可能来不及包含。
+ */
+function maxSeqOf(events) {
+  let max = 0
+  for (const ev of events || []) {
+    const seq = Number(ev && ev.seq)
+    if (Number.isFinite(seq) && seq > max) max = seq
+  }
+  return max
+}
+
+async function syncApprovals(botId, sessionId) {
+  const upto = maxSeqOf(botStreamOf(botId).events)
+  try {
+    const data = await api('GET', `/runtime/sessions/${encodeURIComponent(sessionId)}/approvals`)
+    const ids = new Set(((data && data.pending) || []).map((p) => p.callId))
+    state.chatApprovals = { sessionId, ids, upto }
+    if (state.chatSessionId === sessionId) paintChat()
+  } catch {
+    // 席位没上线、或者这台席位还是老版本没有这条路由。**什么都不做**：宁可留着一张
+    // 可能点不动的卡片，也不要把一条真的在等的确认画成失效——那会让人以为不用管它。
+  }
+}
+
+/**
+ * 这张卡片还点得动吗。
+ *
+ * 只有一条判据，而且必须是「确定不在等了」：这条确认在核对那一刻之前就落了盘，
+ * 而席位报回来的待办里没有它。超时那一路不靠这里——席位超时时会自己补一条终态事件，
+ * 那条走同一条流回来，比在浏览器这边拿两台机器的钟去猜可靠得多。
+ */
+function approvalDead(a) {
+  if (a.state !== 'pending') return false
+  const snap = state.chatApprovals
+  if (!snap || snap.sessionId !== state.chatSessionId || !snap.upto) return false
+  return Boolean(a.seq && a.seq <= snap.upto && !snap.ids.has(a.callId))
 }
 
 /**
@@ -1188,6 +1280,9 @@ const ICON_BOT =
   '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>'
 const ICON_TOOL =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>'
+/** 确认卡上那面盾。用盾不用感叹号：这是一道**边界**，不是一次故障。 */
+const ICON_SHIELD =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>'
 const ICON_DOWN =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>'
 const ICON_FILE =
@@ -1376,6 +1471,46 @@ function inlineFileChips(host, files) {
   }
 }
 
+/** 终态那一行怎么说。四种不批准分开讲，合成一句「已拒绝」会把后三种说成人的决定。 */
+const APPROVAL_DONE = {
+  approved: () => t('已批准，这次调用继续执行了。', 'Approved — the call went through.'),
+  denied: () => t('已拒绝，这次调用没有执行。', 'Denied — the call did not run.'),
+  timeout: () => t('一直没人回应，已按不执行处理。', 'Nobody responded; treated as not approved.'),
+  aborted: () => t('这一轮被停止了，确认作废。', 'The turn was stopped; this request is void.'),
+}
+
+/**
+ * 一张确认卡。
+ *
+ * **参数要摆出来。** 「Bot 想调用 send_email，批准吗」这句话本身没有信息量——人要批的
+ * 是「发给谁、写了什么」，看不到这些就只能凭信任点，那和没有这个开关是一样的。
+ */
+function approvalHtml(a) {
+  const dead = approvalDead(a)
+  const pending = a.state === 'pending' && !dead
+  const args = prettyArgs(a.args)
+  const acts = pending
+    ? `<div class="sw-approval-acts">` +
+      `<button type="button" class="btn btn-primary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="once">${esc(t('批准这一次', 'Approve once'))}</button>` +
+      `<button type="button" class="btn btn-secondary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="session">${esc(t('这次对话都批准', 'Approve for this chat'))}</button>` +
+      `<button type="button" class="btn btn-ghost" data-act="chat-deny" data-call="${esc(a.callId)}">${esc(t('拒绝', 'Deny'))}</button>` +
+      `</div>`
+    : `<div class="sw-approval-done">${esc(
+        dead
+          ? t('这条确认已经失效了（席位重启或已超时），那次调用没有执行。', 'This request expired (seat restarted or timed out); the call did not run.')
+          : (APPROVAL_DONE[a.state] || APPROVAL_DONE.denied)(),
+      )}</div>`
+  return (
+    `<div class="sw-approval" data-state="${esc(dead ? 'expired' : a.state)}" data-call="${esc(a.callId)}">` +
+    `<div class="sw-approval-head">${ICON_SHIELD}<span>${esc(t('需要你确认', 'Needs your approval'))}</span></div>` +
+    `<div class="sw-approval-why">${esc(a.reason)}</div>` +
+    `<div class="sw-approval-tool"><code>${esc(a.name)}</code></div>` +
+    (args ? `<pre class="sw-approval-args">${esc(clip(args))}</pre>` : '') +
+    acts +
+    `</div>`
+  )
+}
+
 /** 一条消息的外壳。正文和工具条留空，交给 updateRow 填——它俩每帧都可能变。 */
 function rowShell(b, key) {
   const account = (state.me && state.me.account) || {}
@@ -1502,6 +1637,28 @@ function updateRow(el, b, streaming) {
     // 这一批节点刚被换掉。开着的悬浮窗要么跟着换到新节点上，要么关掉——
     // 「调用中 → 完成」正好是人盯着它看的那一刻，不该在那时候闪没。
     refreshToolPop()
+  }
+
+  /**
+   * 高风险确认卡。摆在工具药丸**底下**——它说的就是那颗还在转的药丸在等什么。
+   *
+   * 和别处一样按签名跳过重绘：不这么做的话，流式那几帧会把卡片连同上面的按钮一起
+   * 换掉，人正要点的那一下就落空了。
+   */
+  const apps = b.approvals || []
+  let apbox = bubble.querySelector('.sw-approvals')
+  if (apps.length && !apbox) {
+    apbox = document.createElement('div')
+    apbox.className = 'sw-approvals'
+    bubble.appendChild(apbox)
+  }
+  if (apbox) {
+    const apSig = apps.map((a) => a.callId + ':' + a.state + (approvalDead(a) ? ':dead' : '')).join('|')
+    if (apbox.getAttribute('data-sig') !== apSig) {
+      apbox.setAttribute('data-sig', apSig)
+      apbox.innerHTML = apps.map(approvalHtml).join('')
+      apbox.hidden = !apps.length
+    }
   }
   paintRowTime(el, b, streaming)
 }
@@ -3387,6 +3544,37 @@ async function abortChat() {
   } catch (err) {
     flash('err', t('没能中止：') + (err && err.message ? err.message : ''))
     render()
+  }
+}
+
+/**
+ * 批准 / 拒绝一次高风险调用。
+ *
+ * **按下去先把卡片停用。** 终态是靠 SSE 那条事件回来的，一来一回几百毫秒，这期间
+ * 按钮还亮着——人会以为没点上再点一次，而第二次点的是一条已经结束的确认，席位回
+ * 409，界面上无端冒出一句「这条确认已经结束了」。
+ *
+ * 失败了要把它恢复回去：那次真的没送到，卡片得还能点。
+ */
+async function decideApproval(callId, decision, scope) {
+  const sessionId = state.chatSessionId
+  if (!sessionId || !callId) return
+  const box = [...document.querySelectorAll('.sw-approval')].find((el) => el.getAttribute('data-call') === callId)
+  if (box) {
+    if (box.getAttribute('data-busy') === '1') return
+    box.setAttribute('data-busy', '1')
+  }
+  try {
+    await api(
+      'POST',
+      '/runtime/sessions/' + encodeURIComponent(sessionId) + '/approvals/' + encodeURIComponent(callId),
+      { decision, scope: scope || 'once' },
+    )
+  } catch (err) {
+    if (box) box.removeAttribute('data-busy')
+    // 409 是「这条早就结束了」——超时、被停止、或者另一个标签页先点了。它不是错误，
+    // 但必须说出来：人点了一下什么都没发生才是最糟的。
+    flash('err', err && err.message ? err.message : t('没能提交这次确认', 'Could not submit that decision'))
   }
 }
 
