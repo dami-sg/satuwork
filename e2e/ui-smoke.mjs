@@ -971,6 +971,334 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.stopChatStream()
     })
 
+    /* ── 历史和实时拆成两条路 ──────────────────────────────────────
+       历史走 HTTP（hydrateChat），实时走 SSE，而流上还垫一轮兜底：名单要那行灰字，
+       点进去的第一帧也要有东西可看。那一轮和 HTTP 拉回来的最后一轮**必然重叠**，
+       所以两头都要挡：进桶时「比尾巴大才收」，补历史时「比头小才收」。
+       两种到达顺序各测一遍——谁先到取决于网络，不该由它决定画出来对不对。
+       ────────────────────────────────────────────────────────── */
+
+    /** 一轮完整对话，seq 连号。 */
+    const chatTurn = (base, n) => [
+      { seq: base, time: base * 1000, type: 'user/message', data: { message: { content: [{ type: 'text', text: '问题' + n }] }, source: { kind: 'user' } } },
+      { seq: base + 1, time: base * 1000, type: 'turn/start', data: { turn: n } },
+      { seq: base + 2, time: base * 1000, type: 'assistant/message', data: { turn: n, message: { content: [{ type: 'text', text: '回答' + n }] } } },
+      { seq: base + 3, time: base * 1000, type: 'turn/end', data: { turn: n, reason: 'completed' } },
+    ]
+    const THREE_TURNS = [...chatTurn(1, 1), ...chatTurn(5, 2), ...chatTurn(9, 3)]
+
+    /** 接管 /history 和 /events 的 app 实例。history 回的是三轮全量。 */
+    const twoPathUi = async (sse, onHistory) => {
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/history')) {
+            if (onHistory) onHistory(path)
+            return new Response(JSON.stringify({ events: THREE_TURNS, firstSeq: 1, hasMore: false }), {
+              headers: { 'content-type': 'application/json' },
+            })
+          }
+          if (path.includes('/events')) return sse.response
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      return ui
+    }
+
+    await test('流先到、历史后到：重叠的那一轮不画两遍', async () => {
+      const sse = fakeSse()
+      const seen = []
+      const ui = await twoPathUi(sse, (path) => seen.push(path))
+      const row = ui.botStreamOf('bot-two-path')
+      row.sessionId = 's-two-a'
+      ui.state.chatBotId = 'bot-two-path'
+      ui.state.chatSessionId = 's-two-a'
+      ui.state.chatEvents = row.events
+
+      const run = ui.startChatStream('s-two-a', 0, 'bot-two-path')
+      // 流垫的那一轮 = 最后一轮，和 history 的尾巴完全重叠。
+      for (const ev of chatTurn(9, 3)) sse.push(ev)
+      sse.push({ type: 'replay/done', live: false, firstSeq: 9, hasMore: true })
+      for (let i = 0; i < 200 && row.events.length < 4; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(row.events.length === 4, `流垫的一轮没收全：${row.events.length}`)
+
+      await ui.hydrateChat('bot-two-path', 's-two-a')
+      const seqs = row.events.map((e) => e.seq)
+      assert(
+        JSON.stringify(seqs) === JSON.stringify(THREE_TURNS.map((e) => e.seq)),
+        `归并结果不对（该是 1..12 无重复）：${JSON.stringify(seqs)}`,
+      )
+      const folded = ui.fold(row.events)
+      assert(folded.blocks.length === 6, `该是 3 问 3 答共 6 条，实际 ${folded.blocks.length}`)
+      // 游标只许往前推：replay/done 说的是 9，HTTP 说的是 1，最后要留 1。
+      assert(ui.chatPages.get('s-two-a').firstSeq === 1, `翻页游标被缩回去了：${JSON.stringify(ui.chatPages.get('s-two-a'))}`)
+      assert(seen.length === 1 && seen[0].includes('turns=' + ui.CHAT_TAIL_TURNS), `历史那一跳不对：${JSON.stringify(seen)}`)
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
+    await test('历史先到、流后到：重放段整段被认成重复', async () => {
+      const sse = fakeSse()
+      const ui = await twoPathUi(sse)
+      const row = ui.botStreamOf('bot-two-path')
+      row.sessionId = 's-two-b'
+      ui.state.chatBotId = 'bot-two-path'
+      ui.state.chatSessionId = 's-two-b'
+      ui.state.chatEvents = row.events
+
+      await ui.hydrateChat('bot-two-path', 's-two-b')
+      assert(row.events.length === 12, `历史没进桶：${row.events.length}`)
+      assert(row.hydrated === true, 'hydrated 没置位')
+
+      const run = ui.startChatStream('s-two-b', 0, 'bot-two-path')
+      for (const ev of chatTurn(9, 3)) sse.push(ev)
+      sse.push({ type: 'replay/done', live: false })
+      await new Promise((r) => setTimeout(r, 120))
+      assert(row.events.length === 12, `重放段被重复收下了：${row.events.length}`)
+
+      // 真正的新事件照收。
+      for (const ev of chatTurn(13, 4)) sse.push(ev)
+      for (let i = 0; i < 200 && row.events.length < 16; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(row.events.length === 16, `新一轮没收进来：${row.events.length}`)
+      assert(row.sum.lastText === '回答4', `名单摘要不对：${JSON.stringify(row.sum.lastText)}`)
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
+    await test('流上只垫一轮，二十轮那份改走 HTTP', async () => {
+      // 名单上每个 Bot 都挂一条流。以前每条一上来都推二十轮历史，几个 Bot 乘二十轮
+      // 全在主线程上 parse，换来的只是侧栏一行字。
+      const sse = fakeSse()
+      let streamUrl = ''
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/events')) {
+            streamUrl = path
+            return sse.response
+          }
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-tail'
+      const run = ui.startChatStream('s-tail')
+      for (let i = 0; i < 100 && !streamUrl; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(streamUrl.includes('tail=' + ui.STREAM_TAIL_TURNS), `流上的 tail 不对：${streamUrl}`)
+      assert(ui.STREAM_TAIL_TURNS === 1, `流上该只垫一轮，实际 ${ui.STREAM_TAIL_TURNS}`)
+      assert(ui.CHAT_TAIL_TURNS === 20, `历史一页该是二十轮，实际 ${ui.CHAT_TAIL_TURNS}`)
+      sse.close()
+      await run
+      ui.stopChatStream()
+    })
+
+    await test('拉历史途中会话被重建：这一份作废，不串台', async () => {
+      const sse = fakeSse()
+      const ui = await twoPathUi(sse)
+      const row = ui.botStreamOf('bot-two-path')
+      row.sessionId = 's-old'
+      ui.state.chatBotId = 'bot-two-path'
+      ui.state.chatSessionId = 's-old'
+      ui.state.chatEvents = row.events
+      const job = ui.hydrateChat('bot-two-path', 's-old')
+      // 席位重建了会话——这份历史属于另一条对话。
+      ui.resetBotStream(row)
+      row.sessionId = 's-new'
+      await job
+      assert(row.events.length === 0, `串台的历史进桶了：${row.events.length}`)
+      assert(row.hydrated === false, '作废的那次不该置 hydrated')
+      sse.close()
+    })
+
+    await test('席位重建了会话：旧流被掐掉，新会话真的连得上', async () => {
+      // resetBotStream 一度只清数据（事件、摘要、hydrated），把 row.ac 留着。而调用方
+      // 紧接着就把 row.sessionId 改成新的，于是 startChatStream 的「已经在跑」闸
+      // （row.sessionId === sessionId && row.ac）误触发、直接 return——新会话一条流都
+      // 开不出来。更糟的是旧流还活着，继续往这只刚清空的桶里灌旧会话的事件。
+      const first = fakeSse()
+      const second = fakeSse()
+      const opened = []
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/history')) {
+            return new Response(JSON.stringify({ events: [], firstSeq: null, hasMore: false }), {
+              headers: { 'content-type': 'application/json' },
+            })
+          }
+          if (path.includes('/events')) {
+            opened.push(path)
+            return opened.length === 1 ? first.response : second.response
+          }
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      const row = ui.botStreamOf('bot-rebuilt')
+      ui.state.chatBotId = 'bot-rebuilt'
+      ui.state.chatSessionId = 's-old'
+      ui.state.chatEvents = row.events
+      void ui.startChatStream('s-old', 0, 'bot-rebuilt')
+      for (let i = 0; i < 200 && !opened.length; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(row.ac, '第一条流没记到行上')
+
+      // 席位重建 —— 走 ensureChatSession 冷路径的那两步。
+      ui.resetBotStream(row)
+      assert(!row.ac, '旧流的 ac 没清掉，「已经在跑」闸会拿它误认新会话')
+      row.sessionId = 's-new'
+      ui.state.chatSessionId = 's-new'
+      void ui.startChatStream('s-new', 0, 'bot-rebuilt')
+      for (let i = 0; i < 200 && opened.length < 2; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(opened.length === 2, `新会话的流没开出来：${JSON.stringify(opened)}`)
+
+      // 掐掉的那条就算还有半截数据在手，也不该落进新会话的桶里。
+      first.push({ seq: 99, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '旧会话的话' }] }, source: { kind: 'user' } } })
+      await new Promise((r) => setTimeout(r, 60))
+      assert(
+        !JSON.stringify(row.events).includes('旧会话的话'),
+        `旧会话的事件串进新会话了：${JSON.stringify(row.events)}`,
+      )
+      first.close()
+      second.close()
+      ui.stopChatStream()
+    })
+
+    await test('席位重建时正在拉历史：新会话不会被那把闸挡在门外', async () => {
+      // 「别拉两遍」的闸认的是 row.hydrating。它拉的是**旧**会话的历史，重建之后不清
+      // 掉的话，新会话这次 hydrate 会拿到旧会话那只 promise 就直接返回；旧的一醒来
+      // 发现串台自己走了，于是新会话的历史从此没人去拉。
+      const sse = fakeSse()
+      const asked = []
+      let release
+      const gate = new Promise((r) => (release = r))
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/history')) {
+            asked.push(path)
+            // 第一次（旧会话那次）挂住，制造「正在飞」的窗口。
+            if (asked.length === 1) await gate
+            return new Response(JSON.stringify({ events: THREE_TURNS, firstSeq: 1, hasMore: false }), {
+              headers: { 'content-type': 'application/json' },
+            })
+          }
+          if (path.includes('/events')) return sse.response
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      const row = ui.botStreamOf('bot-hydrating')
+      row.sessionId = 's-old'
+      ui.state.chatBotId = 'bot-hydrating'
+      ui.state.chatSessionId = 's-old'
+      ui.state.chatEvents = row.events
+      const stale = ui.hydrateChat('bot-hydrating', 's-old')
+      for (let i = 0; i < 200 && !asked.length; i++) await new Promise((r) => setTimeout(r, 5))
+      assert(row.hydrating, '在飞的 hydrate 没记到行上')
+
+      ui.resetBotStream(row)
+      assert(!row.hydrating, '在飞的 hydrate 没清掉，新会话会被它挡住')
+      row.sessionId = 's-new'
+      ui.state.chatSessionId = 's-new'
+      await ui.hydrateChat('bot-hydrating', 's-new')
+      assert(asked.length === 2, `新会话没去拉历史：${JSON.stringify(asked)}`)
+      assert(row.events.length === 12, `新会话的历史没进桶：${row.events.length}`)
+      assert(row.hydrated === true, '新会话的 hydrated 没置位')
+
+      release()
+      await stale
+      // 旧那次醒来发现串台，不该把自己那份塞进来，也不该改动结论。
+      assert(row.events.length === 12, `串台的历史挤进来了：${row.events.length}`)
+      sse.close()
+    })
+
+    await test('历史接口回了个空 body：不炸，也不把这个 Bot 永久钉死', async () => {
+      // api() 在 body 为空时返回 null（Gateway 的 proxyJson 同样把席位的空 body 转成
+      // 200 + null）。裸取 data.firstSeq 会当场抛，而那时 hydrated 已经置位——于是这个
+      // Bot 从此不再重拉，永远停在流垫的那一轮。
+      const sse = fakeSse()
+      let calls = 0
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/history')) {
+            calls++
+            if (calls === 1) return new Response('', { headers: { 'content-type': 'application/json' } })
+            return new Response(JSON.stringify({ events: THREE_TURNS, firstSeq: 1, hasMore: false }), {
+              headers: { 'content-type': 'application/json' },
+            })
+          }
+          if (path.includes('/events')) return sse.response
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      const row = ui.botStreamOf('bot-empty-body')
+      row.sessionId = 's-empty'
+      ui.state.chatBotId = 'bot-empty-body'
+      ui.state.chatSessionId = 's-empty'
+      ui.state.chatEvents = row.events
+
+      await ui.hydrateChat('bot-empty-body', 's-empty')
+      assert(row.hydrated === false, '空 body 当成拉到了，这个 Bot 就再也不会重拉')
+      // 第二次要真的重来一遍，并且能拿到东西。
+      await ui.hydrateChat('bot-empty-body', 's-empty')
+      assert(calls === 2, `没有重试：calls=${calls}`)
+      assert(row.events.length === 12, `重试之后历史还是没进桶：${row.events.length}`)
+      sse.close()
+    })
+
+    await test('翻页游标只许往前推——loadOlderChat 也不例外', async () => {
+      // chatPages.firstSeq 有三个写入方（replay/done、hydrateChat、loadOlderChat），
+      // 而它们看到的窗口不一样大。窄的那份晚到时如果照写，游标就退回去了：下一次
+      // 「加载更早」取的是一页手上全有的事件，归并那两道闸把它们全滤掉，按钮点了
+      // 没反应。
+      const sse = fakeSse()
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/history')) {
+            // 这一页比手上知道的**窄**：从 seq 5 开始，而 hydrate 已经知道 1 了。
+            return new Response(JSON.stringify({ events: chatTurn(5, 2), firstSeq: 5, hasMore: true }), {
+              headers: { 'content-type': 'application/json' },
+            })
+          }
+          if (path.includes('/events')) return sse.response
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      const row = ui.botStreamOf('bot-cursor')
+      row.sessionId = 's-cursor'
+      ui.state.chatBotId = 'bot-cursor'
+      ui.state.chatSessionId = 's-cursor'
+      ui.state.chatEvents = row.events
+      row.events.push(...THREE_TURNS)
+      // 先记下宽的那份（hydrateChat 拉回二十轮时的样子）。
+      ui.chatPages.set('s-cursor', { firstSeq: 1, hasMore: true, loading: false })
+
+      await ui.loadOlderChat('s-cursor')
+      const page = ui.chatPages.get('s-cursor')
+      assert(page.firstSeq === 1, `游标被窄的那一页推回去了：${JSON.stringify(page)}`)
+      assert(page.loading === false, `翻完了没解灰：${JSON.stringify(page)}`)
+      sse.close()
+    })
+
     await test('bot 说了 replay/done 就立刻开闸，不用等静默', async () => {
       const sse = fakeSse()
       const ui = loadApp({

@@ -379,6 +379,38 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       )
     })
 
+    await test('历史那条路：不带 before 就是「最新的一页」，和流是同一份事件', async () => {
+      // 打开对话时前端并发发两个请求：历史走这条 HTTP，实时走 SSE（只垫一轮）。整块
+      // 设计压在一个前提上——`?turns=N` 不带 `before` 返回的是**最近** N 轮，而不是
+      // 最早的 N 轮。切片函数本身有 replay-slice 那几条钉着，这里钉的是它经 Gateway
+      // 反代之后那一路：路径、鉴权、游标字段都得原样出来。
+      const r = await req(gwBase, 'GET', `/runtime/sessions/${encodeURIComponent(sessionId)}/history?turns=20`, {
+        token: adminTok,
+      })
+      assert(r.status === 200, `history ${r.status} ${JSON.stringify(r.json)}`)
+      const events = (r.json && r.json.events) || []
+      assert(events.length > 0, `历史是空的：${JSON.stringify(r.json).slice(0, 300)}`)
+      assert(typeof r.json.hasMore === 'boolean', `没带 hasMore（「加载更早」全靠它）：${JSON.stringify(r.json).slice(0, 200)}`)
+      assert(
+        r.json.firstSeq === events[0].seq,
+        `firstSeq 和头一条对不上（它是往前翻的游标）：${r.json.firstSeq} vs ${events[0].seq}`,
+      )
+      // seq 必须单调——归并靠的就是这个（进桶「比尾巴大才收」、补历史「比头小才收」）。
+      for (let i = 1; i < events.length; i++) {
+        assert(events[i].seq > events[i - 1].seq, `seq 不单调：${events[i - 1].seq} → ${events[i].seq}`)
+      }
+      // 和流上那份是同一批事件：这一路上的 ping 在两边都得找得到。
+      const blob = JSON.stringify(events)
+      assert(blob.includes(MARKER), `历史里没有这一轮的 ping，多半取成了最早那几轮：${blob.slice(0, 400)}`)
+    })
+
+    await test('历史那条路也认账号：别人的会话拉不到', async () => {
+      const r = await req(gwBase, 'GET', `/runtime/sessions/${encodeURIComponent(sessionId)}/history?turns=20`, {
+        token: memberTok,
+      })
+      assert(r.status !== 200, `成员把管理员的历史拉走了：${r.status} ${JSON.stringify(r.json).slice(0, 200)}`)
+    })
+
     await test('bot 真的会写日志——那 16 处 ?.warn?.() 不能又是空转', async () => {
       // 挂上 logger 服务之前，cordis.yml 里没有任何 logger 插件，ctx.logger 是
       // undefined，代码里那 16 处可选链一条都没输出过。席位的 journal 里除了 systemd
