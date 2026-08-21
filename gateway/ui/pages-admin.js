@@ -469,7 +469,18 @@ function providersPage() {
         <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);">
           <div>
             <h1 style="font-size: 24px; margin: 0 0 4px;">${t('供应商')}</h1>
-            <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('内置供应商配好密钥才列在这里；自定义供应商建出来就一直在。密钥只存在 Gateway，保存后不会回显。')}</p>
+            <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t(
+              '这一页只配模型供应商：内置的配好密钥才列出来，自定义的建出来就一直在。密钥只存在 Gateway，保存后不会回显。',
+              'Model providers only. Built-in ones appear once a key is saved; custom ones stay once created. Keys live only on the Gateway and are never echoed back.',
+            )}</p>
+            ${/* 连接器和搜索后端的密钥跟模型供应商同住一张表，但它们不是供应商——
+                  一行里「几个模型、测一下、哪个角色在用」这些列对它们全都答不上来。
+                  清单已经在接口那头滤掉了（见 modelProviderCreds），这里把去处说明白，
+                  免得有人在这一页找 Composio 找半天。 */ ''}
+            <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted-foreground);">${t(
+              '连接器（Composio）的密钥在「连接器」页存，网页搜索与提取后端在「工具配置」页存——它们不是模型供应商，不会出现在这份清单里。',
+              'Connector keys (Composio) are saved on the Connectors page and web search/extract backends on the Tools page — neither is a model provider, so neither shows up here.',
+            )}</p>
           </div>
           <div style="display: flex; gap: var(--space-2); flex: none;">
             ${isOwner() ? `<button type="button" class="btn btn-secondary" data-act="prov-new">${t('添加自定义供应商')}</button>` : ''}

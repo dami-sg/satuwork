@@ -6,7 +6,7 @@ import { HttpError, json, type Router } from '../http.ts'
 import { PULL_ERROR, pullSessionEvents } from '../lib/machines.ts'
 import { companyMachineOf } from '../deploy.ts'
 import { intField } from '../lib/validate.ts'
-import { publicPlatformCred, publicSessionIndex, sessionCursorOf } from '../lib/org.ts'
+import { modelProviderCreds, publicPlatformCred, publicSessionIndex, sessionCursorOf } from '../lib/org.ts'
 import { rangeQuery, requireOrg, requireUser } from '../lib/guards.ts'
 import { seatBearer } from '../lib/runtime.ts'
 import { sessionPageLimit } from '../db.ts'
@@ -19,7 +19,9 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   router.get('/orgs/:id/credentials', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireOrg(account, req.params.id)
-    json(res, 200, { credentials: (await db.platformCredentials()).map(publicPlatformCred) })
+    // 和平台那条同一个口径：只报模型供应商。公司管理员这一屏就叫「供应商」，
+    // 连接器和搜索后端漏进来同样是假供应商，而他连改都改不了。
+    json(res, 200, { credentials: modelProviderCreds(await db.platformCredentials()).map(publicPlatformCred) })
   })
 
   router.post('/orgs/:id/credentials', async (req, res) => {
