@@ -117,13 +117,18 @@ function appView() {
   const email = account.email || ''
   const displayName = account.name || email || '…'
   const initial = initialOf(account)
-  const nav = navForRole()
-  const home = nav[0]
-  const rest = nav.slice(1)
   const roster = chatRosterNav()
-  const groupLabel = isOwner() ? t('平台') : isAdmin() ? t('公司') : ''
-  const mainNav = home ? navItem(home) : ''
-  const restNav = rest.map(navItem).join('')
+  // 侧栏按组画。组标题原来只有一条（「平台」/「公司」），说的是「你在哪一侧」——可
+  // 平台管理员只有平台这一侧，那句话每次都在重复一件不会变的事。现在它换成了组名，
+  // 说的是「这几条在管什么」，那才是站在菜单前要问的。
+  const navHtml = navGroupsForRole()
+    .map(
+      (group) =>
+        `<div class="satu-navgroup">${
+          group.label ? `<p class="satu-group">${esc(t(group.label))}</p>` : ''
+        }${group.items.map(navItem).join('')}</div>`,
+    )
+    .join('')
   // 右栏和 header 同高：把 main 做成两行两列的 grid，侧栏跨两行占右列。做成 header
   // 下面的兄弟节点就顶不上去了。
   const aside = pageAside()
@@ -149,11 +154,10 @@ function appView() {
               藏在某个设置页里。owner 没有席位也没有名册，那一侧不出现。 */ ''}
         ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="new-bot">${svg(['M12 5v14', 'M5 12h14'], 15)} <span>${t('新建 Bot', 'New bot')}</span></button>`}
         ${
-          mainNav || restNav
+          navHtml
             ? `<div class="satu-navfoot">
           <div class="satu-sep"></div>
-          ${groupLabel ? `<p class="satu-group">${esc(groupLabel)}</p>` : ''}
-          ${mainNav}${restNav}
+          ${navHtml}
         </div>`
             : ''
         }

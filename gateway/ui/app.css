@@ -137,6 +137,12 @@ body { margin: 0; background: var(--color-bg); color: var(--color-text); font-fa
 .satu-rail .satu-newbot span { display: none; }
 /* 页面入口沉在底部，不跟着名单滚。 */
 .satu-navfoot { flex: none; display: flex; flex-direction: column; gap: 2px; padding-top: 2px; }
+/* 没有 Bot 名单的那一侧（平台管理员）——菜单就是这一列的全部内容。十几条再加上分组
+   标题，矮一点的屏就装不下了，而 aside 是 overflow:hidden，装不下等于**直接裁掉**，
+   最底下那几条谁都点不到。所以这一侧让它自己滚。
+   有名单时不能这么写：那时 navfoot 必须 flex:none 沉在底部，一旦可压缩就会被名单
+   挤扁。两种情形靠「有没有名单」区分，正是 :has() 问的那件事。 */
+aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
 .satu-botrow {
   display: flex;
   /* 头像跨两行，所以竖直居中——只有一行（还没说过话的 Bot）时也一样居中，

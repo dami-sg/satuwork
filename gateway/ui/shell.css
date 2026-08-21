@@ -19,6 +19,13 @@ a:hover { color: var(--color-accent-600); }
    `:has()` 不支持的旧浏览器上退回今天的样子：空标题照旧显示，别的都不受影响。 */
 .satu-navgroup { display: contents; }
 .satu-navgroup:not(:has(.satu-nav)) { display: none; }
+/* 组和组之间要留一口气，否则四个标题混在一列 2px 间距的按钮里，看着还是一根柱子。
+   `display: contents` 的元素自己没有盒子，撑不了外边距——所以顶在它的第一个孩子上，
+   不管那是标题还是（第一组那样没标题时的）头一条。 */
+.satu-navgroup + .satu-navgroup > :first-child { margin-top: var(--space-3); }
+/* 收起时标题整条不画，上面那行落在一个 display:none 的元素上等于没写；这时候改由
+   头一颗图标自己让开——不然十几个图标连成一片，分组白分了。 */
+.satu-rail .satu-navgroup + .satu-navgroup > .satu-nav:first-of-type { margin-top: var(--space-3); }
 .satu-card { display: flex; flex-direction: column; gap: var(--space-3); height: 100%; box-sizing: border-box; padding: var(--space-4); background: var(--color-neutral-100); border: 1px solid var(--color-divider); border-radius: var(--radius-md); }
 .satu-card:hover { box-shadow: var(--shadow-md); }
 .satu-meta { display: flex; align-items: center; gap: var(--space-4); font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }

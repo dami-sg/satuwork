@@ -341,6 +341,19 @@ function navForRole() {
   return MEMBER_NAV
 }
 
+/**
+ * 侧栏真正画的那一份：分好组的。
+ *
+ * navForRole() 给的是拍平的名单，回答「能去哪儿」；这一份多带了组的划分和标题，
+ * 回答「怎么摆」。两者同源（见 OWNER_NAV 的定义），不会各自漂开。
+ */
+function navGroupsForRole() {
+  const role = currentRole()
+  if (role === 'owner') return OWNER_NAV_GROUPS
+  if (role === 'admin') return ADMIN_NAV_GROUPS
+  return MEMBER_NAV_GROUPS
+}
+
 function allowedHrefs() {
   // '/' 不在导航里也必须可达：公司侧它就是对话页，是这些人的落点。
   const set = new Set([...navForRole().map((n) => n.href), '/profile', '/'])
