@@ -896,6 +896,22 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       )
     })
 
+    await test('员工侧栏没有 Bot 时，「新建 Bot」不许顶到品牌标底下', async () => {
+      // 占位是按「这一侧有没有名单」留的，不是按「此刻有没有 Bot」。跟着 Bot 一起收掉
+      // 的话，删完最后一颗的那一瞬间「新建 Bot」和「插件」会从名单下沿弹到最上面，
+      // 整个侧栏跳一下——而对话区那句空态写的正是「点左下角「新建 Bot」」。
+      const ui = await boot(adminToken)
+      ui.state.runtimeBots = []
+      ui.render()
+      const html = ui.html()
+      assert(html.includes('satu-botlist'), '名单空了，占位跟着没了')
+      assert(!html.includes('satu-botrow'), '没有 Bot 却画出了名单行')
+      assert(
+        html.indexOf('satu-botlist') < html.indexOf('satu-newbot'),
+        '「新建 Bot」跑到名单占位前面去了',
+      )
+    })
+
     await test('长列表分页：一页 20 条，越界夹回，筛选之后回到第一页', async () => {
       // 这几张表是一次拉齐、前端切页的。切页最容易出的两种错都在这里钉住：
       // **越界**（数据变少了还停在第 7 页，人看到一片空白）和**筛选之后不回第一页**
