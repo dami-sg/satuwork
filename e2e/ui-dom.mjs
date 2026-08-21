@@ -189,7 +189,32 @@ export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
     `${src}\n;return { boot, render, state, api, auditTranscript, messageText, setToken, clearToken, token, onSetup, testLlm, saveSettings, savePriceMultiplier, saveCustomProvider, saveCustomModel, loadCustomProviders, runConfirm, statsWindow, loadStats, catalogBase, pathAllowed, machineHead, readOnlyItem, startChatStream, stopChatStream, paintChat, ensureChatSession, fold, threadRows, loadOlderChat, hydrateChat, pushBotEvent, botStreamOf, resetBotStream, chatPages, CHAT_TAIL_TURNS, STREAM_TAIL_TURNS, CHAT_RETRY_MAX, loadWebTools, saveWebTools, saveWebPrice, testWebBackend, mentionQueryAt, paintChatMentions, paintChatQueue, paintMentionPick, takeMention, chatQueues }`,
   )
 
-  const windowStub = { addEventListener() {}, satuUnzip: null, location, history }
+  /**
+   * `window.open` 开出来的那些标签页。
+   *
+   * 授权那一路必须在**点击的同一拍**里把标签页开出来（见 pages-connectors.js 的
+   * conn-add-account），拿到地址再送过去。没有这个桩就只能验到「没跳走」，验不到
+   * 「真的开了一页、地址送对了」——而那正是这条路的全部。
+   */
+  const windowOpens = []
+  const windowStub = {
+    addEventListener() {},
+    satuUnzip: null,
+    location,
+    history,
+    open: (url = '') => {
+      const tab = {
+        closed: false,
+        opener: {},
+        location: { href: url },
+        close() {
+          this.closed = true
+        },
+      }
+      windowOpens.push(tab)
+      return tab
+    },
+  }
   const api = wrapper(
     document,
     windowStub,
@@ -215,7 +240,7 @@ export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
     }
   }
 
-  return { ...api, app, page, listeners, stubs, fire, sessionStorage, html: () => app.innerHTML }
+  return { ...api, app, page, listeners, stubs, fire, sessionStorage, location, windowOpens, html: () => app.innerHTML }
 }
 
 /**

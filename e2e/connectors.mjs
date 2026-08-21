@@ -838,6 +838,34 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
       assert(del.status === 200, `复原卸载 ${del.status}`)
     })
 
+    await test('界面：加账号开新标签页去授权，不把当前这一页顶掉', async () => {
+      const { loadApp, el } = await import('./ui-dom.mjs')
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base, token: memberTok })
+      await ui.boot()
+      await ui.fire('click', el('button', { 'data-act': 'plugins-open' }))
+      await ui.fire('click', el('button', { 'data-act': 'conn-install', 'data-id': connectorId }))
+      const before = ui.location.href
+
+      await ui.fire('click', el('button', { 'data-act': 'conn-add-account', 'data-id': connectorId }))
+      assert(ui.windowOpens.length === 1, `该开一个新标签页，实际开了 ${ui.windowOpens.length} 个`)
+      const tab = ui.windowOpens[0]
+      assert(tab.location.href.startsWith('https://accounts.example.com/'), `新页没送到授权地址：${tab.location.href}`)
+      assert(!tab.closed, '新页被关掉了')
+      // 反向标签劫持：授权页拿着 opener 就能把我们这一页换成钓鱼页。
+      assert(tab.opener === null, 'opener 没断')
+      // 这一边必须原封不动——弹窗多半盖在对话上，顶掉就等于把草稿和滚动位置一起扔了。
+      assert(ui.location.href === before, `当前这一页被顶掉了：${ui.location.href}`)
+      assert(ui.html().includes('gw-plugins'), '弹窗被关掉了')
+
+      // 复原：断掉刚发起的那把，再卸载。下面还有测试在数装机量和连接数。
+      const detail = await req(base, 'GET', `/me/connectors/${connectorId}`, { token: memberTok })
+      for (const c of detail.json.connections || []) {
+        await req(base, 'DELETE', `/me/connectors/${connectorId}/connections/${c.id}`, { token: memberTok })
+      }
+      const del = await req(base, 'DELETE', `/me/connectors/${connectorId}/install`, { token: memberTok })
+      assert(del.status === 200, `复原卸载 ${del.status}`)
+    })
+
     await test('界面：关掉弹窗要把底下那页刷新；晚到的详情不许落盘', async () => {
       const { loadApp, el } = await import('./ui-dom.mjs')
       // 只把「取这个连接器的详情」这一条拖慢，其余照打真 Gateway。

@@ -636,7 +636,7 @@ function pluginDetailBody() {
           </div>
         </div>
         <p style="margin: var(--space-2) 0 0; font-size: 12px; color: var(--muted-foreground);">
-          ${t('点「添加账号」会跳去授权，回来落在这个插件的详情页上。账号名会出现在工具名里（如 gmail_personal），模型靠它判断该用哪一个。', 'Adding an account sends you off to authorize; you come back on this plugin’s own page. The label shows up in the tool name (gmail_personal), which is how the model tells accounts apart.')}
+          ${t('点「添加账号」会新开一页去授权，这一边不动；授权完关掉那页就行。账号名会出现在工具名里（如 gmail_personal），模型靠它判断该用哪一个。', 'Adding an account opens authorization in a new tab and leaves this one alone — close that tab when you are done. The label shows up in the tool name (gmail_personal), which is how the model tells accounts apart.')}
         </p>
       </section>
       <section>
@@ -661,6 +661,25 @@ function paintPluginList() {
   const box = document.getElementById('plugins-list')
   if (box) box.innerHTML = pluginListRows()
 }
+
+/**
+ * 正在等哪个连接器的授权回来（空串 = 没有在等）。
+ *
+ * 授权是在**另一个标签页**里完成的，这一边一个事件都收不到：账号列表停在点「添加账号」
+ * 之前，不补一次就一直少一行，人会以为没授权成功，然后再点一次。回到这一页时补取，
+ * 而且只补这一次——每次切回标签页都重打一趟网络没有道理。
+ */
+let authReturn = ''
+
+window.addEventListener('focus', () => {
+  const id = authReturn
+  if (!id) return
+  authReturn = ''
+  const inPop = state.plugins && state.plugins.id === id
+  const inPage = connectorIdOfPath(state.path) === id
+  if (!inPop && !inPage) return
+  ;(inPop ? loadPluginDetail(id) : loadConnectorDetail(id)).then(render, () => {})
+})
 
 /** 弹窗里翻到某个插件的详情。装完之后也走这条——装和管理落到同一屏。 */
 async function openPluginDetail(id, opts) {
@@ -831,14 +850,41 @@ async function connectorAct(act, btn) {
   if (act === 'conn-add-account') {
     const id = btn.getAttribute('data-id')
     const label = valueOf('conn-label', '')
+    /**
+     * 授权开**新标签页**，不把这一页顶掉。
+     *
+     * 整页跳走的代价在插件弹窗上尤其重：回来时对话的草稿、滚动位置、刚选好的那颗 Bot
+     * 全没了，而人只是想加一个邮箱。开新页之后这一边原封不动，授权完关掉那页就行。
+     *
+     * **标签页要在点击这一下里就开出来。** 地址得先向后端要（那一趟才生成 OAuth 链接），
+     * 而 `await` 之后浏览器已经不认这是用户点出来的动作了，`window.open` 会被拦掉——
+     * 所以先开一个空页占住手势，拿到地址再把它送过去。
+     *
+     * 不用 `noopener` 这个 feature：带上它 `window.open` 直接返回 null，就没有句柄可以
+     * 送地址了。改成拿到句柄后手动断开 `opener`，防的是同一件事（反向标签劫持）。
+     */
+    let tab = null
+    try {
+      tab = window.open('', '_blank')
+      if (tab) tab.opener = null
+    } catch {
+      tab = null
+    }
     try {
       const r = await api('POST', `/me/connectors/${encodeURIComponent(id)}/connections`, label ? { label } : {})
-      // 授权在供应商那边完成，完事之后它把浏览器送回 /oauth/connectors/callback，
-      // 那条再 302 回这一屏。所以这里是整页跳走，不是开新标签——新标签在很多浏览器
-      // 里会被拦掉，而人正等着授权。
-      location.href = r.redirectUrl
+      // 被拦截器挡下来（tab 是 null）就还是整页跳走：把人卡在原地、什么都不发生，
+      // 比换一页更糟——那时他只会以为按钮坏了。
+      if (tab && !tab.closed) {
+        authReturn = id
+        tab.location.href = r.redirectUrl
+      } else {
+        location.href = r.redirectUrl
+      }
     } catch (e) {
-      flash('err', e.message)
+      // 开都没开成，那页空白着没有意义。
+      if (tab && !tab.closed) tab.close()
+      if (state.plugins) state.plugins.error = e.message
+      else flash('err', e.message)
       render()
     }
     return true

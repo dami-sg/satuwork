@@ -242,7 +242,12 @@ e2e 里的假 Composio 照着上游原话把老路打回（`e2e/connectors.mjs`�
 
 1. Gateway 写 `connector_connections`（`status: 'pending'`），调 `provider.initiate`，
    `callbackUrl` 是 `{GATEWAY_URL}/oauth/connectors/callback`
-2. 响应给 `redirectUrl`，浏览器跳过去，在 Google 那边完成授权
+2. 响应给 `redirectUrl`，浏览器**新开一页**跳过去，在 Google 那边完成授权。不顶掉当前
+   这一页：插件弹窗多半是盖在对话上开的，整页跳走等于把草稿、滚动位置、刚选好的那颗
+   Bot 一起扔了，而人只是想加一个邮箱。新标签页要在**点击那一下里**就开出来（地址还得
+   先向后端要，`await` 之后再 open 会被拦截器当成非用户触发挡掉），被挡下来就退回整页跳
+   ——什么都不发生比换一页更糟。回到原来那一页时补取一次账号列表：授权发生在另一个
+   标签页里，这一边一个事件都收不到
 3. 供应商回调 `/oauth/connectors/callback`
 4. **Gateway 不信回调里带的任何状态**，拿 `connectionId` 回头调 `provider.status()`，
    `ACTIVE` 才把行改成 `active`。回调是从公网进来的，参数谁都能伪造；而这一步的产物是
