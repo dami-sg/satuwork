@@ -251,6 +251,10 @@ document.getElementById('app').addEventListener('click', async (e) => {
     closePreview()
     return
   }
+  if (act === 'preview-mode') {
+    setPreviewMode(btn.getAttribute('data-mode') || 'view')
+    return
+  }
   if (act === 'preview-download') {
     await downloadWorkspaceFile(btn.getAttribute('data-path') || '', btn.getAttribute('data-name') || '')
     return

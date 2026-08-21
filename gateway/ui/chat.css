@@ -975,3 +975,54 @@
 .sw-pick:hover, .sw-pick.is-on { background: var(--secondary); }
 .sw-pick small { margin-left: auto; color: var(--muted-foreground); font-size: 11px; }
 .sw-pick-empty { padding: 8px; font-size: 12px; color: var(--muted-foreground); }
+
+/* ── 预览弹窗：多种看法 ──────────────────────────────────────────────────
+ *
+ * 图片、提示、转圈这几种要居中；文本和渲染出来的 Markdown 要**顶部对齐并且能滚**
+ * ——一份长文档在居中的框里，人打开看到的是正中间那一段，得往上拖才找得到开头。 */
+.sw-preview-body[data-flow='top'] {
+  display: block;
+  align-items: initial;
+  justify-content: initial;
+  padding: var(--space-5) var(--space-6);
+}
+/* iframe（PDF / HTML 预览）要占满整框，所以那一档不吃上面的内边距。 */
+.sw-preview-body[data-flow='top']:has(> .sw-preview-frame) { padding: 0; }
+
+.sw-preview-src {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 渲染出来的 Markdown 借聊天气泡那一套排版（.sw-md），这里只管容器。 */
+.sw-preview-md { max-width: 78ch; margin: 0 auto; color: var(--foreground); }
+
+/* 「预览 / 原文」。做成一对连体的小段，而不是两颗独立按钮——它们是同一个东西的
+   两种看法，不是两个操作。 */
+.sw-preview-tabs {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--secondary);
+  margin-right: var(--space-2);
+}
+.sw-preview-tab {
+  border: 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.sw-preview-tab:hover { color: var(--foreground); }
+.sw-preview-tab[data-on='1'] {
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: var(--shadow-2xs);
+}

@@ -151,6 +151,36 @@ const chatQueues = new Map()
 /** 打开一条会话先要几轮。人来是看最近说了什么的，更早的等他往上翻。 */
 const CHAT_TAIL_TURNS = 20
 
+/**
+ * 用户消息开头那段「我上传了文件，在工作区里：」是 composeChatBody 自己拼的
+ * （同一个文件里，往下找）。这里把它认回来。
+ *
+ * **为什么值得认**：不认的话，附件在气泡里就是一行不能点的路径文本，而 Bot 生成的
+ * 文件早就是可以点开预览的药丸了——同一个东西，自己传上去的反而看不了，这说不通。
+ *
+ * 敢按文本认，是因为这段文本**是我们自己生成的**，格式由 composeChatBody 定死；
+ * 而且判据卡得很紧：首行必须整句相等（中英两版都列在下面，一条消息可能在另一种
+ * 语言下被打开），随后必须是连续的 `- \`uploads/…\`` 行。这和「拿正则去扫模型写的
+ * 散文猜路径」是两回事——那种一改措辞就散架，这种不会。
+ */
+const UPLOAD_LEADS = ['我上传了文件，在工作区里：', 'I uploaded some files. They are in the workspace at:']
+
+function splitUploads(text) {
+  const src = String(text == null ? '' : text)
+  const lead = UPLOAD_LEADS.find((x) => src.startsWith(x + '\n'))
+  if (!lead) return { text: src, files: [] }
+  const lines = src.slice(lead.length + 1).split('\n')
+  const files = []
+  let i = 0
+  for (; i < lines.length; i++) {
+    const m = /^- `(uploads\/[^`]+)`$/.exec(lines[i])
+    if (!m) break
+    files.push({ path: m[1], name: m[1].split('/').pop() || m[1] })
+  }
+  if (!files.length) return { text: src, files: [] }
+  return { text: lines.slice(i).join('\n').trim(), files }
+}
+
 function fold(events, live) {
   const blocks = []
   let assistant = null
@@ -167,9 +197,17 @@ function fold(events, live) {
       if (data.source && data.source.kind && data.source.kind !== 'user') continue
       assistant = null
       tools = []
+      const raw = messageText(data.message) || data.text || ''
+      const up = splitUploads(raw)
       blocks.push({
         kind: 'user',
-        text: messageText(data.message) || data.text || '',
+        text: up.text,
+        // 附件列表拆出来单独画成药丸；正文只留人真正打的那句话。
+        files: up.files,
+        // **raw 不能省。** mergePending 靠「文字一模一样」认回执，而它手上那份是
+        // 拼好的完整正文。只留拆过的 text，带附件的消息就永远认不回来——那条 pending
+        // 销不掉，界面会一直挂着「正在思考」。
+        raw,
         images: messageImages(data.message),
         time: at,
         seq: ev.seq,
@@ -1095,7 +1133,9 @@ function updateRow(el, b, streaming) {
   }
 
   const tools = b.tools || []
-  const outs = outputFiles(tools)
+  // 产出文件 + 上传的附件。两边是同一种东西（工作区里一个能点开的文件），
+  // 用同一种药丸，点开走同一个预览。
+  const outs = outputFiles(tools).concat(b.files || [])
   const sig =
     tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|') +
     '#' +
@@ -1308,7 +1348,8 @@ function mergePending(folded, sessionId) {
   const fresh = folded.blocks.filter((b) => b.kind === 'user' && b.seq != null)
   const left = []
   for (const p of mine) {
-    const hit = fresh.findIndex((b) => b.seq > p.afterSeq && b.text === p.text)
+    // 比的是 raw（拼好的完整正文），不是显示用的 text——后者已经把附件那段拆走了。
+    const hit = fresh.findIndex((b) => b.seq > p.afterSeq && (b.raw != null ? b.raw : b.text) === p.text)
     if (hit >= 0) fresh.splice(hit, 1)
     else left.push(p)
   }
@@ -1317,7 +1358,18 @@ function mergePending(folded, sessionId) {
   }
   if (!left.length) return folded
   for (const p of left) {
-    folded.blocks.push({ kind: 'user', text: p.text, images: p.images || [], time: p.at, pending: true })
+    // 回执还没回来的那几秒也要长成最终的样子，否则附件会先以一行路径文本出现、
+    // 再突然变成药丸——同一条消息在屏幕上跳两次。
+    const up = splitUploads(p.text)
+    folded.blocks.push({
+      kind: 'user',
+      text: up.text,
+      files: up.files,
+      raw: p.text,
+      images: p.images || [],
+      time: p.at,
+      pending: true,
+    })
   }
   // 没回执之前也要有「正在想」：那一行是人按下回车之后唯一的进度反馈。
   if (!folded.status) folded.status = 'sending'
@@ -2208,10 +2260,50 @@ function switchLogSource(key) {
  * 大文件不预览：整个读进内存只为看一眼不值当，给下载就行。判断用响应头里的
  * content-length，在读 body **之前**——否则「太大所以不看」的代价是先下完它。
  */
+/**
+ * 文本类的扩展名。这几种取回来直接当文字看，比塞进 iframe 强——iframe 里的纯文本
+ * 不会换行、没有主题色、也没法选中复制成一段。
+ */
+const PREVIEW_TEXT_EXT = new Set([
+  'txt', 'log', 'csv', 'tsv', 'json', 'yml', 'yaml', 'xml', 'ini', 'toml', 'conf',
+  'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'css', 'scss', 'sh', 'bash', 'zsh', 'py',
+  'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'sql', 'env', 'gitignore', 'diff', 'patch',
+])
+
+/** 这几种在浏览器里没有原生渲染，得靠席位那边先提取成文本（见 fetchDocText）。 */
+const PREVIEW_DOC_EXT = new Set(['docx', 'xlsx', 'xlsm', 'pptx'])
+
+function extOf(name) {
+  const base = String(name || '').split('/').pop() || ''
+  const i = base.lastIndexOf('.')
+  return i > 0 ? base.slice(i + 1).toLowerCase() : ''
+}
+
+/**
+ * 这个文件用哪种方式看。
+ *
+ * **按扩展名判，不按 content-type**：席位那边对不在内联白名单里的一律回
+ * `application/octet-stream`（HTML、docx 都是），光看类型什么都分不出来。
+ */
+function previewKindOf(name, type) {
+  const ext = extOf(name)
+  if (String(type || '').startsWith('image/') || ['png','jpg','jpeg','gif','webp','avif','bmp','ico','svg'].includes(ext)) return 'image'
+  if (ext === 'pdf') return 'pdf'
+  if (ext === 'md' || ext === 'markdown') return 'markdown'
+  if (ext === 'html' || ext === 'htm') return 'html'
+  if (PREVIEW_TEXT_EXT.has(ext)) return 'text'
+  if (PREVIEW_DOC_EXT.has(ext)) return 'doc'
+  return ''
+}
+
+/** 文本类不该按图片那个尺度收：一份 2MB 的日志已经没人会在弹窗里读了。 */
+const PREVIEW_TEXT_MAX = 2 * 1024 * 1024
+
 async function openPreview(path, name) {
   if (!state.chatSessionId) return
   revokePreview()
-  state.preview = { path, name, loading: true, url: '', type: '', size: 0, error: '' }
+  const kind = previewKindOf(name || path, '')
+  state.preview = { path, name, loading: true, url: '', type: '', size: 0, error: '', kind, mode: 'view' }
   render()
   const url = '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/files?path=' + encodeURIComponent(path)
   const ac = new AbortController()
@@ -2228,23 +2320,91 @@ async function openPreview(path, name) {
     }
     const type = (res.headers.get('content-type') || '').split(';')[0].trim()
     const size = Number(res.headers.get('content-length') || 0)
-    // 席位那边判成不能内联的（SVG、HTML、未知格式）会带 attachment 回来。照办，
-    // 不去覆盖它——那张白名单就是干这个的。
-    const attachment = (res.headers.get('content-disposition') || '').includes('attachment')
-    if (attachment || (size && size > CHAT_PREVIEW_MAX)) {
+    const k = kind || previewKindOf(name || path, type)
+    const cap = k === 'markdown' || k === 'html' || k === 'text' ? PREVIEW_TEXT_MAX : CHAT_PREVIEW_MAX
+    /**
+     * **不再拿 content-disposition 当「能不能看」的判据。**
+     *
+     * 席位那张白名单回答的是「这段字节能不能带着自己的 MIME 在浏览器里跑起来」——
+     * HTML 不在里面，理由是它带得动 `<script>`，内联渲染等于让上传者在 Gateway 的源
+     * 上执行代码。那个理由是对的，白名单不动。
+     *
+     * 但**我们并不是让它在 Gateway 的源上跑**：字节取回来变成 blob，塞进一个
+     * `sandbox` 不带任何 allow-* 的 iframe——脚本、表单、同源、导航全关，里面的
+     * `<script>` 一行都不会执行。Gateway 那一跳还压了一条同样含义的 CSP
+     * （见 lib/runtime.ts 的 proxyDownload），直接把文件地址粘到地址栏也一样跑不起来。
+     *
+     * 所以这里改成按**扩展名**决定看法，只有真的没法看的（未知格式）才回落到下载。
+     */
+    if (!k || (size && size > cap)) {
       ac.abort()
       if (!state.preview || state.preview.path !== path) return
-      state.preview = { path, name, loading: false, url: '', type, size, error: '', tooBig: true }
+      state.preview = { path, name, loading: false, url: '', type, size, error: '', kind: k, mode: 'view', tooBig: true }
       render()
+      return
+    }
+    if (k === 'doc') {
+      const blob = await res.blob()
+      if (!state.preview || state.preview.path !== path) return
+      state.preview = { path, name, loading: false, url: '', type, size: blob.size, error: '', kind: k, mode: 'view', docLoading: true }
+      render()
+      void fetchDocText(path, name)
       return
     }
     const blob = await res.blob()
     if (!state.preview || state.preview.path !== path) return
-    state.preview = { path, name, loading: false, url: URL.createObjectURL(blob), type, size: blob.size, error: '' }
+    const next = { path, name, loading: false, url: '', type, size: blob.size, error: '', kind: k, mode: 'view' }
+    if (k === 'markdown' || k === 'html' || k === 'text') {
+      next.text = await blob.text()
+      // HTML 要一个**自称 text/html** 的 blob，iframe 才会当页面渲染。原始响应是
+      // octet-stream（白名单没放行它），照搬只会得到一个下载。重打类型是安全的：
+      // 保护来自 iframe 的 sandbox，不来自这个 MIME。
+      // **charset 不能省。** 这个 blob 是从 JS 字符串造的，就是 UTF-8；不写的话浏览器
+      // 会按自己的默认编码猜，中文当场变成一片乱码（实测就是这样）。
+      if (k === 'html') next.url = URL.createObjectURL(new Blob([next.text], { type: 'text/html; charset=utf-8' }))
+    } else {
+      next.url = URL.createObjectURL(blob)
+    }
+    state.preview = next
   } catch (err) {
     if (ac.signal.aborted) return
     if (!state.preview || state.preview.path !== path) return
-    state.preview = { path, name, loading: false, url: '', type: '', size: 0, error: err.message }
+    state.preview = { path, name, loading: false, url: '', type: '', size: 0, error: err.message, kind, mode: 'view' }
+  }
+  render()
+  // 刚画出来的 Markdown 里可能有代码块 / 公式 / mermaid，和聊天气泡一样要过一遍。
+  if (state.preview && state.preview.kind === 'markdown' && window.satuMd) {
+    const host = document.querySelector('.sw-preview-md')
+    if (host) window.satuMd.enhance(host)
+  }
+}
+
+/**
+ * Word / Excel / PPT：浏览器打不开，让席位提取成 Markdown 再看。
+ *
+ * 走的是 `read` 工具用的同一套提取（bot 的 workspace/extract.ts），所以这里看到的
+ * 和模型读到的是同一份东西——这一点本身就有用：内容对不上时能一眼看出是提取的问题
+ * 还是模型的问题。
+ *
+ * **老席位没有这个接口**，那时候如实退回「下载下来看吧」，而不是转个圈就空在那儿。
+ */
+async function fetchDocText(path, name) {
+  const url =
+    '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/files?path=' + encodeURIComponent(path) + '&as=text'
+  try {
+    const res = await fetch(url, { headers: authHeaders({ accept: 'application/json' }) })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    if (!state.preview || state.preview.path !== path) return
+    state.preview.docLoading = false
+    state.preview.text = String((data && data.text) || '')
+    state.preview.docNote = String((data && data.note) || '')
+    if (!state.preview.text) state.preview.tooBig = true
+  } catch {
+    if (!state.preview || state.preview.path !== path) return
+    state.preview.docLoading = false
+    state.preview.tooBig = true
+    state.preview.docNote = t('这个席位还不支持把 Office 文档提取出来预览（要更新 Bot 版本）。')
   }
   render()
 }
@@ -2285,25 +2445,51 @@ async function downloadWorkspaceFile(path, name) {
   }
 }
 
+/** 渲染视图和原文之间的切换。只有两者都成立的类型才给，别摆一颗按不动的按钮。 */
+function previewTabs(p) {
+  const both = (p.kind === 'markdown' || p.kind === 'html') && !p.tooBig && !p.error && !p.loading
+  if (!both) return ''
+  const tab = (mode, label) =>
+    `<button type="button" class="sw-preview-tab" data-act="preview-mode" data-mode="${mode}"` +
+    `${p.mode === mode ? ' data-on="1"' : ''}>${esc(label)}</button>`
+  return `<div class="sw-preview-tabs">${tab('view', t('预览'))}${tab('source', t('原文'))}</div>`
+}
+
+function previewBody(p) {
+  if (p.loading) return `<p class="sw-preview-note">${t('正在取文件…')}</p>`
+  if (p.error) return `<p class="sw-preview-note sw-preview-err">${esc(p.error)}</p>`
+  if (p.docLoading) return `<p class="sw-preview-note">${t('正在提取文档内容…')}</p>`
+  if (p.tooBig) {
+    const why = p.docNote || t('这个文件不适合在浏览器里打开（太大，或者是不认识的格式）。下载下来看吧。')
+    return `<p class="sw-preview-note">${esc(why)}</p>`
+  }
+  if (p.kind === 'image') return `<img class="sw-preview-img" src="${esc(p.url)}" alt="${esc(p.name)}">`
+  if (p.kind === 'pdf') {
+    // PDF 走 iframe 交给浏览器自带的阅读器。sandbox 不带任何 allow-*。
+    return `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}"></iframe>`
+  }
+  if (p.kind === 'html' && p.mode === 'view') {
+    /**
+     * **`sandbox` 一个 allow-* 都不能加。** 这是让 HTML 能被预览的全部依据：没有
+     * allow-scripts 就没有脚本执行，没有 allow-same-origin 就是 opaque origin，
+     * 拿不到 Gateway 这一侧的任何东西。加任何一项都会把这条推翻。
+     */
+    return `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}"></iframe>`
+  }
+  if (p.kind === 'markdown' && p.mode === 'view') {
+    // satuMd 对原始 HTML 一律转义、链接只放行白名单协议（见 markdown.js 开头第 3 条），
+    // 所以这段 innerHTML 是安全的——和聊天气泡里渲染模型输出走的是同一条路。
+    const md = window.satuMd
+    const html = md ? md.render(String(p.text || '')) : ''
+    if (md) return `<div class="sw-preview-md sw-md">${html}</div>`
+  }
+  // 其余一律看原文：Markdown/HTML 的「原文」页、纯文本、以及提取出来的 Office 文档。
+  return `<pre class="sw-preview-src">${esc(String(p.text || ''))}</pre>`
+}
+
 function previewModal() {
   const p = state.preview
   if (!p) return ''
-  let body
-  if (p.loading) {
-    body = `<p class="sw-preview-note">${t('正在取文件…')}</p>`
-  } else if (p.error) {
-    body = `<p class="sw-preview-note sw-preview-err">${esc(p.error)}</p>`
-  } else if (p.tooBig) {
-    body = `<p class="sw-preview-note">${t('这个文件不适合在浏览器里打开（太大，或者是不能安全内联的格式）。下载下来看吧。')}</p>`
-  } else if (p.type.startsWith('image/')) {
-    body = `<img class="sw-preview-img" src="${esc(p.url)}" alt="${esc(p.name)}">`
-  } else {
-    /**
-     * PDF 与纯文本走 iframe。`sandbox` 不带任何 allow-*：脚本、表单、同源全关。
-     * blob: 本来就是 opaque origin，这条是叠在上面的第二道——两道都便宜。
-     */
-    body = `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}"></iframe>`
-  }
   const meta = p.size ? fileSize(p.size) : ''
   return `<div class="gw-modal-backdrop" data-act="preview-close">
     <div class="gw-modal sw-preview" data-stop>
@@ -2313,13 +2499,27 @@ function previewModal() {
           <p><code>${esc(p.path)}</code>${meta ? ' · ' + esc(meta) : ''}</p>
         </div>
         <div class="sw-preview-acts">
+          ${previewTabs(p)}
           <button type="button" class="btn" data-act="preview-download" data-path="${esc(p.path)}" data-name="${esc(p.name)}">${t('下载')}</button>
           <button type="button" class="btn btn-ghost btn-icon" aria-label="${esc(t('关闭'))}" data-act="preview-close">${svg(['M18 6 6 18', 'M6 6l12 12'], 16)}</button>
         </div>
       </div>
-      <div class="sw-preview-body">${body}</div>
+      <div class="sw-preview-body" data-flow="${p.error || p.loading || p.docLoading || p.tooBig || p.kind === 'image' ? 'center' : 'top'}">${previewBody(p)}</div>
     </div>
   </div>`
+}
+
+/** 切「预览 / 原文」。只改一个字段，字节早就在手上了，不用再取一次。 */
+function setPreviewMode(mode) {
+  if (!state.preview || state.preview.mode === mode) return
+  state.preview.mode = mode === 'source' ? 'source' : 'view'
+  render()
+  // 渲染出来的 Markdown 里可能有代码块、公式、mermaid——和聊天气泡一样要 enhance 一次，
+  // 否则代码不高亮、公式显示 TeX 原文。
+  if (state.preview.mode === 'view' && window.satuMd) {
+    const host = document.querySelector('.sw-preview-md')
+    if (host) window.satuMd.enhance(host)
+  }
 }
 
 function logsModal() {
