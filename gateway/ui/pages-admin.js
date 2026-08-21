@@ -571,7 +571,7 @@ function providerModelsModal() {
         </div>
         ${state.providerError ? `<div class="gw-flash gw-flash-err">${esc(state.providerError)}</div>` : ''}
         <div style="border: 1px solid var(--border); border-radius: var(--radius-lg);">
-          ${rows || `<div style="padding: var(--space-5); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有模型。')}</div>`}
+          ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有模型。')}</div>`}
         </div>
         ${
           d

@@ -990,4 +990,27 @@ window.SATU_I18N = {
   '这个文件不适合在浏览器里打开（太大，或者是不能安全内联的格式）。下载下来看吧。': 'This file cannot be shown in the browser — it is either too large or a format that is not safe to render inline. Download it instead.',
   '下载失败：': 'Download failed: ',
   '产出': 'wrote',
+
+  // ── 连接器 / 插件 ───────────────────────────────────────────────────
+  已安装: 'Installed',
+  已禁用: 'Disabled',
+  已连接: 'Connected',
+  未完成: 'Incomplete',
+  安装: 'Install',
+  卸载: 'Uninstall',
+  断开: 'Disconnect',
+  其他: 'Other',
+  '添加账号': 'Add account',
+  '账号名，如 personal': 'Account label, e.g. personal',
+  '仅 @ 时可用': 'Only when @-mentioned',
+  '本公司已禁用': 'Disabled by your company',
+  '本公司已禁用这个连接器': 'Your company has disabled this connector',
+  '先安装，再连接你的账号。': 'Install it first, then connect your account.',
+  '平台还没上架任何连接器。': 'Nothing has been published to the marketplace yet.',
+  '卸载会把你在它下面连的所有账号一起断掉。继续？': 'Uninstalling also disconnects every account you connected under it. Continue?',
+  '断开这个账号？': 'Disconnect this account?',
+  '这个连接器没有可用工具': 'This connector has no tools',
+  '拉不到工具清单': 'Could not fetch the tool list',
+  '开着的工具会进你每一个 Bot 的工具表。用不上的关掉——装得多了，工具表会把上下文撑满，模型也更容易选错。':
+    'Enabled tools go into every one of your bots. Turn off what you do not need — a long tool list eats context and makes the model pick wrong.',
 }

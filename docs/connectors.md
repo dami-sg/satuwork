@@ -724,6 +724,26 @@ create index if not exists calls_account_time on connector_calls ("accountId","c
   - 详情：账号列表（每行一个 label + 状态 + 「仅 `@` 时可用」开关 + 断开）、
     「添加账号」、工具开关（`n of m enabled`，展开是勾选列表）
 
+### 员工的入口是「插件」，不是菜单里那一行
+
+侧栏 Bot 名单底下、「新建 Bot」下面一颗**「插件」**按钮（`render.js` 的 `appView`），
+点开是弹窗 `pluginsModal()`（`pages-connectors.js`），不跳页：
+
+- 市场 / 已安装两个页签 + 搜索；每行一颗「添加」（未装）或「管理」（已装）
+- 「添加」= 安装，装完**留在同一个弹窗里**，直接翻到详情连账号、挑工具
+- 用的是和详情页同一套零件（`connectionRow` / `connectorToolsBox`），不另画一份
+
+**为什么不是菜单里一行。** 装插件是**为了把话说完**才做的事——「让它读一下我的邮件」
+说到一半才发现 Gmail 没装。跳走一整页，回来时草稿、滚动位置、刚选好的那颗 Bot 全没了。
+所以 `MEMBER_NAV` 又空了（同一件事留两个并排的入口，只会让人问这两个有什么不一样），
+但**页面没有撤**：`/connectors` 和 `/connectors/:id` 还在，OAuth 回调就落在那儿
+（§6 那个 302），所以 `allowedHrefs()` 里给非 owner 单独放行了 `/connectors`。
+
+弹窗的详情存在 `state.pluginDetail`，**和页面那份 `state.connectorDetail` 分开**：
+弹窗能盖在 `/connectors/:id` 上面，共用一个字段的话，在弹窗里翻了别的插件，关掉之后
+底下那页画的是别人的账号。同理，`conn-label` / `conn-tool` 这些控件两边同名，读值要
+限定在弹窗里（`connRoot()`），不然取到的是底下那页那一份。
+
 聊天那一侧（`gateway/ui/chat.js`）四件事：输入框打 `@` 弹选单（走 `/mentions`）、
 选中后在输入框里渲染成药丸、发送时把 `mentions` 一起带上、以及**排队 dock**。历史消息
 里的 `mention` 块也要渲染成同样的药丸，否则翻上去看昨天那条，点名就消失了。
