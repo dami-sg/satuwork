@@ -835,7 +835,18 @@ export class Db {
    * 装一个。**已经装了就原样返回**，不报错也不重置工具开关——重复点「安装」是
    * 用户会做的事（网络慢、手抖），把它变成一次静默的配置重置就太狠了。
    */
-  async installConnector(input: { connectorId: string; accountId: string; companyId: string }): Promise<ConnectorInstall> {
+  async installConnector(input: {
+    connectorId: string
+    accountId: string
+    companyId: string
+    /**
+     * 装上默认开哪几个。空 = 写 `[]`，也就是全开。
+     *
+     * **`[]` = 全开这个口径不动。** 已经装好的那些存的就是 `[]`，改口径等于让现存
+     * 用户的工具悄悄少掉一批。改的只是「新装的时候写什么进去」（docs/tool-search.md §2）。
+     */
+    enabledTools?: string[]
+  }): Promise<ConnectorInstall> {
     const cur = await this.connectorInstall(input.connectorId, input.accountId)
     if (cur) return cur
     const now = Date.now()
@@ -844,7 +855,7 @@ export class Db {
       connectorId: input.connectorId,
       accountId: input.accountId,
       companyId: input.companyId,
-      enabledTools: [],
+      enabledTools: input.enabledTools ?? [],
       createdAt: now,
       updatedAt: now,
     }

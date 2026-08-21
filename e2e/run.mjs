@@ -43,6 +43,7 @@ import { runBilling } from './billing.mjs'
 import { runMigrate } from './migrate.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
 import { runConnectors } from './connectors.mjs'
+import { runToolSearch } from './tool-search.mjs'
 import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
@@ -2812,6 +2813,7 @@ async function main() {
     await runMigrate({ gwRoot, test, start, waitHttp, assert, log })
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
     await runConnectors({ root, gwRoot, test, req, start, waitHttp, assert, log })
+    await runToolSearch({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log })
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runManagerConfirm({ root, test, assert, log })

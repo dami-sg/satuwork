@@ -7,6 +7,8 @@ body { margin: 0; background: var(--color-bg); color: var(--color-text); font-fa
 .gw-flash { margin: 0; padding: 10px var(--space-3); border-radius: var(--radius-sm); font-size: 13px; line-height: 1.6; }
 .gw-flash-err { color: var(--color-accent-800); background: var(--color-accent-100); }
 .gw-flash-ok { color: var(--color-accent-2-800); background: var(--color-accent-2-100); }
+/* 既不是错也不是成功，是一句说明。搜索模式那条用它——用红的会被读成「出事了」。 */
+.gw-flash-note { color: var(--foreground); background: var(--color-neutral-200); }
 
 .satu-provrow { cursor: pointer; }
 .satu-provrow[aria-selected="true"] { background: var(--color-accent-100); }

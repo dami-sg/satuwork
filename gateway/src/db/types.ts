@@ -434,6 +434,14 @@ export interface ConnectorDef {
   /** 沿用 MCP 的三档，只标注不拦截（和现有 MCP 的现状一致，不新造半成品）。 */
   perm: string
   enabled: boolean
+  /**
+   * 安装时默认开哪几个工具。owner 上架时挑。
+   *
+   * 空 = 不挑，安装时照旧写 `[]`（= 全开）。**这一格存在的理由是防线一**：GitHub 有
+   * 500 个工具，默认全开的界面上员工要点 485 次才能剩下 15 个——「员工自己关」这条
+   * 防线被默认值架空了（docs/tool-search.md §2）。
+   */
+  recommendedTools: string[]
 }
 
 /**

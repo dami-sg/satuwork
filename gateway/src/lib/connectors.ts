@@ -7,6 +7,7 @@ import { HttpError } from '../http.ts'
 import { DEFAULT_VENDOR, isVendor, providerFor, type ToolDef } from '../connectors/index.ts'
 import type { Db } from '../db.ts'
 import { MCP_PERMS, asDef, trimStr } from './catalog.ts'
+import { strListOf } from '../db/rows.ts'
 import { COMPANY_CONNECTION_LABEL as COMPANY_LABEL, type CatalogItem, type ConnectorBlockDef, type ConnectorConnection, type ConnectorDef, type ConnectorInstall } from '../db.ts'
 
 /**
@@ -21,8 +22,13 @@ import { COMPANY_CONNECTION_LABEL as COMPANY_LABEL, type CatalogItem, type Conne
  */
 export const MAX_TOOLS = Math.max(1, Math.trunc(Number(process.env.CONNECTOR_MAX_TOOLS) || 64))
 
-/** 工具清单的缓存。列表是给模型看的目录，不是实时数据，五分钟足够新。 */
-const TOOL_TTL_MS = 5 * 60_000
+/**
+ * 工具清单的缓存。列表是给模型看的目录，不是实时数据，五分钟足够新。
+ *
+ * 可以调小，只为一件事：e2e 要验「清单拉不到时会怎样」，而缓存一旦热了，供应商挂没挂
+ * 都影响不到那条路——测出来的会是缓存，不是那一档行为。
+ */
+const TOOL_TTL_MS = Math.max(0, Math.trunc(Number(process.env.CONNECTOR_TOOL_TTL_MS) || 5 * 60_000))
 const toolCache = new Map<string, { at: number; tools: ToolDef[] }>()
 
 export async function toolsOf(db: Db, vendor: string, toolkit: string): Promise<ToolDef[]> {
@@ -53,6 +59,7 @@ export function connectorDefOf(item: CatalogItem): ConnectorDef {
     multiAccount: def.multiAccount !== false,
     perm,
     enabled: def.enabled !== false,
+    recommendedTools: strListOf(def.recommendedTools),
   }
 }
 
@@ -73,7 +80,76 @@ export function newConnectorDefinition(body: Record<string, unknown>): Connector
     multiAccount: body.multiAccount !== false,
     perm: (MCP_PERMS as readonly string[]).includes(trimStr(body.perm)) ? trimStr(body.perm) : '只读',
     enabled: body.enabled !== false,
+    recommendedTools: toolListOf(body.recommendedTools),
   }
+}
+
+/**
+ * 推荐工具集的**形状**：去空、去重、封顶。
+ *
+ * 这里**不判对错、也不改大小写**——对不对要拿真清单核（`checkRecommended`），而大小写
+ * 改坏了比不改更糟：`enabledTools` 是拿 slug 精确比的，被大写化过的 slug 会一个都对不上，
+ * 结果是「装上了、连着、一个工具都没有」。
+ */
+function toolListOf(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return [...new Set(v.map((x) => trimStr(x)).filter(Boolean))].slice(0, 500)
+}
+
+/**
+ * 拿 toolkit 的真清单核一遍推荐工具集，并把它归一成**真实 slug**。
+ *
+ * **不核不行。** 这一份会原样写进新员工的 `enabledTools`，而 `tools/list` 是拿它精确
+ * 过滤的：写错一个 slug，那个人装上之后 `picked` 是空的，`tools/list` 回一张空表——
+ * 连接看着是连上的、界面上还写着「1 / 500 个已开启」，一个工具都用不了，日志里一个字
+ * 都没有。这正是这套代码到处在防的那类静默失败（docs/tool-search.md §2）。
+ *
+ * 拉不到清单时**宁可挡住这次保存**，不放行：这是一次配置写入，重试的代价是刷新一下，
+ * 而放行的代价是上面那一整套静默失败。和 `resolveToolSlug` 那里「拉不到就退回猜」不是
+ * 一回事——那边挡住的是所有调用，这边挡住的只是一次编辑。
+ *
+ * **只核这一次真的要写进去的那份。** `prev` 传上一版：和它一模一样就直接放行，因为那份
+ * 是上次写入时核过的。不这么做的话，一条改说明的 PATCH 也会被拖去核一遍推荐集——供应商
+ * 这会儿不可达、或者某个 slug 早就被上游改名了，改说明就会 502 / 400，而这两件事和这次
+ * 编辑毫无关系。存量里过期的 slug 由接收端负责说出来（`matchTools`），不在这里堵。
+ */
+export async function checkRecommended(db: Db, def: ConnectorDef, prev?: string[]): Promise<ConnectorDef> {
+  if (!def.recommendedTools.length) return def
+  if (prev && prev.length === def.recommendedTools.length && prev.every((x, i) => x === def.recommendedTools[i])) return def
+  let tools: ToolDef[]
+  try {
+    tools = await toolsOf(db, def.vendor, def.toolkit)
+  } catch (e) {
+    throw new HttpError(502, `拉不到 ${def.toolkit} 的工具清单，没法核对推荐工具集：${(e as Error).message}`)
+  }
+  if (!tools.length) throw new HttpError(502, `${def.toolkit} 的工具清单是空的，没法核对推荐工具集`)
+  // 大小写不敏感地对，存回去的是**清单里那个写法**。
+  const bySlug = new Map(tools.map((t) => [t.slug.toUpperCase(), t.slug]))
+  const real: string[] = []
+  const unknown: string[] = []
+  for (const want of def.recommendedTools) {
+    const hit = bySlug.get(want.toUpperCase())
+    if (hit) real.push(hit)
+    else unknown.push(want)
+  }
+  if (unknown.length) {
+    throw new HttpError(400, `${def.toolkit} 里没有这些工具：${unknown.join('、')}。名字要和工具清单里的一模一样。`)
+  }
+  return { ...def, recommendedTools: [...new Set(real)] }
+}
+
+/**
+ * 开着的工具里有几个是真的、哪几个对不上。
+ *
+ * 对不上的那些**必须说出来**：它们既不下发也不报错，表现就是「工具凭空少了几个」。
+ * 供应商改名、下线一个工具都会走到这里，不只是填错。
+ */
+export function matchTools(tools: ToolDef[], enabled: string[]): { matched: string[]; unknown: string[] } {
+  const real = new Set(tools.map((t) => t.slug))
+  const matched: string[] = []
+  const unknown: string[] = []
+  for (const slug of enabled) (real.has(slug) ? matched : unknown).push(slug)
+  return { matched, unknown }
 }
 
 /**
@@ -93,6 +169,7 @@ export function applyConnectorPatch(cur: ConnectorDef, body: Record<string, unkn
   if ('multiAccount' in body) next.multiAccount = body.multiAccount !== false
   if ('perm' in body && (MCP_PERMS as readonly string[]).includes(trimStr(body.perm))) next.perm = trimStr(body.perm)
   if ('enabled' in body) next.enabled = body.enabled !== false
+  if ('recommendedTools' in body) next.recommendedTools = toolListOf(body.recommendedTools)
   return next
 }
 
@@ -131,6 +208,7 @@ export function publicConnector(item: CatalogItem) {
     enabled: def.enabled,
     /** 配了 auth config 才连得上。只说配没配，不带出值。 */
     authReady: Boolean(def.authConfigId),
+    recommendedTools: def.recommendedTools,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   }

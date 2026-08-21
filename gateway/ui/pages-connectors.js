@@ -185,6 +185,12 @@ function connectorEditModal() {
       <label style="display: block; margin-top: var(--space-2); font-size: 13px;">${t('auth config id')}
         <input class="input" data-input="conn-edit-auth" value="${esc(edit.authConfigId || '')}" placeholder="${esc(edit.authReady ? t('已配置，留空则不改') : 'ac_...')}" style="margin-top: 4px;">
       </label>
+      <label style="display: block; margin-top: var(--space-2); font-size: 13px;">${t('装上默认开哪几个工具')}
+        <textarea class="input" data-input="conn-edit-recommended" rows="4" placeholder="GITHUB_CREATE_ISSUE&#10;GITHUB_LIST_ISSUES" style="margin-top: 4px; font-family: var(--font-mono, monospace); font-size: 12px;">${esc((edit.recommendedTools || []).join('\n'))}</textarea>
+      </label>
+      <p style="margin: 4px 0 0; font-size: 12px; color: var(--muted-foreground);">
+        ${t('一行一个 slug。留空 = 装上就全开——GitHub 有五百个工具，全开的话员工要点四百多次才关得完，「自己关」这条路等于没有。挑十几个常用的。')}
+      </p>
       <label style="display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-3); font-size: 13px;">
         <input type="checkbox" data-input="conn-edit-enabled" ${edit.enabled ? 'checked' : ''}>
         ${t('在市场里可见')}
@@ -305,7 +311,14 @@ function connectorToolsBox(detail) {
   const enabled = new Set(detail.install?.enabledTools || [])
   // 空 = 全开。这是后端的口径，界面上也照这个显示，不然「一个都没勾」会被读成「全关」。
   const all = enabled.size === 0
-  const on = all ? tools.length : enabled.size
+  /**
+   * **数字用后端算好的 `enabledCount`，不自己数 `enabledTools`。**
+   *
+   * 自己数的是「存了几个」，后端数的是「有几个真的在清单里」。存着一个供应商已经改名
+   * 的 slug 时，两者会差开——界面写「1 / 500 个已开启」，底下 500 个复选框一个没勾，
+   * Bot 那边一个工具也没有。三处对不上，还查不出为什么。
+   */
+  const on = Number.isFinite(detail.enabledCount) ? detail.enabledCount : all ? tools.length : enabled.size
   const cap = Number(detail.toolCap) || 0
   const rows = tools
     .map(
@@ -326,15 +339,40 @@ function connectorToolsBox(detail) {
     <p style="margin: 0 0 var(--space-2); font-size: 12px; color: var(--muted-foreground);">
       ${t('开着的工具会进你每一个 Bot 的工具表。用不上的关掉——装得多了，工具表会把上下文撑满，模型也更容易选错。')}
     </p>
-    ${
-      cap && on > cap
-        ? `<div class="gw-flash gw-flash-err" style="margin-bottom: var(--space-2);">${t(
-            `开了 ${on} 个，超过上限 ${cap} 个——多出来的 ${on - cap} 个不会下发给 Bot。关掉一些用不上的。`,
-          )}</div>`
-        : ''
-    }
+    ${toolModeNote(detail, on, cap)}
     <div style="max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-3);">${rows}</div>
   </div>`
+}
+
+/**
+ * 工具数超了之后那一条提示。
+ *
+ * **档位由后端给（`detail.toolMode`），界面不许自己按 `on > cap` 去推**——推的那一刻它就
+ * 和 Gateway 的分档逻辑分叉了，而分叉的表现是界面说一套、Bot 拿到另一套（tool-search.md §9）。
+ *
+ * 语气分两种，这个区别是要紧的：
+ * - `search` / `listing`：**没有东西被丢掉**，只是多一两轮往返。是一句说明，不是警告
+ * - `direct` 且超了：这是 `CONNECTOR_TOOL_SEARCH=off` 那一档，真的会截断。红字
+ */
+function toolModeNote(detail, on, cap) {
+  const mode = detail.toolMode || 'direct'
+  // 开着的 slug 在清单里找不到：既不下发也不报错，界面上必须看得见。供应商改名、
+  // 下线一个工具都会走到这里，不只是填错。
+  const gone = detail.unknownTools || []
+  const goneLine = gone.length
+    ? `<div class="gw-flash gw-flash-err" style="margin-bottom: var(--space-2);">${t(
+        `开着的 ${gone.length} 个工具在这个连接器的清单里已经没有了，不会下发给 Bot：${gone.join('、')}。保存一次就能把它们清掉。`,
+      )}</div>`
+    : ''
+  if (mode === 'search' || mode === 'listing') {
+    return goneLine + `<div class="gw-flash gw-flash-note" style="margin-bottom: var(--space-2);">${t(
+      `开了 ${on} 个，超过 ${cap} 个——这个连接会切到搜索模式：Bot 先搜工具再调，${on} 个全都用得上，代价是每次多一两轮往返。关掉用不上的能回到直连模式。`,
+    )}</div>`
+  }
+  if (!cap || on <= cap) return goneLine
+  return goneLine + `<div class="gw-flash gw-flash-err" style="margin-bottom: var(--space-2);">${t(
+    `开了 ${on} 个，超过上限 ${cap} 个——多出来的 ${on - cap} 个不会下发给 Bot。关掉一些用不上的。`,
+  )}</div>`
 }
 
 function connectorDetailPage() {
@@ -1035,6 +1073,11 @@ async function connectorAct(act, btn) {
     // 留空 = 不改。已经配好的 auth config 不该因为「打开弹窗又保存」被清掉。
     const auth = valueOf('conn-edit-auth', '')
     if (auth) body.authConfigId = auth
+    // 这一格不一样：留空**就是**「不挑，装上全开」，所以照原样提交，不能当成「不改」。
+    body.recommendedTools = valueOf('conn-edit-recommended', '')
+      .split('\n')
+      .map((x) => x.trim())
+      .filter(Boolean)
     try {
       await api('PATCH', `/platform/connectors/${encodeURIComponent(edit.id)}`, body)
       state.connectorEdit = null

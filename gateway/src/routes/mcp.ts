@@ -11,7 +11,16 @@ import type { ServerResponse } from 'node:http'
 import { HttpError, json, type Req, type Router } from '../http.ts'
 import type { RouteCtx } from './ctx.ts'
 import { ProviderError, providerFor, type ToolDef } from '../connectors/index.ts'
-import { MAX_TOOLS, blockMapOf, connectorDefOf, toolsOf } from '../lib/connectors.ts'
+import { MAX_TOOLS, blockMapOf, connectorDefOf, matchTools, toolsOf } from '../lib/connectors.ts'
+import {
+  SEARCH_LIMIT,
+  metaToolDefs,
+  metaToolOf,
+  renderHits,
+  renderMiss,
+  searchTools,
+  toolModeOf,
+} from '../lib/tool-search.ts'
 import { requireSeatOnly } from '../lib/guards.ts'
 import type { Account, ConnectorCallStatus, ConnectorConnection, Db } from '../db.ts'
 
@@ -77,6 +86,38 @@ function rpcErr(res: ServerResponse, id: unknown, code: number, message: string)
 /** 工具的返回值一律走 MCP 的 content 形状；`isError` 让席位那边知道这次没成。 */
 function toolResult(text: string, isError = false) {
   return { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) }
+}
+
+/** 目录暂时拉不到时对模型说的话。**说清是目录的问题，不是工具不存在。** */
+function renderCatalogDown(toolkit: string): string {
+  return (
+    `${toolkit} 的工具目录这会儿拉不到，不是没有这个工具。过一会儿再搜一次；` +
+    `如果你已经知道确切的工具名，可以直接用 SW_RUN 调，那条路不依赖目录。`
+  )
+}
+
+/**
+ * `SW_RUN` 的参数。**认嵌套的 `args`，也认平铺。**
+ *
+ * 两层结构（`{ tool, args }`）模型经常写错，把工具自己的参数直接铺在 `arguments` 顶层。
+ * 只认 `args` 的话那种调用会带着空参数打到上游——上游回 2xx + `successful:false`，按
+ * connectors.md §8 的口径**这一次照收钱**，然后模型看到「缺少必填参数」再试一次、再收
+ * 一次。猜错的代价是零（平铺时 `tool` 之外的键本来就是参数），不猜的代价是重复计费。
+ */
+function runArgsOf(metaArgs: Record<string, unknown>): unknown {
+  const nested = metaArgs.args
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) return nested
+  // 有些模型会把 args 整个 JSON 字符串化。
+  if (typeof nested === 'string' && nested.trim()) {
+    try {
+      const parsed = JSON.parse(nested)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    } catch {
+      /* 不是 JSON 就当没有，退回下面的平铺 */
+    }
+  }
+  const { tool: _tool, args: _args, ...rest } = metaArgs
+  return rest
 }
 
 export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
@@ -170,6 +211,38 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
       }
       const allow = new Set(g.enabledTools)
       const picked = allow.size ? all.filter((tl) => allow.has(tl.slug)) : all
+
+      /**
+       * 开着的 slug 对不上真清单时**要说出来**。
+       *
+       * 对不上的既不下发也不报错。全都对不上时这把连接就是一张空工具表——连着、界面上
+       * 写着「开了 N 个」、一个工具都用不了。上架时填错、供应商改名、供应商下线一个工具，
+       * 都会走到这里。
+       */
+      if (allow.size) {
+        const { unknown } = matchTools(all, g.enabledTools)
+        if (unknown.length) {
+          console.warn(
+            `satuwork-gateway: 连接 ${g.conn.id}（${g.toolkit}）开着的 ${unknown.length} 个工具在清单里没有：${unknown.join('、')}`,
+          )
+        }
+      }
+
+      /**
+       * 装不下就**降级**，不截断（docs/tool-search.md §4）。
+       *
+       * 降级和截断的区别是全部：截断之后那 436 个工具**够不着**，降级之后一个都不少，
+       * 只是要先搜一下。所以这条路上不带 `truncated`——没有东西被丢掉。
+       */
+      const mode = toolModeOf(picked)
+      if (mode !== 'direct') {
+        console.log(
+          `satuwork-gateway: 连接 ${g.conn.id}（${g.toolkit}）有 ${picked.length} 个工具，切到搜索模式（${mode}）`,
+        )
+        rpcOk(res, id, { tools: metaToolDefs(g.toolkit, picked, mode) })
+        return
+      }
+
       const kept = picked.slice(0, MAX_TOOLS)
       const dropped = picked.length - kept.length
       if (dropped > 0) {
@@ -205,8 +278,80 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
      */
     const viaMention = (params._meta as { viaMention?: unknown } | undefined)?.viaMention === true
     // 清单是缓存的（五分钟），所以这一步不是每次调用都打一趟上游。
-    const known = await toolsOf(db, g.vendor, g.toolkit).catch(() => [] as ToolDef[])
-    const slug = resolveToolSlug(g.toolkit, String(params.name ?? ''), known)
+    /**
+     * **拉不到清单和「清单里没有」不是一回事，这里要分开记。**
+     *
+     * 混成一个空数组的话，供应商抖一下 SW_DESCRIBE 就会回「没有这个工具」，模型转头
+     * 告诉用户这个能力不存在——而同一时刻 SW_RUN 其实是通的（`resolveToolSlug` 拉不到
+     * 清单会退回猜前缀）。同一个故障给出两种相反结论，是最难查的一类。
+     */
+    let known: ToolDef[] = []
+    let catalogDown = false
+    try {
+      known = await toolsOf(db, g.vendor, g.toolkit)
+    } catch {
+      catalogDown = true
+    }
+    const allow = new Set(g.enabledTools)
+    /** 员工开着的那些。元工具**只在这个集合里搜、在这个集合里描述**——关掉的不许露出来。 */
+    const visible = allow.size ? known.filter((tl) => allow.has(tl.slug)) : known
+
+    /**
+     * 元工具要在 `resolveToolSlug` **之前**拦下来。
+     *
+     * 那个函数会给不带前缀的名字无条件补 toolkit 前缀，`SW_SEARCH` 会被还原成
+     * `GITHUB_SW_SEARCH` 然后当成一个真工具打到上游去。顺序反了就是一个跑得通、
+     * 结果全错、日志上看不出来的 bug（docs/tool-search.md §5）。
+     */
+    const meta = metaToolOf(String(params.name ?? ''))
+    // 只认普通对象。数组或字符串直接当空——`runArgsOf` 里的 rest 展开碰上它们会摊出
+    // `{0:'{',1:'"'…}` 这种东西，然后一本正经地发给上游。
+    const metaArgs =
+      params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments)
+        ? (params.arguments as Record<string, unknown>)
+        : {}
+
+    /**
+     * 搜和描述**不计费、也不落 `connector_calls`**：它们不产生供应商侧的执行，跟
+     * `tools/list` 同一档。落进流水表还会把「按工具统计次数」搅浑——`SW_SEARCH` 会
+     * 变成这个 toolkit 里调用量最大的「工具」（docs/tool-search.md §7）。只写日志。
+     */
+    // 目录暂时不可达：**明说是目录的问题**，并给模型一条还走得通的路。
+    if ((meta === 'search' || meta === 'describe') && catalogDown) {
+      rpcOk(res, id, toolResult(renderCatalogDown(g.toolkit), true))
+      return
+    }
+    if (meta === 'search') {
+      const query = String(metaArgs.query ?? '').trim()
+      const limit = Math.trunc(Number(metaArgs.limit) || SEARCH_LIMIT)
+      const hits = searchTools(visible, query, limit)
+      console.log(`satuwork-gateway: 连接 ${g.conn.id}（${g.toolkit}）搜「${query}」命中 ${hits.length} 个`)
+      rpcOk(res, id, toolResult(hits.length ? renderHits(hits) : renderMiss(g.toolkit, visible, query)))
+      return
+    }
+    if (meta === 'describe') {
+      const want = resolveToolSlug(g.toolkit, String(metaArgs.tool ?? ''), known)
+      const hit = visible.find((tl) => tl.slug === want)
+      if (!hit) {
+        // 关掉的工具也走这一支。**不回它的 schema**——否则模型拿到一份它永远调不动的
+        // 参数表，然后反复重试。这里回的是「去找」，不是「不存在」。
+        rpcOk(res, id, toolResult(`${g.toolkit} 这把连接里没有开着的 ${want || '(空)'}，先用 SW_SEARCH 找一个。`, true))
+        return
+      }
+      rpcOk(
+        res,
+        id,
+        toolResult(`${hit.slug} — ${hit.description || hit.name}\n\n参数（JSON Schema）：\n${JSON.stringify(hit.inputSchema ?? {}, null, 2)}`),
+      )
+      return
+    }
+
+    /**
+     * `SW_RUN` 就是今天的 `tools/call`，只是工具名从参数里来。**往下走的是同一段代码**：
+     * 白名单、余额、超时、流水、计费一样不少。元工具不许成为绕过工具开关的后门。
+     */
+    const slug = resolveToolSlug(g.toolkit, String(meta === 'run' ? (metaArgs.tool ?? '') : (params.name ?? '')), known)
+    const callArgs = meta === 'run' ? runArgsOf(metaArgs) : (params.arguments ?? {})
     const startedAt = Date.now()
 
     /**
@@ -247,7 +392,7 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
       rpcOk(res, id, toolResult('没有指定工具名', true))
       return
     }
-    if (g.enabledTools.length && !g.enabledTools.includes(slug)) {
+    if (allow.size && !allow.has(slug)) {
       await record('denied', true)
       rpcOk(res, id, toolResult('这个工具没有开启，去连接器那一屏打开它', true))
       return
@@ -276,7 +421,7 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
         tool: slug,
         externalUserId: g.conn.externalUserId,
         externalId: g.conn.externalId,
-        args: params.arguments ?? {},
+        args: callArgs,
         signal: timer,
       })
       /**
