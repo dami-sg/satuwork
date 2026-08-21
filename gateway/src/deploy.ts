@@ -718,24 +718,86 @@ export async function managerRemoveSeat(machine: Machine, seatId: string): Promi
  * 回来之后再删也不迟。硬删下去只会留下一批谁也看不见、还占着端口的席位。
  *
  * 没配对的机器（还没装管家、或者已经注销）跳过：那上面本来就没有我们放上去的东西。
+ *
+ * **删 Bot 不走这条**，走下面的 purgeBot：那条路上「拆不掉」不该把删除一起否掉。
  */
 export async function releaseSeats(db: Db, seats: SeatRuntime[]): Promise<void> {
+  const { failed } = await releaseSeatsBestEffort(db, seats)
+  if (failed.length) throw new Error(failed[0].error)
+}
+
+/** 拆不掉的那些。`error` 已经脱敏，可以原样给人看。 */
+export interface SeatReleaseResult {
+  released: SeatRuntime[]
+  failed: { seat: SeatRuntime; error: string }[]
+}
+
+/**
+ * 同上，但**逐个记账而不是第一个失败就停**。
+ *
+ * 删 Bot 走这条：那条路上「拆席位」失败不能把「删 Bot」一起否掉。管家拆席位的顺序
+ * 是先停单元再收拾目录，中间任何一步出岔子（单元卡在 stopping、目录不在它该在的
+ * 位置、120 秒超时），Bot 都已经聊不了了，而删除每次都以同一个理由失败——那颗 Bot
+ * 于是既用不了也删不掉，界面上还一直列着。这是真发生过的现场。
+ *
+ * 拆不掉的席位由调用方留成墓碑（见 db.orphanSeatRuntime）：行留着，slot 就不会被
+ * 下一个人分走，而 Bot 那边该删的全删。
+ */
+export async function releaseSeatsBestEffort(db: Db, seats: SeatRuntime[]): Promise<SeatReleaseResult> {
+  const out: SeatReleaseResult = { released: [], failed: [] }
   // 一台机器查一次，别为同一台机器上的每个席位都去 db.machine() 一趟。
   const machines = new Map<string, Machine | undefined>()
+  /**
+   * 已经答不上话的机器。**同一台不再逐个席位重试**：管家那一跳等 120 秒，一台躺着
+   * 的机器上有十个席位就是二十分钟，而第一次的答案已经够了。
+   */
+  const dead = new Map<string, string>()
   for (const seat of seats) {
-    if (!seat.machineId) continue
+    // 没配对的机器（还没装管家、或者已经注销）跳过：那上面本来就没有我们放上去的
+    // 东西，算「拆掉了」。
+    if (!seat.machineId) {
+      out.released.push(seat)
+      continue
+    }
     if (!machines.has(seat.machineId)) machines.set(seat.machineId, await db.machine(seat.machineId))
     const machine = machines.get(seat.machineId)
-    if (!machinePaired(machine)) continue
+    if (!machinePaired(machine)) {
+      out.released.push(seat)
+      continue
+    }
+    const seen = dead.get(seat.machineId)
+    if (seen !== undefined) {
+      out.failed.push({ seat, error: `席位 ${seat.seatId}：${seen}` })
+      continue
+    }
     try {
       await managerRemoveSeat(machine, seat.seatId)
+      out.released.push(seat)
     } catch (e) {
-      throw new Error(
-        `席位 ${seat.seatId} 所在的机器拆不掉（${sanitizeError(e, [machine.token])}）。` +
-          '先把它「停用」，等机器恢复后再删除。',
-      )
+      const why = `机器拆不掉（${sanitizeError(e, [machine.token])}）。先把它「停用」，等机器恢复后再删除。`
+      dead.set(seat.machineId, why)
+      out.failed.push({ seat, error: `席位 ${seat.seatId} 所在的${why}` })
     }
   }
+  return out
+}
+
+/**
+ * 删一颗 Bot：**先拆机器上的席位，再把库里跟它有关的东西清干净**。
+ *
+ * 两件事的成败是分开的。席位拆掉了就连行一起删；拆不掉就把那行留成墓碑（状态
+ * 出错、写明原因），slot 因此不会被下一个人分走，而 Bot 本身照删不误——「删了」和
+ * 「界面上还列着但聊不了」之间，用户要的永远是前者。
+ *
+ * 按 botId 查席位、不按公司：全局 Bot 可能被好几家公司各自部署过。
+ */
+export async function purgeBot(db: Db, botId: string): Promise<SeatReleaseResult> {
+  const seats = await db.seatRuntimesOfBot(botId)
+  const result = await releaseSeatsBestEffort(db, seats)
+  for (const seat of result.released) await db.deleteSeatRuntimeOf(seat.accountId, seat.botId)
+  for (const f of result.failed) await db.orphanSeatRuntime(f.seat.accountId, f.seat.botId, f.error)
+  await db.deleteBot(botId)
+  return result
 }
 
 /** 问管家还活着吗。配对回拨和界面上的「检查连通」都走它。 */

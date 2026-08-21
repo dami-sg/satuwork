@@ -2152,6 +2152,55 @@ export class Db {
     })
   }
 
+  /**
+   * 拆不掉的席位：**行留着，但把它和 Bot 之间的东西全清掉**。
+   *
+   * 机器不在线、或者管家把单元停了却没收拾干净时走这条。行不能删——slot 一空出来
+   * 就会被下一个人分走，而那台机器上的单元还占着 3200+N / 6081+N（理由见 deploy.ts
+   * 的 releaseSeats）。行留着，机器详情页上就是一条「出错、没有 Bot 名」的席位，
+   * 平台侧点一下「清理」重试拆除即可。
+   *
+   * 实例地址和会话索引照删：Bot 已经删了，它们指向的东西再也打不开。
+   */
+  async orphanSeatRuntime(accountId: string, botId: string, reason: string): Promise<void> {
+    await this.tx(async () => {
+      await this.run(
+        'update seat_runtimes set status = ?, "lastError" = ?, "updatedAt" = ? where "accountId" = ? and "botId" = ?',
+        ['error', reason.slice(0, 500), Date.now(), accountId, botId],
+      )
+      await this.run('delete from instances where "accountId" = ? and "botId" = ?', [accountId, botId])
+      await this.run('delete from session_index where "accountId" = ? and "botId" = ?', [accountId, botId])
+    })
+  }
+
+  /**
+   * 一颗 Bot 名下的全部东西，**账本除外**。
+   *
+   * 「删掉」得是真的删掉：会话索引、实例地址、分组里对它的引用、目录项自己，一条
+   * 都不留。留一半的后果上一次已经见过——目录项还在，界面上那颗 Bot 照常列着，
+   * 点进去却聊不了，谁也说不清它是什么。
+   *
+   * **席位不在这里拆**：那要先和机器说话，删不删得掉库里这行取决于机器答不答应，
+   * 由调用点决定（见 deploy.ts 的 purgeBot）。
+   *
+   * **账本一个字都不动**：usage_charges / llm_calls / connector_calls / web_calls 是
+   * 要留档的钱，botId 变成悬空引用没关系，统计里按 id 显示。audit_events 同理——它
+   * 记的是「谁在什么时候删了这颗 Bot」，跟着 Bot 一起消失就没有审计可言了。
+   */
+  async deleteBot(botId: string): Promise<void> {
+    await this.tx(async () => {
+      await this.run('delete from session_index where "botId" = ?', [botId])
+      await this.run('delete from instances where "botId" = ?', [botId])
+      // 分组按 jsonb 反查，**不按公司**：全局 Bot 可能被好几家公司各自编进分组，
+      // 只扫它自己那家会把别家的引用留成一个指向不存在 Bot 的 id。
+      const rows = await this.many('select * from groups where agents @> ?::jsonb', [JSON.stringify([botId])])
+      for (const g of rows.map(groupOf)) {
+        await this.updateGroup(g.id, { agents: g.agents.filter((a) => a !== botId) })
+      }
+      await this.run('delete from catalog_items where id = ? and kind = \'bot\'', [botId])
+    })
+  }
+
   // ── Bot 发布包。只存元数据，tarball 在 $SATUWORK_GATEWAY_HOME/releases。──
 
   async insertBotRelease(row: BotRelease): Promise<BotRelease> {

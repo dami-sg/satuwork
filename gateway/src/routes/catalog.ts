@@ -7,7 +7,7 @@ import { HttpError, type Req, type Router, json } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { kindOf, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
 import { type Account, type CatalogItem, type CatalogKind } from '../db.ts'
-import { releaseSeats } from '../deploy.ts'
+import { purgeBot } from '../deploy.ts'
 
 export function attachCatalog(router: Router, ctx: RouteCtx) {
   const { db, keys } = ctx
@@ -319,23 +319,22 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
      *
      * 按 botId 查席位、不按公司：全局 Bot 可能被好几家公司各自部署过。
      *
-     * 拆不掉就 502 并且**不删目录项**——留着比留下一批谁也看不见、还占着端口的席位好。
+     * **拆不掉的席位留成墓碑，Bot 照删**（见 deploy.ts 的 purgeBot）：那行还占着
+     * slot，谁也分不走它，而「删了」这件事不该被一台联系不上的机器无限期扣住——
+     * 员工那条删除路径上已经因此挂过一颗既聊不了也删不掉的 Bot。
      */
     router.delete(`${s.base}/bots/:botId`, async (req, res) => {
       const { account, owner } = await s.write(req)
       const item = await ownedItem(owner, req.params.botId, 'bot', '没有这个助理')
-      const seats = await db.seatRuntimesOfBot(item.id)
-      if (seats.length) {
-        try {
-          await releaseSeats(db, seats)
-        } catch (e) {
-          throw new HttpError(502, `席位没拆干净，先重试或者等机器恢复：${(e as Error).message}`)
-        }
-        for (const seat of seats) await db.deleteSeatRuntimeOf(seat.accountId, seat.botId)
-      }
-      await db.deleteCatalog(item.id)
-      await auditCatalog(owner, account.id, 'catalog.delete', { kind: 'bot', id: item.id, seats: seats.length })
-      json(res, 200, { deleted: true, id: item.id, seats: seats.length })
+      const { released, failed } = await purgeBot(db, item.id)
+      const orphans = failed.map((f) => ({ seatId: f.seat.seatId, error: f.error }))
+      await auditCatalog(owner, account.id, 'catalog.delete', {
+        kind: 'bot',
+        id: item.id,
+        seats: released.length,
+        orphans,
+      })
+      json(res, 200, { deleted: true, id: item.id, seats: released.length, orphans })
     })
 
     // ── Skill ──────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { INSTANCE_DOWN, MIN_MANAGER_NODE, PAIRING_TTL, desiredManagerRelease, gatewayBaseFor, installCommandFor, machineBase, machineCard, machineHostResolver, machineOfOrg, managerHostOf, normalizePairingCode, randomPairingCode, registerFromBody, sendReleaseFile } from '../lib/machines.ts'
-import { MACHINE_TOMBSTONE_TTL, MIN_MANAGER_PROTOCOL, type MachineLoad, companyMachineOf, deploySeat, machineLink, machineLoadOf, machineLoads, machinePaired, managerHealth, normalizeTimezone, ownerMachine, publicSeatRuntime } from '../deploy.ts'
+import { MACHINE_TOMBSTONE_TTL, MIN_MANAGER_PROTOCOL, type MachineLoad, companyMachineOf, deploySeat, machineLink, machineLoadOf, machineLoads, machinePaired, managerHealth, normalizeTimezone, ownerMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
 import { accessUrlFor } from '../lib/catalog.ts'
 import { bodyOf, intField, strField } from '../lib/validate.ts'
 import { installScript } from '../install.ts'
@@ -346,6 +346,10 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
         // Bot 被删掉之后席位还在（拆席位是另一件事），名字就没了——退回 id，
         // 至少还指得出是哪一个。
         botName: bots.get(r.botId)?.name || null,
+        // 没有主人的席位。**单独一个字段，不让界面拿 botName 是不是空来猜**：
+        // 那一列将来完全可能因为别的原因取不到名字，而「能不能从这里清掉」是权限
+        // 判断，不能建在一个显示字段上。
+        orphan: !bots.get(r.botId),
         seatId: r.seatId,
         linuxUser: r.linuxUser,
         slot: r.slot,
@@ -669,6 +673,41 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     })
     // pending = 机器还得收一次信才算收拾干净。界面据此把话说全，别写成「已经停了」。
     json(res, 200, { ok: true, seats: seats.length, pending: notify })
+  })
+
+  /**
+   * 清理一条**没有主人的席位**：Bot 已经删了，机器上那套单元当时没拆掉。
+   *
+   * 删 Bot 时拆不掉的席位会留成墓碑（见 deploy.ts 的 purgeBot），行留着是为了占住
+   * slot——机器上那组端口（3200+N / 6081+N）还被老单元占着，把 slot 让出去，下一个
+   * 人的席位就起不来。机器修好之后总得有人来收这一行，这条路就是那把扫帚。
+   *
+   * **只清理 Bot 已经不在的那些。** 还有主人的席位不能从这里拆：那是「删 Bot」或者
+   * 「重新部署」的事，从机器页把一个活着的席位掀掉，员工那边只会看到聊天忽然 503，
+   * 界面上却什么都没变。
+   */
+  router.delete('/platform/machines/:id/seats/:seatId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const seat = await db.seatRuntimeBySeatId(req.params.seatId)
+    if (!seat || seat.machineId !== machine.id) throw new HttpError(404, '这台机器上没有这个席位')
+    if (await db.catalog(seat.botId)) {
+      throw new HttpError(409, '这个席位的 Bot 还在，请去 Bot 那边删除，或者让本人重新部署')
+    }
+    try {
+      await releaseSeats(db, [seat])
+    } catch (e) {
+      throw new HttpError(502, (e as Error).message)
+    }
+    await db.deleteSeatRuntimeOf(seat.accountId, seat.botId)
+    await auditMachine(machine, account.id, 'machine.seat.remove', {
+      machineId: machine.id,
+      seatId: seat.seatId,
+      botId: seat.botId,
+      accountId: seat.accountId,
+    })
+    json(res, 200, { ok: true, seatId: seat.seatId })
   })
 
   // 读发布列表跟上传同一套凭证：CI 传完要能回查，人在发布页看的是同一份数据。

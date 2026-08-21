@@ -143,6 +143,16 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
   return base
 }
 
+/**
+ * 拆一个席位。**非零退出只有一个含义：单元还活着**（见 remove-seat.sh 的结尾）。
+ *
+ * 分得这么细，是因为 Gateway 那边拿这个结果决定「这颗 Bot 能不能删」。删目录、删
+ * drop-in 失败只是留了点垃圾，据此报错的代价是那颗 Bot 既聊不了也删不掉；而单元
+ * 没停，端口就还占着，槽位让出去下一个人的席位就起不来——只有后者值得拦。
+ *
+ * 脚本的警告（跳过的目录、没删掉的 drop-in）走 stderr，成功时也写进 journal：
+ * 机器上留了什么垃圾，事后只有这里答得上。
+ */
 export async function removeSeat(seatId: string): Promise<void> {
   const reg = load()
   const row = reg[seatId]
@@ -153,6 +163,8 @@ export async function removeSeat(seatId: string): Promise<void> {
       env: { LINUX_USER: row.linuxUser, SEAT_ID: seatId, SEAT_DIR: row.seatDir },
     })
     if (r.code !== 0) throw new Error(tailError(r, `remove script exited ${r.code}`))
+    const warnings = r.stderr.trim()
+    if (warnings) console.warn(`satuwork-manager: 席位 ${seatId} 拆掉了，但有告警：${warnings.slice(-400)}`)
   }
   delete reg[seatId]
   save(reg)

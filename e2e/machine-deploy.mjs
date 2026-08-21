@@ -1055,6 +1055,139 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       }
     })
 
+    /**
+     * 席位拆不掉时，**Bot 照样删得掉**。
+     *
+     * 以前是拆不掉就 502、一个字都不删。而管家拆席位的顺序是「先停单元再收拾目录」：
+     * 中间任何一步出岔子（单元卡在 stopping、目录不在它该在的位置、超时），Bot 已经
+     * 聊不了了，删除却每次都以同一个理由失败——界面上于是永远挂着一颗既用不了也删不
+     * 掉的 Bot，机器管理里还列着它的席位。线上真出过。
+     *
+     * 现在拆不掉的席位留成墓碑：行留着（slot 不会被下一个人分走），Bot 和它名下的
+     * 会话索引照删，机器修好之后从机器详情页点一下「清理」收尾。
+     */
+    await test('席位拆不掉：Bot 照删、席位留成待清理、清理入口能收尾', async () => {
+      let refuse = true
+      const seen = []
+      const fake = createServer((r, res) => {
+        seen.push(`${r.method} ${r.url}`)
+        if (r.method === 'DELETE' && refuse) {
+          res.writeHead(500, { 'content-type': 'application/json' }).end('{"error":"remove script exited 1"}')
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
+      })
+      await new Promise((ok, bad) => {
+        fake.once('error', bad)
+        fake.listen(8546, '127.0.0.1', ok)
+      })
+      try {
+        const co = await createCompany(req, gwBase, {
+          ownerToken: ownerTok,
+          email: 'admin@stuck.test',
+          password: 'correct-horse',
+          companyName: 'Stuck',
+          slug: 'stuck',
+        })
+        const code = await req(gwBase, 'POST', `/platform/orgs/${co.company.id}/pairing-code`, { token: ownerTok })
+        assert(code.status === 201, `配对码 ${code.status} ${code.text}`)
+        const paired = await req(gwBase, 'POST', '/machines/pair', {
+          body: { code: code.json.code, managerPort: 8546, managerVersion: '1.0.0', protocol: 1 },
+        })
+        assert(paired.status === 201, `配对 ${paired.status} ${paired.text}`)
+        const machineId = paired.json.machineId
+
+        const bot = await req(gwBase, 'POST', '/runtime/bots', { token: co.token, body: { name: '拆不掉的 Bot' } })
+        assert(bot.status === 201, `建 bot ${bot.status} ${bot.text}`)
+        const botId = bot.json.bot.id
+        const deployed = await req(gwBase, 'POST', '/runtime/deploy', { token: co.token, body: { botId } })
+        assert(deployed.status === 200, `部署 ${deployed.status} ${deployed.text}`)
+        const seatId = deployed.json.seatId
+
+        // 会话索引：删 Bot 要连它一起清掉，否则管理员点进去的是一条永远打不开的会话。
+        const mach = await req(gwBase, 'GET', `/platform/orgs/${co.company.id}/machine`, { token: ownerTok })
+        assert(mach.status === 200, `机器 ${mach.status} ${mach.text}`)
+        const idx = await req(gwBase, 'POST', '/internal/sessions/index', {
+          token: mach.json.machine.token,
+          body: {
+            sessionId: 's-stuck',
+            companyId: co.company.id,
+            accountId: co.account.id,
+            botId,
+            messageCount: 1,
+            createdAt: 1_700_000_000_000,
+            updatedAt: 1_700_000_000_000,
+          },
+        })
+        assert(idx.status === 200, `会话索引 ${idx.status} ${idx.text}`)
+
+        // 分组里对它的引用也要跟着没：留着的话那一格指向一个不存在的 Bot，界面上
+        // 是个空位，谁也说不清它原来是什么。
+        const group = await req(gwBase, 'POST', `/orgs/${co.company.id}/accounts/groups`, {
+          token: co.token,
+          body: { name: '带 Bot 的组', role: 'member', members: [co.account.id], agents: [botId] },
+        })
+        assert(group.status === 201, `建分组 ${group.status} ${group.text}`)
+        assert((group.json.group.agents || []).includes(botId), `分组没记住这颗 Bot：${group.text}`)
+
+        const del = await req(gwBase, 'DELETE', `/runtime/bots/${botId}`, { token: co.token })
+        assert(del.status === 200, `删 bot ${del.status} ${del.text}`)
+        assert((del.json.orphans || []).length === 1, `回执没说哪个席位没拆掉：${del.text}`)
+        const gone = await req(gwBase, 'GET', `/runtime/bots/${botId}`, { token: co.token })
+        assert(gone.status === 404, `Bot 应该删掉了，得到 ${gone.status} ${gone.text}`)
+        const sessions = await req(gwBase, 'GET', `/orgs/${co.company.id}/sessions`, { token: co.token })
+        assert(sessions.status === 200, `会话列表 ${sessions.status} ${sessions.text}`)
+        assert(
+          !(sessions.json.sessions || []).some((x) => x.sessionId === 's-stuck'),
+          `会话索引还在：${sessions.text}`,
+        )
+
+        const roster = await req(gwBase, 'GET', `/orgs/${co.company.id}/accounts`, { token: co.token })
+        assert(roster.status === 200, `名册 ${roster.status} ${roster.text}`)
+        assert(
+          !(roster.json.groups || []).some((g) => (g.agents || []).includes(botId)),
+          `分组里还留着这颗 Bot：${roster.text}`,
+        )
+
+        // 席位那行**必须留着**：删掉的话 slot 立刻能被下一个人分走，而机器上那套
+        // 单元还占着 3200+N / 6081+N。
+        const detail = await req(gwBase, 'GET', `/platform/machines/${machineId}`, { token: ownerTok })
+        assert(detail.status === 200, `机器详情 ${detail.status} ${detail.text}`)
+        const row = (detail.json.seatList || []).find((x) => x.seatId === seatId)
+        assert(row, `席位行不见了：${detail.text}`)
+        assert(row.status === 'error' && row.orphan === true, `席位没标成待清理：${JSON.stringify(row)}`)
+
+        // 活着的席位不许从机器页掀掉——那是「删 Bot」的事。
+        const live = (detail.json.seatList || []).find((x) => x.orphan === false)
+        if (live) {
+          const denied = await req(gwBase, 'DELETE', `/platform/machines/${machineId}/seats/${live.seatId}`, {
+            token: ownerTok,
+          })
+          assert(denied.status === 409, `Bot 还在的席位应该 409，得到 ${denied.status} ${denied.text}`)
+        }
+
+        // 机器恢复之后，清理入口把这行收掉。
+        refuse = false
+        seen.length = 0
+        const cleaned = await req(gwBase, 'DELETE', `/platform/machines/${machineId}/seats/${seatId}`, {
+          token: ownerTok,
+        })
+        assert(cleaned.status === 200, `清理 ${cleaned.status} ${cleaned.text}`)
+        assert(
+          seen.some((x) => x === `DELETE /seats/${seatId}`),
+          `管家没收到重试的拆席位请求，只看到 ${JSON.stringify(seen)}`,
+        )
+        const after = await req(gwBase, 'GET', `/platform/machines/${machineId}`, { token: ownerTok })
+        assert(
+          !(after.json.seatList || []).some((x) => x.seatId === seatId),
+          `席位行还在：${after.text}`,
+        )
+      } finally {
+        fake.closeAllConnections?.()
+        await new Promise((r) => fake.close(() => r()))
+      }
+    })
+
   } finally {
     if (gw && !gw._exited) {
       try {
