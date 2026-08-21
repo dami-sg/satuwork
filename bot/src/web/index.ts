@@ -3,6 +3,7 @@ import type { SessionEvent } from '../session/types.ts'
 import { historySlice } from '../session/replay.ts'
 import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
+import { docKindOf, extractDocument } from '../workspace/extract.ts'
 import type { ImageRef, Mention } from '../agent/index.ts'
 
 /**
@@ -250,6 +251,36 @@ export function apply(ctx: Context, _config: Config = {}) {
       res.json({ error: 'path 不能为空' })
       return
     }
+    /**
+     * `?as=text`：把 Word / Excel / PPT / PDF 提取成文本回给界面预览。
+     *
+     * 浏览器打不开这几种格式，而对一份刚生成的报表说「下载下来看吧」是很差的答复。
+     * 走的是 `read` 工具用的**同一套提取**（workspace/extract.ts），所以界面上看到的
+     * 和模型读到的是同一份东西——内容对不上时，能一眼看出是提取的问题还是模型的问题。
+     *
+     * **摆在 open() 前面**：open() 会当场开一个读流，而这条路根本不读字节，
+     * 放在后面等于每次预览都漏一个 fd。
+     */
+    if (req.query.get('as') === 'text') {
+      const kind = docKindOf(path)
+      if (!kind) {
+        res.status = 415
+        res.json({ error: '这种格式没法提取成文本' })
+        return
+      }
+      try {
+        const out = await extractDocument(ctx.workspace.resolve(path), kind)
+        res.json({ text: out.text, note: out.truncated ? `内容较长，只提取了前 ${out.parts} ${out.unit}。` : '' })
+      } catch (e) {
+        const err = e as NodeJS.ErrnoException
+        res.status = e instanceof WorkspaceError ? 400 : err?.code === 'ENOENT' ? 404 : 500
+        res.json({
+          error:
+            e instanceof WorkspaceError ? e.message : err?.code === 'ENOENT' ? '文件不存在' : `提取失败：${(e as Error).message}`,
+        })
+      }
+      return
+    }
     let file: Awaited<ReturnType<typeof ctx.workspace.open>>
     try {
       file = await ctx.workspace.open(path)
@@ -259,6 +290,16 @@ export function apply(ctx: Context, _config: Config = {}) {
       res.json({ error: e instanceof WorkspaceError ? e.message : err?.code === 'ENOENT' ? '文件不存在' : '读不出来' })
       return
     }
+    /**
+     * `?as=text`：把 Word / Excel / PPT / PDF 提取成文本回给界面预览。
+     *
+     * 浏览器打不开这几种格式，而「下载下来看吧」对一份刚生成的报表是很差的答复。
+     * 走的是 `read` 工具用的**同一套提取**（workspace/extract.ts），所以界面上看到
+     * 的和模型读到的是同一份东西——内容对不上时能一眼看出是提取的问题还是模型的
+     * 问题，这比另写一份渲染有用得多。
+     *
+     * 只对认识的文档格式生效；其余照旧回字节，让前端自己按扩展名处理。
+     */
     const inline = file.inline && req.query.get('download') !== '1'
     return new Response(file.stream, {
       status: 200,

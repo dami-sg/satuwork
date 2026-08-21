@@ -16,13 +16,14 @@ import { extname } from 'node:path'
  * 让人以为文件坏了。
  */
 
-export type DocKind = 'pdf' | 'docx' | 'xlsx'
+export type DocKind = 'pdf' | 'docx' | 'xlsx' | 'pptx'
 
 const KINDS: Record<string, DocKind> = {
   '.pdf': 'pdf',
   '.docx': 'docx',
   '.xlsx': 'xlsx',
   '.xlsm': 'xlsx',
+  '.pptx': 'pptx',
 }
 
 /** 这个文件名要不要走提取。`.doc` / `.xls` 那两种老二进制格式不在内。 */
@@ -45,6 +46,8 @@ export interface Extracted {
 const MAX_PAGES = 300
 /** 每个工作表的行数上限。 */
 const MAX_ROWS = 5000
+/** 幻灯片页数上限。理由同 MAX_PAGES。 */
+const MAX_SLIDES = 300
 
 /**
  * 肯提取的文件大小上限。
@@ -98,7 +101,14 @@ export async function extractDocument(file: string, kind: DocKind): Promise<Extr
   const key = `${kind}|${file}|${info.mtimeMs}|${info.size}`
   const hit = cacheGet(key)
   if (hit) return hit
-  const out = kind === 'pdf' ? await fromPdf(file) : kind === 'docx' ? await fromDocx(file) : await fromXlsx(file)
+  const out =
+    kind === 'pdf'
+      ? await fromPdf(file)
+      : kind === 'docx'
+        ? await fromDocx(file)
+        : kind === 'pptx'
+          ? await fromPptx(file)
+          : await fromXlsx(file)
   cachePut(key, out)
   return out
 }
@@ -123,6 +133,75 @@ async function fromPdf(file: string): Promise<Extracted> {
     unit: '页',
     truncated,
   }
+}
+
+/**
+ * PowerPoint。
+ *
+ * pptx 就是一个 zip：正文在 `ppt/slides/slideN.xml` 里，文字落在 `<a:t>` 元素上，
+ * `<a:p>` 是一个段落。**不引 XML 解析器**——这里只需要按标签取文本，而这些文件是
+ * PowerPoint 自己生成的、结构固定；引一个完整的解析器要多背一个依赖，还得处理它对
+ * 命名空间的那套脾气。
+ *
+ * 排序必须**按数字**取：`slide10.xml` 在字典序里排在 `slide2.xml` 前面，直接 sort
+ * 出来的页码是乱的。
+ *
+ * 备注（`notesSlides/`）不取：那是讲稿，跟版面上的内容常常重复，而且一份带备注的
+ * 演示文稿提出来会翻一倍。要看备注的话原文件还在。
+ */
+async function fromPptx(file: string): Promise<Extracted> {
+  const { readFile } = await import('node:fs/promises')
+  const JSZip = (await import('jszip')).default
+  const zip = await JSZip.loadAsync(await readFile(file))
+  const slides = Object.keys(zip.files)
+    .map((name) => ({ name, n: Number(/^ppt\/slides\/slide(\d+)\.xml$/.exec(name)?.[1] ?? NaN) }))
+    .filter((x) => Number.isFinite(x.n))
+    .sort((a, b) => a.n - b.n)
+  if (!slides.length) {
+    return { text: '（这个 pptx 里没有幻灯片，或者它不是标准的 Office Open XML 文件。）', parts: 0, unit: '页', truncated: false }
+  }
+  const truncated = slides.length > MAX_SLIDES
+  const use = truncated ? slides.slice(0, MAX_SLIDES) : slides
+  const parts: string[] = []
+  for (let i = 0; i < use.length; i++) {
+    const xml = await zip.files[use[i].name].async('string')
+    // 页码用**位置**而不是文件名里那个数字，和 fromPdf 一致。编号万一不连续
+    // （手工拼出来的包会这样），拿文件名里的数字就会写出「第 10 页 / 共 3 页」。
+    parts.push(`${divider(`第 ${i + 1} 页 / 共 ${slides.length} 页`)}\n${slideText(xml)}`)
+  }
+  const body = parts.join('\n\n')
+  const blank = !body.replace(/第 \d+ 页[^\n]*/g, '').trim()
+  return {
+    text: blank
+      ? `${body}\n\n（这份演示文稿里没有可提取的文字，多半整页都是图片。）`
+      : body,
+    parts: slides.length,
+    unit: '页',
+    truncated,
+  }
+}
+
+/** 一页幻灯片的 XML → 文本。`<a:p>` 一段一行，段内的 `<a:t>` 直接拼起来。 */
+function slideText(xml: string): string {
+  const lines: string[] = []
+  for (const para of xml.match(/<a:p[ >][\s\S]*?<\/a:p>/g) ?? []) {
+    const line = [...para.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)]
+      .map((m) => unxml(m[1]))
+      .join('')
+      .trim()
+    if (line) lines.push(line)
+  }
+  return lines.join('\n')
+}
+
+/** XML 实体还原。只有这五个——Office 写出来的正文里不会有别的。 */
+function unxml(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
 }
 
 async function fromDocx(file: string): Promise<Extracted> {

@@ -621,6 +621,20 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const target = await seatTargetForSession(db, account, req.params.id)
     const path = req.query.get('path') ?? ''
     if (!path.trim()) throw new HttpError(400, 'path 不能为空')
+    // `as=text` 回的是 JSON（提取出来的文档正文），不是字节流——走 proxyJson。
+    // 拿 proxyDownload 转会给它安上 content-disposition 和那条 sandbox CSP，
+    // 对一段 JSON 既没意义又容易让人误以为它也是「文件字节」。
+    if (req.query.get('as') === 'text') {
+      await proxyJson(
+        res,
+        'GET',
+        `${target.host}/api/workspace/file?path=${encodeURIComponent(path)}&as=text`,
+        undefined,
+        await seatBearer(db, account.id),
+        target.machineToken,
+      )
+      return
+    }
     const q = `?path=${encodeURIComponent(path)}${req.query.get('download') === '1' ? '&download=1' : ''}`
     await proxyDownload(
       req,
