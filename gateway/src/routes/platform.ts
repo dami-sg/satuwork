@@ -5,7 +5,8 @@ import type { RouteCtx } from './ctx.ts'
 import { CUSTOM_APIS, type CustomProviderDef, DefError, parseProviderDef } from '../providers.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
-import { enabledModelsOf, modelRoleOf, priceMultiplierOf, publicPlatformCred, publicSettings } from '../lib/org.ts'
+import { enabledModelsOf, modelProviderCreds, modelRoleOf, priceMultiplierOf, publicPlatformCred, publicSettings } from '../lib/org.ts'
+import { isVendor } from '../connectors/index.ts'
 import { rangeQuery, requireOwner, requireUser } from '../lib/guards.ts'
 import { WEB_BACKENDS, WEB_DOCUMENT, type PlatformSettings, emptyWebTools, parseConnectorPricing, parsePriceMultiplier, parseWebTools } from '../db.ts'
 import { WebToolError, canExtract, canSearch, needsSecret } from '../web-tools.ts'
@@ -45,17 +46,37 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
     json(res, 200, publicSettings(saved))
   })
 
+  /**
+   * 平台密钥清单。**只报模型供应商**——连接器和网页后端的密钥虽然同住一张表，
+   * 但它们各有自己的页面和接口，见 modelProviderCreds。
+   */
+  /**
+   * 这条路只收模型供应商的密钥。
+   *
+   * 连接器供应商（composio）有自己的保存接口 `PUT /platform/connector-vendors/:vendor`
+   * 和自己的页面。两条路都写得进同一张表，于是「在供应商页贴一次、在连接器页再贴
+   * 一次」这种事随时会发生，而两边显示的状态还各算各的。堵住这一头，composio 就只有
+   * 一个存法、一个看处。
+   *
+   * 网页搜索后端（tavily 那几个）仍然从这条路存——它们没有另一条路，见「工具配置」
+   * 那一屏的注释。它们不出现在供应商清单里，是 GET 那头过滤掉的。
+   */
+  function modelSecretOr400(provider: string): string {
+    if (isVendor(provider)) throw new HttpError(400, `${provider} 是连接器供应商，密钥请到「连接器」页保存`)
+    return provider
+  }
+
   router.get('/platform/credentials', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireOwner(account)
-    json(res, 200, { credentials: (await db.platformCredentials()).map(publicPlatformCred) })
+    json(res, 200, { credentials: modelProviderCreds(await db.platformCredentials()).map(publicPlatformCred) })
   })
 
   router.post('/platform/credentials', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireOwner(account)
     const body = bodyOf(req)
-    const provider = strField(body, 'provider')
+    const provider = modelSecretOr400(strField(body, 'provider'))
     const secret = strField(body, 'secret')
     const existed = !!await db.platformCredential(provider)
     const row = await db.upsertPlatformCredential(provider, secret)
@@ -71,7 +92,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   router.put('/platform/credentials/:provider', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireOwner(account)
-    const provider = req.params.provider
+    const provider = modelSecretOr400(req.params.provider)
     if (!await db.platformCredential(provider)) throw new HttpError(404, '密钥不存在')
     const secret = strField(bodyOf(req), 'secret')
     const row = await db.upsertPlatformCredential(provider, secret)
@@ -82,7 +103,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   router.delete('/platform/credentials/:provider', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireOwner(account)
-    const provider = req.params.provider
+    const provider = modelSecretOr400(req.params.provider)
     if (!await db.platformCredential(provider)) throw new HttpError(404, '密钥不存在')
     await db.deletePlatformCredential(provider)
     await db.audit({ companyId: 'platform', accountId: account.id, action: 'platform.credential.delete', detail: { provider } })

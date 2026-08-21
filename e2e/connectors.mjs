@@ -166,6 +166,29 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
       assert(mock.seen.keys.has('ck_e2e_never_leak'), '上游应该收到平台密钥')
     })
 
+    await test('连接器供应商不算模型供应商：不进密钥清单，也不从那条路存', async () => {
+      // 两类密钥同住 platform_credentials 一张表。composio 漏进「供应商」那一屏的话，
+      // 那里会多出一个 0 个模型、测不了、删了还会从连接器页再冒出来的假供应商——而
+      // 「供应商」讲的是模型，一行里每一列对它都答不上来。
+      const plat = await req(base, 'GET', '/platform/credentials', { token: owner })
+      assert(plat.status === 200, `credentials ${plat.status}`)
+      assert(
+        !plat.json.credentials.some((c) => c.provider === 'composio'),
+        `composio 混进了模型供应商清单：${JSON.stringify(plat.json.credentials)}`,
+      )
+      // 存也只有一个存法：这条路收下的话，同一把密钥会有两个入口、两处状态。
+      const wrongDoor = await req(base, 'POST', '/platform/credentials', {
+        token: owner,
+        body: { provider: 'composio', secret: 'ck_should_not_land_here' },
+      })
+      assert(wrongDoor.status === 400, `从供应商那条路存 composio 应该 400，实际 ${wrongDoor.status}`)
+      assert(String(wrongDoor.json.error).includes('连接器'), `没指路该去哪存：${wrongDoor.text}`)
+      // 挡下来之后，连接器那头原来那把密钥必须还在——别把「不给存」做成了「顺手清掉」。
+      const ping = await req(base, 'POST', '/platform/connector-vendors/composio/ping', { token: owner })
+      assert(ping.status === 200 && ping.json.ok === true, `密钥被误伤了：${ping.text}`)
+      assert(!mock.seen.keys.has('ck_should_not_land_here'), '被挡下的那把密钥居然发到了上游')
+    })
+
     await test('上架一条，同一个 toolkit 不能上架两次', async () => {
       const made = await req(base, 'POST', '/platform/connectors', {
         token: owner,

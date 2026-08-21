@@ -6,6 +6,8 @@
 import { EMAIL_RE, PHONE_RE, SLUG_RE, strField } from './validate.ts'
 import { HttpError } from '../http.ts'
 import { type Account, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRole, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, type Plan, type PlatformSettings, type Role, type SessionIndex, parseConnectorPricing, parsePriceMultiplier } from '../db.ts'
+import { WEB_BACKENDS, WEB_DOCUMENT } from '../db/types.ts'
+import { VENDORS } from '../connectors/index.ts'
 
 export function emailOf(raw: string): string {
   const email = raw.trim().toLowerCase()
@@ -95,6 +97,29 @@ export function publicSettings(s: CompanySettings | PlatformSettings): PlatformS
 
 export function publicPlatformCred(c: { provider: string; createdAt: number; updatedAt: number }) {
   return { configured: true as const, provider: c.provider, createdAt: c.createdAt, updatedAt: c.updatedAt }
+}
+
+/**
+ * `platform_credentials` 是一张**按名字存密钥的通用表**，三类东西都住在里面：
+ * 模型供应商（openai、anthropic、自定义端点）、连接器供应商（composio）、网页搜索
+ * 与提取后端（tavily 那几个）。表可以合，**清单不能合**。
+ *
+ * 「供应商」那一屏讲的是模型：一行的每一列——多少个模型、测一下通不通、哪个角色在
+ * 用它——对连接器和搜索后端全都答不上来。混进去的结果就是那屏上多出一个 0 个模型、
+ * 测不了、删了还会从别处再冒出来的假供应商，而它真正的配置屏在另外两页。
+ *
+ * 所以对外报密钥清单的那两条接口在这里过一道：**只报模型供应商**。另外两类各自有
+ * 自己的接口和自己的页面（`/platform/connector-vendors`、`/platform/tools/web`），
+ * 那才是它们该出现的地方。
+ */
+const NON_MODEL_SECRETS: ReadonlySet<string> = new Set<string>([...VENDORS, ...WEB_BACKENDS, WEB_DOCUMENT])
+
+export function isModelProvider(provider: string): boolean {
+  return !NON_MODEL_SECRETS.has(provider)
+}
+
+export function modelProviderCreds<T extends { provider: string }>(creds: T[]): T[] {
+  return creds.filter((c) => isModelProvider(c.provider))
 }
 
 /**
