@@ -198,15 +198,22 @@ async function renderDocument(
 ): Promise<string> {
   const head = `── ${page.url} ──`
   const title = oneLine(page.title ?? '') || page.url
-  let saved: { path: string; name: string; text: string }
+  let saved: { path: string; name: string; text: string; extractError?: string }
   try {
     saved = await ctx.websearch.document(page.url, title, page.document!)
   } catch (e) {
+    // 走到这里才是真的没写成盘（越界、磁盘满）。提文失败不在这条路上——见下面。
     return `${head}\n标题：${title}\n文档取回来了，但存不进工作区：${(e as Error).message}`
   }
+  // **文件写成了就报出来**，哪怕正文没取出来：files 是界面发现产出的唯一一环，而人
+  // 完全可能自己打开那份 PDF 看。
   files.push({ path: saved.path, name: saved.name })
   const size = `${Math.round((page.document!.bytes / 1024) * 10) / 10} KB`
   const lines = [head, `标题：${title} · 文档 ${size} · 已保存：${saved.path}`]
+  if (saved.extractError) {
+    lines.push('', `文件已经存好了，但正文取不出来：${saved.extractError}。可以用 bash 另想办法。`)
+    return lines.join('\n')
+  }
   if (!saved.text.trim()) {
     lines.push('', '这份文档提不出文字（扫描件多半没有文字层）。文件已经在工作区里，可以用 bash 另想办法。')
     return lines.join('\n')

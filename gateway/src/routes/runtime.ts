@@ -54,9 +54,23 @@ function catalogStamp(
    * 重新部署。
    */
   conn: { updatedAt: number; count: number } = { updatedAt: 0, count: 0 },
+  /**
+   * 平台钉的两个模型角色。
+   *
+   * **不能省。** 席位拿着 `models.utility` 去做网页摘要，而这两个角色改动时
+   * `catalog_items` 一个字节都不会变——只看上面那几样的话，管理员换掉 utility（比如
+   * 旧的那个下架了）之后，跑着的席位永远不会重拉目录，摘要会一直打那个已经不存在的
+   * 模型，然后静静退化成「截原文前 8000 字」。
+   */
+  models = '',
 ): string {
   const toolsAt = tools.reduce((n, i) => Math.max(n, i.updatedAt), 0)
-  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}`
+  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}:${models}`
+}
+
+/** 两个模型角色压成一小段，进指纹用。 */
+function modelStamp(s: { daily: { provider: string; model: string }; utility: { provider: string; model: string } }): string {
+  return `${s.daily.provider}/${s.daily.model}|${s.utility.provider}/${s.utility.model}`
 }
 
 /** 这个账号的连接器状态指纹：安装和连接一起算，删一条也要能看出来。 */
@@ -184,7 +198,13 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
        * 的结果当基线，而在「拉完目录」到「第一次探针」之间落地的改动就永远丢了——
        * 那两件事之间隔着一整轮插件启动，几百毫秒到几十秒都可能。
        */
-      stamp: catalogStamp(tpl.version, botId ? bots[0] : undefined, [...skills, ...servers], await connectorStampOf(db, account.id, companyId)),
+      stamp: catalogStamp(
+        tpl.version,
+        botId ? bots[0] : undefined,
+        [...skills, ...servers],
+        await connectorStampOf(db, account.id, companyId),
+        modelStamp(settings),
+      ),
       /**
        * 连接器绑账号、不绑 Bot：合成出来的那几条挂到**每一颗** Bot 的 `mcps` 上。
        * 席位那边 `toolSchemasFor()` 照现有逻辑按 `mcps` 过滤，一行都不用改。
@@ -219,7 +239,13 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     ]
     json(res, 200, {
       templateVersion: version,
-      stamp: catalogStamp(version, bot, tools, await connectorStampOf(db, account.id, companyId)),
+      stamp: catalogStamp(
+        version,
+        bot,
+        tools,
+        await connectorStampOf(db, account.id, companyId),
+        modelStamp(await db.platformSettings()),
+      ),
     })
   })
 

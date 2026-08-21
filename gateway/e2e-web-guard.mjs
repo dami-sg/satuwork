@@ -189,6 +189,54 @@ out.ddgThrottle = {
   闲下来立刻放行: reserveDdgSlot(t + 60_000) === 0,
 }
 
+// ── 7. Firecrawl：自托管地址要过得去，200 里的 success:false 要认出来 ─
+//
+// 这两条在假后端下走不到，必须用真实现打一台本地服务器。自托管的官方示例就是
+// localhost:3002——不给闸留例外的话，这个后端配了也用不了。
+const fcSeen = []
+const fc = createServer(async (req, res) => {
+  let raw = ''
+  req.on('data', (d) => (raw += d))
+  await new Promise((r) => req.on('end', r))
+  fcSeen.push({ url: req.url, auth: req.headers.authorization || '' })
+  res.writeHead(200, { 'content-type': 'application/json' })
+  if (req.url === '/v2/search' && raw.includes('额度用尽')) {
+    // Firecrawl 用 200 + success:false 报这类错。当成「没结果」的话，模型会一遍遍
+    // 换搜索词重试，而换到天亮也没用。
+    return res.end(JSON.stringify({ success: false, error: 'Insufficient credits' }))
+  }
+  if (req.url === '/v2/search') {
+    return res.end(JSON.stringify({ success: true, data: { web: [{ title: '自托管命中', url: 'https://ok.test/1', description: '来自本地实例' }] } }))
+  }
+  return res.end(JSON.stringify({ success: true, data: { markdown: '# 自托管正文', metadata: { title: '自托管页' } } }))
+})
+await new Promise((r) => fc.listen(0, '127.0.0.1', r))
+process.env.FIRECRAWL_API_URL = `http://127.0.0.1:${fc.address().port}`
+
+// backendOf 要在 env 设好之后再取——firecrawlBase() 是每次调用现读的，所以这样就行。
+const { backendOf: liveBackendOf } = await import('./src/web-tools.ts')
+const fcBackend = liveBackendOf('firecrawl')
+const q = { query: '自托管', count: 3, domains: [], exclude: [], freshness: '' }
+const cfg = { secret: 'fc-test' }
+
+const hits = await fcBackend.search(q, cfg).catch((e) => ({ err: e.hint || e.message }))
+const page = await fcBackend.extract('https://ok.test/1', cfg).catch((e) => ({ err: e.hint || e.message }))
+const denied = await fcBackend
+  .search({ ...q, query: '额度用尽' }, cfg)
+  .then(() => '')
+  .catch((e) => e.hint || e.message)
+
+out.firecrawl = {
+  自托管搜索通了: Array.isArray(hits) && hits[0]?.url === 'https://ok.test/1',
+  自托管提取通了: page?.markdown === '# 自托管正文',
+  带上了密钥: fcSeen.every((x) => x.auth === 'Bearer fc-test'),
+  // success:false 必须变成一句「它拒绝了」，不能落成空结果。
+  拒绝被认出来: /拒绝了这次请求/.test(denied),
+  错误原文带上了: /Insufficient credits/.test(denied),
+}
+fc.close()
+delete process.env.FIRECRAWL_API_URL
+
 hopper.close()
 server.close()
 console.log('__RESULT__' + JSON.stringify(out))

@@ -563,7 +563,9 @@ const firecrawl: WebBackend = {
       headers: { authorization: `Bearer ${cfg.secret}`, 'content-type': 'application/json' },
       body: JSON.stringify(body),
       timeoutMs: SEARCH_TIMEOUT_MS,
+      allowHost: selfHostedFirecrawl(),
     })
+    firecrawlOk(data)
     // v2 把结果按来源分桶（web / news / images），我们只要 web 那一桶。
     const rows = Array.isArray(data?.data?.web) ? data.data.web : Array.isArray(data?.results) ? data.results : []
     return rows
@@ -585,7 +587,9 @@ const firecrawl: WebBackend = {
       // onlyMainContent：去掉导航和页脚。它们对模型是纯噪音，还要占摘要的额度。
       body: JSON.stringify({ url, formats: ['markdown'], onlyMainContent: true }),
       timeoutMs: EXTRACT_TIMEOUT_MS,
+      allowHost: selfHostedFirecrawl(),
     })
+    firecrawlOk(data)
     const doc = data?.data
     const markdown = String(doc?.markdown ?? '')
     if (!markdown) {
@@ -604,6 +608,39 @@ const firecrawl: WebBackend = {
 /** 自托管的 Firecrawl 也认这个变量，和上游文档里的 FIRECRAWL_API_URL 同名。 */
 function firecrawlBase(): string {
   return (process.env.FIRECRAWL_API_URL || 'https://api.firecrawl.dev').replace(/\/$/, '')
+}
+
+/**
+ * 自托管实例的 host，作为 SSRF 闸的**明示例外**——和 SearXNG 那条同一个道理。
+ *
+ * 自托管的 Firecrawl 官方示例就是 `http://localhost:3002`，多半在内网。不给例外的话
+ * 这个后端配了也用不了：每一次都被自家的闸拦成「拒绝访问内网地址」。
+ *
+ * **只对显式配过 FIRECRAWL_API_URL 的那一个 host 放行。** 默认的公网域名照常过闸——
+ * 它没有理由需要例外，而多放一个 host 就多一条 DNS 被劫持后指进内网的路。
+ */
+function selfHostedFirecrawl(): string | undefined {
+  const raw = (process.env.FIRECRAWL_API_URL || '').trim()
+  if (!raw) return undefined
+  try {
+    return new URL(raw).host
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Firecrawl 会在 **HTTP 200 里**用 `success: false` 报错（额度用尽、查询被拒之类）。
+ *
+ * 不看这一位的话，`data.web` 取不到 → rows 是空数组 → 上层说成「没有结果，换个说法
+ * 再试」，于是模型一遍遍换搜索词重试，改到天亮也没用。这正是 SearXNG 那条「不通不能
+ * 说成没结果」要避免的情形。
+ */
+function firecrawlOk(data: any): void {
+  if (data?.success === false) {
+    const why = String(data?.error ?? '').slice(0, 160)
+    throw new WebToolError(`firecrawl success=false ${why}`, `Firecrawl 拒绝了这次请求${why ? `：${why}` : ''}。`)
+  }
 }
 
 function firecrawlQuery(q: SearchQuery): string {

@@ -298,7 +298,7 @@ export class WebSearchService extends Service {
     url: string,
     title: string,
     doc: { ext: string; base64: string },
-  ): Promise<{ path: string; name: string; text: string }> {
+  ): Promise<{ path: string; name: string; text: string; extractError?: string }> {
     // **ext 是 Gateway 给的，是外部输入。** 直接拼进文件名就是一条写路径：
     // `/../../.ssh/authorized_keys` 这种值能让这次写落到工作区外面去。白名单一挡，
     // 再让最终路径过一遍 workspace.resolve()——越界在那里会被拒，和别的写入同一条规矩。
@@ -312,10 +312,21 @@ export class WebSearchService extends Service {
     const target = this.ctx.workspace.resolve(`web/${name}`)
     await mkdir(this.ctx.workspace.resolve('web'), { recursive: true })
     await writeFile(target, Buffer.from(doc.base64, 'base64'))
+    const path = this.ctx.workspace.show(target)
     const kind = docKindOf(name)
-    if (!kind) return { path: this.ctx.workspace.show(target), name, text: '' }
-    const got = await extractDocument(target, kind)
-    return { path: this.ctx.workspace.show(target), name, text: got.text }
+    if (!kind) return { path, name, text: '' }
+    try {
+      return { path, name, text: (await extractDocument(target, kind)).text }
+    } catch (e) {
+      /**
+       * **提文失败不能连累「文件已经落盘」这个事实。**
+       *
+       * 这两步以前共用调用方的一个 catch：一份损坏的 PDF 让 unpdf 抛出来，模型收到的
+       * 是「存不进工作区」——可文件明明就在那儿，只是没进 ToolResult.files，于是界面上
+       * 也看不见它。文件已经写成了就要报出来，取不出正文是另一件事，分开说。
+       */
+      return { path, name, text: '', extractError: (e as Error).message }
+    }
   }
 
   /** 原文落到 `work/web/`。摘要是有损的，落盘让漏掉的东西还捞得回来。 */

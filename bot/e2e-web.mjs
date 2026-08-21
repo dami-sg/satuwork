@@ -51,6 +51,8 @@ function buildPdf(text) {
 }
 
 const PDF = buildPdf('SATU-PDF-BODY-LINE')
+/** 头像 PDF、内容是坏的：写盘会成功，unpdf 解析会抛。 */
+const BROKEN_PDF = Buffer.from('%PDF-1.4\n坏掉的内容，没有 xref 也没有 trailer\n')
 
 /** 摘要该成功还是该炸。用来验回退那条路。 */
 let summaryBroken = false
@@ -98,12 +100,13 @@ const server = createServer(async (req, res) => {
         // `evil-ext` 那条模拟一个被顶掉/被冒充的 Gateway：ext 是外部输入，直接拼进
         // 文件名就是一条写路径。
         const ext = url.includes('evil-ext') ? '/../../escaped.txt' : '.pdf'
+        const bytes = url.includes('broken') ? BROKEN_PDF : PDF
         return {
           url,
           ok: true,
           title: 'paper.pdf',
           contentType: 'application/pdf',
-          document: { contentType: 'application/pdf', ext, base64: PDF.toString('base64'), bytes: PDF.length },
+          document: { contentType: 'application/pdf', ext, base64: bytes.toString('base64'), bytes: bytes.length },
         }
       }
       if (url.includes('huge')) return { url, ok: true, title: '巨页', markdown: HUGE, chars: HUGE.length }
@@ -331,7 +334,21 @@ const call = (name, args) =>
   }
 }
 
-// ── 13. 落盘文件名 ────────────────────────────────────────────────────
+// ── 13. 提文失败：文件照样报出来，话也要说对 ─────────────────────────
+{
+  const r = await call('web_extract', { urls: ['https://a.test/broken.pdf'] })
+  const one = r.files?.[0]
+  out.brokenDoc = {
+    // 写盘成功了就得报出来——files 是界面发现产出的唯一一环，人可能自己去打开它。
+    报了文件: !!one && existsSync(join(root, one.path)),
+    // 不能再说成「存不进工作区」：那和事实相反。
+    没说成存不进去: !r.text.includes('存不进工作区'),
+    说了取不出正文: r.text.includes('正文取不出来'),
+    没置位: !r.failed,
+  }
+}
+
+// ── 14. 落盘文件名 ────────────────────────────────────────────────────
 out.fileName = {
   形状: fileNameFor('https://www.nodejs.org/blog/v24', 'Node.js 24 发布说明', new Date(2026, 7, 20)),
   坏地址也能出名字: fileNameFor('not a url', '', new Date(2026, 7, 20)),

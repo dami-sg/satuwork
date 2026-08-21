@@ -108,6 +108,12 @@ export async function runWebBot({ root, test, assert, log }) {
     all(r.evilExt, '后缀逃逸', assert)
   })
 
+  await test('文档提不出正文时：文件照样报出来，别说成「存不进工作区」', () => {
+    // 写盘和提文是两步，以前共用一个 catch：一份损坏的 PDF 会让模型以为文件没存下来，
+    // 而它明明就在工作区里，只是没进 files，于是界面上也看不见。
+    all(r.brokenDoc, '提文失败', assert)
+  })
+
   await test('落盘文件名：日期 + 域名 + 标题；坏地址也出得来', () => {
     assert(/^2026-08-20-nodejs-org-/.test(r.fileName.形状), `文件名不对：${r.fileName.形状}`)
     assert(r.fileName.形状.endsWith('.md'), `没有后缀：${r.fileName.形状}`)

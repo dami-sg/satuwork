@@ -295,6 +295,19 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       await req(base, 'PUT', '/platform/tools/web', { token, body: { searchBackend: 'tavily', extractBackend: 'tavily' } })
     })
 
+    await test('同一次调用里重复的地址只抓一次、只收一次钱', async () => {
+      const before = (await webCalls()).length
+      const r = await req(base, 'POST', '/runtime/web/extract', {
+        token: seatToken,
+        // 同一个地址写两遍：并发下两条都会绕过缓存（第一条还没回来写缓存）。
+        body: { urls: ['https://a.test/dup', 'https://a.test/dup'] },
+      })
+      assert(r.json.ok === true, r.text)
+      assert(r.json.pages.length === 1, `该只剩一条，实际 ${r.json.pages.length}`)
+      const rows = (await webCalls()).slice(before)
+      assert(rows.length === 1 && rows[0].units === 1, `计费条数不对：${JSON.stringify(rows)}`)
+    })
+
     await test('参数越界当场说清楚，不发给后端', async () => {
       // 越界的两次一笔都不该有：调用前后账目条数必须一样。
       const before = (await webCalls()).length
@@ -402,9 +415,9 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(r.json.totals.quotedUsd === 0 || !Number.isNaN(r.json.totals.quotedUsd), '模型合计被污染了')
     })
 
-    await test('闸与限流：SSRF、跳转不带凭据、文档边读边数、DDG 排队', async () => {
+    await test('闸与限流：SSRF、跳转不带凭据、文档边读边数、DDG 排队、Firecrawl 自托管', async () => {
       const g = await runGuardProbe(gwRoot)
-      for (const group of ['scheme', 'private', 'publicOk', 'redirect', 'redirectCreds', 'docLimit', 'ddgThrottle']) {
+      for (const group of ['scheme', 'private', 'publicOk', 'redirect', 'redirectCreds', 'docLimit', 'ddgThrottle', 'firecrawl']) {
         for (const [k, v] of Object.entries(g[group])) assert(v === true, `${group}.${k} 不成立`)
       }
     })

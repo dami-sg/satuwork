@@ -269,10 +269,13 @@ function docTitle(url: string): string {
 
 export function parseExtractUrls(raw: unknown): string[] {
   const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []
-  const urls = list.map((x) => String(x ?? '').trim()).filter(Boolean)
+  // **先去重再数**。同一个地址写两遍在模型那儿并不罕见（尤其是从搜索结果里拉列表的
+  // 时候），而两条一样的 URL 会并发绕过缓存——第一条还没回来写缓存，第二条已经出去了。
+  // 结果是同一个页面抓两次、收两份钱。顺带让「最多 5 个」数的是五个**不同**的页面。
+  const urls = [...new Set(list.map((x) => String(x ?? '').trim()).filter(Boolean))]
   if (!urls.length) throw new WebToolError('no urls', 'urls 不能为空。')
   if (urls.length > MAX_EXTRACT_URLS) {
-    throw new WebToolError('too many urls', `一次最多 ${MAX_EXTRACT_URLS} 个地址，你给了 ${urls.length} 个。`)
+    throw new WebToolError('too many urls', `一次最多 ${MAX_EXTRACT_URLS} 个不同的地址，你给了 ${urls.length} 个。`)
   }
   return urls
 }
