@@ -183,17 +183,65 @@ export function mcpToolRisk(perm: string, remoteName: string): ToolRisk[] {
   return [...risk]
 }
 
+/** 工具名的总长上限。64 是 OpenAI 和 Anthropic 都接受的那个数。 */
+const MAX_NAME = 64
+/** 服务器名在里面占多少。 */
+const SERVER_BUDGET = 16
+/** 截断时补的那截哈希。4 位十六进制 = 65536 个桶。 */
+const HASH_LEN = 4
+
+/**
+ * 服务器名压进预算，**优先保住最后一段**。
+ *
+ * 合成出来的名字是 `${连接器名} (${账号名})`，而区分两把连接的恰恰是**末尾**那一段。
+ * 从头硬截的话「Microsoft Teams (default)」和「Microsoft Teams (personal)」都会变成
+ * `microsoft_teams_`——两把连接合成同一个工具名，后注册的那把**全部工具**被丢掉。
+ *
+ * 所以先把最后一段整个留下（账号名不超过 16 位，见 Gateway 的 `CONNECTION_LABEL_RE`），
+ * 剩下的预算再从头填。名字里没有下划线、或者最后一段自己就占满预算时，没有更好的办法，
+ * 只能从头截——那种情况交给 `mcpToolName` 的哈希兜底。
+ */
+function shortServer(full: string): string {
+  if (full.length <= SERVER_BUDGET) return full
+  const cut = full.lastIndexOf('_')
+  const tail = cut > 0 ? full.slice(cut + 1) : ''
+  if (!tail || tail.length + 2 > SERVER_BUDGET) return full.slice(0, SERVER_BUDGET)
+  return `${full.slice(0, SERVER_BUDGET - tail.length - 1)}_${tail}`
+}
+
+/** FNV-1a，取 4 位十六进制。**要的是确定性**：同样的输入每次同样的名字，重启也一样。 */
+function hashOf(s: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0').slice(-HASH_LEN)
+}
+
 /**
  * 工具名。上限 **64**，不是 40。
  *
  * 40 太紧：连接器一家就有几十个工具，名字长得像 `FETCH_MESSAGE_BY_THREAD_ID`，
  * 截到 40 之后两个不同的工具会变成同一个名字，而重名的那个会被静默丢掉——表现是
- * 「某个工具时有时无」，最难查的一类。64 是 OpenAI 和 Anthropic 都接受的上限。
+ * 「某个工具时有时无」，最难查的一类。
+ *
+ * **只要有东西被截掉，就补一截哈希。** 光靠「截得聪明一点」是堵不住的：
+ * 「Microsoft Teams (default)」和「Microsoft Todo (default)」保住尾巴之后还是一样，
+ * 而工具名本身特别长时（Composio 有 `LIST_REPOSITORY_ISSUES_ASSIGNED_TO_…` 这种）
+ * 尾巴会在总长那一刀上再被切掉。哈希是**确定性**的——同一对（服务器，工具）永远得到
+ * 同一个名字，重启不变、换机器不变，不会因为注册顺序抖动而让工具表每轮都变。
+ *
+ * 没截断的名字**一个字节都不变**，所以绝大多数工具的名字和以前完全一样。
  */
 export function mcpToolName(serverName: string, toolName: string): string {
-  const short = sanitize(serverName).slice(0, 16) || 'srv'
+  const full = sanitize(serverName) || 'srv'
   const tool = sanitize(toolName) || 'tool'
-  return `mcp_${short}_${tool}`.slice(0, 64)
+  const short = shortServer(full)
+  const name = `mcp_${short}_${tool}`
+  if (short === full && name.length <= MAX_NAME) return name
+  const suffix = `_${hashOf(`${full}\u0000${tool}`)}`
+  return `${name.slice(0, MAX_NAME - suffix.length)}${suffix}`
 }
 
 function sanitize(s: string): string {

@@ -19,6 +19,7 @@ import { runDeployErrors } from './deploy-errors.mjs'
 import { runMachineDeploy } from './machine-deploy.mjs'
 import { runLlmUsage } from './llm-usage.mjs'
 import { runMarkdown } from './markdown.mjs'
+import { runToolNames } from './tool-names.mjs'
 import { runSessionStore } from './session-store.mjs'
 import { runLlmIdle } from './llm-idle.mjs'
 import { runReplaySlice } from './replay-slice.mjs'
@@ -2876,6 +2877,7 @@ async function main() {
     await runManagerConfirm({ root, test, assert, log })
     await runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runMarkdown({ root, test, assert, log })
+    await runToolNames({ root, test, assert, log })
     await runSessionStore({ root, test, assert, log })
     await runLlmIdle({ root, test, assert, log })
     await runReplaySlice({ root, test, assert, log })
