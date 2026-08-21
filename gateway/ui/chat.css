@@ -984,10 +984,14 @@
   display: block;
   align-items: initial;
   justify-content: initial;
-  padding: var(--space-5) var(--space-6);
+  /* --space-5 不存在（这套只有 1/2/3/4/6/8）。写了它整条 padding 会被判为无效
+     直接丢掉，结果就是原文顶着框边——已经这么翻过一次车了。 */
+  padding: var(--space-4) var(--space-6);
 }
-/* iframe（PDF / HTML 预览）要占满整框，所以那一档不吃上面的内边距。 */
-.sw-preview-body[data-flow='top']:has(> .sw-preview-frame) { padding: 0; }
+/* iframe（PDF / HTML 预览）要占满整框，所以那一档不吃上面的内边距。
+   注意是 `:has(.sw-preview-load)` 不是 `:has(> .sw-preview-frame)`——iframe 现在裹在
+   转圈容器里，不再是直接子元素。 */
+.sw-preview-body[data-flow='top']:has(.sw-preview-load) { padding: 0; }
 
 .sw-preview-src {
   margin: 0;
@@ -1025,4 +1029,41 @@
   background: var(--background);
   color: var(--foreground);
   box-shadow: var(--shadow-2xs);
+}
+
+/* 内容自己加载完之前的转圈。iframe / img 一 load 就把 data-busy 摘掉（见 chat.js
+   的 DONE_JS），转圈跟着消失——CSS 只认这个属性，不需要再管一遍状态。 */
+/* 居中同时兼顾两种内容：iframe 自己是 100%×100% 铺满，图片按比例缩在中间。 */
+.sw-preview-load {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sw-preview-load > .sw-preview-spin { display: none; }
+.sw-preview-load[data-busy] > .sw-preview-spin {
+  display: block;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  margin: -11px 0 0 -11px;
+}
+.sw-preview-spin {
+  display: inline-block;
+  vertical-align: -3px;
+  width: 22px;
+  height: 22px;
+  margin-right: var(--space-2);
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--muted-foreground);
+  animation: sw-spin 700ms linear infinite;
+}
+.sw-preview-note > .sw-preview-spin { width: 14px; height: 14px; border-width: 2px; }
+@keyframes sw-spin { to { transform: rotate(360deg); } }
+/* 动效敏感的人不该被一个转不停的圈晃。留一个静止的环，位置和含义都还在。 */
+@media (prefers-reduced-motion: reduce) {
+  .sw-preview-spin { animation: none; }
 }

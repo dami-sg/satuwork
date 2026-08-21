@@ -2362,6 +2362,12 @@ async function openPreview(path, name) {
       // **charset 不能省。** 这个 blob 是从 JS 字符串造的，就是 UTF-8；不写的话浏览器
       // 会按自己的默认编码猜，中文当场变成一片乱码（实测就是这样）。
       if (k === 'html') next.url = URL.createObjectURL(new Blob([next.text], { type: 'text/html; charset=utf-8' }))
+    } else if (k === 'pdf') {
+      // **类型钉死。** 下面那个 iframe 不带 sandbox（不带才有 PDF 阅读器，见
+      // previewBody），所以绝不能让这段字节有机会被当成 HTML 解释。blob 的 type
+      // 就是浏览器认的 Content-Type：写死 application/pdf，一个改名成 .pdf 的
+      // HTML 只会交给 PDF 阅读器然后解析失败，而不是变成一个页面跑起来。
+      next.url = URL.createObjectURL(new Blob([await blob.arrayBuffer()], { type: 'application/pdf' }))
     } else {
       next.url = URL.createObjectURL(blob)
     }
@@ -2455,26 +2461,65 @@ function previewTabs(p) {
   return `<div class="sw-preview-tabs">${tab('view', t('预览'))}${tab('source', t('原文'))}</div>`
 }
 
+/**
+ * 内容自己加载完之前先转圈。
+ *
+ * 取字节那一段有 p.loading 管，但**字节到手不等于看得见**：iframe 里的 PDF 阅读器、
+ * 大图的解码，都还要一会儿，而那段时间框里是纯白的——和「坏了」长得一模一样。
+ *
+ * 清除用内联 onload：它随 HTML 字符串走，每次整页重绘都自动带上。挂 JS 监听的话，
+ * 任何一次无关的 render() 都会把节点换掉、监听丢掉，圈就永远转下去。
+ */
+const DONE_JS = "this.parentNode.removeAttribute('data-busy')"
+
+function busyBox(inner) {
+  return `<div class="sw-preview-load" data-busy="1"><span class="sw-preview-spin" aria-hidden="true"></span>${inner}</div>`
+}
+
+function spinNote(text) {
+  return `<p class="sw-preview-note"><span class="sw-preview-spin" aria-hidden="true"></span>${esc(text)}</p>`
+}
+
 function previewBody(p) {
-  if (p.loading) return `<p class="sw-preview-note">${t('正在取文件…')}</p>`
+  if (p.loading) return spinNote(t('正在取文件…'))
   if (p.error) return `<p class="sw-preview-note sw-preview-err">${esc(p.error)}</p>`
-  if (p.docLoading) return `<p class="sw-preview-note">${t('正在提取文档内容…')}</p>`
+  if (p.docLoading) return spinNote(t('正在提取文档内容…'))
   if (p.tooBig) {
     const why = p.docNote || t('这个文件不适合在浏览器里打开（太大，或者是不认识的格式）。下载下来看吧。')
     return `<p class="sw-preview-note">${esc(why)}</p>`
   }
-  if (p.kind === 'image') return `<img class="sw-preview-img" src="${esc(p.url)}" alt="${esc(p.name)}">`
+  if (p.kind === 'image') {
+    return busyBox(
+      `<img class="sw-preview-img" src="${esc(p.url)}" alt="${esc(p.name)}" ` +
+        `onload="${DONE_JS}" onerror="${DONE_JS}">`,
+    )
+  }
   if (p.kind === 'pdf') {
-    // PDF 走 iframe 交给浏览器自带的阅读器。sandbox 不带任何 allow-*。
-    return `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}"></iframe>`
+    /**
+     * PDF 交给浏览器自带的阅读器，**这个 iframe 不能带 sandbox**。
+     *
+     * 带上就是一片白：sandbox 的 opaque origin 会把 PDF 阅读器整个挡掉，页面根本
+     * 起不来。这不是新问题，之前一直是这么写的——只是没人点过 PDF。实测对照过
+     * `sandbox=""` / 无 sandbox / `<embed>` 三种，只有不带 sandbox 的那两种能起阅读器。
+     *
+     * 去掉它安全吗：安全，因为**类型是钉死的**。上面 openPreview 把这段字节重新包成
+     * 了 `application/pdf` 的 blob，浏览器只会把它交给 PDF 阅读器，没有任何路径能让它
+     * 被当成 HTML 解释——而 sandbox 在这里防的正是「HTML 跑起脚本」。
+     */
+    return busyBox(`<iframe class="sw-preview-frame" src="${esc(p.url)}" title="${esc(p.name)}" onload="${DONE_JS}"></iframe>`)
   }
   if (p.kind === 'html' && p.mode === 'view') {
     /**
      * **`sandbox` 一个 allow-* 都不能加。** 这是让 HTML 能被预览的全部依据：没有
      * allow-scripts 就没有脚本执行，没有 allow-same-origin 就是 opaque origin，
      * 拿不到 Gateway 这一侧的任何东西。加任何一项都会把这条推翻。
+     *
+     * 和上面 PDF 那条的差别就在这里：HTML **要**当页面跑，所以必须锁死；PDF 不当
+     * 页面跑，锁死反而只剩一片白。
      */
-    return `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}"></iframe>`
+    return busyBox(
+      `<iframe class="sw-preview-frame" src="${esc(p.url)}" sandbox title="${esc(p.name)}" onload="${DONE_JS}"></iframe>`,
+    )
   }
   if (p.kind === 'markdown' && p.mode === 'view') {
     // satuMd 对原始 HTML 一律转义、链接只放行白名单协议（见 markdown.js 开头第 3 条），
