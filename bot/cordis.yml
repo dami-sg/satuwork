@@ -62,6 +62,11 @@
 # Gateway 目录：拉 Skill / MCP / Bot，钉到名册，连 HTTP MCP。
 - name: './src/catalog/index.ts'
 
+# 行为边界：公司模版上那三个开关的**执行点**（tools/pre-execute 短路）。
+# 排在工具与目录之后——它要按「这把工具属于哪台 MCP」判断，那张表由目录维护。
+# 名字是 policy 不是 guard：src/guard 是入站席位票的闸门，两件事不能同名。
+- name: './src/policy/index.ts'
+
 # 会话索引上报 + 给 Gateway 按 sessionId 拉全文（机器凭证）+ 实例 ready。
 - name: './src/session/gateway.ts'
 

@@ -235,6 +235,14 @@ document.getElementById('app').addEventListener('click', async (e) => {
     paintChatMentions()
     return
   }
+  if (act === 'chat-approve') {
+    await decideApproval(btn.getAttribute('data-call'), 'approve', btn.getAttribute('data-scope') || 'once')
+    return
+  }
+  if (act === 'chat-deny') {
+    await decideApproval(btn.getAttribute('data-call'), 'deny')
+    return
+  }
   if (act === 'chat-queue-cancel') {
     await cancelQueued(btn.getAttribute('data-id'))
     return

@@ -136,7 +136,17 @@ export async function runMentions({ root, test, assert, log }) {
      * 每一次调用都返回 `cannot get property "agents" without inject`：一个流水上的附加
      * 标记，把整把工具打死了，而模型只能照着这句英文告诉用户「MCP 配置有问题」。
      */
-    assert(r.viaMention.取不到就当没点名, 'ctx.agents 抛出来的异常没被接住')
+    assert(r.viaMention.一次都没抛出来, 'ctx.agents 抛出来的异常没被接住')
+    /**
+     * **答不上来时给 undefined，不是 false。**
+     *
+     * 这条以前断言的是 false（「取不到就当没点名」）。后来 Gateway 拿这个标记去强制
+     * 「仅 @ 时可用」的连接（routes/mcp.ts），两个值就有了完全不同的后果：false 是
+     * 「我看过了，人没点名」，会让那次调用被服务端拒掉；而上面那次故障里席位其实
+     * 什么都没看到。报 false 等于替用户说他没点名——用户明明 `@` 了自己的邮箱，
+     * 却每次都被回一句「这一轮没有点名它」，做什么都没用。
+     */
+    assert(r.viaMention.取不到时是undefined, '取不到 agents 时报了 false，等于替用户说他没点名')
     assert(r.viaMention.reflect自己炸了也不许抛, 'reflect 出问题时还是会抛')
     assert(r.viaMention.没有reflect也不许抛, '没有 reflect 的 ctx 会把调用弄失败')
     assert(r.viaMention.点了名的照样认得出, '兜住异常的同时把功能也兜没了')

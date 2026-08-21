@@ -315,6 +315,73 @@ await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2
       assert(seenVersion === wantVersion, `实例还停在模版 v${seenVersion}，Gateway 已经是 v${wantVersion}`)
       assert(rolledPrompt === nextPrompt, `名册里的人设没跟着换：${rolledPrompt}`)
 
+      /**
+       * **行为边界也一样跟着跑。**
+       *
+       * 上面那一段验的是提示词。三个开关走的是同一条路（目录探针 → 指纹变了 → 重拉 →
+       * roster.pin），但它有两处单独的失败可能：
+       *
+       *  - **只改开关、不动提示词**时指纹变不变。指纹里带的是模版的 version，而每一次
+       *    保存都 +1——所以这里故意只发 `guards` 和 `escalate`，不碰 prompt：变了就说明
+       *    「改开关」这条路自己就够，不是搭了提示词的便车。
+       *  - 席位收没收下这两个字段。它们是这一版才加进 `RemoteBot` 的；在那之前
+       *    Gateway 一直在发，而席位读进来就丢——开关拨了等于没拨，而界面上看不出来。
+       *
+       * 断言看的是席位自己报的那一份（`/api/runtime/status` 的 bots[].guards），
+       * 也就是策略在 `tools/pre-execute` 里真正拿去判断的那一份（同一条 roster 记录）。
+       */
+      const escalateRule = '涉及退款、或者客户明确要求转人工时'
+      const guarded = await req(gwBase, 'PUT', `/orgs/${orgId}/bot-template`, {
+        token: adminTok,
+        body: { guards: { 'high-risk': false, pii: true, 'no-external': false }, escalate: escalateRule },
+      })
+      assert(guarded.status === 200, `改开关 ${guarded.status} ${guarded.text}`)
+      const guardVersion = guarded.json.template.version
+      assert(guardVersion === wantVersion + 1, `只改开关也该 +1，实际 v${guardVersion}`)
+
+      const guardDeadline = Date.now() + 20000
+      let seatGuards = null
+      let seatEscalate = ''
+      let guardSeen = 0
+      while (Date.now() < guardDeadline) {
+        const st = await req(botBase, 'GET', '/api/runtime/status', { token: seatAccess })
+        guardSeen = st.json?.templateVersion || 0
+        const row = (st.json?.bots || []).find((b) => b.id === remoteBotId)
+        seatGuards = row?.guards || null
+        seatEscalate = row?.escalate || ''
+        if (guardSeen === guardVersion && seatGuards && seatGuards['high-risk'] === false) break
+        await sleep(300)
+      }
+      assert(guardSeen === guardVersion, `实例还停在 v${guardSeen}，Gateway 已经是 v${guardVersion}`)
+      assert(seatGuards, `席位没报出行为边界：${JSON.stringify(seatGuards)}`)
+      assert(
+        seatGuards['high-risk'] === false && seatGuards.pii === true && seatGuards['no-external'] === false,
+        `开关没跟着换：${JSON.stringify(seatGuards)}`,
+      )
+      assert(seatEscalate === escalateRule, `转人工的条件没跟着换：${seatEscalate}`)
+
+      // 关回去：这条用例后面还在跑，别把边界留在「两条关着」的状态上。
+      const restored = await req(gwBase, 'PUT', `/orgs/${orgId}/bot-template`, {
+        token: adminTok,
+        body: { guards: { 'high-risk': true, pii: true, 'no-external': true } },
+      })
+      assert(restored.status === 200, `关回去 ${restored.status} ${restored.text}`)
+      const backDeadline = Date.now() + 20000
+      let back = null
+      while (Date.now() < backDeadline) {
+        const st = await req(botBase, 'GET', '/api/runtime/status', { token: seatAccess })
+        back = (st.json?.bots || []).find((b) => b.id === remoteBotId)?.guards || null
+        if (back && back['high-risk'] === true && back['no-external'] === true) break
+        await sleep(300)
+      }
+      assert(back && back['high-risk'] === true && back['no-external'] === true, `关回去没跟上：${JSON.stringify(back)}`)
+      // 提示词没跟着这次保存变——只发了 guards，别的字段该沿用原值。
+      const afterGuards = await req(botBase, 'GET', '/api/bots', { token: seatAccess })
+      assert(
+        (afterGuards.json?.bots || []).find((b) => b.id === remoteBotId)?.prompt === nextPrompt,
+        '只改开关那次把人设也冲掉了',
+      )
+
       const sess = await req(botBase, 'GET', `/api/bots/${pinned.id}/session`, { token: seatAccess })
       assert(sess.status === 200, `session ${sess.status} ${sess.text}`)
       const sessionId = sess.json.sessionId

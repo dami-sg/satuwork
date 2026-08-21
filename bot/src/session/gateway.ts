@@ -38,7 +38,38 @@ const READY_CAP_MS = 30_000
  *
  * 老队列里可能还压着 usage 项，flushOutbox 会把它们直接丢掉，不再往外发。
  */
-type OutboxItem = { kind: 'index'; sessionId: string; createdAt: number; attempts: number; lastError?: string }
+type OutboxItem =
+  | { kind: 'index'; sessionId: string; createdAt: number; attempts: number; lastError?: string }
+  /**
+   * 一次行为边界的表态（policy/decision）。
+   *
+   * **为什么要上报**：这三个开关对管理员的全部价值就是「它到底拦住过什么」。只拦不报
+   * 的话，开关开着、界面上画着开着的样子，而没有任何一处能回答「上个月拦了几次、拦的
+   * 是谁」——那时候它是个心理安慰，不是一条合规证据。
+   *
+   * 走这条队列而不是当场 fetch：拦截发生在工具执行的关键路径上，一次网络超时就是一次
+   * 卡住的对话。落队列、失败重试，Gateway 挂了也只是记录晚到。
+   */
+  | {
+      kind: 'guard'
+      sessionId: string
+      createdAt: number
+      attempts: number
+      lastError?: string
+      decision: GuardDecision
+    }
+
+/** 与 bot/src/policy/index.ts 的 PolicyDecision 同形。这里只搬运，不解释。 */
+interface GuardDecision {
+  sessionId: string
+  botId: string
+  callId: string
+  tool: string
+  guard: string
+  outcome: string
+  reason: string
+  at: number
+}
 
 /**
  * 给 Gateway 拉全文，以及把会话索引报到控制面。
@@ -149,12 +180,13 @@ export function apply(ctx: Context) {
       for (const row of outbox.list()) {
         // 升级前压在队列里的 usage 项：丢掉，别发。留着只会重复计费，
         // 而且 Gateway 那条 /internal/usage 已经拆掉了，发出去只会 404。
-        if (row.value.kind !== 'index') {
+        if (row.value.kind !== 'index' && row.value.kind !== 'guard') {
           outbox.delete(row.id)
           continue
         }
         try {
-          await sendIndex(row.value.sessionId)
+          if (row.value.kind === 'guard') await sendGuard(row.value.decision)
+          else await sendIndex(row.value.sessionId)
           outbox.delete(row.id)
         } catch (e) {
           outbox.put(row.id, {
@@ -204,6 +236,16 @@ export function apply(ctx: Context) {
     })
   }
 
+  async function sendGuard(decision: GuardDecision) {
+    const who = await cachedMe()
+    if (!who) throw new Error('/me 未就绪')
+    await postInternal('/internal/guard-events', {
+      companyId: who.companyId,
+      accountId: who.accountId,
+      ...decision,
+    })
+  }
+
   async function report(sessionId: string) {
     if (!configured()) return
     try {
@@ -213,6 +255,20 @@ export function apply(ctx: Context) {
       enqueue({ kind: 'index', sessionId, createdAt: Date.now(), attempts: 0, lastError: (e as Error).message })
     }
   }
+
+  /**
+   * 边界的每一次表态都往控制面报一条。
+   *
+   * **不 await、不挡路**：这个监听器跑在 `ctx.emit` 上（同步派发、不收返回值），
+   * 而 emit 它的地方正是工具执行的关键路径。发失败就落队列，五秒一轮自己重试。
+   */
+  ctx.on('policy/decision', (decision: GuardDecision) => {
+    if (!configured()) return
+    void sendGuard(decision).catch((e: Error) => {
+      ctx.logger?.warn?.(`guard 上报失败，转入队列：${e.message}`)
+      enqueue({ kind: 'guard', sessionId: decision.sessionId, createdAt: Date.now(), attempts: 0, decision })
+    })
+  })
 
   ctx.on('session/event', (sessionId: string, event: SessionEvent) => {
     if (

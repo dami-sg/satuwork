@@ -186,7 +186,7 @@ function guardsPanel(a, ro) {
       <label for="bot-escalate">${t('升级人工的条件')}</label>
       <input class="input" id="bot-escalate" type="text" data-bot="escalate" value="${esc(a.escalate || '')}" ${ro ? 'disabled' : ''}>
     </div>
-    <span style="font-size: 12px; color: var(--muted-foreground);">${t('这几条最终落在工具执行前的拦截上（tools/pre-execute），不是提示词里的一句话——现在还没接。')}</span>
+    <span style="font-size: 12px; color: var(--muted-foreground);">${t('这几条落在席位上工具执行前的拦截里，不是提示词里的一句话：拦下来的调用没跑过。「升级人工的条件」原样进提示词，配一把 escalate_to_human 工具，调用会留痕。', 'These are enforced on the seat before a tool runs — a blocked call never executed. The escalation rule goes into the prompt verbatim, paired with an escalate_to_human tool whose calls are recorded.')}</span>
   </div>`
 }
 
@@ -419,7 +419,7 @@ function fullBotPage(bot, a) {
             <button type="button" class="btn btn-primary" data-act="bot-save" ${state.busy || ro ? 'disabled' : ''} ${ro ? 'title="' + esc(roNote) + '"' : ''}>${state.busy ? t('保存中…') : ro ? t('只读') : t('保存配置')}</button>
           </div>
         </div>
-        <p style="margin: 0 0 var(--space-4); font-size: 12px; color: var(--muted-foreground);">${ro ? esc(roNote) : t('这一页的设置都会写回目录。行为边界与记忆现在只是存下来：拦截和注入还没接到 Bot 上。分组与知识库也还没有落点。', 'Everything here is persisted to the catalog. Guardrails and memory are stored only — enforcement and injection are not wired into the bot yet. Groups and knowledge bases have no home yet either.')}</p>
+        <p style="margin: 0 0 var(--space-4); font-size: 12px; color: var(--muted-foreground);">${ro ? esc(roNote) : t('这一页的设置都会写回目录。行为边界保存即生效（席位一分钟内跟上，拦截发生在工具执行前）。记忆现在还只是存下来：注入还没接到 Bot 上。分组与知识库也还没有落点。', 'Everything here is persisted to the catalog. Guardrails take effect on save — seats pick them up within a minute and enforcement happens before a tool runs. Memory is still stored only: injection is not wired into the bot yet. Groups and knowledge bases have no home yet either.')}</p>
       </div>
     </div>`
 }

@@ -766,7 +766,15 @@ export class AgentService extends Service {
     const data = root?.data as { botId?: string; agentId?: string } | undefined
     const botId = data?.botId ?? data?.agentId
     if (!botId) return undefined
-    type Row = { prompt?: string; model?: string; provider?: string; skills?: string[]; mcps?: string[] }
+    type Row = {
+      prompt?: string
+      model?: string
+      provider?: string
+      skills?: string[]
+      mcps?: string[]
+      /** 模版上的转人工条件。composeSystem 会把它拼成提示词里的一段。 */
+      escalate?: string
+    }
     return this.ctx.storage.collection<Row>('bots').get(botId)
       ?? this.ctx.storage.collection<Row>('agents').get(botId)
   }
@@ -779,12 +787,22 @@ export class AgentService extends Service {
    * 字符串既脆（提示词里出现同样的小标题就切错）又白算一遍。
    */
   private composeSystem(
-    bot: { prompt?: string; skills?: string[] } | undefined,
+    bot: { prompt?: string; skills?: string[]; escalate?: string } | undefined,
   ): { text: string; base: string; skills: string } {
     // 网页那一段只在 web_extract 真的挂上时才加：没有这把工具的进程里，那三行
     // 是在教模型防一种它遇不到的东西，纯占上下文。
     const web = this.ctx.tools.has('web_extract') ? `\n\n${webContentBlock()}` : ''
-    const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}${web}`
+    /**
+     * 公司模版上的转人工条件。
+     *
+     * **这一段是提示词，边界不是。** 「什么时候该交给人」本来就是一句业务判断，写不成
+     * 一条拦截规则；而它对应的动作（escalate_to_human）是一把真工具，调用会在日志和
+     * 审计里留痕。没有条件、或者这个进程里压根没挂那把工具时不加——那等于在教模型用
+     * 一把它没有的工具。
+     */
+    const rule = bot?.escalate?.trim()
+    const escalate = rule && this.ctx.tools.has('escalate_to_human') ? `\n\n${escalateBlock(rule)}` : ''
+    const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}${web}${escalate}`
     const col = this.ctx.storage.collection<{ id: string; name: string; body: string; enabled?: boolean }>('skills')
     const ids = bot?.skills
     const picked =
@@ -1550,6 +1568,19 @@ function runtimeBlock(): string {
     `对话里每条用户消息开头的 \`[时间]\` 是这句话发出的时刻（时区 ${timeZone()}），由系统加上，不是用户打的字。`,
     '最后一条用户消息上的时间就是现在，据此回答「今天」「昨天」「上周」这类问题，不必再去查。',
     '你自己的回复不要加这个前缀。',
+  ].join('\n')
+}
+
+/**
+ * 转人工的条件。原样引用模版里那段话，不改写、不概括——那是公司写下的规矩，
+ * 我们替它转述一遍只会走样。
+ */
+function escalateBlock(rule: string): string {
+  return [
+    '## 什么时候转人工',
+    rule,
+    '',
+    '满足上面任何一条时，调用 escalate_to_human 说明原因，然后停下来等人接手：把已经做完的部分和卡住的地方讲清楚，不要自己想办法绕过去。',
   ].join('\n')
 }
 

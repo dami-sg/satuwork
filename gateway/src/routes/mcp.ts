@@ -274,9 +274,24 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
      *
      * 只有席位那一侧知道（点名决定的是那一轮的工具表），所以它经 MCP 的 `params._meta`
      * 带过来。出事时第一个要问的就是「人点的还是模型自己挑的」，事后从会话正文反推
-     * 既慢又不一定对得上。**只做归因，不参与任何判定**——它是席位自报的。
+     * 既慢又不一定对得上。
+     *
+     * **它现在也参与一处判定**：「仅 @ 时可用」的连接没被点名就不许调（见下面那道门）。
+     * 但它仍然是席位自报的，所以那道门挡的是 bug 不是攻击者——真正的边界还是账号
+     * （见 gate()）。计费和流水这一侧照旧只拿它做归因。
      */
-    const viaMention = (params._meta as { viaMention?: unknown } | undefined)?.viaMention === true
+    // 名字不叫 meta：这个函数里 `meta` 已经是「这次调的是不是元工具」了（SW_SEARCH /
+    // SW_DESCRIBE / SW_RUN，见下面 metaToolOf）。两个 meta 撞在同一个作用域里。
+    const callMeta = params._meta as { viaMention?: unknown } | undefined
+    const viaMention = callMeta?.viaMention === true
+    /**
+     * 席位到底**说没说**这件事。
+     *
+     * 三态：true / false / 没这个字段。第三种有两个来源——老席位（那时候还不发这个
+     * 标记），以及席位当时答不上来（`viaMentionOf` 返回 undefined）。下面那道
+     * mentionOnly 的门只在席位明确说了 false 时才关，见那里的说明。
+     */
+    const mentionKnown = typeof callMeta?.viaMention === 'boolean'
     // 清单是缓存的（五分钟），所以这一步不是每次调用都打一趟上游。
     /**
      * **拉不到清单和「清单里没有」不是一回事，这里要分开记。**
@@ -396,6 +411,34 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
       await record('denied', true)
       rpcOk(res, id, toolResult('这个工具没有开启，去连接器那一屏打开它', true))
       return
+    }
+
+    /**
+     * 「仅 @ 时可用」的连接，**没被点名就不许调**。
+     *
+     * 这条以前只活在席位那一侧：`toolSchemasFor()` 不把它放进工具表。那是遮掩不是
+     * 强制——模型直接报出工具名照样调得到，而这把连接的全部意思就是「只有我点名了
+     * 你才能碰我的邮箱」。这里补上服务端这一道。
+     *
+     * **它挡的是 bug，不是攻击者**：`viaMention` 和 URL 上的 `botId` 一样是席位自报的，
+     * 一台被拿下的席位可以直接说自己被点名了。真正的边界仍然是账号（见 gate()）——
+     * 假也只能假成同一个账号名下的另一种调用。
+     *
+     * **席位没说的时候放行，只记一行日志。** 这个字段缺席有两种来源：老席位（Gateway
+     * 和席位各自升级，中间必然有一段两边版本不一致），以及席位那一刻取不到 `agents`
+     * 服务——后者在线上真发生过一次，当时的后果只是流水少个标记。把「没说」当成「没
+     * 点名」的话，那次故障就会变成：用户明明 `@` 了自己的邮箱，每一次调用都被回一句
+     * 「这一轮没有点名它」，而他做什么都没用。宁可漏掉一次强制。
+     */
+    if (g.conn.mentionOnly && mentionKnown && !viaMention) {
+      await record('denied', true)
+      rpcOk(res, id, toolResult('这把连接设成了「仅 @ 时可用」，这一轮没有点名它', true))
+      return
+    }
+    if (g.conn.mentionOnly && !mentionKnown) {
+      console.warn(
+        `satuwork-gateway: 连接 ${g.conn.id} 是「仅 @ 时可用」，但席位没报 viaMention（老席位或取不到 agents），这次放行`,
+      )
     }
 
     // 变量名不叫 gate：这个文件里 gate() 已经是「取连接、查权限」那个函数了。

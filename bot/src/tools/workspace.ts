@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { humanSize, looksBinary, WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
-import type { ToolCall, WorkspaceFile } from './index.ts'
+import type { ToolCall, ToolRisk, WorkspaceFile } from './index.ts'
 
 /**
  * 工作区工具：read / write / edit / ls / find / grep / bash。
@@ -208,7 +208,7 @@ export function apply(ctx: Context, config: Config = {}) {
 
   /** 统一把业务失败收成文本。管道故障（真异常）继续往上抛，由 ToolService 标 failed。 */
   const tool = (
-    def: { name: string; description: string; parameters: Record<string, unknown> },
+    def: { name: string; description: string; parameters: Record<string, unknown>; risk?: ToolRisk[] },
     execute: (args: any, call: ToolCall) => Promise<string | { text: string; files: WorkspaceFile[] }> | string,
   ) => {
     ctx.tools.register({
@@ -235,6 +235,7 @@ export function apply(ctx: Context, config: Config = {}) {
   tool(
     {
       name: 'read',
+      risk: ['read'],
       description:
         '读取工作区里的一个文件，按行返回并带行号。PDF、Word（.docx）、Excel（.xlsx）会先转成文本再读，同样按行分页。' +
         '改文件之前必须先读——edit 要求 old_string 与文件里的内容逐字相同。',
@@ -299,6 +300,7 @@ export function apply(ctx: Context, config: Config = {}) {
   tool(
     {
       name: 'write',
+      risk: ['write'],
       description: '把内容整体写入一个文件，已存在就覆盖，父目录自动创建。只改一处时用 edit，别用它重写整个文件。',
       parameters: {
         type: 'object',
@@ -330,6 +332,7 @@ export function apply(ctx: Context, config: Config = {}) {
   tool(
     {
       name: 'edit',
+      risk: ['write'],
       description:
         '把文件里的一段文本原样替换成另一段。old_string 必须与文件内容逐字相同（含缩进），并且在文件里唯一——不唯一就多带几行上下文，或者置 replace_all。',
       parameters: {
@@ -377,6 +380,7 @@ export function apply(ctx: Context, config: Config = {}) {
   tool(
     {
       name: 'ls',
+      risk: ['read'],
       description: '列出一个目录下的条目，目录带 / 后缀，文件带大小。不知道工作区里有什么时先用它。',
       parameters: {
         type: 'object',
@@ -414,6 +418,7 @@ export function apply(ctx: Context, config: Config = {}) {
   tool(
     {
       name: 'find',
+      risk: ['read'],
       description:
         '按文件名模式找文件，返回相对路径，按修改时间从新到旧。模式支持 * ? 与 **，例如 "*.ts"、"src/**/*.json"。node_modules、.git、dist 这类目录会跳过。',
       parameters: {
@@ -455,6 +460,7 @@ export function apply(ctx: Context, config: Config = {}) {
   tool(
     {
       name: 'grep',
+      risk: ['read'],
       description:
         '在文件内容里按正则搜索，返回 路径:行号: 内容。可用 glob 限定文件类型。二进制文件与 node_modules、.git、dist 这类目录会跳过。',
       parameters: {
@@ -544,6 +550,11 @@ export function apply(ctx: Context, config: Config = {}) {
   tool(
     {
       name: 'bash',
+      /**
+       * **三样都占。** 一条 bash 命令能写文件、能 rm -rf、也能 curl 出去——它是这台
+       * 席位上唯一一把「什么都做得到」的工具，标成只写就等于给所有边界开了条暗路。
+       */
+      risk: ['write', 'destructive', 'external'],
       description:
         `在工作区里执行一条 bash 命令，返回标准输出与标准错误。默认工作目录是工作区根目录，超时 ${Math.round(defaultTimeout / 1000)} 秒。` +
         '查找文件用 find、搜内容用 grep、读文件用 read——它们的输出更适合阅读。命令是非交互执行的，不要跑需要输入或永不退出的程序。',

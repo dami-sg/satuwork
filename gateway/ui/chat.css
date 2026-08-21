@@ -391,6 +391,70 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* ── 高风险确认卡 ──────────────────────────────────────────────────────
+   摆在工具药丸底下，说的就是那颗还在转的药丸在等什么。
+
+   **用边框和留白分块，不用警告色刷底。** 这不是一次故障，是一道边界；刷成红的，人
+   第一反应是「出错了」，然后开始学着忽略它——而这张卡片一旦被习惯性忽略，这个开关
+   就等于没有。左边那条竖线用品牌色，够醒目，也说得清「这里在等你」。 */
+.sw-approvals { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.sw-approval {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--background);
+  font-size: 12.5px;
+}
+.sw-approval-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.sw-approval-head svg { flex: none; color: var(--primary); }
+.sw-approval-why { margin-top: 4px; color: var(--muted-foreground); }
+.sw-approval-tool { margin-top: 6px; }
+.sw-approval-tool code {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--secondary);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+}
+/* 参数要摆出来，但不能占掉半屏：批的是「发给谁、写了什么」，看的是头几行。 */
+.sw-approval-args {
+  margin: 6px 0 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.sw-approval-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+/* 卡片里的按钮比页面上的小一号：它长在气泡里，用标准尺寸会把整条消息撑变形。 */
+.sw-approval-acts .btn { padding: 5px 12px; font-size: 12px; }
+.sw-approval-done { margin-top: 8px; color: var(--muted-foreground); }
+/* 点完到终态事件回来之间。按钮留在原地但点不动——挪走或者变灰闪一下，都会让人
+   以为自己点空了。 */
+.sw-approval[data-busy='1'] .sw-approval-acts { pointer-events: none; opacity: 0.5; }
+/* 已经有结论的卡片退到背景里去：它不再需要人做什么，但要留着，因为「谁批的、
+   批了什么」正是事后要翻的东西。 */
+.sw-approval[data-state='approved'],
+.sw-approval[data-state='denied'],
+.sw-approval[data-state='timeout'],
+.sw-approval[data-state='aborted'],
+.sw-approval[data-state='expired'] {
+  border-left-color: var(--border);
+  background: transparent;
+}
+
 /* 药丸本身要看得出「可以看详情」。 */
 .sw-toolchip { cursor: help; }
 .sw-toolchip:hover, .sw-toolchip:focus-visible { background: var(--muted); }

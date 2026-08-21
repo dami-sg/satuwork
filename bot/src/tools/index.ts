@@ -59,7 +59,28 @@ export interface ToolResult {
   files?: WorkspaceFile[]
 }
 
+/**
+ * 这把工具会干出什么性质的事。**策略据此判断要不要拦**——没有它，「高风险操作需确认」
+ * 只能靠工具名去猜，而 MCP 的工具名是远端起的，猜到的永远是上一版。
+ *
+ *  - `read`：只看，不改任何东西
+ *  - `write`：改数据（本地文件、远端记录、发出去一封邮件）
+ *  - `external`：出这台席位，打别人家的系统
+ *  - `destructive`：能不可逆地毁掉东西
+ */
+export type ToolRisk = 'read' | 'write' | 'external' | 'destructive'
+
+/**
+ * 没标注的工具按什么算。**最高风险**，不是最低。
+ *
+ * 反过来（不标注 = 只读）意味着任何一把新注册的工具默认绕过全部边界，而新工具恰恰是
+ * 最没被审视过的那些。宁可多问一次。
+ */
+export const UNKNOWN_RISK: ToolRisk[] = ['external', 'write']
+
 export interface ToolDefinition extends ToolSchema {
+  /** 见 ToolRisk。不写 = UNKNOWN_RISK。 */
+  risk?: ToolRisk[]
   execute(args: unknown, call: ToolCall): Promise<ToolResult> | ToolResult
 }
 
@@ -98,6 +119,18 @@ export class ToolService extends Service {
 
   has(name: string) {
     return this.defs.has(name)
+  }
+
+  /**
+   * 这把工具的风险面。**认不出的按最高风险算**（见 UNKNOWN_RISK）。
+   *
+   * 「认不出」有两种，都必须往严了算：工具压根没注册（模型编了个名字，那次调用会被
+   * run() 判失败，但策略在它之前就要表态），以及注册了却没标注 risk。
+   */
+  riskOf(name: string): ToolRisk[] {
+    const def = this.defs.get(name)
+    if (!def || !Array.isArray(def.risk) || !def.risk.length) return UNKNOWN_RISK
+    return def.risk
   }
 
   /**

@@ -646,6 +646,46 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     )
   })
 
+  /**
+   * 还等着人拍板的高风险调用。**真相在席位那边**——等待方是那个进程里的一个 Promise，
+   * Gateway 只是把它转出来；自己缓存一份的话，刷新页面看到的会是一张早就点过的卡片。
+   */
+  router.get('/runtime/sessions/:id/approvals', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/approvals`,
+      undefined,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
+  /**
+   * 批准 / 拒绝。
+   *
+   * **鉴权就是 `seatTargetForSession`**：它已经保证了这条会话属于这个账号（那把
+   * `sat_` 是按账号发的）。别人的会话在这里根本查不出席位，拿不到可以点的地方——
+   * 这也是为什么这条路不能走席位票直连：那把票在员工的桌面里够得着。
+   *
+   * 席位回 409（这条确认已经结束）原样透出去，界面据此把卡片改成「已失效」。
+   */
+  router.post('/runtime/sessions/:id/approvals/:callId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    const body = bodyOf(req)
+    await proxyJson(
+      res,
+      'POST',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/approvals/${encodeURIComponent(req.params.callId)}`,
+      { decision: strField(body, 'decision'), scope: strField(body, 'scope', false) || 'once' },
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
   router.post('/runtime/sessions/:id/abort', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const target = await seatTargetForSession(db, account, req.params.id)

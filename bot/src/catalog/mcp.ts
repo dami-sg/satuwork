@@ -2,6 +2,7 @@
  * 最小 HTTP JSON-RPC MCP 客户端。不引 @modelcontextprotocol/sdk。
  * stdio 不在这里处理。
  */
+import type { ToolRisk } from '../tools/index.ts'
 
 export interface JsonRpcTool {
   name: string
@@ -144,6 +145,42 @@ export class McpHttpClient {
     if (result?.isError) return text || '工具返回了错误'
     return text
   }
+}
+
+/**
+ * 一把 MCP 工具的风险面。
+ *
+ * 两个来源，**只叠加、不相减**：
+ *
+ *  1. 服务器的 `perm`（管理员在目录里配的：只读 / 可写 / 需审批）。它是**权威**——
+ *     说可写就是可写。
+ *  2. 远端工具名里的动词。连接器那批合成出来的服务器 perm 默认是「只读」（见
+ *     gateway/src/lib/connectors.ts 的 connectorDefOf），而同一把连接里躺着
+ *     `GMAIL_SEND_EMAIL`。只信 perm 的话，「对外发送前先征求同意」这条边界对连接器
+ *     整个失效——而那正是它最该管住的地方。
+ *
+ * 动词表只往严了推，永远不会把一把「可写」的工具降回只读：判断错一次的代价是多问
+ * 一句，反过来是一封已经发出去的邮件。
+ */
+const MUTATING_VERBS = [
+  'send', 'create', 'add', 'insert', 'update', 'patch', 'edit', 'modify', 'write', 'upload',
+  'post', 'reply', 'forward', 'move', 'archive', 'label', 'assign', 'invite', 'schedule',
+  'publish', 'share', 'set', 'put', 'pay', 'transfer', 'charge', 'refund', 'order', 'submit',
+  'approve', 'merge', 'close', 'complete', 'execute', 'run', 'trigger', 'import', 'sync',
+]
+const DESTRUCTIVE_VERBS = ['delete', 'remove', 'destroy', 'purge', 'drop', 'trash', 'revoke', 'cancel', 'terminate', 'wipe']
+
+export function mcpToolRisk(perm: string, remoteName: string): ToolRisk[] {
+  // MCP 工具一律出这台席位——它打的是另一个进程、另一台主机。
+  const risk = new Set<ToolRisk>(['external', 'read'])
+  if (perm === '可写' || perm === '需审批') risk.add('write')
+  const words = remoteName.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+  if (words.some((w) => MUTATING_VERBS.includes(w))) risk.add('write')
+  if (words.some((w) => DESTRUCTIVE_VERBS.includes(w))) {
+    risk.add('write')
+    risk.add('destructive')
+  }
+  return [...risk]
 }
 
 /**
