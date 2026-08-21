@@ -1564,13 +1564,34 @@ function approvalActs(a, okLabel) {
   return (
     `<div class="sw-approval-acts">` +
     `<button type="button" class="btn btn-primary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="once">${esc(okLabel)}</button>` +
-    `<button type="button" class="btn btn-secondary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="session"` +
-    // 改过的这一次不能变成整场放行：后面那些调用带的是模型自己写的内容，不是人刚改的这份。
+    /**
+     * **「这一轮」，不是「这次对话」。**
+     *
+     * 一个 Bot 一辈子只有一条会话（席位那边的 ensureSession 有就复用），所以按会话
+     * 放行等于给出一张永久通行证——而人点它时想的是「我让它发三封信，别问我三遍」。
+     * 范围收在这一轮里，下一句话重新问。按钮上的话要跟真实范围对得上，
+     * 否则这颗按钮就是在替人做一个他没同意的决定。
+     */
+    `<button type="button" class="btn btn-secondary" data-act="chat-approve" data-call="${esc(a.callId)}" data-scope="turn"` +
     (touched
-      ? ` disabled title="${esc(t('这一次改过内容，只能批准这一次', 'You edited this one, so it can only be approved once'))}"`
-      : '') +
-    `>${esc(t('这次对话都批准', 'Approve for this chat'))}</button>` +
-    `<button type="button" class="btn btn-ghost" data-act="chat-deny" data-call="${esc(a.callId)}">${esc(t('拒绝', 'Deny'))}</button>` +
+      ? // 改过的这一次不能顺带放行后面几次：后面那些带的是模型自己写的内容，不是人刚改的这份。
+        ` disabled title="${esc(t('这一次改过内容，只能批准这一次', 'You edited this one, so it can only be approved once'))}"`
+      : ` title="${esc(t('从你刚才那句话到它答完，这把工具不再问；下一句话会重新问。', 'Until this reply finishes, this tool won\'t ask again; your next message starts over.'))}"`) +
+    `>${esc(t('这一轮都批准', 'Approve for this turn'))}</button>` +
+    `<button type="button" class="btn btn-ghost" data-act="chat-deny" data-call="${esc(a.callId)}" data-scope="once">${esc(t('拒绝', 'Deny'))}</button>` +
+    /**
+     * 拒绝那一侧也配一颗带范围的，和批准那一对对称。
+     *
+     * 只有「拒绝」的话，模型下一步换个措辞再调一遍同样的东西，人得一次次点——而每一次
+     * 都长得差不多。点这颗，这一轮里同一把工具直接挡掉，理由如实告诉模型「刚拒过」，
+     * 让它去换做法，不是换措辞。
+     *
+     * **单独一颗，不做成「拒绝」的默认行为**：默认就挡的话，「拒绝 → 我跟它说改发给
+     * 李总 → 它重发」这条最自然的路会被自己挡死（插话是插进同一轮的）。
+     */
+    `<button type="button" class="btn btn-ghost" data-act="chat-deny" data-call="${esc(a.callId)}" data-scope="turn"` +
+    ` title="${esc(t('这一轮里同一把工具直接挡掉，不再问你；下一句话会重新开始。', 'Blocks this tool for the rest of this reply; your next message starts over.'))}"` +
+    `>${esc(t('这一轮别再试', 'Block for this turn'))}</button>` +
     `</div>`
   )
 }

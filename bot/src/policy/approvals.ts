@@ -26,10 +26,12 @@ export type Verdict = 'approved' | 'denied' | 'timeout' | 'aborted'
  */
 export interface Decision {
   verdict: Verdict
-  /** 人点的是「这一次」还是「这次对话都批准」。没人点（超时、被停止）时没有这一项。 */
-  scope?: 'once' | 'session'
-  /** 这次是被此前那条「本会话都批准」直接放行的，没有再问过人。 */
+  /** 人点的是「这一次」还是「这一轮都批准」。没人点（超时、被停止）时没有这一项。 */
+  scope?: 'once' | 'turn'
+  /** 这次是被此前那条「这一轮都批准」直接放行的，没有再问过人。 */
   viaGrant?: boolean
+  /** 这次是被此前那条「这一轮别再试了」直接挡下的，没有再问过人。 */
+  viaBlock?: boolean
   /** 人在卡片上改过哪几格（标签，给日志和审计看）。没改就没有这一项。 */
   edited?: string[]
 }
@@ -66,16 +68,48 @@ export class ApprovalGate {
        * 中间那一步迟早会漏，而漏掉的表现是：界面显示改过了，发出去的还是原文。
        */
       call: ToolCall
-      settle: (v: Verdict, scope?: 'once' | 'session', edited?: string[]) => void
+      settle: (v: Verdict, scope?: 'once' | 'turn', edited?: string[]) => void
     }
   >()
   /**
-   * 「本会话内都批准」的口子：sessionId → 工具名。
+   * 「这一轮都批准」的口子：sessionId → 工具名。**轮末清空**（见 clearGrants）。
    *
-   * **只在内存里，进程一重启就没了。** 落盘的话，一次「今天下午都别问我了」会跨过
-   * 重启、跨过第二天，而那时候点它的人早就不在了。丢失的方向是多问一次，安全。
+   * 一开始这里是「本会话都批准」，那是错的：**一个 Bot 一辈子只有一条会话**
+   * （registry.ts 的 ensureSession——有就复用，只增不减），而席位上的 bot 是常驻进程。
+   * 于是那颗按钮实际给出去的是「这台席位上这把工具从此不再问」，可能一连几周。按钮上
+   * 写的是「这次对话」，人读到的是「眼下这一段」——一次点击换走一张无限期通行证，
+   * 而这正是这条边界要防的事。
+   *
+   * 收成一轮，正好是人点它时脑子里的那个范围：「我让它发三封信，别问我三遍」。
+   * 下一句话是新的意图，重新问一次。
+   *
+   * **只在内存里。** 落盘的话它还会跨过重启，而丢失的方向是多问一次，安全。
    */
   private grants = new Map<string, Set<string>>()
+
+  /**
+   * 「这一轮别再试了」的口子：sessionId → 工具名。和放行名单同生共死（轮末一起清）。
+   *
+   * **为什么要有它**：拒绝目前只作用于这一次，模型下一步完全可以换个措辞再调一遍同样的
+   * 东西——人得一次次点拒绝，而每一次都长得差不多。点了这个，这一轮里同一把工具直接挡掉，
+   * 理由如实告诉模型「刚拒过」，让它去换做法，而不是换措辞。
+   *
+   * **是一颗单独的按钮，不是「拒绝」的默认行为。** 默认就挡掉的话，「拒绝 → 我跟它说
+   * 改发给李总 → 它重发」这条最自然的路会被自己挡死：插话（steer）是插进**同一轮**的，
+   * 那时工具已经在黑名单上了。
+   */
+  private denials = new Map<string, Set<string>>()
+
+  /**
+   * 轮末清空这条会话上的放行 / 拦停名单。
+   *
+   * 挂在 `turn/end` 上（policy/index.ts）。轮首也清一次：进程如果在上一轮中途硬死过，
+   * 那一轮的 `turn/end` 根本没写下来，名单会带着一张没人再看着的通行证进下一轮。
+   */
+  clearTurn(sessionId: string): void {
+    this.grants.delete(sessionId)
+    this.denials.delete(sessionId)
+  }
 
   constructor(private ctx: Context) {}
 
@@ -91,8 +125,17 @@ export class ApprovalGate {
    * 那次调用就会挂着不动——而它挂着的时候，整条会话都在等它。
    */
   async ask(call: ToolCall, reason: string, form: ApprovalForm): Promise<Decision> {
+    /**
+     * 拦停名单先看：人这一轮已经说过「别再试了」。
+     *
+     * 排在放行名单前面——同一把工具不可能既在放行名单又在拦停名单里（点了一个就落定了），
+     * 但万一将来两边都能进，**拒绝优先**才是安全的那一侧。
+     */
+    const blocked = this.denials.get(call.sessionId)
+    if (blocked?.has(call.name)) return { verdict: 'denied', scope: 'turn', viaBlock: true }
+
     const granted = this.grants.get(call.sessionId)
-    if (granted?.has(call.name)) return { verdict: 'approved', scope: 'session', viaGrant: true }
+    if (granted?.has(call.name)) return { verdict: 'approved', scope: 'turn', viaGrant: true }
 
     const key = `${call.sessionId}:${call.callId}`
     const now = Date.now()
@@ -116,7 +159,7 @@ export class ApprovalGate {
      */
     const settled = new Promise<Decision>((resolve) => {
       let done = false
-      const finish = (v: Verdict, scope?: 'once' | 'session', edited?: string[]) => {
+      const finish = (v: Verdict, scope?: 'once' | 'turn', edited?: string[]) => {
         if (done) return
         done = true
         clearTimeout(timer)
@@ -177,7 +220,7 @@ export class ApprovalGate {
     sessionId: string,
     callId: string,
     decision: 'approve' | 'deny',
-    scope: 'once' | 'session' = 'once',
+    scope: 'once' | 'turn' = 'once',
     edits?: Record<string, unknown>,
   ): 'ok' | 'gone' {
     const hit = this.waiting.get(`${sessionId}:${callId}`)
@@ -195,26 +238,42 @@ export class ApprovalGate {
       edited = patched.changed
     }
     /**
-     * **改过的这一次不能变成整场放行。**
+     * **改过的这一次不能顺带放行后面几次。**
      *
-     * 「这次对话都批准」的意思是「后面同样的调用不用再问我」，而后面那些调用带的是
+     * 「这一轮都批准」的意思是「后面同样的调用不用再问我」，而后面那些调用带的是
      * 模型自己写的内容，不是人刚改的这一份。两件事凑在一起，等于人改了一封信，
-     * 然后默许了之后所有没人看过的信。
+     * 然后默许了之后几封没人看过的。
      */
     if (edited.length) scope = 'once'
-    if (decision === 'approve' && scope === 'session') {
+    if (decision === 'approve' && scope === 'turn') {
       const set = this.grants.get(sessionId) ?? new Set<string>()
       set.add(hit.rec.name)
       this.grants.set(sessionId, set)
     }
-    // 拒绝没有「范围」可言——带上一个 scope: 'once' 只会让日志读起来像「他只拒了这一次」。
-    hit.settle(decision === 'approve' ? 'approved' : 'denied', decision === 'approve' ? scope : undefined, edited)
+    // 「这一轮别再试了」：拒绝也能带范围，落进拦停名单，这一轮同一把工具直接挡。
+    if (decision === 'deny' && scope === 'turn') {
+      const set = this.denials.get(sessionId) ?? new Set<string>()
+      set.add(hit.rec.name)
+      this.denials.set(sessionId, set)
+    }
+    /**
+     * 范围两边都要带出去。
+     *
+     * 以前拒绝一律不带 scope（那时它只有一种拒法）。现在「拒绝」和「这一轮别再试了」
+     * 是两件事，日志上分不出来的话，事后就答不了「他是拒了这一次，还是把这条路关了」。
+     */
+    hit.settle(decision === 'approve' ? 'approved' : 'denied', scope, edited)
     return 'ok'
   }
 
-  /** 这条会话上「本会话内都批准」过的工具。给 /api/sessions/:id/approvals 报出去。 */
+  /** 这条会话上「这一轮都批准」过的工具。给 /api/sessions/:id/approvals 报出去。 */
   grantedIn(sessionId: string): string[] {
     return [...(this.grants.get(sessionId) ?? new Set<string>())]
+  }
+
+  /** 这条会话上「这一轮别再试了」的那几把工具。 */
+  blockedIn(sessionId: string): string[] {
+    return [...(this.denials.get(sessionId) ?? new Set<string>())]
   }
 
   private async append(sessionId: string, data: {
@@ -225,7 +284,7 @@ export class ApprovalGate {
     form?: ApprovalForm
     edited?: string[]
     state: 'pending' | Verdict
-    scope?: 'once' | 'session'
+    scope?: 'once' | 'turn'
     expiresAt?: number
   }): Promise<void> {
     try {

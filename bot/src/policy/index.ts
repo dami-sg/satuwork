@@ -74,9 +74,21 @@ export class PolicyService extends Service {
   constructor(ctx: Context) {
     super(ctx, 'policy')
     this.approvals = new ApprovalGate(ctx)
-    // 轮首清零。不清的话，一整条长会话累计几次之后，每一次拦截都会带上转人工那句话。
     ctx.on('session/event', (sessionId: string, event: { type: string }) => {
-      if (event.type === 'turn/start') this.blocks.delete(sessionId)
+      // 轮首清零。不清的话，一整条长会话累计几次之后，每一次拦截都会带上转人工那句话。
+      if (event.type === 'turn/start') {
+        this.blocks.delete(sessionId)
+        // 轮首也清一次：上一轮要是在中途硬死过，它的 turn/end 根本没写下来。
+        this.approvals.clearTurn(sessionId)
+      }
+      /**
+       * **「这一轮都批准」和「这一轮别再试了」都到这儿为止。**
+       *
+       * 一个 Bot 一辈子只有一条会话（registry 的 ensureSession），所以按会话记的名单
+       * 等于永久生效——而按钮上写的是「这一轮」。范围必须跟着轮次收口，不然那两颗按钮
+       * 就是在说一件它们做不到的事。
+       */
+      if (event.type === 'turn/end') this.approvals.clearTurn(sessionId)
     })
   }
 
@@ -387,7 +399,7 @@ export function apply(ctx: Context) {
           const why = ctx.policy.needsApproval(call, risk)
           if (why) {
             // 表单在**席位这边**算：剥元工具的壳、认字段、定哪几格能改，全在 forms.ts。
-            const { verdict, viaGrant, edited } = await ctx.policy.approvals.ask(call, why, formOf(call))
+            const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why, formOf(call))
             await ctx.policy.record({
               sessionId: call.sessionId,
               botId: bot?.id ?? '',
@@ -399,13 +411,15 @@ export function apply(ctx: Context) {
               // 放行，日志上都只是一条 approved；不写清楚出处，事后翻记录的人会以为
               // 有人一次次点过头。
               reason: viaGrant
-                ? `${why}（这次对话此前已批准同一把工具）`
-                : edited?.length
-                  ? `${why}（批准时改过：${edited.join('、')}）`
-                  : why,
+                ? `${why}（这一轮此前已批准同一把工具）`
+                : viaBlock
+                  ? `${why}（这一轮此前已拒绝同一把工具，没有再问）`
+                  : edited?.length
+                    ? `${why}（批准时改过：${edited.join('、')}）`
+                    : why,
               at: Date.now(),
             })
-            if (verdict !== 'approved') return blockedByUser(verdict, why)
+            if (verdict !== 'approved') return blockedByUser(verdict, why, viaBlock)
           }
         }
 
@@ -436,7 +450,21 @@ function outboundOf(call: ToolCall, risk: readonly string[]): boolean {
  * 后者它该在对话里把这件事重新提一遍——合成一句「操作被拒绝」，第二种情况下用户回来
  * 看到的是一条毫无线索的失败。
  */
-function blockedByUser(verdict: Verdict, why: string): ToolResult {
+function blockedByUser(verdict: Verdict, why: string, viaBlock?: boolean): ToolResult {
+  /**
+   * 人这一轮说过「别再试了」。
+   *
+   * **要说清楚是「这一轮」而不是「永远」**，也要说清楚该往哪走：不这么说的话，模型的
+   * 下一步多半是换个措辞再调一次——而它每换一次，人就得再看一条失败。
+   */
+  if (viaBlock) {
+    return {
+      text:
+        `用户这一轮已经拒绝过这把工具（${why}），并且说了这一轮别再试。` +
+        `换一条不需要它的路子；实在绕不开就把话说清楚交给他，等他下一句话再说。`,
+      failed: true,
+    }
+  }
   if (verdict === 'aborted') {
     return { text: `这次调用还没等到确认，用户就点了停止（${why}）。`, failed: true }
   }

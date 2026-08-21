@@ -240,7 +240,8 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'chat-deny') {
-    await decideApproval(btn.getAttribute('data-call'), 'deny')
+    // 拒绝也有范围：`once` 是只拒这一次，`turn` 是这一轮别再试（见 chat.js 的 approvalActs）。
+    await decideApproval(btn.getAttribute('data-call'), 'deny', btn.getAttribute('data-scope') || 'once')
     return
   }
   if (act === 'chat-queue-cancel') {
