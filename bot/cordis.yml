@@ -66,6 +66,9 @@
     provider: deepseek
     model: deepseek-v4-flash
     system: 你是 Satuwork 的 AI 员工。用简洁、专业的中文回答。需要当前时间、查看或修改文件、执行命令时调用工具，不要凭猜测。
+    # 一轮里最多连着跑多少步（一步 = 一次模型调用加它那批工具）。到顶收口，对话里留一句
+    # 说明，回「继续」接着跑。防的是绕不出来的工具循环——上下文那条路有压缩兜着，撞不到墙。
+    maxSteps: 120
 
 # HTTP API（无 SPA）。对话 UI 在 Gateway。
 - name: './src/web/index.ts'
