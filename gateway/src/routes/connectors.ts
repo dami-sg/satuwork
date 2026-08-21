@@ -6,8 +6,9 @@
  */
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Router } from '../http.ts'
-import { ProviderError, VENDORS, isVendor, providerFor } from '../connectors/index.ts'
-import { MAX_TOOLS, applyConnectorPatch, blockMapOf, connectorDefOf, newConnectorDefinition, publicConnector, toolsOf } from '../lib/connectors.ts'
+import { ProviderError, VENDORS, isVendor, providerFor, type ToolDef } from '../connectors/index.ts'
+import { MAX_TOOLS, applyConnectorPatch, blockMapOf, checkRecommended, connectorDefOf, matchTools, newConnectorDefinition, publicConnector, toolsOf } from '../lib/connectors.ts'
+import { toolModeOf } from '../lib/tool-search.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { isUniqueViolation } from '../db.ts'
 import { originOf, rangeQuery, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
@@ -161,7 +162,8 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
       scope: 'global',
       companyId: null,
       name: def.name,
-      definition: def,
+      // 推荐工具集要拿真清单核过才落库，写错的 slug 会变成新员工的一张空工具表。
+      definition: await checkRecommended(db, def),
     })
     await db.audit({ companyId: 'platform', accountId: account.id, action: 'connector.publish', detail: { id: item.id, toolkit: def.toolkit } })
     json(res, 201, { connector: publicConnector(item) })
@@ -177,7 +179,9 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     requireOwner(account)
     const item = await globalConnector(req.params.connectorId)
-    const def = applyConnectorPatch(connectorDefOf(item), bodyOf(req))
+    const cur = connectorDefOf(item)
+    // 带上上一版：没动推荐集的那些编辑（改名、改说明、上下架）不该被拖去核清单。
+    const def = await checkRecommended(db, applyConnectorPatch(cur, bodyOf(req)), cur.recommendedTools)
     const next = await db.updateCatalog(item.id, { name: def.name, definition: def })
     await db.audit({ companyId: 'platform', accountId: account.id, action: 'connector.update', detail: { id: item.id } })
     json(res, 200, { connector: publicConnector(next) })
@@ -359,7 +363,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
     const install = await db.connectorInstall(item.id, account.id)
     const mine = (await db.connectionsFor(account.id, account.companyId)).filter((c) => c.connectorId === item.id)
     const rows = await refreshPending(mine, def)
-    let tools: unknown[] = []
+    let tools: ToolDef[] = []
     let toolsError = ''
     try {
       const provider = await providerFor(db, def.vendor)
@@ -369,9 +373,23 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
     } catch (e) {
       toolsError = (e as Error).message
     }
-    // 开着的工具超过上限时，多出来的不会下发。**这件事必须说出来**——静默截断的表现
-    // 是「某个工具时有时无」，界面上一点征兆都没有。
-    const enabledCount = install ? (install.enabledTools.length || tools.length) : 0
+    /**
+     * 开着的里面有几个是真的、哪几个对不上。
+     *
+     * **数「真的」而不是数「存了几个」**：供应商改名或下线一个工具之后，存着的那个 slug
+     * 既不下发也不报错，而界面按存了几个来数，会显示「1 / 500 个已开启」而底下一个都
+     * 没勾——人看到的数字和 Bot 拿到的工具对不上，还查不出为什么。
+     *
+     * 清单拉不到（`toolsError`）时不做这个判断：那时 `tools` 是空的，全判成对不上是错的。
+     */
+    const enabled = install?.enabledTools ?? []
+    const hit = tools.length ? matchTools(tools, enabled) : { matched: enabled, unknown: [] }
+    const enabledCount = install ? (enabled.length ? hit.matched.length : tools.length) : 0
+    // 超上限之后这把连接会切到搜索模式（docs/tool-search.md §4）。**档位由后端算，界面
+    // 不许自己按 enabledCount > toolCap 去推**——推的那一刻它就和这里分叉了，而分叉的
+    // 表现是界面说一套、Bot 拿到另一套。
+    const on = enabled.length ? new Set(hit.matched) : null
+    const toolMode = toolModeOf(on ? tools.filter((t) => on.has(t.slug)) : tools)
     json(res, 200, {
       connector: { ...publicConnector(item), blocked, blockedReason },
       install: install ? publicInstall(install) : null,
@@ -379,6 +397,9 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
       tools,
       toolCap: MAX_TOOLS,
       enabledCount,
+      toolMode,
+      // 对不上的那些。空数组时不出现，界面据此决定要不要画那条红字。
+      ...(hit.unknown.length ? { unknownTools: hit.unknown } : {}),
       ...(toolsError ? { toolsError } : {}),
     })
   })
@@ -387,7 +408,13 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     const { item, blocked, blockedReason } = await seatConnector(account, req.params.connectorId)
     if (blocked) throw new HttpError(403, blockedReason ? `本公司已禁用这个连接器：${blockedReason}` : '本公司已禁用这个连接器')
-    const install = await db.installConnector({ connectorId: item.id, accountId: account.id, companyId: account.companyId! })
+    // 上架时挑好的那一小撮。owner 没挑就还是全开，由 tool-search 那边的降级兜底。
+    const install = await db.installConnector({
+      connectorId: item.id,
+      accountId: account.id,
+      companyId: account.companyId!,
+      enabledTools: connectorDefOf(item).recommendedTools,
+    })
     await db.audit({ companyId: account.companyId!, accountId: account.id, action: 'connector.install', detail: { connectorId: item.id } })
     json(res, 201, { install: publicInstall(install) })
   })
