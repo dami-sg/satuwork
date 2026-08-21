@@ -67,6 +67,43 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(/\nboot\(\)\s*$/.test(last), `最后一个分片 ${parts[parts.length - 1]} 末尾没有 boot()`)
     })
 
+    await test('空壳工具调用不画成药丸，它的结果也不许赖到别人头上', async () => {
+      // bot 那边的下标错位已经修了（见 e2e/toolcalls.mjs），但**已经写下的日志里还留着**：
+      // 翻上去看昨天那轮，每轮开头挂一颗红色的「tool · 失败」，点开里面什么都没有。
+      const ui = await boot()
+      const ev = (seq, type, data) => ({ seq, time: 1, type, data })
+      const folded = ui.fold([
+        ev(1, 'user/message', { message: { content: [{ type: 'text', text: '查一下' }] }, source: { kind: 'user' } }),
+        ev(2, 'turn/start', { turn: 1 }),
+        ev(3, 'tool/call', { turn: 1, step: 1, callId: '', name: '', arguments: '{}' }),
+        ev(4, 'tool/call', { turn: 1, step: 1, callId: 'call_a', name: 'web_search', arguments: '{"q":"x"}' }),
+        ev(5, 'tool/result', { turn: 1, step: 1, callId: '', text: 'Tool  not found', failed: true }),
+        ev(6, 'tool/result', { turn: 1, step: 1, callId: 'call_a', text: '搜到了', failed: false }),
+        ev(7, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: '好了' }] } }),
+        ev(8, 'turn/end', { turn: 1, reason: 'completed' }),
+      ])
+      const tools = folded.blocks.find((b) => b.kind === 'assistant')?.tools || []
+      assert(tools.length === 1, `该只剩真的那一把：${JSON.stringify(tools.map((t) => t.name))}`)
+      assert(tools[0].name === 'web_search', `留错了：${tools[0].name}`)
+      // 空壳的结果要一起跳过。不跳的话它会按「第一条还没有结果的」认过去，
+      // 把一次成功的调用标成失败——比多一颗药丸更坏，因为它是错的。
+      assert(tools[0].failed === false, '成功的调用被空壳的失败结果盖成了失败')
+      assert(tools[0].result === '搜到了', `结果配错了：${tools[0].result}`)
+    })
+
+    await test('工具浮层：在它自己身上滚不算「页面滚了」，不许收掉', async () => {
+      // 这一条只验源码。滚动收浮层挂在 window 的**捕获阶段**，垫片里 window 是个空壳，
+      // 事件根本发不出去——但错法就藏在那一行里：不看事件源头，滚浮层自己的结果区
+      // （`.sw-toolpop pre`，最高 220px）也照收，手一动窗口就没了，长输出永远看不完。
+      const src = readFileSync(join(root, 'gateway/ui/chat.js'), 'utf8')
+      // chat.js 里不止一个捕获阶段的 scroll 监听，认收浮层的那一个。
+      const handler = [...src.matchAll(/addEventListener\(\s*'scroll',([\s\S]*?),\s*true,?\s*\)/g)]
+        .map((m) => m[1])
+        .find((h) => h.includes('hideToolPop'))
+      assert(handler !== undefined, '找不到收浮层的那个 scroll 监听')
+      assert(handler.includes('sw-toolpop'), '滚动收浮层时没有区分事件源头，滚浮层自己也会把它收掉')
+    })
+
     await test('空库 + 没有票 → 画「创建系统管理员」，不是登录页', async () => {
       const ui = await boot()
       const html = ui.html()

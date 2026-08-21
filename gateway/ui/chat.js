@@ -328,6 +328,8 @@ function fold(events, live) {
   let assistant = null
   let tools = []
   let status = ''
+  // 空壳工具调用的 callId（见下面 tool/call）。它们的结果也要一起跳过。
+  const phantoms = new Set()
   for (const ev of events || []) {
     const type = ev.type
     const data = ev.data || {}
@@ -381,11 +383,21 @@ function fold(events, live) {
         assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
+      // **没有名字的不画。** 那是 bot 那边一个已经修掉的下标错位留下的空壳（见
+      // llm/gateway.ts 的 toolSlot），它从来没跑过、也跑不起来，pi 一句「找不到叫「」
+      // 的工具」就把它判失败了。可**已经写下的日志里还留着**，翻上去看昨天那轮，
+      // 每一轮开头都挂一颗红色的「tool · 失败」，点开里面什么都没有。
+      // 结果也一起跳过（见下面 tool/result）：不跳的话它会按「第一条还没有结果的」
+      // 认过去，把一次成功的调用标成失败。
+      if (!String(data.name || '').trim()) {
+        phantoms.add(data.callId)
+        continue
+      }
       // arguments 要留着：工具药丸的悬浮窗全靠它回答「这次到底拿什么跑的」。存的是
       // bot 那边 JSON.stringify 过的原串，展示时再 parse 一次做缩进（见 toolPopBody）。
       tools.push({
         callId: data.callId,
-        name: data.name || 'tool',
+        name: data.name,
         args: typeof data.arguments === 'string' ? data.arguments : '',
         result: null,
         failed: false,
@@ -393,6 +405,7 @@ function fold(events, live) {
       assistant.tools = tools
       assistant.endTime = at
     } else if (type === 'tool/result') {
+      if (phantoms.has(data.callId)) continue
       const hit =
         tools.find((x) => x.callId && x.callId === data.callId && x.result == null) ||
         tools.find((x) => x.result == null) ||
@@ -3616,8 +3629,22 @@ document.addEventListener('focusin', (e) => {
   else if (el && !el.closest('.sw-toolpop')) hideToolPop(0)
 })
 
-// 滚动时立刻收：浮层是 fixed 的，跟不上锚点，留在原地就是一块飘着的脏东西。
-window.addEventListener('scroll', () => hideToolPop(0), true)
+/**
+ * 滚动时立刻收：浮层是 fixed 的，跟不上锚点，留在原地就是一块飘着的脏东西。
+ *
+ * **但浮层自己滚不算。** 结果那一段有自己的滚动区（`.sw-toolpop pre`，最高 220px），
+ * 内容一长就得在里面滚着看——而这个监听器是捕获阶段挂在 window 上的，滚它也照收不误：
+ * 手一动窗口就没了，长输出永远看不完。这里按事件源头分一下：源头在浮层里就不收。
+ */
+window.addEventListener(
+  'scroll',
+  (e) => {
+    const el = e.target instanceof Element ? e.target : null
+    if (el && el.closest('.sw-toolpop')) return
+    hideToolPop(0)
+  },
+  true,
+)
 window.addEventListener('resize', () => hideToolPop(0))
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && toolPop && !toolPop.hidden) hideToolPop(0)

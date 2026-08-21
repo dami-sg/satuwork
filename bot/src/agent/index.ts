@@ -1008,9 +1008,23 @@ export async function toAgentMessages(
 
   // 先找出每个 step 的助手消息落在哪个 seq，工具结果据此排到它后面。
   const assistantSeq = new Map<string, number>()
+  /**
+   * 没有名字的工具调用：连它的结果一起丢掉，不回传给模型。
+   *
+   * 来源是 `consumeOpenAI` 那个已经修掉的下标错位（见 llm/gateway.ts），可**已经写下
+   * 的日志里还留着**。一把叫「」的工具谁也执行不了，回传它只有两种下场：好一点的是白
+   * 占几个 token 外加教模型「可以有空名字的调用」，坏一点的是上游直接拒收整条请求
+   * （name 空、tool_call_id 空），那这个会话从此一句话都答不了。
+   *
+   * 必须成对丢：只丢调用会留下一条无主的 toolResult，Anthropic 那边同样是硬拒。
+   */
+  const nameless = new Set<string>()
   for (const e of events) {
     if (e.type === 'assistant/message') {
       assistantSeq.set(stepKey(e.data.turn, e.data.step), e.seq)
+      for (const c of e.data.message.content) {
+        if (c.type === 'tool-call' && !String(c.name || '').trim()) nameless.add(c.callId)
+      }
     }
   }
 
@@ -1050,6 +1064,7 @@ export async function toAgentMessages(
     } else if (e.type === 'assistant/message') {
       const content = e.data.message.content
         .filter((c) => c.type !== 'reasoning')
+        .filter((c) => !(c.type === 'tool-call' && nameless.has(c.callId)))
         .map((c) =>
           c.type === 'tool-call'
             ? { type: 'toolCall', id: c.callId, name: c.name, arguments: safeParse(c.arguments) }
@@ -1072,6 +1087,7 @@ export async function toAgentMessages(
         } as any,
       })
     } else if (e.type === 'tool/result') {
+      if (nameless.has(e.data.callId)) continue
       const anchor = assistantSeq.get(stepKey(e.data.turn, e.data.step)) ?? e.seq
       entries.push({
         // 小数偏移把结果排到锚点之后、下一条整数 seq 之前，同时保持批内先后。
