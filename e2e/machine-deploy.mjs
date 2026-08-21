@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { createCompany } from './org.mjs'
 import { publishRelease, sha256Of, tarGz } from './release.mjs'
+import { freePort } from './ports.mjs'
 
 /** 一个员工一个 Linux 账号——名下所有 bot 共用它。和 gateway/src/deploy.ts 保持一致。 */
 function linuxUserOf(accountId) {
@@ -58,7 +59,7 @@ function wsUpgrade(port, path, cookie) {
 
 export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-machine-gw'
-  const GW_PORT = 18380
+  const GW_PORT = await freePort()
   const MACHINE_TOK = 'e2e-machine-deploy'
   const PLATFORM_TOK = 'e2e-platform-deploy'
   const gwBase = `http://127.0.0.1:${GW_PORT}`

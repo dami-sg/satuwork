@@ -14,6 +14,7 @@ import { connect } from 'node:net'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { freePorts } from './ports.mjs'
 
 /** 起一个假 bot。记下每次请求的头和路径，供断言。 */
 function fakeBot() {
@@ -77,10 +78,7 @@ function wsHandshake(port, path, cookie) {
 export async function runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-manager-gw'
   const MGR_HOME = '/tmp/satuwork-e2e-manager-etc'
-  const GW_PORT = 19080
-  const MGR_PORT = 19081
-  const BOT_PORT = 19082
-  const NOVNC_PORT = 19083
+  const [GW_PORT, MGR_PORT, BOT_PORT, NOVNC_PORT] = await freePorts(4)
   const gwBase = `http://127.0.0.1:${GW_PORT}`
   const mgrBase = `http://127.0.0.1:${MGR_PORT}`
   const managerRoot = join(root, 'manager')

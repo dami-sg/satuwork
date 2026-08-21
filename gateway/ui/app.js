@@ -152,6 +152,10 @@ document.getElementById('app').addEventListener('submit', (e) => {
     const secret = String(new FormData(form).get('secret') || '')
     return saveCred(provider, secret, credId)
   }
+  if (form.getAttribute('data-form') === 'web-secret') {
+    e.preventDefault()
+    return saveWebSecret(form.getAttribute('data-provider'), String(new FormData(form).get('secret') || '').trim())
+  }
   if (form.getAttribute('data-form') === 'add-cred') {
     e.preventDefault()
     const fd = new FormData(form)
@@ -1062,6 +1066,15 @@ document.getElementById('app').addEventListener('click', async (e) => {
     render()
     return
   }
+  if (act === 'tools-tab') {
+    state.toolsTab = btn.getAttribute('data-tab') || 'web'
+    render()
+    return
+  }
+  if (act === 'web-test') {
+    await testWebBackend(btn.getAttribute('data-kind') === 'extract' ? 'extract' : 'search')
+    return
+  }
   if (act === 'audit-tab') {
     state.auditTab = btn.getAttribute('data-tab') === 'events' ? 'events' : 'chats'
     render()
@@ -1590,6 +1603,24 @@ document.getElementById('app').addEventListener('change', async (e) => {
       set('seats', sku.seats)
       set('period', sku.period || 'month')
     }
+    return
+  }
+  // 工具配置这三样有 input 也有 select，跟倍率一样得排在「只收 select」那道关卡前面。
+  if (el.getAttribute?.('data-act') === 'web-backend') {
+    const cap = el.getAttribute('data-cap') === 'extract' ? 'extractBackend' : 'searchBackend'
+    await saveWebTools({ [cap]: el.value })
+    return
+  }
+  if (el.getAttribute?.('data-act') === 'web-field') {
+    await saveWebTools({ [el.getAttribute('data-field')]: el.value.trim() })
+    return
+  }
+  if (el.getAttribute?.('data-act') === 'web-limit') {
+    await saveWebLimit(el.value)
+    return
+  }
+  if (el.getAttribute?.('data-act') === 'web-price') {
+    await saveWebPrice(el.getAttribute('data-backend'), el.getAttribute('data-kind'), el.value)
     return
   }
   // 倍率是 input，得在下面那道「只收 select」的关卡之前处理。

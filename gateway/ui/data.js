@@ -226,6 +226,12 @@ async function loadSettings() {
   if (state.me?.settings) state.settings = state.me.settings
 }
 
+/** 平台工具配置。只有 owner 拿得到——里面有价目，也有「哪家配了密钥」。 */
+async function loadWebTools() {
+  if (!isOwner()) return
+  state.webTools = await api('GET', '/platform/tools/web')
+}
+
 async function loadOrgs() {
   const data = await api('GET', '/platform/orgs')
   state.orgs = data.orgs || []
@@ -653,6 +659,8 @@ async function loadPage() {
       }
     } else if (state.path === '/stats') {
       await loadStats()
+    } else if (state.path === '/tools') {
+      await loadWebTools()
     } else if (state.path.startsWith('/connectors/')) {
       await loadConnectorDetail(connectorIdOfPath(state.path))
     } else if (state.path === '/connectors') {

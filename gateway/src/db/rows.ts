@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, SessionIndex, Theme, Topup, emptyPlatformSettings, parseConnectorPricing, parsePriceMultiplier } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, SessionIndex, Theme, Topup, emptyPlatformSettings, parseConnectorPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -117,6 +117,7 @@ export function parsePlatformPayload(raw: unknown): PlatformSettings {
     connectorPricing: parseConnectorPricing(o.connectorPricing),
     // 空字符串 = 没钉，跟最新发布走。写端和这里必须成对，少一边这个开关就是死的。
     managerVersion: typeof o.managerVersion === 'string' ? o.managerVersion.trim() : '',
+    webTools: parseWebTools(o.webTools),
   }
 }
 export function planOf(r: Row): Plan {

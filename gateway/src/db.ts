@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
-import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, emptyPlatformSettings, emptySettings, parseConnectorPricing, parsePriceMultiplier, releaseArch } from './db/types.ts'
+import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseConnectorPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
 import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf } from './db/rows.ts'
 
 /**
@@ -601,6 +601,81 @@ export class Db {
       usage.cached_tokens ?? 0,
       id,
     ])
+  }
+
+  async insertWebCall(input: {
+    accountId: string
+    companyId?: string | null
+    kind: WebCallKind
+    backend: string
+    units: number
+    mils: number
+  }): Promise<WebCall> {
+    const row: WebCall = {
+      id: randomUUID(),
+      accountId: input.accountId,
+      companyId: input.companyId ?? null,
+      kind: input.kind,
+      backend: input.backend,
+      units: input.units,
+      mils: input.mils,
+      createdAt: Date.now(),
+    }
+    await this.run(
+      'insert into web_calls (id, "accountId", "companyId", kind, backend, units, mils, "createdAt") values (?,?,?,?,?,?,?,?)',
+      [row.id, row.accountId, row.companyId, row.kind, row.backend, row.units, row.mils, row.createdAt],
+    )
+    return row
+  }
+
+  /** 按公司 × 后端 × 类型汇总。金额直接求和——它已经是当时的报价，不重算。 */
+  async webUsageByCompanyBackend(
+    range?: { from?: number; to?: number },
+    companyId?: string,
+  ): Promise<{ companyId: string | null; backend: string; kind: string; calls: number; units: number; mils: number; lastAt: number | null }[]> {
+    const r = this.llmRangeSql(range)
+    const args: unknown[] = [...r.args]
+    let where = `where 1=1${r.sql}`
+    if (companyId) {
+      where += ' and "companyId" = ?'
+      args.push(companyId)
+    }
+    const rows = await this.many(
+      `select "companyId", backend, kind, count(*) as calls, coalesce(sum(units), 0) as units, coalesce(sum(mils), 0) as mils, max("createdAt") as "lastAt" from web_calls ${where} group by "companyId", backend, kind`,
+      args,
+    )
+    return rows.map((row) => ({
+      companyId: strOrNull(row.companyId),
+      backend: str(row.backend),
+      kind: str(row.kind),
+      calls: num(row.calls),
+      units: num(row.units),
+      mils: num(row.mils),
+      lastAt: row.lastAt == null ? null : num(row.lastAt),
+    }))
+  }
+
+  /** 这家公司从某个时刻起用了多少次。配额闸用它，所以只数条数不取行。 */
+  async webCallCountSince(companyId: string, since: number): Promise<number> {
+    const r = await this.one('select count(*)::int as n from web_calls where "companyId" = ? and "createdAt" >= ?', [
+      companyId,
+      since,
+    ])
+    return num(r?.n ?? 0)
+  }
+
+  async webCallsOfCompany(companyId: string): Promise<WebCall[]> {
+    const rows = await this.many('select * from web_calls where "companyId" = ? order by "createdAt" desc', [companyId])
+    return rows.map((r) => ({
+      id: str(r.id),
+      accountId: str(r.accountId),
+      companyId: strOrNull(r.companyId),
+      kind: str(r.kind) as WebCallKind,
+      backend: str(r.backend),
+      units: num(r.units),
+      mils: num(r.mils),
+      createdAt: num(r.createdAt),
+    }))
   }
 
   async llmCallsOfCompany(companyId: string): Promise<LlmCall[]> {
@@ -2334,6 +2409,8 @@ export class Db {
       // 后果是「全机队钉版本」这一级完全失效：传一个包上去，所有没有逐台钉过的机器
       // 都会在下一次心跳自己升上去，而唯一能拦住它的开关，看起来能设、其实存不进去。
       managerVersion: String(next.managerVersion ?? '').trim(),
+      // 同上：这一行漏了，工具配置那一屏就是「能填、回 200、读出来永远是空」。
+      webTools: parseWebTools(next.webTools),
     })
     await this.run(
       "insert into platform_settings (id, payload, \"updatedAt\") values ('platform', ?, ?) on conflict (id) do update set payload=excluded.payload, \"updatedAt\"=excluded.\"updatedAt\"",
@@ -2361,6 +2438,7 @@ export class Db {
             enabledModels: cur.enabledModels,
             priceMultiplier: cur.priceMultiplier,
             connectorPricing: cur.connectorPricing,
+            webTools: cur.webTools,
           })
           lifted.settings = true
           break

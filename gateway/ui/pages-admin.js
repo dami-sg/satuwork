@@ -347,6 +347,23 @@ function statsPage() {
 
   const unpriced = d?.unpricedModels || []
 
+  /**
+   * 网页工具按**次**算钱，跟 token 不是一个量纲，所以单开一块，不混进上面的合计。
+   * 金额是写行那一刻的报价，这里只求和，不重算——重算会让改价追溯改动历史账单。
+   */
+  const web = d?.web || { byCompany: [], byBackend: [], totals: { calls: 0, units: 0, mils: 0 } }
+  const webRows = (web.byBackend || [])
+    .map(
+      (b) => `<div class="satu-statrow" style="grid-template-columns: 2fr 1fr 1fr 1fr 1fr;">
+        <span style="font-size: 13.5px; font-weight: 600;">${esc(b.backend)}</span>
+        <span style="font-size: 13px;">${esc(String(b.search))}</span>
+        <span style="font-size: 13px;">${esc(String(b.extract))}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(String(b.units))}</span>
+        <span style="font-size: 13px; font-weight: 600;">${esc(usd(b.mils))}</span>
+      </div>`,
+    )
+    .join('')
+
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
@@ -381,6 +398,20 @@ function statsPage() {
               <span>${t('公司')}</span><span>${t('调用')}</span><span>${t('输入')}</span><span>${t('输出')}</span><span>${t('总计')}</span><span>${t('成本价')}</span><span>${t('报价')}</span>
             </div>
             ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${state.statsLoading ? t('统计中…') : t('这个时间段里没有调用。')}</div>`}
+          </div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: var(--space-3);">
+          <div style="display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap;">
+            <h2 style="font-size: 18px; margin: 0;">${t('网页工具')}</h2>
+            <span style="font-size: 12px; color: var(--muted-foreground);">
+              ${t(`${web.totals.calls} 次调用 · ${web.totals.units} 条 · ${esc(usd(web.totals.mils))}`, `${web.totals.calls} calls · ${web.totals.units} units · ${esc(usd(web.totals.mils))}`)}
+            </span>
+          </div>
+          <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+            <div class="satu-stathead" style="grid-template-columns: 2fr 1fr 1fr 1fr 1fr;">
+              <span>${t('后端')}</span><span>${t('搜索')}</span><span>${t('提取')}</span><span>${t('计费条数')}</span><span>${t('报价')}</span>
+            </div>
+            ${webRows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${state.statsLoading ? t('统计中…') : t('这个时间段里没有网页调用。')}</div>`}
           </div>
         </div>
         <div style="display: flex; flex-direction: column; gap: var(--space-3);">

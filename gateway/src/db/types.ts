@@ -524,6 +524,21 @@ export interface LlmCall {
   createdAt: number
 }
 
+export type WebCallKind = 'search' | 'extract'
+
+export interface WebCall {
+  id: string
+  accountId: string
+  companyId: string | null
+  kind: WebCallKind
+  backend: string
+  /** search 恒为 1；extract 记**真打了后端且抓成功**的条数——失败和命中缓存都不算。 */
+  units: number
+  /** 写行那一刻的报价，整数「厘」。 */
+  mils: number
+  createdAt: number
+}
+
 export interface LlmUsageByAccount {
   accountId: string
   calls: number
@@ -588,6 +603,73 @@ export interface PlatformSettings {
    * 下一轮心跳各台机器自己退回去。
    */
   managerVersion?: string
+  /** 网页搜索/提取的后端与价目。密钥不在这里，在 platform_credentials。 */
+  webTools?: WebToolsSettings
+}
+
+/** 能挂网页工具的后端。`firecrawl` 只占位，还没接。 */
+export const WEB_BACKENDS = ['tavily', 'searxng', 'duckduckgo', 'firecrawl'] as const
+export type WebBackendId = (typeof WEB_BACKENDS)[number]
+
+/**
+ * PDF / Word / Excel 是 Gateway **自己**取回来的，提取后端一次都没被调用。
+ *
+ * 所以它不能记在提取后端头上：`web_calls.backend` 写着 tavily、而 Tavily 根本没跑，
+ * 统计里「按后端」那张表就在撒谎。给它一个自己的名字和自己的单价——真实成本是我们
+ * 的带宽和内存，跟买来的搜索额度不是一回事，本来也该分开定价。
+ */
+export const WEB_DOCUMENT = 'document'
+
+/** 能定价的条目 = 后端 ∪ 自取文档。**不是**能选的后端，document 不进那两个下拉。 */
+export const WEB_PRICEABLE = [...WEB_BACKENDS, WEB_DOCUMENT] as const
+
+/** 单价，整数「厘」（千分之一美元），每次调用。和账单那套的单位一致。 */
+export interface WebToolPrice {
+  search: number
+  extract: number
+}
+
+export interface WebToolsSettings {
+  /** 空 = 没配。**不做自动检测**：配了哪把密钥就悄悄换一家后端，界面和实际会对不上。 */
+  searchBackend: WebBackendId | ''
+  extractBackend: WebBackendId | ''
+  /** 自托管 SearXNG 的实例地址。不是密文，所以不进凭证表。 */
+  searxngUrl: string
+  pricing: Record<string, WebToolPrice>
+  /** 一家公司一天最多几次调用。0 = 不限。防的是跑飞，不是精确计费。 */
+  dailyLimit: number
+}
+
+export function emptyWebTools(): WebToolsSettings {
+  return { searchBackend: '', extractBackend: '', searxngUrl: '', pricing: {}, dailyLimit: 0 }
+}
+
+function parseWebPrice(raw: unknown): WebToolPrice {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const mils = (v: unknown) => {
+    const n = Math.round(Number(v))
+    return Number.isFinite(n) && n >= 0 ? n : 0
+  }
+  return { search: mils(o.search), extract: mils(o.extract) }
+}
+
+export function parseWebTools(raw: unknown): WebToolsSettings {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const backend = (v: unknown): WebBackendId | '' =>
+    WEB_BACKENDS.includes(v as WebBackendId) ? (v as WebBackendId) : ''
+  const pricing: Record<string, WebToolPrice> = {}
+  const rawPricing = (o.pricing && typeof o.pricing === 'object' ? o.pricing : {}) as Record<string, unknown>
+  for (const id of WEB_PRICEABLE) {
+    if (rawPricing[id] != null) pricing[id] = parseWebPrice(rawPricing[id])
+  }
+  const limit = Math.round(Number(o.dailyLimit))
+  return {
+    searchBackend: backend(o.searchBackend),
+    extractBackend: backend(o.extractBackend),
+    searxngUrl: typeof o.searxngUrl === 'string' ? o.searxngUrl.trim() : '',
+    pricing,
+    dailyLimit: Number.isFinite(limit) && limit > 0 ? limit : 0,
+  }
 }
 
 /** 倍率的合法区间。0 会把报价抹平成免费，上限挡住一个手滑多打的零。 */
@@ -612,6 +694,7 @@ export function emptyPlatformSettings(): PlatformSettings {
     priceMultiplier: 1,
     connectorPricing: emptyConnectorPricing(),
     managerVersion: '',
+    webTools: emptyWebTools(),
   }
 }
 

@@ -1,6 +1,7 @@
 /**
  * 可见目录，以及反代到席位实例的那一组：目录下发、桌面、日志、部署、对话。
  */
+import type { ServerResponse } from 'node:http'
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, bearer, json, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
@@ -10,6 +11,8 @@ import { companyMachineOf, deploySeat, publicSeatRuntime, releaseSeats } from '.
 import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
 import { LEGACY_BOT_ICONS, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer } from '../lib/catalog.ts'
 import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
+import { WebToolError } from '../web-tools.ts'
+import { runExtract, runSearch } from '../web-service.ts'
 import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
 
 /**
@@ -51,9 +54,23 @@ function catalogStamp(
    * 重新部署。
    */
   conn: { updatedAt: number; count: number } = { updatedAt: 0, count: 0 },
+  /**
+   * 平台钉的两个模型角色。
+   *
+   * **不能省。** 席位拿着 `models.utility` 去做网页摘要，而这两个角色改动时
+   * `catalog_items` 一个字节都不会变——只看上面那几样的话，管理员换掉 utility（比如
+   * 旧的那个下架了）之后，跑着的席位永远不会重拉目录，摘要会一直打那个已经不存在的
+   * 模型，然后静静退化成「截原文前 8000 字」。
+   */
+  models = '',
 ): string {
   const toolsAt = tools.reduce((n, i) => Math.max(n, i.updatedAt), 0)
-  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}`
+  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}:${models}`
+}
+
+/** 两个模型角色压成一小段，进指纹用。 */
+function modelStamp(s: { daily: { provider: string; model: string }; utility: { provider: string; model: string } }): string {
+  return `${s.daily.provider}/${s.daily.model}|${s.utility.provider}/${s.utility.model}`
 }
 
 /** 这个账号的连接器状态指纹：安装和连接一起算，删一条也要能看出来。 */
@@ -166,9 +183,14 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
      */
     const synthIds = synth.filter((x) => !x.mentionOnly).map((x) => x.id)
 
+    // 席位要知道 utility 是谁：网页提取的摘要走它。挑模型是平台的事，所以是下发的，
+    // 不是席位自己在 cordis.yml 里配的——那等于给了一条绕过平台配置的暗路。
+    const settings = await db.platformSettings()
+
     json(res, 200, {
       // 实例照着这个数字判断「底座换了没有」。和下面那条探针给的是同一个值。
       templateVersion: tpl.version,
+      models: { daily: settings.daily, utility: settings.utility },
       /**
        * **这一份内容的指纹，和探针给的算法完全一样。**
        *
@@ -176,7 +198,13 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
        * 的结果当基线，而在「拉完目录」到「第一次探针」之间落地的改动就永远丢了——
        * 那两件事之间隔着一整轮插件启动，几百毫秒到几十秒都可能。
        */
-      stamp: catalogStamp(tpl.version, botId ? bots[0] : undefined, [...skills, ...servers], await connectorStampOf(db, account.id, companyId)),
+      stamp: catalogStamp(
+        tpl.version,
+        botId ? bots[0] : undefined,
+        [...skills, ...servers],
+        await connectorStampOf(db, account.id, companyId),
+        modelStamp(settings),
+      ),
       /**
        * 连接器绑账号、不绑 Bot：合成出来的那几条挂到**每一颗** Bot 的 `mcps` 上。
        * 席位那边 `toolSchemasFor()` 照现有逻辑按 `mcps` 过滤，一行都不用改。
@@ -211,8 +239,49 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     ]
     json(res, 200, {
       templateVersion: version,
-      stamp: catalogStamp(version, bot, tools, await connectorStampOf(db, account.id, companyId)),
+      stamp: catalogStamp(
+        version,
+        bot,
+        tools,
+        await connectorStampOf(db, account.id, companyId),
+        modelStamp(await db.platformSettings()),
+      ),
     })
+  })
+
+  // ── 网页工具。密钥在平台，所以抓取也在这里做完，席位只拿结果。 ─────────
+  //
+  // 走 /runtime/* 而不是 /v1/*：那一面是 OpenAI/Anthropic 兼容面，明确拒 sat_；
+  // 搜索是席位运行时的能力，和 /runtime/catalog 同类。用席位票还顺带把
+  // (accountId, companyId) 带了出来——计量不用 body 自报家门，自报的不作数。
+
+  /** 业务失败要成为**结果**，不是 4xx：席位那头要把它原样说给模型听。 */
+  async function webCall(res: ServerResponse, run: () => Promise<unknown>) {
+    try {
+      json(res, 200, { ok: true, ...(await run() as object) })
+    } catch (e) {
+      if (e instanceof WebToolError) return json(res, 200, { ok: false, error: e.hint })
+      throw e
+    }
+  }
+
+  router.post('/runtime/web/search', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const body = bodyOf(req)
+    await webCall(res, () =>
+      runSearch(db, account, {
+        query: String(body.query ?? ''),
+        count: body.count == null ? undefined : Number(body.count),
+        domains: Array.isArray(body.domains) ? body.domains.map(String) : [],
+        exclude: Array.isArray(body.exclude) ? body.exclude.map(String) : [],
+        freshness: String(body.freshness ?? ''),
+      }),
+    )
+  })
+
+  router.post('/runtime/web/extract', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    await webCall(res, () => runExtract(db, account, bodyOf(req).urls))
   })
 
   router.get('/runtime/desktop', async (req, res) => {
