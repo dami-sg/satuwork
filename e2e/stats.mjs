@@ -240,6 +240,62 @@ export async function runStats({ gwRoot, test, req, start, waitHttp, assert, log
       assert(priced.json.totals.unledgeredCalls === 0, `有账本行的也被标了：${priced.json.totals.unledgeredCalls}`)
     })
 
+    await test('金额卡是三条路的合计：模型 + 连接器 + 网页', async () => {
+      /**
+       * 上面那两张金额卡报的是**账单口径**——月底从余额里扣掉的是三条路的和。
+       * 只报模型那一份的话，卡上的数比账单小，而少掉的那截在这一屏上找不出来。
+       *
+       * 同时钉住另一半：`totals` 里的金额仍然只是模型那一条（按公司 / 按模型两张表
+       * 用的就是它）。两个数不一样是故意的，不能哪天有人把它们合成一个。
+       */
+      // 位置避开别的用例：45/46 缓存、55 没账本行、61 倍率、70–90 空窗口。
+      const at = now - 65 * DAY
+      const charge = (id, kind, subject, micros, mult, refId) =>
+        client.query(
+          'insert into usage_charges (id, "companyId", "accountId", kind, subject, status, quantity, "unitPrice", multiplier, "amountMicros", "bonusMicros", unpriced, "refId", "createdAt")' +
+            " values ($1,$2,$3,$4,$5,'ok','{}','{}',$6,$7,0,false,$8,$9)",
+          [id, orgId, accountId, kind, subject, mult, micros, refId, at],
+        )
+      await client.query(
+        'insert into llm_calls (id, "accountId", "companyId", provider, model, "promptTokens", "completionTokens", "createdAt") values ($1,$2,$3,$4,$5,$6,$7,$8)',
+        ['s-mix', accountId, orgId, 'openai', 'gpt-4.1', 100_000, 0, at],
+      )
+      await charge('c-s-mix', 'llm', 'openai/gpt-4.1', 1_000_000, 1, 's-mix')
+      // 连接器：落账时倍率 1.5，所以原价该倒推成 200000。
+      await client.query(
+        'insert into connector_calls (id, "companyId", "accountId", vendor, connector, label, tool, status, "createdAt") values ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        ['n-mix', orgId, accountId, 'composio', 'gmail', 'default', 'GMAIL_SEND_EMAIL', 'ok', at],
+      )
+      await charge('c-n-mix', 'connector', 'gmail:GMAIL_SEND_EMAIL', 300_000, 1.5, 'n-mix')
+      await client.query(
+        'insert into web_calls (id, "accountId", "companyId", kind, backend, units, mils, "createdAt") values ($1,$2,$3,$4,$5,$6,$7,$8)',
+        ['w-mix', accountId, orgId, 'search', 'searxng', 4, 0, at],
+      )
+      await charge('c-w-mix', 'web', 'searxng', 500_000, 1, 'w-mix')
+
+      const r = await req(base, 'GET', q(now - 66 * DAY, now - 64 * DAY), { token })
+      assert(r.status === 200, `${r.status} ${r.text}`)
+      assert(r.json.totals.amountMicros === 1_000_000, `totals 该只有模型那一条：${r.json.totals.amountMicros}`)
+      assert(r.json.money.llm.amountMicros === 1_000_000, `模型 ${r.json.money.llm.amountMicros}`)
+      assert(r.json.money.connector.amountMicros === 300_000, `连接器 ${r.json.money.connector.amountMicros}`)
+      assert(r.json.money.web.amountMicros === 500_000, `网页 ${r.json.money.web.amountMicros}`)
+      assert(r.json.money.all.amountMicros === 1_800_000, `合计 ${r.json.money.all.amountMicros}`)
+      // 原价按各行自己的倍率倒推：1000000 + 300000/1.5 + 500000。
+      assert(r.json.money.all.costMicros === 1_700_000, `合计原价 ${r.json.money.all.costMicros}`)
+
+      assert(r.json.connector.totals.calls === 1, `连接器调用数 ${r.json.connector.totals.calls}`)
+      assert(r.json.connector.totals.amountMicros === 300_000, `连接器已扣 ${r.json.connector.totals.amountMicros}`)
+      const g = r.json.connector.byConnector.find((x) => x.connector === 'gmail')
+      assert(g && g.calls === 1 && g.amountMicros === 300_000, `按连接器那行不对：${JSON.stringify(r.json.connector.byConnector)}`)
+      assert(r.json.web.totals.units === 4, `网页条数 ${r.json.web.totals.units}`)
+
+      // 公司过滤要一起管住这两条路，否则筛完公司卡上的钱还是全平台的。
+      const one = await req(base, 'GET', q(now - 66 * DAY, now - 64 * DAY, orgId), { token })
+      assert(one.json.money.all.amountMicros === 1_800_000, `按公司过滤后 ${one.json.money.all.amountMicros}`)
+      const other = await req(base, 'GET', q(now - 66 * DAY, now - 64 * DAY, 'no-such-company'), { token })
+      assert(other.status === 404, `不存在的公司 ${other.status}`)
+    })
+
     await test('按公司过滤；公司不存在是 404', async () => {
       const one = await req(base, 'GET', q(now - 30 * DAY, now, orgId), { token })
       assert(one.json.byCompany.length === 1, `过滤后 ${one.json.byCompany.length} 行`)

@@ -692,7 +692,10 @@ function usageRangeMs(range) {
 async function loadUsage() {
   const range = state.usageRange || '近 30 天'
   const { from, to } = usageRangeMs(range)
-  const q = `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+  // 日线要按**看的人所在时区**切天，服务端不知道那是哪个时区。传的是
+  // getTimezoneOffset() 的相反数（东八区 +480），跟 from/to 由前端算好是同一个道理。
+  const tz = -new Date().getTimezoneOffset()
+  const q = `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&tz=${encodeURIComponent(tz)}`
   if (isAdmin() || isOwner()) {
     const id = orgId()
     if (!id) return

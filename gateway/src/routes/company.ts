@@ -593,8 +593,126 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
   })
 
   /**
-   * 公司用量。费用没有真实账单，永远是 —，不编钱。
-   * 有 llm_calls 就报真实调用次数和 token 合计；没有就 0 / —。
+   * 用量屏那几块维度：日线、按 Bot、按模型、按类型。
+   *
+   * 都从已经有的两张表来——事实在 `llm_calls`，钱在账本——所以公司管理员这一屏和平台
+   * 那一屏是同一个口径，不是另算一份。以前这四个字段是写死的空数组，界面上四块永远
+   * 写着「还没有用量」，而底下的计费明细一屏都是——两个说法互相打脸。
+   *
+   * `offsetMs` 是看的人所在时区的偏移，只有日线用得上（见 `db.llmDailyBy`）。
+   */
+  async function usageDims(
+    scope: { companyId?: string; accountId?: string },
+    range: { from?: number; to?: number },
+    offsetMs: number,
+  ) {
+    const column = scope.companyId ? 'companyId' : 'accountId'
+    const value = scope.companyId ?? scope.accountId ?? ''
+    const [buckets, models, charges] = await Promise.all([
+      db.llmDailyBy(column, value, range, offsetMs),
+      db.llmUsageByCompanyModel(range, scope.companyId, scope.accountId),
+      db.chargeUsageBy(['botId', 'kind', 'subject'], range, scope),
+    ])
+
+    /**
+     * 日线要**把没有调用的那天也画出来**：只画有数的那几天，横轴会被悄悄压缩，
+     * 「周末没人用」看上去和「天天都在用」长得一样。
+     */
+    const day = 86400000
+    const first = range.from != null ? Math.floor((range.from + offsetMs) / day) : buckets[0]?.bucket
+    const last = range.to != null ? Math.floor((range.to + offsetMs) / day) : buckets[buckets.length - 1]?.bucket
+    const daily: { label: string; value: number }[] = []
+    if (first != null && last != null && last >= first) {
+      const counts = new Map(buckets.map((b) => [b.bucket, b.calls]))
+      // 92 根柱子已经挤不下了；手搓一个三年的 from/to 不该把这一屏拖垮。
+      const start = Math.max(first, last - 91)
+      for (let b = start; b <= last; b += 1) {
+        const d = new Date(b * day)
+        const label = `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}`
+        daily.push({ label, value: counts.get(b) ?? 0 })
+      }
+    }
+
+    /** 账本上这一段的钱，按对象（模型是 `provider/model`、连接器是 `连接器:工具`）摊开。 */
+    const spentBySubject = new Map<string, number>()
+    const byKindAcc = new Map<string, { calls: number; micros: number }>()
+    const byBotAcc = new Map<string, { calls: number; micros: number }>()
+    for (const c of charges) {
+      spentBySubject.set(c.subject, (spentBySubject.get(c.subject) ?? 0) + c.amountMicros)
+      const k = byKindAcc.get(c.kind) ?? { calls: 0, micros: 0 }
+      k.calls += c.calls
+      k.micros += c.amountMicros
+      byKindAcc.set(c.kind, k)
+      // botId 只有连接器那条路填得上（见 lib/meter.ts）。填不上的不兜成「未标记」——
+      // 那一行会一口气占掉九成，把真正带标识的几行压成看不见的细线。
+      if (!c.botId) continue
+      const b = byBotAcc.get(c.botId) ?? { calls: 0, micros: 0 }
+      b.calls += c.calls
+      b.micros += c.amountMicros
+      byBotAcc.set(c.botId, b)
+    }
+
+    const n = (x: number) => x.toLocaleString('en-US')
+    const pctOf = (x: number, top: number) => (top > 0 ? Math.round((x / top) * 100) : 0)
+
+    /** 同一个模型可能跨多家公司/多个人分了几行，这里按 `provider/model` 合回去。 */
+    const modelAcc = new Map<string, { tokens: number; calls: number }>()
+    for (const m of models) {
+      const key = `${m.provider}/${m.model}`
+      const cur = modelAcc.get(key) ?? { tokens: 0, calls: 0 }
+      cur.tokens += m.promptTokens + m.completionTokens
+      cur.calls += m.calls
+      modelAcc.set(key, cur)
+    }
+    const modelRows = [...modelAcc.entries()].sort((a, b) => b[1].tokens - a[1].tokens)
+    const topTokens = modelRows[0]?.[1].tokens ?? 0
+    const byModel = modelRows.map(([name, m]) => ({
+      name,
+      value: `${n(m.tokens)} token · ${usdMicros(spentBySubject.get(name) ?? 0)}`,
+      pct: pctOf(m.tokens, topTokens),
+    }))
+
+    const KINDS: [string, string][] = [['llm', '模型'], ['connector', '连接器'], ['web', '网页']]
+    const topKind = Math.max(0, ...[...byKindAcc.values()].map((x) => x.calls))
+    const byKind = KINDS.filter(([k]) => byKindAcc.has(k)).map(([k, label]) => {
+      const x = byKindAcc.get(k) as { calls: number; micros: number }
+      return { name: label, value: `${n(x.calls)} 次 · ${usdMicros(x.micros)}`, pct: pctOf(x.calls, topKind) }
+    })
+
+    const bots = scope.companyId
+      ? await db.companyBots(scope.companyId)
+      : scope.accountId
+        ? await db.botsFor((await db.account(scope.accountId))?.companyId ?? null, scope.accountId)
+        : []
+    const botName = new Map(bots.map((b) => [b.id, b.name]))
+    const botRows = [...byBotAcc.entries()].sort((a, b) => b[1].calls - a[1].calls)
+    const topBot = botRows[0]?.[1].calls ?? 0
+    const byAgent = botRows.map(([id, x]) => ({
+      // 名字查不到就用 id：Bot 被删了，它花过的钱还在账上。
+      name: botName.get(id) ?? id,
+      value: `${n(x.calls)} 次 · ${usdMicros(x.micros)}`,
+      pct: pctOf(x.calls, topBot),
+    }))
+
+    return { daily, byAgent, byModel, byKind }
+  }
+
+  /**
+   * 时区偏移（毫秒）。前端传的是 `Date.getTimezoneOffset()` 的**相反数**（东八区 +480 分）。
+   * 缺省 0 = UTC 切天：老前端不带这个参数时，日线仍然画得出来，只是边界按 UTC。
+   */
+  function tzOffsetMs(req: Parameters<typeof rangeQuery>[0]): number {
+    const raw = (req.query.get('tz') || '').trim()
+    if (!raw) return 0
+    const n = Number(raw)
+    if (!Number.isFinite(n)) throw new HttpError(400, 'tz 必须是分钟数')
+    // 谁也不在 ±16 小时之外。越界的值当没传，而不是让日线整体飘走。
+    if (Math.abs(n) > 16 * 60) return 0
+    return n * 60000
+  }
+
+  /**
+   * 公司用量。调用次数和 token 从 `llm_calls` 汇总，钱从账本汇总（三条路都算）。
    * 管理员；员工走 GET /me/stats。
    */
   router.get('/orgs/:id/usage', async (req, res) => {
@@ -615,7 +733,8 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
       spentByAccount.set(row.accountId, (spentByAccount.get(row.accountId) ?? 0) + row.amountMicros)
       spentMicros += row.amountMicros
     }
-    json(res, 200, usagePayload(usage, { seats, members, includeMembers: true, spentByAccount, spentMicros }))
+    const dims = await usageDims({ companyId: company.id }, range, tzOffsetMs(req))
+    json(res, 200, usagePayload(usage, { seats, members, includeMembers: true, spentByAccount, spentMicros, dims }))
   })
 
   router.get('/me/stats', async (req, res) => {
@@ -623,11 +742,13 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     const range = rangeQuery(req)
     const usage = await db.llmUsageOfAccount(account.id, range)
     const mine = await db.chargeUsageBy(['accountId'], range, { accountId: account.id })
+    const dims = await usageDims({ accountId: account.id }, range, tzOffsetMs(req))
     json(res, 200, usagePayload(usage, {
       seats: 0,
       members: [account],
       includeMembers: false,
       spentMicros: mine.reduce((n, r) => n + r.amountMicros, 0),
+      dims,
     }))
   })
 

@@ -528,6 +528,80 @@ export async function runBilling({ gwRoot, test, req, start, waitHttp, assert, l
       assert(!unreachable.out.includes('x:x@'), `把口令打出来了：${unreachable.out}`)
     })
 
+    await test('用量屏那几块维度都填得上：日线、按类型、按模型', async () => {
+      /**
+       * 这四块以前是写死的空数组，界面上四块永远写着「还没有用量」，而同一屏底下的
+       * 计费明细一屏都是——两个说法互相打脸。现在都从已有的两张表来：次数和 token 在
+       * `llm_calls`，钱在账本，和平台那一屏同一个口径。
+       */
+      const to = Date.now()
+      const from = to - 6 * 86400000
+      const q = `from=${from}&to=${to}&tz=480`
+      const r = await req(base, 'GET', `/orgs/${orgA}/usage?${q}`, { token: tokenA })
+      assert(r.status === 200, `usage ${r.status} ${r.text}`)
+
+      // 日线：窗口里**每天一根**，包括一次调用都没有的那几天——只画有数的那几天，
+      // 横轴会被悄悄压缩，「周末没人用」和「天天在用」就长得一样了。
+      assert(r.json.daily.length === 7, `日线该是 7 根，实际 ${r.json.daily.length}`)
+      assert(r.json.daily.every((d) => /^\d{2}\/\d{2}$/.test(d.label)), `日期格式不对：${JSON.stringify(r.json.daily[0])}`)
+      assert(r.json.daily.reduce((n, d) => n + d.value, 0) > 0, '这家公司这几天有调用，日线却全是 0')
+
+      // 按类型：钱就是从这三处出去的，这一维要盖得全。
+      const kinds = r.json.byKind.map((x) => x.name)
+      assert(kinds.includes('模型'), `按类型里没有模型：${JSON.stringify(r.json.byKind)}`)
+      assert(kinds.includes('网页'), `按类型里没有网页：${JSON.stringify(r.json.byKind)}`)
+      assert(r.json.byKind.every((x) => x.value.includes('次') && x.value.includes('$')), `按类型缺次数或金额：${JSON.stringify(r.json.byKind)}`)
+
+      assert(r.json.byModel.length > 0, '按模型是空的')
+      assert(r.json.byModel[0].name.includes('/'), `按模型的名字该是 provider/model：${r.json.byModel[0].name}`)
+      assert(r.json.byModel[0].value.includes('token'), `按模型缺 token：${r.json.byModel[0].value}`)
+      assert(r.json.byModel[0].pct === 100, `占比该以最大的那条为 100，实际 ${r.json.byModel[0].pct}`)
+      // 套餐额度**仍然是空的**：当前套餐只约束席位，编一个分母出来会被当成真在生效。
+      assert(Array.isArray(r.json.quota) && r.json.quota.length === 0, 'quota 不该凭空冒出来')
+
+      // 员工自己那一屏走的是同一套维度，只是范围小一圈。
+      const me = await req(base, 'GET', `/me/stats?${q}`, { token: tokenA })
+      assert(me.status === 200, `me/stats ${me.status} ${me.text}`)
+      assert(me.json.daily.length === 7, `自己那屏的日线 ${me.json.daily.length} 根`)
+      assert(Array.isArray(me.json.byKind) && Array.isArray(me.json.byModel), '自己那屏缺维度')
+
+      // tz 只影响切天，坏值不许把日线整体推走，更不许 500。
+      const bad = await req(base, 'GET', `/orgs/${orgA}/usage?from=${from}&to=${to}&tz=不知道`, { token: tokenA })
+      assert(bad.status === 400, `坏 tz ${bad.status}`)
+      const wild = await req(base, 'GET', `/orgs/${orgA}/usage?from=${from}&to=${to}&tz=99999`, { token: tokenA })
+      assert(wild.status === 200 && wild.json.daily.length === 7, `离谱的 tz 把日线弄坏了：${wild.status} ${wild.json.daily?.length}`)
+    })
+
+    await test('单价和倍率只下发给平台：公司侧连字段都没有', async () => {
+      /**
+       * 单价 + 倍率 = 我们的成本价和加价率。只在界面上不画的话，翻开 devtools 就都在，
+       * 所以这一刀切在**响应里**：非 owner 拿到的行上根本没有这两个键。
+       * 计量和金额照给——那是客户自己的消耗和真扣掉的钱。
+       */
+      const mine = await req(base, 'GET', `/orgs/${orgA}/charges?limit=5`, { token: tokenA })
+      assert(mine.status === 200, `charges ${mine.status} ${mine.text}`)
+      const row = mine.json.charges[0]
+      assert(row, '这家公司应当已经有账了')
+      assert(!('unitPrice' in row) && !('multiplier' in row), `公司管理员看到了定价：${JSON.stringify(row)}`)
+      // 整个响应体里都不许出现，防止哪天有人塞个 null 回去。
+      assert(!mine.text.includes('"unitPrice"') && !mine.text.includes('"multiplier"'), '响应体里还带着定价字段')
+      assert(row.quantity !== undefined, '计量不该跟着一起藏掉')
+      assert(typeof row.amountMicros === 'number', '金额不该跟着一起藏掉')
+
+      const me = await req(base, 'GET', '/me/charges', { token: tokenA })
+      assert(me.status === 200, `me ${me.status} ${me.text}`)
+      assert(!me.text.includes('"unitPrice"') && !me.text.includes('"multiplier"'), '自己那份里还带着定价字段')
+
+      // 平台自己照给：这一列的意义就是让人乘一遍对得上金额。
+      const plat = await req(base, 'GET', '/platform/charges?limit=5', { token: owner })
+      const p0 = plat.json.charges[0]
+      assert(p0 && p0.unitPrice && typeof p0.multiplier === 'number', `平台侧丢了定价：${JSON.stringify(p0)}`)
+      // owner 在公司详情页上看的是同一条 /orgs/:id/charges，他那份要带着。
+      const asOwner = await req(base, 'GET', `/orgs/${orgA}/charges?limit=5`, { token: owner })
+      const o0 = asOwner.json.charges[0]
+      assert(o0 && o0.unitPrice && typeof o0.multiplier === 'number', `owner 看公司详情时丢了定价：${JSON.stringify(o0)}`)
+    })
+
     await test('平台明细看得见所有公司，无票 401，公司管理员 403', async () => {
       const all = await req(base, 'GET', '/platform/charges?limit=50', { token: owner })
       assert(all.status === 200, `platform charges ${all.status} ${all.text}`)

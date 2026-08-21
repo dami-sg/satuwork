@@ -306,8 +306,13 @@ aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; ov
 /* 统计表。列比供应商表多，单独一套。 */
 .satu-stathead, .satu-statrow { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr 1fr 1fr; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); }
 .satu-stathead { padding: 10px var(--space-4); background: var(--card); border-bottom: 1px solid var(--border); font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted-foreground); }
-.satu-stathead > *:not(:first-child), .satu-statrow > *:not(:first-child) { text-align: right; }
-.satu-statrow { border-bottom: 1px solid var(--border); min-width: 0; }
+/* 除第一列外都是数字列：右对齐，并且要**等宽数字**——比例数字下 `1` 比 `7` 窄，
+   右对齐只保证末位齐，上下两行的千分位仍然错开，一列数扫下来是歪的。 */
+.satu-stathead > *:not(:first-child), .satu-statrow > *:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
+/* 一行里的格子按**首行基线**对齐，不按盒子居中：带副行的格子（公司名下面的时间、
+   输入下面的缓存、金额下面的角标）比别的格子高，居中会把它的首行顶上去，于是同一
+   行的几个数字落在三个高度上。基线对齐让数字都停在同一条线上，副行统一往下挂。 */
+.satu-statrow { align-items: baseline; border-bottom: 1px solid var(--border); min-width: 0; }
 .satu-statrow:last-child { border-bottom: 0; }
 .satu-statrow:hover { background: var(--card); }
 .satu-stathead:first-child { border-top-left-radius: var(--radius-lg); border-top-right-radius: var(--radius-lg); }

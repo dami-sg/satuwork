@@ -155,6 +155,11 @@ export function rangeQuery(req: Req): { from?: number; to?: number } {
   return { from, to }
 }
 
+/** 日线上的一根柱子。`label` 是给人看的日期，怎么写由算它的那一层决定。 */
+export type UsageBar = { label: string; value: number }
+/** 一条量表：名字、右边那行小字、以及 0–100 的占比。 */
+export type UsageMeter = { name: string; value: string; pct: number }
+
 export function usagePayload(
   usage: { calls: number; promptTokens: number; completionTokens: number; byAccount: { accountId: string; calls: number; promptTokens: number; completionTokens: number; lastAt: number | null }[] },
   opts: {
@@ -168,6 +173,11 @@ export function usagePayload(
     spentByAccount?: Map<string, number>
     /** 这个范围内一共扣了多少微元。顶上那张「费用」卡用它。 */
     spentMicros?: number
+    /**
+     * 下面那几块维度：日线、按 Bot、按模型、按类型。都由路由那边算好——这里只负责
+     * 把它们摆进同一个信封，不去碰库。给空数组时界面画各自的空态。
+     */
+    dims?: { daily?: UsageBar[]; byAgent?: UsageMeter[]; byModel?: UsageMeter[]; byKind?: UsageMeter[] }
   },
 ) {
   const spent = opts.spentByAccount ?? new Map<string, number>()
@@ -202,10 +212,15 @@ export function usagePayload(
       // 以前这里永远是 '—'（「按量扣费还没接」）。现在是真的。
       { label: '费用', value: usdMicros(opts.spentMicros ?? 0), delta: '—' },
     ],
-    daily: [] as unknown[],
-    byAgent: [] as unknown[],
-    byModel: [] as unknown[],
+    daily: opts.dims?.daily ?? [],
+    byAgent: opts.dims?.byAgent ?? [],
+    byModel: opts.dims?.byModel ?? [],
+    // 套餐额度这一维**故意还是空的**：当前套餐只约束席位，没有任务次数和 token 额度，
+    // 编一个分母出来会被当成真的在生效。界面上那句话说的就是这件事。
     quota: [] as unknown[],
+    // 三条计费路各自的次数和钱。模型那条填不上 botId（见 lib/meter.ts），所以「按 Bot」
+    // 覆盖不全；这一维是能覆盖全的那个，两块并排看才知道钱花在哪一类上。
+    byKind: opts.dims?.byKind ?? [],
     seats: opts.seats,
     ...(opts.includeMembers
       ? {
