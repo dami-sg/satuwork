@@ -193,7 +193,7 @@ export interface ConnectorProvider {
 |---|---|
 | `listToolkits` | `GET /toolkits` |
 | `listTools` | `GET /tools?toolkit_slug=` |
-| `initiate` | `connected_accounts.initiate({ user_id, auth_config_id })` → `redirect_url` |
+| `initiate` | `POST /connected_accounts/link { auth_config_id, user_id, callback_url, allow_multiple: true }` → `connected_account_id` + `redirect_url` |
 | `status` | `GET /connected_accounts/{id}` → `ACTIVE` / 其他 |
 | `execute` | `tools.execute(slug, { user_id, connected_account_id, arguments })` |
 
@@ -208,6 +208,16 @@ export interface ConnectorProvider {
 **用官方 SDK 还是裸 `fetch`：裸 fetch。** 接口就上面六个方法，而 `@composio/core` 会把
 一整套 provider 适配层拖进控制面——那些东西是给「agent 跑在你自己进程里」准备的，我们
 的 agent 跑在席位机器上。实现时逐条对着 API reference 钉版本，别照抄本文里的路径。
+
+**`initiate` 那一条踩过一次坑，记在这儿。** 老的 `POST /connected_accounts`（`auth_config`
+和 `connection` 两个嵌套对象）对「Composio 托管的 OAuth」已经不受理了，回的是一句
+`Use POST /api/v3/connected_accounts/link instead`，而那句英文会一路顶到员工的插件弹窗
+上。新的 `/connected_accounts/link` 对所有认证方式都是推荐路径，所以只留这一条。
+**`allow_multiple: true` 不能省**：一个安装底下的几把连接（`default`、`personal`……）
+`user_id` 和 auth config 完全一样，不带这个标记的话第二次 link 会把同一把 connected
+account 还回来，两行本地记录共用一个 externalId，断开其中一个另一个跟着废。允不允许
+第二把由我们自己判（§4 的 `multiAccount`），走到 provider 这一层就是已经准了。
+e2e 里的假 Composio 照着上游原话把老路打回（`e2e/connectors.mjs`），走回去立刻红。
 
 **换供应商时会变的只有 `composio.ts`。** 会不好受的地方提前说清楚：工具 slug
 （`GMAIL_SEND_EMAIL`）是 Composio 的命名，换家之后工具名会变，而工具名已经进了历史

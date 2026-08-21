@@ -40,15 +40,31 @@ function mockComposio() {
     }
     if (url.pathname === '/toolkits') return send(200, TOOLKITS)
     if (url.pathname === '/tools') return send(200, TOOLS)
+    // 老的那条对「Composio 托管的 OAuth」已经不受理了，照着上游的原话打回——
+    // 我们要是又走回去，测试立刻红，而不是等到线上有人点「添加账号」才看见那句英文。
     if (url.pathname === '/connected_accounts' && req.method === 'POST') {
+      return send(400, {
+        error: {
+          message:
+            'Creating connections on this endpoint for Composio-managed OAuth auth configs is no longer supported. Use POST /api/v3/connected_accounts/link instead.',
+        },
+      })
+    }
+    if (url.pathname === '/connected_accounts/link' && req.method === 'POST') {
       let raw = ''
       req.on('data', (d) => { raw += d })
       req.on('end', () => {
         const body = JSON.parse(raw || '{}')
         const id = `ca_${++n}`
         accounts.set(id, 'INITIATED')
-        seen.initiated.push({ id, userId: body.connection?.user_id, callback: body.connection?.callback_url, authConfigId: body.auth_config?.id })
-        send(200, { id, redirect_url: `https://accounts.example.com/o/oauth2?ca=${id}` })
+        seen.initiated.push({
+          id,
+          userId: body.user_id,
+          callback: body.callback_url,
+          authConfigId: body.auth_config_id,
+          allowMultiple: body.allow_multiple === true,
+        })
+        send(200, { connected_account_id: id, redirect_url: `https://accounts.example.com/o/oauth2?ca=${id}` })
       })
       return
     }
@@ -293,6 +309,9 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
       assert(sent.userId.startsWith('sw_'), `externalUserId 应该是 sw_ 前缀，实际 ${sent.userId}`)
       assert(!sent.userId.includes('@'), '不能拿邮箱当 externalUserId')
       assert(sent.callback.includes('/oauth/connectors/callback?c='), `回调地址不对：${sent.callback}`)
+      // 不带 allow_multiple 的话，第二把 link 会把同一个 connected account 还回来——
+      // 两行本地记录共用一个 externalId，断开其中一个另一个跟着废。
+      assert(sent.allowMultiple === true, '没带 allow_multiple')
 
       const dup = await req(base, 'POST', `/me/connectors/${connectorId}/connections`, {
         token: memberTok,
