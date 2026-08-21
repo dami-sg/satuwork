@@ -38,6 +38,21 @@ class FakeCatalog extends Service {
       'srv-notion': ['mcp_notion_create_page'],
     }
     this.mentionOnlyIds = new Set(['conn-personal'])
+    /** 重拉了几次。点名却没工具时 agent 会补拉一次目录（见 agent/index.ts）。 */
+    this.pulls = 0
+    /** 这一把「重拉之后才出现」——刚在浏览器里授权完、席位还没同步到的那个时序。 */
+    this.appearOnPull = ''
+  }
+  /** 真的 CatalogService 会去打 Gateway；这里只记一笔，顺便把「迟到的那把」放出来。 */
+  async pull() {
+    this.pulls += 1
+    const late = this.appearOnPull
+    if (!late) return true
+    this.appearOnPull = ''
+    const name = `mcp_${late.replace(/-/g, '_')}_send_email`
+    this.tools[late] = [name]
+    this.ctx.tools.register({ name, description: name, parameters: { type: 'object', properties: {} }, execute: async () => ({ text: 'ok' }) })
+    return true
   }
   get servers() {
     return Object.keys(this.tools).map((id) => ({ id, name: id, kind: 'HTTP', enabled: true, connected: true, tools: this.tools[id] }))
@@ -259,6 +274,36 @@ await ctx.agents
   const events = await ctx.sessions.events(sessionId)
   const all = JSON.stringify(events)
   out.cancelled = { 取消的那条没进日志: !all.includes('第二条') }
+}
+
+// ── 9. 点名了却没工具：先补拉一次目录，还是没有就把实情说给模型听 ────
+{
+  const say = async (id, label) => {
+    captured = null
+    await ctx.agents.send(sessionId, '查看邮件', [], [{ kind: 'connector', id, label }]).catch(() => {})
+    return { tools: toolNames(), system: captured?.systemPrompt ?? '' }
+  }
+
+  // 9a. 刚授权完、席位还没同步：补拉一次就该有了，也就不用跟模型解释什么。
+  ctx.catalog.appearOnPull = 'conn-late'
+  const before = ctx.catalog.pulls
+  const late = await say('conn-late', 'Gmail (late)')
+  out.late = {
+    补拉了一次: ctx.catalog.pulls === before + 1,
+    工具补回来了: late.tools.includes('mcp_conn_late_send_email'),
+    不用再跟模型解释: !late.system.includes('本轮被点名、但没挂上的连接'),
+  }
+
+  // 9b. 补拉了还是没有：**必须说出来**。不说的话模型会自己编一个替代方案——
+  // 线上真发生过，它开始教用户用虚拟桌面里的 Chrome 登邮箱。
+  const at = ctx.catalog.pulls
+  const ghost = await say('conn-ghost', 'Gmail (ghost)')
+  out.gap = {
+    也补拉了一次: ctx.catalog.pulls === at + 1,
+    跟模型说清楚了: ghost.system.includes('本轮被点名、但没挂上的连接'),
+    点了名的那把写出来了: ghost.system.includes('Gmail (ghost)'),
+    这一轮照样跑: ghost.tools.includes('mcp_notion_create_page'),
+  }
 }
 
 hold = null

@@ -720,6 +720,13 @@
    顺序一致（图片块在正文前面）。 */
 .sw-shots { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .sw-shots[hidden] { display: none; }
+/* 气泡里那排「这条消息 @ 了谁」。药丸沿用输入框上方那一种（.sw-mention），发出去前后
+   长得一样；只是这里没有那颗 ×——已经发出去的消息改不了了。 */
+.sw-mentions-in { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.sw-mentions-in[hidden] { display: none; }
+.sw-mentions-in .sw-mention { padding: 3px 10px; }
+/* 用户气泡是强调色底，药丸再用同一族的浅色就糊在一起了——翻过来用气泡里的底色。 */
+.sw-bubble[data-role='user'] .sw-mention { background: color-mix(in srgb, var(--color-surface) 88%, transparent); color: var(--color-text); }
 .sw-shot {
   width: 108px;
   height: 108px;

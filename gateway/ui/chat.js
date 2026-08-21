@@ -200,6 +200,20 @@ function messageText(msg) {
 }
 
 /**
+ * 消息里的 `@` 点名块。
+ *
+ * 落盘的是结构（`{type:'mention', kind, id, label}`，见 bot 的 session/types.ts），
+ * 正文里一个字都没有——`messageText` 也是这么约定的。所以要显示成药丸只能从这里取。
+ */
+function messageMentions(msg) {
+  const content = msg && msg.content
+  if (!Array.isArray(content)) return []
+  return content
+    .filter((b) => b && b.type === 'mention' && b.label)
+    .map((b) => ({ kind: b.kind || 'connector', id: b.id || '', label: String(b.label) }))
+}
+
+/**
  * 每条会话「此刻在不在跑」——**bot 亲口说的那一份**，不是扫事件扫出来的。
  *
  * 扫出来的那个（fold 里的 status）有个前提：手上这份历史是完整的。而它经常不成立，
@@ -348,6 +362,10 @@ function fold(events, live) {
         text: up.text,
         // 附件列表拆出来单独画成药丸；正文只留人真正打的那句话。
         files: up.files,
+        // **点名要跟着消息留下来。** 它是这条消息的一部分（决定了这一轮的工具表），
+        // 不是输入框上一个发完就没的装饰。丢掉的话翻上去看昨天那条，「@ 了谁」就消失了，
+        // 而那正是「它为什么去读了我的邮箱」的唯一答案。
+        mentions: messageMentions(data.message),
         // **raw 不能省。** mergePending 靠「文字一模一样」认回执，而它手上那份是
         // 拼好的完整正文。只留拆过的 text，带附件的消息就永远认不回来——那条 pending
         // 销不掉，界面会一直挂着「正在思考」。
@@ -1396,6 +1414,26 @@ function updateRow(el, b, streaming) {
     void fillShots(strip)
   }
 
+  /**
+   * 这条消息 `@` 了谁。画在正文**上面**，和输入框里那排是同一种药丸——发出去前后
+   * 长得一样，人才认得出这就是刚才点的那个。
+   *
+   * 和附件缩略图一条路子：签名没变就不重画，否则流式那几帧会把它反复换掉。
+   */
+  const ments = b.mentions || []
+  const mentSig = ments.map((m) => m.label).join('|')
+  let mentBox = bubble.querySelector('.sw-mentions-in')
+  if (ments.length && !mentBox) {
+    mentBox = document.createElement('div')
+    mentBox.className = 'sw-mentions-in'
+    bubble.insertBefore(mentBox, bubble.firstChild)
+  }
+  if (mentBox && mentBox.getAttribute('data-sig') !== mentSig) {
+    mentBox.setAttribute('data-sig', mentSig)
+    mentBox.innerHTML = ments.map((m) => `<span class="sw-mention"><span>${esc(m.label)}</span></span>`).join('')
+    mentBox.hidden = !ments.length
+  }
+
   const tools = b.tools || []
   // 产出文件 + 上传的附件。两边是同一种东西（工作区里一个能点开的文件），
   // 用同一种药丸，点开走同一个预览。
@@ -1650,6 +1688,7 @@ function mergePending(folded, sessionId) {
       files: up.files,
       raw: p.text,
       images: p.images || [],
+      mentions: p.mentions || [],
       time: p.at,
       pending: true,
     })
@@ -3243,7 +3282,9 @@ async function sendChat() {
    * afterSeq 记住「此刻流走到哪儿了」，回执认领时只认它之后的——见 mergePending。
    */
   const afterSeq = (state.chatEvents || []).reduce((m, ev) => (ev.seq > m ? ev.seq : m), -1)
-  const pending = { sessionId, text: body, images, at: Date.now(), afterSeq }
+  // mentions 也带上：回执那几秒里那条消息要长成最终的样子，否则药丸会先没有、
+  // 等席位把事件送回来才突然冒出来——同一条消息在屏幕上跳两次。
+  const pending = { sessionId, text: body, images, mentions, at: Date.now(), afterSeq }
   state.chatPending = (state.chatPending || []).concat(pending)
   paintChat()
   try {

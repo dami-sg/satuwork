@@ -91,6 +91,37 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(tools[0].result === '搜到了', `结果配错了：${tools[0].result}`)
     })
 
+    await test('消息里的 @ 点名要留在气泡上，别发完就没', async () => {
+      // 点名是消息的一部分（它决定了这一轮的工具表），不是输入框上一个发完就没的装饰。
+      // 丢掉的话翻上去看昨天那条，「@ 了谁」就消失了——而那正是「它为什么去读了我的
+      // 邮箱」的唯一答案。落盘的是结构块，正文里一个字都没有，所以只能从块里取。
+      const ui = await boot()
+      const folded = ui.fold([
+        {
+          seq: 1,
+          time: 1,
+          type: 'user/message',
+          data: {
+            source: { kind: 'user' },
+            message: {
+              content: [
+                { type: 'mention', kind: 'connector', id: 'conn-1', label: 'Gmail (default)' },
+                { type: 'text', text: '查看邮件' },
+              ],
+            },
+          },
+        },
+      ])
+      const b = folded.blocks[0]
+      assert(b && b.kind === 'user', '用户那条没折出来')
+      assert(b.text === '查看邮件', `正文被点名块弄脏了：${b.text}`)
+      assert((b.mentions || []).length === 1, `点名没跟着消息留下来：${JSON.stringify(b.mentions)}`)
+      assert(b.mentions[0].label === 'Gmail (default)', `药丸上的名字不对：${b.mentions[0].label}`)
+      // 气泡那一层是真 DOM（垫片里画不出来），这里只钉住它确实画了这排药丸。
+      const src = readFileSync(join(root, 'gateway/ui/chat.js'), 'utf8')
+      assert(src.includes('sw-mentions-in'), '气泡里没有画点名药丸的那一排')
+    })
+
     await test('工具浮层：在它自己身上滚不算「页面滚了」，不许收掉', async () => {
       // 这一条只验源码。滚动收浮层挂在 window 的**捕获阶段**，垫片里 window 是个空壳，
       // 事件根本发不出去——但错法就藏在那一行里：不看事件源头，滚浮层自己的结果区
