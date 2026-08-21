@@ -38,9 +38,27 @@ export interface Config {
   compactHard?: number
   /** 窗口未知时（目录没给 contextWindow）按这个 token 数当窗口。 */
   contextWindowFallback?: number
+  /**
+   * 一轮里最多让模型连着跑多少步（一步 = 一次模型调用加它那批工具）。
+   *
+   * 防的是**跑飞**：pi 的循环是「模型还在要工具就接着跑」，模型自己不停就永远不停；
+   * 而上下文这条路有自动压缩兜着，撞不到窗口那堵墙——没有这个数的话，一个绕不出来的
+   * 工具循环能一直烧下去，直到有人恰好看见并按停止。
+   *
+   * 到顶是**收口**，不是报错：这一轮的历史完整落在日志里，回一句「继续」就接着做。
+   */
+  maxSteps?: number
 }
 
 const EMPTY_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0 }
+
+/**
+ * 一轮的默认步数硬顶。见 `Config.maxSteps`。
+ *
+ * 120 是按「真干活的一轮能有多长」定的：装环境、跑测试、按报错改再跑，几十步是常态，
+ * 上百步已经罕见。定得太小会把正经的长活拦腰砍断，而那比跑飞更让人恼火。
+ */
+const DEFAULT_MAX_STEPS = 120
 
 /**
  * Agent 循环。
@@ -96,6 +114,11 @@ export class AgentService extends Service {
       'system',
       this.config.system ?? '你是 Satuwork 的 AI 员工，用简洁、专业的中文回答。',
     )
+  }
+  /** 设置库里塞进来的可能是字符串或负数，取到手先夹一遍——0 或负数会让每一轮开局即收口。 */
+  get maxSteps(): number {
+    const raw = this.setting('maxSteps', this.config.maxSteps ?? DEFAULT_MAX_STEPS)
+    return Math.max(1, Math.trunc(Number(raw) || DEFAULT_MAX_STEPS))
   }
 
   isRunning(sessionId: string) {
@@ -407,6 +430,16 @@ export class AgentService extends Service {
       throw e
     }
 
+    // 跑飞的刹车。**数的是带工具调用的步**：模型不再要工具的那一步，循环本来就要退出，
+    // 算进去的话每一轮正常结束都要白记一笔，硬顶就成了「一轮最多说 N 句话」。
+    //
+    // 这一轮开始时读一次就定住，中途不再看设置库：界面上把上限改小，不该把正跑着的
+    // 这一轮就地掐了。
+    const maxSteps = this.maxSteps
+    let steps = 0
+    let toolCalls = 0
+    let capped = false
+
     const agent = new Agent({
       initialState: {
         systemPrompt: system.text,
@@ -418,6 +451,16 @@ export class AgentService extends Service {
       steeringMode: 'one-at-a-time',
       followUpMode: 'one-at-a-time',
       sessionId,
+      // pi 唯一的刹车口。返回 true 它就发 agent_end 收工——干净退出，不是抛异常，
+      // 所以 tool/result 那些事件都已经落盘，历史是完整的。
+      shouldStopAfterTurn: ({ toolResults }: { toolResults: unknown[] }) => {
+        if (!toolResults.length) return false
+        steps += 1
+        toolCalls += toolResults.length
+        if (steps < maxSteps) return false
+        capped = true
+        return true
+      },
     } as any)
 
     this.live.set(sessionId, agent)
@@ -438,7 +481,7 @@ export class AgentService extends Service {
       }),
     )
 
-    let reason: 'completed' | 'error' | 'aborted' = 'completed'
+    let reason: 'completed' | 'error' | 'aborted' | 'capped' = 'completed'
     const startedAt = Date.now()
     this.ctx.logger?.info?.(`agents: 会话 ${sessionId} 第 ${turn} 轮开始（${provider}/${modelId}）`)
     try {
@@ -481,6 +524,37 @@ export class AgentService extends Service {
           },
           usage: EMPTY_USAGE,
         })
+      }
+      // 撞顶要在对话里**看得见**。只写日志的话，用户看到的是它干着干着突然不说话了，
+      // 跟卡住分不出来；而它其实停得好好的，接着说一句就能继续。
+      if (capped && !failure) {
+        reason = 'capped'
+        await sessions.append(sessionId, 'assistant/message', {
+          turn,
+          step: 0,
+          message: {
+            id: randomUUID(),
+            role: 'assistant',
+            content: [
+              {
+                type: 'text',
+                text:
+                  `这一轮连着跑了 ${steps} 步、调了 ${toolCalls} 次工具，到了单轮上限（${maxSteps} 步），我先停下。\n\n` +
+                  `已经做的都在上面。要接着做，回一句「继续」就行；如果是我绕进死循环了，换个说法告诉我该怎么走。`,
+              },
+            ],
+          },
+          usage: EMPTY_USAGE,
+        })
+        this.ctx.logger?.warn?.(
+          `agents: 会话 ${sessionId} 第 ${turn} 轮撞到步数硬顶（${maxSteps} 步，工具 ${toolCalls} 次），已收口`,
+        )
+        // steering 的消息投在 pi 自己的队列里、不落会话日志，而收口发生在它下一次
+        // 排空之前——这些插话既没进模型也没进历史。Agent 只告诉我们「还有没有」，
+        // 捞不回来，至少在 journal 里留一句，别让它无声消失。
+        if (agent.hasQueuedMessages()) {
+          this.ctx.logger?.warn?.(`agents: 会话 ${sessionId} 撞顶时仍有插话没处理，已随这一轮丢弃`)
+        }
       }
     } catch (e) {
       reason = 'error'

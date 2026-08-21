@@ -30,6 +30,7 @@ import { runTurnImages } from './turn-images.mjs'
 import { runMentions } from './mentions.mjs'
 import { runHistoryTime } from './history-time.mjs'
 import { runCompact } from './compact.mjs'
+import { runMaxSteps } from './max-steps.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
 import { uiSource } from './ui-dom.mjs'
@@ -2812,6 +2813,7 @@ async function main() {
     await runMentions({ root, test, assert, log })
     await runHistoryTime({ root, test, assert, log })
     await runCompact({ root, test, assert, log })
+    await runMaxSteps({ root, test, assert, log })
   } finally {
     killAll()
     try {

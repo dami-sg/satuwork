@@ -134,7 +134,8 @@ export interface SessionEventMap {
   }
 
   'turn/start': { turn: number }
-  'turn/end': { turn: number; reason: 'completed' | 'error' | 'aborted' }
+  /** `capped`：撞上一轮的步数硬顶，被我们收的口——不是模型自己说完了，也不是出错。 */
+  'turn/end': { turn: number; reason: 'completed' | 'error' | 'aborted' | 'capped' }
   'step/start': { turn: number; step: number }
   'step/end': { turn: number; step: number }
 
