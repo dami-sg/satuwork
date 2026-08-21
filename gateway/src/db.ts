@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
-import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf } from './db/rows.ts'
+import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseConnectorPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -489,6 +489,9 @@ export class Db {
       // 同上：删员工也不销毁他的用量记录。少了它，公司的历史用量会凭空缺一块，而
       // 「谁烧了多少」正是要留档的东西。accountId 变成悬空引用，统计里按 id 显示。
       await this.run('delete from account_secrets where "accountId" = ?', [id])
+      // 他自己建的 Bot 跟着他走。catalog_items."accountId" 是真外键，留着这几行的话
+      // 最后那句 delete from accounts 会直接外键报错，删员工整条路走不通。
+      await this.run('delete from catalog_items where scope = \'user\' and "accountId" = ?', [id])
       if (cur?.companyId) {
         for (const g of await this.groupsOf(cur.companyId)) {
           if (!g.members.includes(id)) continue
@@ -784,6 +787,370 @@ export class Db {
       cachedTokens: num(row.cachedTokens),
       lastAt: numOrNull(row.lastAt),
     }))
+  }
+
+  // ── 连接器：安装、连接、调用流水。见 docs/connectors.md §10。────────
+
+  async connectorInstalls(accountId: string): Promise<ConnectorInstall[]> {
+    const rows = await this.many('select * from connector_installs where "accountId" = ? order by "createdAt"', [accountId])
+    return rows.map(connectorInstallOf)
+  }
+
+  /** 一家公司谁装了什么。admin 那一屏唯一能看清攻击面的地方。 */
+  async connectorInstallsOfCompany(companyId: string): Promise<ConnectorInstall[]> {
+    const rows = await this.many('select * from connector_installs where "companyId" = ? order by "createdAt"', [companyId])
+    return rows.map(connectorInstallOf)
+  }
+
+  async connectorInstall(connectorId: string, accountId: string): Promise<ConnectorInstall | undefined> {
+    const r = await this.one('select * from connector_installs where "connectorId" = ? and "accountId" = ?', [connectorId, accountId])
+    return r ? connectorInstallOf(r) : undefined
+  }
+
+  /**
+   * 装一个。**已经装了就原样返回**，不报错也不重置工具开关——重复点「安装」是
+   * 用户会做的事（网络慢、手抖），把它变成一次静默的配置重置就太狠了。
+   */
+  async installConnector(input: { connectorId: string; accountId: string; companyId: string }): Promise<ConnectorInstall> {
+    const cur = await this.connectorInstall(input.connectorId, input.accountId)
+    if (cur) return cur
+    const now = Date.now()
+    const row: ConnectorInstall = {
+      id: randomUUID(),
+      connectorId: input.connectorId,
+      accountId: input.accountId,
+      companyId: input.companyId,
+      enabledTools: [],
+      createdAt: now,
+      updatedAt: now,
+    }
+    try {
+      await this.run(
+        'insert into connector_installs (id, "connectorId", "accountId", "companyId", "enabledTools", "createdAt", "updatedAt") values (?,?,?,?,?,?,?)',
+        [row.id, row.connectorId, row.accountId, row.companyId, JSON.stringify(row.enabledTools), row.createdAt, row.updatedAt],
+      )
+    } catch (e) {
+      // 两次点击撞在一起：唯一索引兜住，取回已有的那条。
+      if (!isUniqueViolation(e)) throw e
+      return (await this.connectorInstall(input.connectorId, input.accountId))!
+    }
+    return row
+  }
+
+  async setInstallTools(id: string, enabledTools: string[]): Promise<ConnectorInstall | undefined> {
+    await this.run('update connector_installs set "enabledTools" = ?, "updatedAt" = ? where id = ?', [
+      JSON.stringify(enabledTools),
+      Date.now(),
+      id,
+    ])
+    const r = await this.one('select * from connector_installs where id = ?', [id])
+    return r ? connectorInstallOf(r) : undefined
+  }
+
+  async deleteConnectorInstall(id: string): Promise<void> {
+    await this.run('delete from connector_installs where id = ?', [id])
+  }
+
+  async connectorConnection(id: string): Promise<ConnectorConnection | undefined> {
+    const r = await this.one('select * from connector_connections where id = ?', [id])
+    return r ? connectorConnectionOf(r) : undefined
+  }
+
+  /**
+   * 这个账号能用的所有连接：自己的，加上本公司共用的那些。
+   *
+   * 合成工具表、`@` 选单、计费归属都从这一条出发——「能用哪些」只有一个来源，
+   * 免得三处各写一遍再慢慢分叉。
+   */
+  async connectionsFor(accountId: string, companyId: string | null): Promise<ConnectorConnection[]> {
+    const rows = companyId
+      ? await this.many(
+          'select * from connector_connections where ("accountId" = ? and scope = \'user\') or ("companyId" = ? and scope = \'company\') order by "createdAt"',
+          [accountId, companyId],
+        )
+      : await this.many('select * from connector_connections where "accountId" = ? and scope = \'user\' order by "createdAt"', [accountId])
+    return rows.map(connectorConnectionOf)
+  }
+
+  async connectionsOfCompany(companyId: string): Promise<ConnectorConnection[]> {
+    const rows = await this.many('select * from connector_connections where "companyId" = ? order by "createdAt"', [companyId])
+    return rows.map(connectorConnectionOf)
+  }
+
+  async insertConnectorConnection(input: {
+    connectorId: string
+    vendor: string
+    scope: ConnectionScope
+    label: string
+    accountId: string | null
+    companyId: string
+    externalUserId: string
+    mentionOnly?: boolean
+  }): Promise<ConnectorConnection> {
+    const now = Date.now()
+    const row: ConnectorConnection = {
+      id: randomUUID(),
+      connectorId: input.connectorId,
+      vendor: input.vendor,
+      scope: input.scope,
+      label: input.label,
+      accountId: input.accountId,
+      companyId: input.companyId,
+      externalUserId: input.externalUserId,
+      externalId: null,
+      status: 'pending',
+      mentionOnly: input.mentionOnly ?? false,
+      lastError: null,
+      connectedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await this.run(
+      'insert into connector_connections (id, "connectorId", vendor, scope, label, "accountId", "companyId", "externalUserId", "externalId", status, "mentionOnly", "lastError", "connectedAt", "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [
+        row.id,
+        row.connectorId,
+        row.vendor,
+        row.scope,
+        row.label,
+        row.accountId,
+        row.companyId,
+        row.externalUserId,
+        row.externalId,
+        row.status,
+        row.mentionOnly,
+        row.lastError,
+        row.connectedAt,
+        row.createdAt,
+        row.updatedAt,
+      ],
+    )
+    return row
+  }
+
+  async updateConnectorConnection(
+    id: string,
+    patch: {
+      label?: string
+      externalId?: string | null
+      status?: ConnectionStatus
+      mentionOnly?: boolean
+      lastError?: string | null
+      connectedAt?: number | null
+    },
+  ): Promise<ConnectorConnection | undefined> {
+    const cur = await this.connectorConnection(id)
+    if (!cur) return undefined
+    const next = { ...cur, ...patch, updatedAt: Date.now() }
+    await this.run(
+      'update connector_connections set label=?, "externalId"=?, status=?, "mentionOnly"=?, "lastError"=?, "connectedAt"=?, "updatedAt"=? where id=?',
+      [next.label, next.externalId, next.status, next.mentionOnly, next.lastError, next.connectedAt, next.updatedAt, id],
+    )
+    return next
+  }
+
+  async deleteConnectorConnection(id: string): Promise<void> {
+    await this.run('delete from connector_connections where id = ?', [id])
+  }
+
+  async insertConnectorCall(input: {
+    companyId: string | null
+    accountId: string
+    connectionId?: string | null
+    botId?: string | null
+    sessionId?: string | null
+    vendor: string
+    connector: string
+    label?: string
+    tool: string
+    status: ConnectorCallStatus
+    amountMicros?: number
+    bonusMicros?: number
+    latencyMs?: number
+    viaMention?: boolean
+  }): Promise<ConnectorCall> {
+    const row: ConnectorCall = {
+      id: randomUUID(),
+      companyId: input.companyId,
+      accountId: input.accountId,
+      connectionId: input.connectionId ?? null,
+      botId: input.botId ?? null,
+      sessionId: input.sessionId ?? null,
+      vendor: input.vendor,
+      connector: input.connector,
+      label: input.label ?? '',
+      tool: input.tool,
+      status: input.status,
+      amountMicros: Math.max(0, Math.trunc(input.amountMicros ?? 0)),
+      // 赠送承担的部分不可能超过总额——脏数据也不能算出负的「充值承担」。
+      bonusMicros: Math.min(
+        Math.max(0, Math.trunc(input.bonusMicros ?? 0)),
+        Math.max(0, Math.trunc(input.amountMicros ?? 0)),
+      ),
+      latencyMs: Math.max(0, Math.trunc(input.latencyMs ?? 0)),
+      viaMention: input.viaMention ?? false,
+      createdAt: Date.now(),
+    }
+    await this.run(
+      'insert into connector_calls (id, "companyId", "accountId", "connectionId", "botId", "sessionId", vendor, connector, label, tool, status, "amountMicros", "bonusMicros", "latencyMs", "viaMention", "createdAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [
+        row.id,
+        row.companyId,
+        row.accountId,
+        row.connectionId,
+        row.botId,
+        row.sessionId,
+        row.vendor,
+        row.connector,
+        row.label,
+        row.tool,
+        row.status,
+        row.amountMicros,
+        row.bonusMicros,
+        row.latencyMs,
+        row.viaMention,
+        row.createdAt,
+      ],
+    )
+    return row
+  }
+
+  /**
+   * 连接器用量：一次查询给出四种切法。
+   *
+   * 按 (谁 / 连接器 / 工具 / 状态) 分别 group by，而不是把原始行拉回来在 JS 里算——
+   * 一天几万行，拉回来就是拿内存换一句 SQL。
+   *
+   * 金额直接 `sum(amountMicros)`，**不按当前单价现折**：单价改过之后，历史账不能跟着
+   * 一起变（docs/connectors.md §9）。
+   */
+  async connectorUsage(
+    scope: { companyId?: string | null; accountId?: string },
+    range?: { from?: number; to?: number },
+  ): Promise<{
+    total: { calls: number; amountMicros: number; lastAt: number | null }
+    byStatus: { status: string; calls: number; amountMicros: number }[]
+    byAccount: { accountId: string; calls: number; amountMicros: number; lastAt: number | null }[]
+    byConnector: { connector: string; label: string; calls: number; amountMicros: number }[]
+    byTool: { connector: string; tool: string; calls: number; amountMicros: number }[]
+  }> {
+    const where: string[] = ['1=1']
+    const args: (string | number)[] = []
+    if (scope.accountId) {
+      where.push('"accountId" = ?')
+      args.push(scope.accountId)
+    }
+    if (scope.companyId) {
+      where.push('"companyId" = ?')
+      args.push(scope.companyId)
+    }
+    if (range?.from != null) {
+      where.push('"createdAt" >= ?')
+      args.push(range.from)
+    }
+    if (range?.to != null) {
+      where.push('"createdAt" <= ?')
+      args.push(range.to)
+    }
+    const w = where.join(' and ')
+    const g = async (cols: string, group: string) =>
+      this.many(
+        `select ${cols}, count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt" from connector_calls where ${w} group by ${group}`,
+        args,
+      )
+
+    const total = await this.one(
+      `select count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt" from connector_calls where ${w}`,
+      args,
+    )
+    const byStatus = await g('status', 'status')
+    const byAccount = await g('"accountId"', '"accountId"')
+    const byConnector = await g('connector, label', 'connector, label')
+    const byTool = await g('connector, tool', 'connector, tool')
+    return {
+      total: { calls: num(total?.calls ?? 0), amountMicros: num(total?.micros ?? 0), lastAt: numOrNull(total?.lastAt) },
+      byStatus: byStatus.map((r) => ({ status: str(r.status), calls: num(r.calls), amountMicros: num(r.micros) })),
+      byAccount: byAccount.map((r) => ({
+        accountId: str(r.accountId),
+        calls: num(r.calls),
+        amountMicros: num(r.micros),
+        lastAt: numOrNull(r.lastAt),
+      })),
+      byConnector: byConnector.map((r) => ({
+        connector: str(r.connector),
+        label: str(r.label || ''),
+        calls: num(r.calls),
+        amountMicros: num(r.micros),
+      })),
+      byTool: byTool.map((r) => ({
+        connector: str(r.connector),
+        tool: str(r.tool),
+        calls: num(r.calls),
+        amountMicros: num(r.micros),
+      })),
+    }
+  }
+
+  /** 平台统计的底表：按 (公司, 连接器) 汇总。owner 的调用 companyId 为 null，原样留着。 */
+  async connectorUsageByCompany(range?: { from?: number; to?: number }): Promise<
+    { companyId: string | null; connector: string; calls: number; amountMicros: number; lastAt: number | null }[]
+  > {
+    const where: string[] = ['1=1']
+    const args: number[] = []
+    if (range?.from != null) {
+      where.push('"createdAt" >= ?')
+      args.push(range.from)
+    }
+    if (range?.to != null) {
+      where.push('"createdAt" <= ?')
+      args.push(range.to)
+    }
+    const rows = await this.many(
+      `select "companyId", connector, count(*) as calls, coalesce(sum("amountMicros"), 0) as micros, max("createdAt") as "lastAt"
+       from connector_calls where ${where.join(' and ')}
+       group by "companyId", connector order by "companyId", connector`,
+      args,
+    )
+    return rows.map((r) => ({
+      companyId: strOrNull(r.companyId),
+      connector: str(r.connector),
+      calls: num(r.calls),
+      amountMicros: num(r.micros),
+      lastAt: numOrNull(r.lastAt),
+    }))
+  }
+
+  /**
+   * 这家公司花出去多少微元，**按桶分开**。
+   *
+   * **余额是「充的 − 花的」现算，没有余额行。** 建一行余额就要为每次工具调用去更新它，
+   * 一家公司所有席位挤在同一行上排队，为一次 20 毫秒的调用付出一次行锁——不值得。
+   *
+   * 两个桶必须分开算，因为它们的有效期不一样：
+   *
+   * - **套餐赠送**跟着账期，到期作废。所以只统计 `bonusSince`（当前账期起点）之后的，
+   *   上一期花掉的赠送不能再从这一期扣。
+   * - **充值**不过期，累计全部历史。
+   *
+   * 合成一个数的话，套餐一到期，它已经花掉的部分会从充值余额上再扣一遍——刚充过钱
+   * 的公司会被判定成欠费（见迁移 0005）。
+   */
+  async connectorSpend(
+    companyId: string,
+    bonusSince: number | null,
+  ): Promise<{ bonusMicros: number; topupMicros: number }> {
+    const topup = await this.one(
+      'select coalesce(sum("amountMicros" - "bonusMicros"), 0) as spent from connector_calls where "companyId" = ?',
+      [companyId],
+    )
+    const bonus =
+      bonusSince == null
+        ? undefined
+        : await this.one(
+            'select coalesce(sum("bonusMicros"), 0) as spent from connector_calls where "companyId" = ? and "createdAt" >= ?',
+            [companyId, bonusSince],
+          )
+    return { bonusMicros: num(bonus?.spent ?? 0), topupMicros: num(topup?.spent ?? 0) }
   }
 
   // ── 分组。全体成员是算出来的，不进这张表。──────────────────────────
@@ -1490,6 +1857,18 @@ export class Db {
     return rows.map(seatRuntimeOf)
   }
 
+  /**
+   * 部署了这一颗 Bot 的全部席位，**不分公司**。
+   *
+   * 删目录项之前要按它把机器上的东西拆干净。全局 Bot 可能被好几家公司各自部署过，
+   * 按公司查会漏掉别家的那些——漏下的席位仍占着 slot 和端口，而库里再没有任何东西
+   * 指向它们（理由见 deploy.ts 的 releaseSeats）。
+   */
+  async seatRuntimesOfBot(botId: string): Promise<SeatRuntime[]> {
+    const rows = await this.many('select * from seat_runtimes where "botId" = ?', [botId])
+    return rows.map(seatRuntimeOf)
+  }
+
   async seatRuntimesOfAccount(accountId: string): Promise<SeatRuntime[]> {
     const rows = await this.many('select * from seat_runtimes where "accountId" = ? order by slot', [accountId])
     return rows.map(seatRuntimeOf)
@@ -1542,6 +1921,24 @@ export class Db {
 
   async deleteSeatRuntime(accountId: string): Promise<void> {
     await this.run('delete from seat_runtimes where "accountId" = ?', [accountId])
+  }
+
+  /**
+   * 拆掉**一个** Bot 的席位，连同它的实例地址和会话索引。
+   *
+   * 员工删自己建的 Bot 走这条：他名下别的 Bot 还在跑，上面那条按账号删的会把它们
+   * 一起抹掉——slot 立刻能被下一个人分走，而机器上那几套 systemd 单元还占着端口
+   * （理由见 deploy.ts 的 releaseSeats）。
+   *
+   * 会话索引一起删：全文本来就在席位目录里，管家拆席位时跟着没了，留着索引只会让
+   * 管理员点进一条永远打不开的会话。
+   */
+  async deleteSeatRuntimeOf(accountId: string, botId: string): Promise<void> {
+    await this.tx(async () => {
+      await this.run('delete from seat_runtimes where "accountId" = ? and "botId" = ?', [accountId, botId])
+      await this.run('delete from instances where "accountId" = ? and "botId" = ?', [accountId, botId])
+      await this.run('delete from session_index where "accountId" = ? and "botId" = ?', [accountId, botId])
+    })
   }
 
   // ── Bot 发布包。只存元数据，tarball 在 $SATUWORK_GATEWAY_HOME/releases。──
@@ -1605,6 +2002,8 @@ export class Db {
     kind: CatalogKind
     scope: Scope
     companyId: string | null
+    /** 只有 `scope: 'user'` 用得上：这条归谁。别的层级传不传都存 null。 */
+    accountId?: string | null
     name: string
     definition?: unknown
   }): Promise<CatalogItem> {
@@ -1614,14 +2013,15 @@ export class Db {
       kind: input.kind,
       scope: input.scope,
       companyId: input.scope === 'global' ? null : input.companyId,
+      accountId: input.scope === 'user' ? (input.accountId ?? null) : null,
       name: input.name,
       definition: input.definition ?? {},
       createdAt: now,
       updatedAt: now,
     }
     await this.run(
-      'insert into catalog_items (id, kind, scope, "companyId", name, definition, "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?)',
-      [row.id, row.kind, row.scope, row.companyId, row.name, JSON.stringify(row.definition), row.createdAt, row.updatedAt],
+      'insert into catalog_items (id, kind, scope, "companyId", "accountId", name, definition, "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?)',
+      [row.id, row.kind, row.scope, row.companyId, row.accountId, row.name, JSON.stringify(row.definition), row.createdAt, row.updatedAt],
     )
     return row
   }
@@ -1667,6 +2067,67 @@ export class Db {
       id,
     ])
     return next
+  }
+
+  /**
+   * 这家公司那份 Bot 模版。一家公司恰好一条（0002 上有唯一索引）。
+   *
+   * 查不到不代表出错：公司是在 0003 之后建的，模版由第一次读它的人懒创建
+   * （见 lib/catalog.ts 的 ensureBotTemplate）。
+   */
+  async botTemplate(companyId: string): Promise<CatalogItem | undefined> {
+    const r = await this.one(
+      'select * from catalog_items where kind = \'bot-template\' and "companyId" = ? limit 1',
+      [companyId],
+    )
+    return r ? catalogOf(r) : undefined
+  }
+
+  /**
+   * 某个员工的名册：全局 Bot ∪ 本公司的（都是 0003 停用掉的老条目）∪ **他自己建的**。
+   *
+   * 别人建的 Bot 一律不在里面——用户 Bot 只有主人看得见，这条线由这里的 where 保证，
+   * 而不是靠每个调用点自己过滤。
+   */
+  async botsFor(companyId: string | null, accountId: string): Promise<CatalogItem[]> {
+    if (!companyId) {
+      const rows = await this.many("select * from catalog_items where kind = 'bot' and scope = 'global' order by name")
+      return rows.map(catalogOf)
+    }
+    const rows = await this.many(
+      `select * from catalog_items where kind = 'bot' and (
+         scope = 'global'
+         or (scope = 'company' and "companyId" = ?)
+         or (scope = 'user' and "accountId" = ?)
+       ) order by scope, name`,
+      [companyId, accountId],
+    )
+    return rows.map(catalogOf)
+  }
+
+  /**
+   * 这家公司里的全部 Bot，**不分主人**：全局 + 公司 + 每个员工自己建的。
+   *
+   * 只给「按 id 换个名字」这类展示用（会话索引、审计）。要判「这个人能不能用它」
+   * 一律走 botsFor——那条才带主人这一维。
+   */
+  async companyBots(companyId: string): Promise<CatalogItem[]> {
+    const rows = await this.many(
+      `select * from catalog_items where kind = 'bot' and (
+         scope = 'global' or "companyId" = ?
+       ) order by scope, name`,
+      [companyId],
+    )
+    return rows.map(catalogOf)
+  }
+
+  /** 某个员工自己建了几个。配额挡在建之前，见 routes/runtime.ts。 */
+  async countUserBots(accountId: string): Promise<number> {
+    const r = await this.one(
+      'select count(*)::int as n from catalog_items where kind = \'bot\' and scope = \'user\' and "accountId" = ?',
+      [accountId],
+    )
+    return Number((r as { n?: number } | undefined)?.n ?? 0)
   }
 
   async deleteCatalog(id: string): Promise<void> {
@@ -1942,6 +2403,7 @@ export class Db {
       utility: { provider: next.utility.provider, model: next.utility.model },
       enabledModels: enabled,
       priceMultiplier: parsePriceMultiplier(next.priceMultiplier),
+      connectorPricing: parseConnectorPricing(next.connectorPricing),
       // **不能漏。** 这一行漏了整整一版：类型上有、路由层收得好好的、界面也能填，
       // 只有这里拼 payload 时把它丢了——于是 PUT 回 200、读出来永远是空。
       // 后果是「全机队钉版本」这一级完全失效：传一个包上去，所有没有逐台钉过的机器
@@ -1975,6 +2437,7 @@ export class Db {
             utility: s.utility,
             enabledModels: cur.enabledModels,
             priceMultiplier: cur.priceMultiplier,
+            connectorPricing: cur.connectorPricing,
             webTools: cur.webTools,
           })
           lifted.settings = true

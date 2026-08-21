@@ -5,6 +5,7 @@
  */
 function pageView() {
   if (state.path.startsWith('/bots/')) return botDetailPage()
+  if (state.path.startsWith('/connectors/')) return connectorDetailPage()
   if (state.path.startsWith('/companies/') && state.path !== '/companies') return companyDetailPage()
   if (state.path.startsWith('/users/') && state.path !== '/users') return userDetailPage()
   if (state.path.startsWith('/machines/') && state.path !== '/machines') return machineDetailPage()
@@ -21,6 +22,8 @@ function pageView() {
       return providersPage()
     case '/tools':
       return toolsPage()
+    case '/connectors':
+      return connectorsPage()
     case '/company':
       return companyPage()
     case '/accounts':
@@ -142,6 +145,9 @@ function appView() {
             空一大片——沉底的理由是「给名单让位」，名单不在，理由也就不在了。 */ ''}
       <div style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
         ${roster ? `<div class="satu-botlist">${roster}</div>` : ''}
+        ${/* 「新建 Bot」跟着名单走：Bot 是自己建的，入口就该在自己那份名单底下，而不是
+              藏在某个设置页里。owner 没有席位也没有名册，那一侧不出现。 */ ''}
+        ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="new-bot">${svg(['M12 5v14', 'M5 12h14'], 15)} <span>${t('新建 Bot', 'New bot')}</span></button>`}
         ${
           mainNav || restNav
             ? `<div class="satu-navfoot">
@@ -176,6 +182,7 @@ function appView() {
       ${aside}
     </main>
     ${confirmModal()}
+    ${newBotModal()}
     ${logsModal()}
     ${previewModal()}
   </div>`
@@ -208,7 +215,13 @@ function render() {
   root.innerHTML = state.me ? appView() : loginView()
   // 对话页的正文不在 appView 里——chatPage 只搭空壳，消息由 paintChat 增量填。
   // 整页重绘会把那个壳换掉，所以每次 render 之后要补一次。
-  if (document.getElementById('chat-thread')) paintChat()
+  if (document.getElementById('chat-thread')) {
+    paintChat()
+    // 输入框上下那三块（排队 dock、已选的 @ 药丸、选单）同样是空壳 + 增量填。
+    paintChatQueue()
+    paintChatMentions()
+    paintMentionPick()
+  }
   // 日志面板同理：壳在 render 里，内容由 paintLogs 增量填。
   if (document.getElementById('log-body')) paintLogs()
   // 内嵌桌面那块屏活在 #app 外面（重绘换不掉它），但它的位置是照着右栏里的空槽算

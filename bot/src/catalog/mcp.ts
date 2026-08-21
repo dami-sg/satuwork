@@ -54,6 +54,14 @@ async function readBody(res: Response): Promise<unknown> {
   }
 }
 
+/**
+ * 一次 RPC 的默认时限。
+ *
+ * 本地 MCP 八秒绰绰有余，但连接器不一样：发一封邮件、查一遍 CRM，十几秒是常态。
+ * 所以这个数可以由目录下发（`timeoutMs`）——Gateway 给连接器那几条填 60 秒。
+ */
+const DEFAULT_TIMEOUT_MS = 8000
+
 export class McpHttpClient {
   private nextId = 1
   sessionId?: string
@@ -61,6 +69,7 @@ export class McpHttpClient {
   constructor(
     readonly endpoint: string,
     readonly token: string,
+    readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
   ) {}
 
   async rpc(method: string, params?: unknown, notification = false): Promise<unknown> {
@@ -74,7 +83,7 @@ export class McpHttpClient {
         method: 'POST',
         headers: headersOf(this.token, this.sessionId),
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(this.timeoutMs),
       })
     } catch (e) {
       throw new McpHttpError(`连不上：${(e as Error).message}`)
@@ -113,8 +122,19 @@ export class McpHttpClient {
     return Array.isArray(result?.tools) ? result!.tools! : []
   }
 
-  async callTool(name: string, args: unknown): Promise<string> {
-    const result = (await this.rpc('tools/call', { name, arguments: args ?? {} })) as {
+  /**
+   * 调一次工具。
+   *
+   * `meta` 走 MCP 的 `params._meta`（协议给自定义字段留的那一格）：服务端认得就用，
+   * 不认得就忽略，不会破坏握手。我们拿它送「这一次是不是用户 `@` 点名的」——
+   * 那是出事后第一个要问的问题，只有这一侧知道答案。
+   */
+  async callTool(name: string, args: unknown, meta?: Record<string, unknown>): Promise<string> {
+    const result = (await this.rpc('tools/call', {
+      name,
+      arguments: args ?? {},
+      ...(meta && Object.keys(meta).length ? { _meta: meta } : {}),
+    })) as {
       content?: { type?: string; text?: string }[]
       isError?: boolean
     }
@@ -126,10 +146,17 @@ export class McpHttpClient {
   }
 }
 
+/**
+ * 工具名。上限 **64**，不是 40。
+ *
+ * 40 太紧：连接器一家就有几十个工具，名字长得像 `FETCH_MESSAGE_BY_THREAD_ID`，
+ * 截到 40 之后两个不同的工具会变成同一个名字，而重名的那个会被静默丢掉——表现是
+ * 「某个工具时有时无」，最难查的一类。64 是 OpenAI 和 Anthropic 都接受的上限。
+ */
 export function mcpToolName(serverName: string, toolName: string): string {
-  const short = sanitize(serverName).slice(0, 12) || 'srv'
+  const short = sanitize(serverName).slice(0, 16) || 'srv'
   const tool = sanitize(toolName) || 'tool'
-  return `mcp_${short}_${tool}`.slice(0, 40)
+  return `mcp_${short}_${tool}`.slice(0, 64)
 }
 
 function sanitize(s: string): string {

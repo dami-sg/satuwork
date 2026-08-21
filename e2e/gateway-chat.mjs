@@ -135,11 +135,15 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
     const seatAccess = seat.json.accessToken
     const seatApiKey = seat.json.apiKey
 
-    const createdBot = await req(gwBase, 'POST', `/orgs/${orgId}/bots`, {
-      token: adminTok,
+    /**
+     * 用**全局 Bot**：下面几条要验的是「同一颗 Bot 在管理员和员工两边都在名册里」，
+     * 而员工自己建的 Bot 只有本人看得见（公司这一层现在是一份模版，不再有共享 Bot）。
+     */
+    const createdBot = await req(gwBase, 'POST', '/platform/bots', {
+      token: ownerTok,
       body: { name: '对话 Bot' },
     })
-    assert(createdBot.status === 201, `company bot ${createdBot.status} ${createdBot.text}`)
+    assert(createdBot.status === 201, `global bot ${createdBot.status} ${createdBot.text}`)
     const catalogBotId = createdBot.json.bot.id
     let machineTok
 
@@ -153,7 +157,7 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(r.status === 200, `member ${r.status} ${r.text}`)
       assert(Array.isArray(r.json.bots), 'bots array')
       const hit = (r.json.bots || []).find((b) => b.id === catalogBotId)
-      assert(hit, '名册没有公司 Bot')
+      assert(hit, '名册没有那颗全局 Bot')
       assert(hit.runtime == null, 'member runtime 应为空')
     })
 
@@ -262,6 +266,27 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       })
       assert(r.status === 200, `message ${r.status} ${r.text}`)
       assert(r.json.accepted === true || r.json.steered === true, 'accepted/steered')
+    })
+
+    await test('@ 点名：Gateway 把失效的剔掉，不让它进席位', async () => {
+      /**
+       * 这一条守的是不变量：**席位收到什么就注入什么**——它信的是那张 `sat_` 票，
+       * 票背后是谁由 Gateway 说了算。所以浏览器编一个连接 id 上来，必须在这一跳被
+       * 挡掉，而不是让整条消息失败：用户那句话没有错，错的是一个已经失效的点名。
+       */
+      const r = await req(gwBase, 'POST', `/runtime/sessions/${sessionId}/messages`, {
+        token: adminTok,
+        body: {
+          text: `mention ${MARKER}`,
+          mentions: [{ kind: 'connector', id: 'conn-not-mine', label: '别人的 Gmail' }],
+        },
+      })
+      assert(r.status === 200, `message ${r.status} ${r.text}`)
+      assert(Array.isArray(r.json.droppedMentions), `该说明剔掉了什么：${r.text}`)
+      assert(r.json.droppedMentions.includes('conn-not-mine'), `没剔掉伪造的点名：${r.text}`)
+      assert(r.json.accepted === true || r.json.steered === true || r.json.queued === true, `这条消息本身该照发：${r.text}`)
+      // 剔干净了就等于没点名，所以走的是 steering / 新一轮，不是排队。
+      assert(r.json.queued !== true, '点名全被剔掉了还排队，那用户就白等一轮')
     })
 
     // ── 附件反代。这一跳是 proxyUpload / proxyDownload：字节从浏览器流到席位，

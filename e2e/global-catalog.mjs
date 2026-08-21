@@ -129,16 +129,25 @@ export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, ass
       assert(del.status === 404, `删 ${del.status}`)
     })
 
-    await test('别家公司的 Bot 详情仍然拉不到', async () => {
-      const mine = await req(base, 'POST', `/orgs/${orgB}/bots`, { token: adminB, body: { name: 'B 家私有 Bot' } })
+    await test('公司这一层不再建 Bot：POST /orgs/:id/bots 没有这条路由', async () => {
+      // 公司的配置收成了一份 Bot 模版，Bot 由员工自己建（POST /runtime/bots）。
+      const r = await req(base, 'POST', `/orgs/${orgA}/bots`, { token: adminA, body: { name: '公司 Bot' } })
+      assert(r.status === 404, `还能建公司 Bot：${r.status} ${r.text}`)
+    })
+
+    await test('别人建的 Bot，管理目录里拉不到', async () => {
+      const mine = await req(base, 'POST', '/runtime/bots', { token: adminB, body: { name: 'B 家的私人 Bot' } })
       assert(mine.status === 201, `建 ${mine.status} ${mine.text}`)
       const peek = await req(base, 'GET', `/orgs/${orgA}/bots/${mine.json.bot.id}`, { token: adminA })
       assert(peek.status === 404, `A 家看到了 B 家的 Bot：${peek.status}`)
+      // 自己家的管理目录里也不该出现：那一页列的是全局项和停用掉的老公司 Bot。
+      const listB = await req(base, 'GET', `/orgs/${orgB}/bots`, { token: adminB })
+      assert(!(listB.json.bots || []).some((x) => x.id === mine.json.bot.id), '自建 Bot 漏进了管理目录')
     })
 
     await test('头像两套不重合：跨层级用会落回本层级默认', async () => {
       // 光靠界面上色不够——那样公司随手改成全局那一款，列表里就分不出来了。
-      const sneaky = await req(base, 'POST', `/orgs/${orgA}/bots`, {
+      const sneaky = await req(base, 'POST', '/runtime/bots', {
         token: adminA, body: { name: '越界头像', icon: 'g-shield' },
       })
       assert(sneaky.status === 201, `建 ${sneaky.status} ${sneaky.text}`)
@@ -151,9 +160,9 @@ export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, ass
       await req(base, 'DELETE', `/platform/bots/${back.json.bot.id}`, { token: owner })
 
       // 改也一样挡住：传了另一层级的键就当没传，保留原值。
-      const ok = await req(base, 'PATCH', `/orgs/${orgA}/bots/${sneaky.json.bot.id}`, { token: adminA, body: { icon: 'c-flow' } })
+      const ok = await req(base, 'PATCH', `/runtime/bots/${sneaky.json.bot.id}`, { token: adminA, body: { icon: 'c-flow' } })
       assert(ok.json.bot.icon === 'c-flow', `本层级的没生效：${ok.json.bot.icon}`)
-      const no = await req(base, 'PATCH', `/orgs/${orgA}/bots/${sneaky.json.bot.id}`, { token: adminA, body: { icon: 'g-vault' } })
+      const no = await req(base, 'PATCH', `/runtime/bots/${sneaky.json.bot.id}`, { token: adminA, body: { icon: 'g-vault' } })
       assert(no.json.bot.icon === 'c-flow', `跨层级改成功了：${no.json.bot.icon}`)
     })
 
@@ -170,21 +179,26 @@ export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, ass
     })
 
     await test('改版前存的老头像键落到新的一套上，不变成默认', async () => {
-      const bot = await req(base, 'POST', `/orgs/${orgA}/bots`, { token: adminA, body: { name: '老 Bot' } })
+      const bot = await req(base, 'POST', '/runtime/bots', { token: adminA, body: { name: '老 Bot' } })
       // 直接把库里的 icon 改回旧键，模拟改版前建的 Bot。
-      await req(base, 'PATCH', `/orgs/${orgA}/bots/${bot.json.bot.id}`, { token: adminA, body: { icon: 'c-chart' } })
-      const read = await req(base, 'GET', `/orgs/${orgA}/bots/${bot.json.bot.id}`, { token: adminA })
+      await req(base, 'PATCH', `/runtime/bots/${bot.json.bot.id}`, { token: adminA, body: { icon: 'c-chart' } })
+      const read = await req(base, 'GET', `/runtime/bots/${bot.json.bot.id}`, { token: adminA })
       assert(read.json.bot.icon === 'c-chart', `拿到 ${read.json.bot.icon}`)
     })
 
-    await test('公司自己的 Bot 能挂全局 Skill / MCP', async () => {
-      const mine = await req(base, 'POST', `/orgs/${orgA}/bots`, {
-        token: adminA, body: { name: '本公司助理', skills: [gSkill], mcps: [gMcp] },
+    await test('公司模版能挂全局 Skill / MCP，员工的 Bot 跟着拿到', async () => {
+      const put = await req(base, 'PUT', `/orgs/${orgA}/bot-template`, {
+        token: adminA, body: { skills: [gSkill], mcps: [gMcp] },
       })
+      assert(put.status === 200, `存模版 ${put.status} ${put.text}`)
+      assert(put.json.template.skills.includes(gSkill), '模版挂不上全局 Skill')
+      assert(put.json.template.mcps.includes(gMcp), '模版挂不上全局 MCP')
+
+      const mine = await req(base, 'POST', '/runtime/bots', { token: adminA, body: { name: '本公司助理' } })
       assert(mine.status === 201, `建 ${mine.status} ${mine.text}`)
-      assert(mine.json.bot.skills.includes(gSkill), '公司 Bot 挂不上全局 Skill')
-      assert(mine.json.bot.mcps.includes(gMcp), '公司 Bot 挂不上全局 MCP')
-      assert(mine.json.bot.origin === 'company', `origin ${mine.json.bot.origin}`)
+      assert(mine.json.bot.skills.includes(gSkill), '自建 Bot 没继承到模版的 Skill')
+      assert(mine.json.bot.mcps.includes(gMcp), '自建 Bot 没继承到模版的 MCP')
+      assert(mine.json.bot.scope === 'user', `scope ${mine.json.bot.scope}`)
     })
 
     await test('全局 Bot 挂不上某一家公司的 Skill——别的公司会找不到它', async () => {

@@ -176,6 +176,48 @@ async function loadCreds() {
   state.creds = data.credentials || []
 }
 
+/**
+ * 连接器：供应商、上架清单、市场。
+ *
+ * 市场（`/connectors`）是公司里所有人都读得到的那一份；上架清单（`/platform/connectors`）
+ * 只有 owner 读得到。两份分开，是因为员工那一份**不带 authConfigId**。
+ */
+async function loadConnectorVendors() {
+  state.connectorVendors = (await api('GET', '/platform/connector-vendors')).vendors || []
+}
+
+async function loadConnectors() {
+  state.connectors = (await api('GET', '/platform/connectors')).connectors || []
+}
+
+async function loadConnectorToolkits() {
+  state.connectorToolkits = (await api('GET', '/platform/connector-toolkits')).toolkits || []
+}
+
+async function loadOrgConnectors() {
+  const id = orgId()
+  const [list, stats] = await Promise.all([
+    api('GET', `/orgs/${encodeURIComponent(id)}/connectors`),
+    api('GET', `/orgs/${encodeURIComponent(id)}/connector-stats`).catch(() => null),
+  ])
+  state.orgConnectors = list.connectors || []
+  state.connectorStats = stats
+}
+
+async function loadMarket() {
+  state.market = (await api('GET', '/me/connectors')).connectors || []
+}
+
+/**
+ * 一个连接器的详情：我的安装、我的几把连接、可开的工具。
+ *
+ * 工具清单是现拉的（Gateway 那边去问供应商），所以这一条会慢一点；拉不到时后端给
+ * `toolsError`，界面照样能装能连。
+ */
+async function loadConnectorDetail(id) {
+  state.connectorDetail = await api('GET', `/me/connectors/${encodeURIComponent(id)}`)
+}
+
 async function loadSettings() {
   if (isOwner()) {
     state.settings = await api('GET', '/platform/settings')
@@ -398,6 +440,41 @@ async function loadBots() {
   state.botDraft = null
 }
 
+/**
+ * 公司的 Bot 模版。管理员那一页编辑的就是它，员工那边只读着看「我的 Bot 继承了什么」。
+ *
+ * 草稿和 state.template 分开放：改了一半还没保存的时候，版本号那一栏要显示的是**已经
+ * 生效**的那一版，不是手上这份。
+ */
+async function loadBotTemplate() {
+  const base = catalogBase()
+  if (!base) return
+  const data = await api('GET', `${base}/bot-template`)
+  state.template = data.template || null
+  state.templateOptions = { skills: data.options?.skills || [], mcps: data.options?.mcps || [] }
+  state.templateDraft = draftFromTemplate(state.template)
+}
+
+function draftFromTemplate(tpl) {
+  if (!tpl) return null
+  const saved = tpl.guards && typeof tpl.guards === 'object' ? tpl.guards : {}
+  const mem = tpl.memory && typeof tpl.memory === 'object' ? tpl.memory : {}
+  return {
+    prompt: tpl.prompt || '',
+    escalate: tpl.escalate || '',
+    skills: Array.isArray(tpl.skills) ? tpl.skills.slice() : [],
+    mcps: Array.isArray(tpl.mcps) ? tpl.mcps.slice() : [],
+    guards: DEFAULT_BOT_GUARDS.map((g) => ({ ...g, on: typeof saved[g.id] === 'boolean' ? saved[g.id] : g.on })),
+    memoryOn: mem.on !== false,
+    scope: MEMORY_SCOPES.includes(mem.scope) ? mem.scope : '所属分组',
+    kinds: Array.isArray(mem.kinds) ? mem.kinds.filter((k) => MEMORY_KINDS.includes(k)) : ['偏好', '事实'],
+    ttl: MEMORY_TTLS.includes(mem.ttl) ? mem.ttl : '90 天',
+    cap: Number.isFinite(Number(mem.cap)) && mem.cap ? Number(mem.cap) : 20,
+    confirmOn: mem.confirm !== false,
+    piiOn: mem.pii !== false,
+  }
+}
+
 async function loadSkills() {
   const base = catalogBase()
   if (!base) return
@@ -438,20 +515,35 @@ function draftFromBot(bot) {
 }
 
 async function loadBotDetail(botId) {
-  const base = catalogBase()
-  if (!base || !botId) return
+  if (!botId) return
   // 不再拉 /v1/models：模型由平台指定，这一页没有可挑的下拉了。
-  const [one, opts] = await Promise.all([
-    api('GET', `${base}/bots/${encodeURIComponent(botId)}`),
-    api('GET', `${base}/bots/options`),
+  if (isOwner()) {
+    const [one, opts] = await Promise.all([
+      api('GET', `/platform/bots/${encodeURIComponent(botId)}`),
+      api('GET', '/platform/bots/options'),
+    ])
+    state.bot = one.bot
+    state.botDraft = draftFromBot(one.bot)
+    state.botOptions = { skills: opts.skills || [], mcps: opts.mcps || [], groups: opts.groups || [], kbs: opts.kbs || [] }
+    return
+  }
+  /**
+   * 公司侧一律走 /runtime/bots/:id——**员工也进得来这一页**，而 /orgs/:id/bots/:id 是
+   * 管理员接口。那条给出的也是合成之后的样子（提示词已经拼上模版那一段），正是这一页
+   * 要显示的东西。
+   */
+  const [one, tpl] = await Promise.all([
+    api('GET', `/runtime/bots/${encodeURIComponent(botId)}`),
+    api('GET', `${catalogBase()}/bot-template`).catch(() => null),
   ])
   state.bot = one.bot
-  state.botDraft = draftFromBot(one.bot)
+  state.botDraft = { ...draftFromBot(one.bot), extraPrompt: one.bot.extraPrompt || '' }
+  state.template = tpl?.template || state.template
   state.botOptions = {
-    skills: opts.skills || [],
-    mcps: opts.mcps || [],
-    groups: opts.groups || [],
-    kbs: opts.kbs || [],
+    skills: tpl?.options?.skills || [],
+    mcps: tpl?.options?.mcps || [],
+    groups: [],
+    kbs: [],
   }
 }
 
@@ -569,6 +661,17 @@ async function loadPage() {
       await loadStats()
     } else if (state.path === '/tools') {
       await loadWebTools()
+    } else if (state.path.startsWith('/connectors/')) {
+      await loadConnectorDetail(connectorIdOfPath(state.path))
+    } else if (state.path === '/connectors') {
+      if (isOwner()) {
+        // 上架清单、供应商状态、单价一起要：没有密钥时那颗「上架」按钮是灰的。
+        await Promise.all([loadConnectorVendors(), loadConnectors(), loadSettings()])
+      } else if (isAdmin()) {
+        await loadOrgConnectors()
+      } else {
+        await loadMarket()
+      }
     } else if (state.path === '/providers') {
       await Promise.all([loadCatalog(), loadCreds(), loadCustomProviders().catch(() => { state.customProviders = [] })])
     } else if (state.path === '/company') {
@@ -605,7 +708,10 @@ async function loadPage() {
     } else if (state.path === '/profile') {
       await loadMe()
     } else if (state.path === '/bots') {
-      await loadBots()
+      // owner 管的是全局 Bot 名录；公司管理员这一页是模版，底下还列着全局那几个和
+      // 停用掉的老公司 Bot，所以两份都要。
+      if (isOwner()) await loadBots()
+      else await Promise.all([loadBotTemplate(), loadBots()])
     } else if (state.path.startsWith('/bots/')) {
       await loadBotDetail(botIdOfPath(state.path))
     } else if (state.path === '/skills') {

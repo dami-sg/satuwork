@@ -24,6 +24,23 @@ async function runConfirm() {
       // 而它恰恰是机器上出了问题时唯一的自助手段。
       await deployMyRuntime(c.id, { force: true })
       return
+    } else if (c.kind === 'template-redeploy') {
+      state.busy = true
+      render()
+      try {
+        const data = await api('POST', `${catalogBase()}/bot-template/redeploy`, {})
+        const bad = (data.failed || []).length
+        // 没铺到的（这条请求的时间预算用完了）不算失败：它们照样会自己跟上，得说清楚。
+        const left = (data.skipped || []).length
+        const tail = left ? t(`，还有 ${left} 个没轮到，它们会自己跟上`, `; ${left} not reached — they will catch up on their own`) : ''
+        flash(bad ? 'err' : 'ok', bad
+          ? t(`${data.ok}/${data.total} 个席位已重铺，${bad} 个失败`, `${data.ok}/${data.total} seats reinstalled, ${bad} failed`) + tail
+          : t(`${data.ok} 个席位已重铺`, `${data.ok} seats reinstalled`) + tail)
+      } finally {
+        state.busy = false
+      }
+      render()
+      return
     } else if (c.kind === 'remove-machine') {
       await doRemoveMachine(machineTarget(c.scope, c.orgId, c.machineId))
       return
@@ -32,6 +49,15 @@ async function runConfirm() {
       await api('DELETE', `${base}/bots/${encodeURIComponent(c.id)}`)
       flash('ok', '已删除')
       go('/bots')
+      return
+    } else if (c.kind === 'delete-my-bot') {
+      // 席位在服务端一起拆（见 routes/runtime.ts）。名册要重拉：侧栏那一行得当场消失。
+      await api('DELETE', `/runtime/bots/${encodeURIComponent(c.id)}`)
+      state.bot = null
+      state.botDraft = null
+      await loadRuntimeBots().catch(() => {})
+      flash('ok', '已删除')
+      go('/')
       return
     } else if (c.kind === 'delete-skill') {
       const base = catalogBase()
@@ -166,6 +192,9 @@ document.getElementById('app').addEventListener('click', async (e) => {
   if (!btn) return
   if (btn.classList.contains('gw-modal-backdrop') && e.target !== btn) return
   const act = btn.getAttribute('data-act')
+  // 连接器那一屏的动作都在 pages-connectors.js 里。这条 if 链已经六百多行了，
+  // 再往上堆只会让下一个人更难找。
+  if (await connectorAct(act, btn)) return
   if (act === 'go') {
     go(btn.getAttribute('data-href'))
     return
@@ -194,6 +223,20 @@ document.getElementById('app').addEventListener('click', async (e) => {
   if (act === 'chat-attach') {
     const picker = document.getElementById('chat-file')
     if (picker) picker.click()
+    return
+  }
+  if (act === 'chat-mention-pick') {
+    takeMention(btn.getAttribute('data-id'))
+    return
+  }
+  if (act === 'chat-mention-drop') {
+    const i = Number(btn.getAttribute('data-i'))
+    state.chatMentions = (state.chatMentions || []).filter((_, idx) => idx !== i)
+    paintChatMentions()
+    return
+  }
+  if (act === 'chat-queue-cancel') {
+    await cancelQueued(btn.getAttribute('data-id'))
     return
   }
   if (act === 'chat-file-drop') {
@@ -461,6 +504,124 @@ document.getElementById('app').addEventListener('click', async (e) => {
     }
     return
   }
+  if (act === 'template-save') {
+    const base = catalogBase()
+    const a = state.templateDraft
+    if (!base || !a) return
+    state.busy = true
+    render()
+    try {
+      const data = await api('PUT', `${base}/bot-template`, {
+        // if-match：服务端拿它跟当前版本比，对不上就 409。两个管理员同时改这一页时，
+        // 后保存的那个不会再不声不响地把前一个的改动盖掉（见 routes/bot-template.ts）。
+        version: state.template?.version,
+        prompt: a.prompt,
+        escalate: a.escalate,
+        skills: a.skills,
+        mcps: a.mcps,
+        guards: Object.fromEntries((a.guards || []).map((g) => [g.id, !!g.on])),
+        memory: { on: a.memoryOn, scope: a.scope, kinds: a.kinds, ttl: a.ttl, cap: a.cap, confirm: a.confirmOn, pii: a.piiOn },
+      })
+      state.template = data.template
+      // 按回执重建草稿：被归一化过的字段（越界的注入上限、认不出的选项）当场就看得见。
+      state.templateDraft = draftFromTemplate(data.template)
+      flash('ok', t(`已保存，模版现在是 v${data.template.version}`, `Saved — the template is now v${data.template.version}`))
+    } catch (err) {
+      /**
+       * 409 = 别人刚改过。
+       *
+       * **手上这份草稿一个字都不动**——那是他刚写的东西，为了一次撞车丢掉它最不能接受。
+       * 只把「已经生效的是哪一版」更新掉：版本号那一栏当场变新，他再点一次保存就带上
+       * 新版本号过去，也就是「我看到了，确认覆盖」。第一次拦下来是为了让他知道，不是
+       * 为了拦住他。
+       */
+      if (err.status === 409) {
+        const fresh = await api('GET', `${base}/bot-template`).catch(() => null)
+        if (fresh?.template) state.template = fresh.template
+        flash('err', t('别人刚改过这份模版。你写的还在，再点一次「保存模版」就是覆盖他的。', 'Someone just changed this template. Your edits are kept — press Save again to overwrite theirs.'))
+      } else {
+        flash('err', err.message)
+      }
+    } finally {
+      state.busy = false
+      render()
+    }
+    return
+  }
+  if (act === 'template-redeploy') {
+    state.confirm = {
+      title: '立即下发到全部席位？',
+      body: t('公司里已经部署的每个席位都会重铺一遍并重启，正在进行的对话会断。不按它也会在一分钟内自己跟上。', 'Every deployed seat is reinstalled and restarted; ongoing conversations drop. They would pick the change up within a minute anyway.'),
+      label: '下发',
+      kind: 'template-redeploy',
+    }
+    render()
+    return
+  }
+  if (act === 'legacy-bot-delete') {
+    const id = btn.getAttribute('data-id')
+    const name = btn.getAttribute('data-name') || id
+    if (!id) return
+    state.confirm = {
+      title: '删除这个 Bot？',
+      body: t(`「${name}」是改版前的公司 Bot，已经停用。删掉之后它的配置不再保留。`, `"${name}" is a disabled pre-template company bot. Deleting drops its config for good.`),
+      label: '删除',
+      kind: 'delete-bot',
+      id,
+    }
+    render()
+    return
+  }
+  if (act === 'new-bot') {
+    state.newBot = { name: '', description: '', extraPrompt: '', icon: 'c-bot' }
+    state.newBotError = ''
+    render()
+    return
+  }
+  if (act === 'new-bot-close') {
+    state.newBot = null
+    state.newBotError = ''
+    render()
+    return
+  }
+  if (act === 'new-bot-icon') {
+    if (!state.newBot) return
+    const icon = btn.getAttribute('data-icon')
+    if (!avatarKeysFor('company').includes(icon)) return
+    state.newBot = { ...state.newBot, icon }
+    render()
+    return
+  }
+  if (act === 'new-bot-save') {
+    const f = state.newBot
+    if (!f) return
+    if (!f.name.trim()) {
+      state.newBotError = t('助理要有名字', 'Give it a name')
+      render()
+      return
+    }
+    state.busy = true
+    state.newBotError = ''
+    render()
+    try {
+      const data = await api('POST', '/runtime/bots', {
+        name: f.name.trim(),
+        description: f.description.trim(),
+        extraPrompt: f.extraPrompt.trim(),
+        icon: f.icon,
+      })
+      state.newBot = null
+      state.busy = false
+      await loadRuntimeBots().catch(() => {})
+      // 直接进它的对话页：那儿有「部署这个 Bot」，也是建完之后人真正要去的地方。
+      go('/a/' + data.bot.id)
+    } catch (err) {
+      state.newBotError = err.message
+      state.busy = false
+      render()
+    }
+    return
+  }
   if (act === 'bot-list-enabled') {
     const base = catalogBase()
     const botId = btn.getAttribute('data-id')
@@ -491,48 +652,48 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'bot-pick') {
-    if (!state.botDraft) return
+    const d = editingDraft()
+    if (!d) return
     const key = btn.getAttribute('data-key')
     const value = btn.getAttribute('data-value')
-    const cur = Array.isArray(state.botDraft[key]) ? state.botDraft[key] : []
-    state.botDraft = {
-      ...state.botDraft,
-      [key]: cur.includes(value) ? cur.filter((x) => x !== value) : cur.concat(value),
-    }
+    const cur = Array.isArray(d[key]) ? d[key] : []
+    setEditingDraft({ ...d, [key]: cur.includes(value) ? cur.filter((x) => x !== value) : cur.concat(value) })
     render()
     return
   }
   if (act === 'bot-scope') {
-    if (!state.botDraft) return
-    state.botDraft = { ...state.botDraft, scope: btn.getAttribute('data-value') }
+    const d = editingDraft()
+    if (!d) return
+    setEditingDraft({ ...d, scope: btn.getAttribute('data-value') })
     render()
     return
   }
   if (act === 'bot-guard') {
-    if (!state.botDraft) return
+    const d = editingDraft()
+    if (!d) return
     const gid = btn.getAttribute('data-id')
-    state.botDraft = {
-      ...state.botDraft,
-      guards: (state.botDraft.guards || []).map((g) => (g.id === gid ? { ...g, on: !g.on } : g)),
-    }
+    setEditingDraft({ ...d, guards: (d.guards || []).map((g) => (g.id === gid ? { ...g, on: !g.on } : g)) })
     render()
     return
   }
   if (act === 'bot-memory') {
-    if (!state.botDraft) return
-    state.botDraft = { ...state.botDraft, memoryOn: !state.botDraft.memoryOn }
+    const d = editingDraft()
+    if (!d) return
+    setEditingDraft({ ...d, memoryOn: !d.memoryOn })
     render()
     return
   }
   if (act === 'bot-confirm') {
-    if (!state.botDraft) return
-    state.botDraft = { ...state.botDraft, confirmOn: !state.botDraft.confirmOn }
+    const d = editingDraft()
+    if (!d) return
+    setEditingDraft({ ...d, confirmOn: !d.confirmOn })
     render()
     return
   }
   if (act === 'bot-pii') {
-    if (!state.botDraft) return
-    state.botDraft = { ...state.botDraft, piiOn: !state.botDraft.piiOn }
+    const d = editingDraft()
+    if (!d) return
+    setEditingDraft({ ...d, piiOn: !d.piiOn })
     render()
     return
   }
@@ -540,7 +701,33 @@ document.getElementById('app').addEventListener('click', async (e) => {
     const base = catalogBase()
     const bot = state.bot
     const a = state.botDraft
-    if (!base || !bot || !a) return
+    if (!bot || !a) return
+    // 自己建的那种：只发身份那几个字段。人设、边界、能力在公司模版里，服务端也不收。
+    if (isMyBot(bot)) {
+      state.busy = true
+      render()
+      try {
+        const data = await api('PATCH', `/runtime/bots/${encodeURIComponent(bot.id)}`, {
+          name: a.name,
+          description: a.description,
+          greeting: a.greeting,
+          extraPrompt: a.extraPrompt || '',
+          enabled: a.enabled,
+          icon: a.icon,
+        })
+        state.bot = data.bot
+        state.botDraft = { ...draftFromBot(data.bot), extraPrompt: data.bot.extraPrompt || '' }
+        await loadRuntimeBots().catch(() => {})
+        flash('ok', '已保存')
+      } catch (err) {
+        flash('err', err.message)
+      } finally {
+        state.busy = false
+        render()
+      }
+      return
+    }
+    if (!base) return
     state.busy = true
     render()
     try {
@@ -579,7 +766,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
       title: '删除这个 Bot？',
       body: t(`「${(a && a.name) || bot.name}」的人设、能力配置与已存记忆会一并删除，正在用它的定时任务与渠道会失效。`, `The persona, capability config and stored memories of "${(a && a.name) || bot.name}" are deleted; scheduled tasks and channels using it stop working.`),
       label: '删除',
-      kind: 'delete-bot',
+      kind: isMyBot(bot) ? 'delete-my-bot' : 'delete-bot',
       id: bot.id,
     }
     render()
@@ -1317,6 +1504,12 @@ document.getElementById('app').addEventListener('input', (e) => {
   const el = e.target
   if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return
   // 两份草稿只存在 state 里，边打边收；不 render，否则每敲一个字都会丢焦点。
+  if (el.getAttribute('data-act') === 'conn-field' && state.connectorDraft) {
+    state.connectorDraft[el.getAttribute('data-field')] = el.value
+    // 搜索只重画候选那一块，不整页 render——否则每敲一个字都会丢焦点。
+    if (el.getAttribute('data-field') === 'q') paintConnectorPicks()
+    return
+  }
   if (el.getAttribute('data-act') === 'prov-field' && state.providerDraft) {
     state.providerDraft[el.getAttribute('data-field')] = el.value
     return
@@ -1326,15 +1519,21 @@ document.getElementById('app').addEventListener('input', (e) => {
     state.modelDraft[f] = el.type === 'checkbox' ? el.checked : el.value
     return
   }
+  const nb = el.getAttribute('data-newbot')
+  if (nb && state.newBot) {
+    state.newBot = { ...state.newBot, [nb]: el.value }
+    return
+  }
   const botField = el.getAttribute('data-bot')
-  if (botField && state.botDraft) {
+  if (botField && editingDraft()) {
+    const d = editingDraft()
     if (botField === 'cap') {
-      state.botDraft = { ...state.botDraft, cap: Number(el.value) }
+      setEditingDraft({ ...d, cap: Number(el.value) })
       const label = document.querySelector('[data-bot-cap-label]')
-      if (label) label.textContent = t(`注入上限 · ${state.botDraft.cap} 条`, `Injection cap · ${state.botDraft.cap}`)
+      if (label) label.textContent = t(`注入上限 · ${Number(el.value)} 条`, `Injection cap · ${Number(el.value)}`)
       return
     }
-    state.botDraft = { ...state.botDraft, [botField]: el.value }
+    setEditingDraft({ ...d, [botField]: el.value })
     if (botField === 'prompt') {
       const len = document.querySelector('[data-bot-prompt-len]')
       if (len) len.textContent = t(`${el.value.length} 字 · 每轮随上下文注入`, `${el.value.length} chars · injected each turn`)
@@ -1473,8 +1672,9 @@ document.getElementById('app').addEventListener('change', async (e) => {
     return
   }
   if (act === 'bot-ttl') {
-    if (!state.botDraft) return
-    state.botDraft = { ...state.botDraft, ttl: el.value }
+    const d = editingDraft()
+    if (!d) return
+    setEditingDraft({ ...d, ttl: el.value })
   }
 })
 
@@ -1484,6 +1684,11 @@ document.getElementById('app').addEventListener('input', (e) => {
   state.chatDraft = el.value
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+  // 光标前面刚打出来的那截 `@xxx` 决定选单开不开。**不 render**：整页重绘会把输入框
+  // 换掉，正在打字的人当场丢焦点。
+  const hit = mentionQueryAt(el)
+  if (hit) void openMentionPick(hit.q)
+  else if (state.mentionPick) closeMentionPick()
 })
 
 /**
@@ -1495,6 +1700,38 @@ document.getElementById('app').addEventListener('input', (e) => {
 document.getElementById('app').addEventListener('keydown', (e) => {
   const el = e.target
   if (!(el instanceof HTMLTextAreaElement) || el.id !== 'chat-input') return
+  /**
+   * `@` 选单开着时，上下键和回车归它——回车是「选中这一个」，不是「把话发出去」。
+   * 这一段必须排在下面的发送之前，否则选到一半按回车就把半句话发走了（和输入法那条
+   * 是同一类问题）。
+   */
+  if (state.mentionPick && state.mentionPick.open) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      closeMentionPick()
+      return
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const box = document.getElementById('chat-mentionpick')
+      const n = box ? box.querySelectorAll('[data-act="chat-mention-pick"]').length : 0
+      if (n) {
+        const cur = state.mentionPick.index || 0
+        state.mentionPick.index = (cur + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
+        paintMentionPick()
+      }
+      return
+    }
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+      const box = document.getElementById('chat-mentionpick')
+      const hit = box && box.querySelectorAll('[data-act="chat-mention-pick"]')[state.mentionPick.index || 0]
+      if (hit) {
+        e.preventDefault()
+        takeMention(hit.getAttribute('data-id'))
+        return
+      }
+    }
+  }
   if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return
   if (e.isComposing || e.keyCode === 229) return
   e.preventDefault()

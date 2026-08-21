@@ -198,14 +198,190 @@ export async function assignedIds(db: Db, owner: CatalogOwner, kind: 'skill' | '
 }
 
 /**
+ * 公司的 **Bot 模版**：全公司所有 Bot 共用的那一份底座。
+ *
+ * 公司这一层不再是「一批共享的 Bot」，而是这一份配置——员工自己建的每个 Bot 都长在
+ * 它上面。所以这里只有底座该有的东西（提示词、行为边界、记忆策略、挂哪些 Skill/MCP），
+ * 没有名字和头像：那是每个 Bot 自己的身份，不是公司统一的口径。
+ */
+export interface BotTemplate {
+  /**
+   * 版本号。每保存一次 +1，**不是时间戳**。
+   *
+   * 它是「跟没跟上」的唯一判据：席位实例拿着自己那一版去问 Gateway，数字对不上就
+   * 重新拉一遍目录。用 updatedAt 也能比，但那样时钟一歪（机器时区、库恢复）就会
+   * 出现「新的比旧的还早」，而一个只增的整数不会。
+   */
+  version: number
+  prompt: string
+  escalate: string
+  guards: Record<string, boolean>
+  memory: BotMemory
+  skills: string[]
+  mcps: string[]
+  updatedAt: number
+}
+
+export const BOT_TEMPLATE_NAME = 'Bot 模版'
+/** 追加提示词的上限。够写一段岗位说明，又不至于让谁把整本手册塞进去。 */
+export const MAX_EXTRA_PROMPT = 4000
+
+export function defaultBotTemplate(now = Date.now()): BotTemplate {
+  return {
+    version: 1,
+    prompt: DEFAULT_BOT_PROMPT,
+    escalate: '',
+    guards: { ...DEFAULT_BOT_GUARDS },
+    memory: { ...DEFAULT_BOT_MEMORY, kinds: [...DEFAULT_BOT_MEMORY.kinds] },
+    skills: [],
+    mcps: [],
+    updatedAt: now,
+  }
+}
+
+/** 库里那一行读成模版。没有这一行（新公司还没人打开过）就是出厂默认。 */
+export function botTemplateOf(item: CatalogItem | undefined): BotTemplate {
+  const base = defaultBotTemplate(item?.updatedAt ?? Date.now())
+  if (!item) return base
+  const def = objOf(item.definition)
+  const version = Number(def.version)
+  return {
+    version: Number.isFinite(version) && version >= 1 ? Math.trunc(version) : 1,
+    prompt: typeof def.prompt === 'string' && def.prompt.trim() ? def.prompt : base.prompt,
+    escalate: typeof def.escalate === 'string' ? def.escalate : '',
+    guards: botGuardsOf(def.guards),
+    memory: botMemoryOf(def.memory),
+    skills: idList(def.skills),
+    mcps: idList(def.mcps),
+    updatedAt: typeof def.updatedAt === 'number' ? def.updatedAt : item.updatedAt,
+  }
+}
+
+/** 对外的模版。模型那一对跟 Bot 一样由平台钉，列在这里只是让人看见用的是哪一个。 */
+export function publicTemplate(tpl: BotTemplate, pinned: { provider: string; model: string }) {
+  return { ...tpl, provider: pinned.provider, model: pinned.model }
+}
+
+/**
+ * 这家公司的模版行。没有就现建一份出厂默认的。
+ *
+ * 懒创建而不是在建公司时插一行：0003 只管得了迁移那一刻**已经存在**的公司，之后新建
+ * 的公司还是得有人补上这一份。补在读的时候，建公司那条路径就不必知道模版这回事。
+ *
+ * 并发下两个请求可能同时插——`catalog_one_template` 那条唯一索引会让后到的那个失败，
+ * 这时重查一次即可（对方刚插好的就是我们要的）。
+ */
+export async function ensureBotTemplate(db: Db, companyId: string): Promise<CatalogItem> {
+  const hit = await db.botTemplate(companyId)
+  if (hit) return hit
+  try {
+    return await db.insertCatalog({
+      kind: 'bot-template',
+      scope: 'company',
+      companyId,
+      name: BOT_TEMPLATE_NAME,
+      definition: defaultBotTemplate(),
+    })
+  } catch {
+    const again = await db.botTemplate(companyId)
+    if (!again) throw new HttpError(500, '模版创建失败')
+    return again
+  }
+}
+
+/**
+ * 读这家公司「合成一个 Bot 要用到的东西」：平台钉的模型 + 模版。
+ *
+ * 名册一次要合成十来个 Bot，每个都各读一遍设置和模版毫无意义——调用方取一次，
+ * 整批共用。
+ */
+export async function botContext(db: Db, companyId: string | null): Promise<{ pinned: { provider: string; model: string }; tpl: BotTemplate }> {
+  const pinned = await defaultBotModel(db)
+  if (!companyId) return { pinned, tpl: defaultBotTemplate() }
+  return { pinned, tpl: botTemplateOf(await db.botTemplate(companyId)) }
+}
+
+/**
+ * 收下一次模版改动，**版本号 +1**。
+ *
+ * 没传的字段沿用原值（PUT 但按 patch 收），传了空提示词也退回原值——底座不能是空的，
+ * 那等于全公司的 Bot 一起失去人设。
+ */
+export async function applyTemplatePatch(db: Db, companyId: string, cur: BotTemplate, body: Record<string, unknown>): Promise<BotTemplate> {
+  const owner = companyOwner(companyId)
+  const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : ''
+  return {
+    version: cur.version + 1,
+    prompt: prompt || cur.prompt,
+    escalate: body.escalate !== undefined ? String(body.escalate).trim() : cur.escalate,
+    guards: body.guards !== undefined ? botGuardsOf(body.guards, cur.guards) : cur.guards,
+    memory: body.memory !== undefined ? botMemoryOf(body.memory, cur.memory) : cur.memory,
+    skills: Array.isArray(body.skills) ? await assignedIds(db, owner, 'skill', body.skills) : cur.skills,
+    mcps: Array.isArray(body.mcps) ? await assignedIds(db, owner, 'mcp', body.mcps) : cur.mcps,
+    updatedAt: Date.now(),
+  }
+}
+
+/**
+ * 用户 Bot 自己那一段追加提示词。拼在模版提示词**后面**，不覆盖它。
+ *
+ * 覆盖式的「自定义提示词」会让模版形同虚设——第一个想改口气的人就把整段底座替掉了，
+ * 之后公司再改模版，他这台永远跟不上。追加则是可叠加的：底座换了，追加的还在。
+ */
+export function extraPromptOf(v: unknown, base = ''): string {
+  if (v === undefined) return base
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (s.length > MAX_EXTRA_PROMPT) throw new HttpError(400, `补充说明最多 ${MAX_EXTRA_PROMPT} 字`)
+  return s
+}
+
+/**
  * 对外的 Bot。
  *
  * provider / model 一律给平台指定的那一对，不给存里那一对：Bot 不自己挑模型，
  * 库里那两个字段只是上次保存时的快照。平台换了日常模型，所有 Bot——包括之后再没人
  * 动过的——下一次读就跟着换，不用挨个打开保存一遍。
+ *
+ * **用户 Bot 同理，底座是现取的。** 它库里只有身份那几个字段，提示词 / 行为边界 /
+ * 记忆 / Skill / MCP 全部来自传进来的模版，读一次合成一次。所以「模版改了，公司里
+ * 的 Bot 跟着变」不是一个要去触发的同步动作——没有副本，也就没有会漂的东西。
  */
-export function publicBot(item: CatalogItem, pinned: { provider: string; model: string }) {
+export function publicBot(item: CatalogItem, pinned: { provider: string; model: string }, tpl?: BotTemplate) {
   const def = botDefOf(item.definition)
+  if (item.scope === 'user') {
+    const template = tpl ?? defaultBotTemplate()
+    const extraPrompt = typeof def.extraPrompt === 'string' ? def.extraPrompt : ''
+    return {
+      id: item.id,
+      name: item.name,
+      description: typeof def.description === 'string' ? def.description : '',
+      prompt: [template.prompt, extraPrompt].filter(Boolean).join('\n\n'),
+      greeting: typeof def.greeting === 'string' ? def.greeting : '',
+      escalate: template.escalate,
+      guards: template.guards,
+      memory: template.memory,
+      icon: botIconOf(def.icon, 'company'),
+      provider: pinned.provider,
+      model: pinned.model,
+      enabled: def.enabled !== false,
+      /**
+       * **给运行面看的仍然是 company。** origin 会写进会话 JSONL 的信封
+       * （SessionOrigin），那是落盘格式；为了一个只有界面用得上的区别去动它，等于让
+       * 所有历史会话跟着迁一次。界面要分辨自建 / 公司 / 全局，看下面的 scope。
+       */
+      origin: 'company' as const,
+      scope: 'user' as const,
+      ownerId: item.accountId,
+      extraPrompt,
+      templateVersion: template.version,
+      createdAt: item.createdAt,
+      skills: template.skills,
+      mcps: template.mcps,
+      skillCount: template.skills.length,
+      mcpCount: template.mcps.length,
+      usage: '—',
+    }
+  }
   const skills = idList(def.skills)
   const mcps = idList(def.mcps)
   return {
@@ -222,6 +398,12 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
     model: pinned.model,
     enabled: def.enabled !== false,
     origin: item.scope === 'global' ? ('global' as const) : ('company' as const),
+    scope: item.scope === 'global' ? ('global' as const) : ('company' as const),
+    ownerId: null as string | null,
+    extraPrompt: '',
+    templateVersion: 0,
+    /** 0003 停用掉的老公司 Bot。界面据此标「已停用」并给出删除入口。 */
+    legacy: item.scope === 'company' && def.legacy === true,
     createdAt: item.createdAt,
     skills,
     mcps,

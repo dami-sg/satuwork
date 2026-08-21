@@ -121,7 +121,7 @@ const PATHS = {
   '/costs': { title: '账单' },
   '/catalog': { title: '公司目录' },
   '/profile': { title: '个人设置' },
-  '/bots': { title: 'Bot 配置', ownerTitle: '全局 Bot' },
+  '/bots': { title: 'Bot 模版', ownerTitle: '全局 Bot' },
   '/skills': { title: 'Skill 与 MCP', ownerTitle: '全局 Skill 与 MCP' },
   '/chat': { title: '对话' },
 }
@@ -288,6 +288,7 @@ const OWNER_NAV = [
   // 的」。页面本身没有撤——全局 Bot 目录还得有人维护，而 owner 是唯一改得动它的人，
   // 所以 allowedHrefs 里单独补了 /bots，直接输地址仍然进得去。
   { href: '/skills', label: '全局 Skill 与 MCP', icon: 'skills' },
+  { href: '/connectors', label: '连接器', icon: 'providers' },
 ]
 
 const ADMIN_NAV = [
@@ -296,9 +297,13 @@ const ADMIN_NAV = [
   { href: '/audit', label: '审计', icon: 'audit' },
   { href: '/billing', label: '账单', icon: 'billing' },
   { href: '/usage', label: '用量统计', icon: 'usage' },
-  { href: '/bots', label: 'Bot 配置', icon: 'bots' },
+  { href: '/bots', label: 'Bot 模版', icon: 'bots' },
   { href: '/skills', label: 'Skill 与 MCP', icon: 'skills' },
+  { href: '/connectors', label: '连接器', icon: 'providers' },
 ]
 
-/** 员工侧栏只有 Bot 名单（它由 chatRosterNav 单独画），所以这里是空的。 */
-const MEMBER_NAV = []
+/**
+ * 员工侧栏原来是空的（只有 Bot 名单，由 chatRosterNav 单独画）。连接器是第一个
+ * 进来的东西——它是「我这个人有哪些账号」，不属于任何一颗 Bot。
+ */
+const MEMBER_NAV = [{ href: '/connectors', label: '连接器', icon: 'providers' }]

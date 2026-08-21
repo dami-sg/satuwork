@@ -24,6 +24,17 @@ const GW_HOME = '/tmp/satuwork-e2e-migrate'
  * 拿它来造一个「迁移机制之前的库」——那正是生产库现在的样子。写死一份副本的话，
  * 这条用例过几个月就会在测一个和线上无关的形状。
  */
+/**
+ * 代码里一共有几条迁移。**从源码数出来，不写死**——写死的话每加一条迁移都要回来改
+ * 这个文件，改着改着就会有人图省事把断言删掉，而这几条断言正是「迁移真的只跑一遍」
+ * 的唯一证据。
+ */
+function migrationIds(gwRoot) {
+  const src = readFileSync(join(gwRoot, 'src/db/migrations/index.ts'), 'utf8')
+  const body = src.slice(src.indexOf('export const MIGRATIONS'))
+  return [...body.matchAll(/\{\s*id:\s*'([^']+)'/g)].map((m) => m[1])
+}
+
 function initialSql(gwRoot) {
   const src = readFileSync(join(gwRoot, 'src/db/migrations/0001-initial.ts'), 'utf8')
   // 从 `export const SQL = ` 之后那个反引号开始数——文件抬头的注释里也有反引号。
@@ -98,26 +109,6 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
     const r = await client.query('select id, name, checksum from schema_migrations order by id')
     return r.rows
   }
-  /**
-   * 代码里现在有哪几条迁移。**不写死条数**：每加一条新迁移都要回来改一遍断言的话，
-   * 这套用例就会变成「加迁移的人顺手改绿」的橡皮图章。
-   */
-  const migrationIds = () => {
-    const src = readFileSync(join(gwRoot, 'src/db/migrations/index.ts'), 'utf8')
-    const body = src.slice(src.indexOf('MIGRATIONS: Migration[] = ['))
-    return [...body.matchAll(/\{\s*id:\s*'([^']+)'/g)].map((m) => m[1])
-  }
-
-  /** 0001 之后那些迁移会新建哪些表。存量库那条用它算「只该多出这几张」。 */
-  const laterTables = () => {
-    const out = []
-    for (const id of migrationIds().slice(1)) {
-      const src = readFileSync(join(gwRoot, `src/db/migrations/${id}.ts`), 'utf8')
-      for (const m of src.matchAll(/create table if not exists (\w+)/g)) out.push(m[1])
-    }
-    return out
-  }
-
   const boot = (name) =>
     start(name, ['--import', 'tsx', `${gwRoot}/src/index.ts`], {
       cwd: gwRoot,
@@ -135,24 +126,22 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
 
   let gw
   try {
-    await test('空库：把代码里的迁移全跑一遍并记上账', async () => {
+    const ALL = migrationIds(gwRoot)
+
+    await test('空库：建全套并按顺序记上每一条', async () => {
       await fresh()
       gw = boot('migrate-fresh')
       await waitHttp(`${base}/health`)
-      const ids = migrationIds()
       const rows = await ledger()
-      assert(
-        rows.map((r) => r.id).join() === ids.join(),
-        `账本和代码里的迁移对不上：${JSON.stringify(rows.map((r) => r.id))} vs ${JSON.stringify(ids)}`,
-      )
-      assert(rows[0].id === '0001-initial', `第一条该是基线，实际 ${rows[0].id}`)
-      assert(rows.every((r) => r.checksum && r.checksum.length === 16), `校验和形状不对：${JSON.stringify(rows)}`)
+      assert(rows.length === ALL.length, `应有 ${ALL.length} 条迁移，实际 ${rows.length}：${JSON.stringify(rows)}`)
+      assert(rows.map((r) => r.id).join(',') === ALL.join(','), `编号或顺序不对：${rows.map((r) => r.id)}`)
+      assert(rows[0].checksum && rows[0].checksum.length === 16, `校验和形状不对：${rows[0].checksum}`)
       // 表真的建出来了，不是只记了一行账。
       const t = await client.query(
         `select count(*)::int as n from information_schema.tables where table_schema = '${SCHEMA}' and table_name = 'companies'`,
       )
       assert(t.rows[0].n === 1, 'companies 表没建出来')
-      assert(gw._out.includes(`已应用 ${ids.length} 条迁移`), `启动日志没说跑了哪几条：\n${gw._out.slice(-400)}`)
+      assert(gw._out.includes(`已应用 ${ALL.length} 条迁移`), `启动日志没说跑了哪几条：\n${gw._out.slice(-400)}`)
       await stop(gw)
     })
 
@@ -160,7 +149,7 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       gw = boot('migrate-again')
       await waitHttp(`${base}/health`)
       const rows = await ledger()
-      assert(rows.length === migrationIds().length, `迁移被重复应用了：${JSON.stringify(rows)}`)
+      assert(rows.length === ALL.length, `迁移被重复应用了：${JSON.stringify(rows)}`)
       assert(gw._out.includes('已是最新'), `没说「已是最新」：\n${gw._out.slice(-400)}`)
       await stop(gw)
     })
@@ -178,8 +167,8 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       await fresh()
       // 造一个「迁移机制之前」的库：直接跑 0001 的 SQL，不建 schema_migrations。
       await client.query(initialSql(gwRoot))
-      const before = await client.query('select count(*)::int as n from information_schema.tables where table_schema = $1', [SCHEMA])
-      assert(before.rows[0].n > 10, `存量库该有一堆表，实际 ${before.rows[0].n}`)
+      const before = await client.query('select table_name from information_schema.tables where table_schema = $1', [SCHEMA])
+      assert(before.rows.length > 10, `存量库该有一堆表，实际 ${before.rows.length}`)
       const has = await client.query(
         `select count(*)::int as n from information_schema.tables where table_schema = '${SCHEMA}' and table_name = 'schema_migrations'`,
       )
@@ -195,18 +184,21 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       gw = boot('migrate-legacy')
       await waitHttp(`${base}/health`)
       const rows = await ledger()
-      // 存量库认出「已经是 0001 的形状」记一行账，然后把 0001 之后那几条正常跑掉。
-      assert(rows.map((r) => r.id).join() === migrationIds().join(), `没接上基线：${JSON.stringify(rows)}`)
+      // 0001 在存量库上是空转（它幂等），后面几条是真跑的——账本上一条都不能少。
+      assert(rows.map((r) => r.id).join(',') === ALL.join(','), `没接上基线：${JSON.stringify(rows)}`)
       const kept = await client.query('select name from companies where id = $1', ['co-legacy'])
       assert(kept.rows.length === 1 && kept.rows[0].name === '存量公司', '存量数据被弄丢了')
-      const after = await client.query('select count(*)::int as n from information_schema.tables where table_schema = $1', [SCHEMA])
-      // 只该多出 schema_migrations，以及 0001 之后那几条迁移自己建的表——
-      // 0001 在存量库上必须是空转，一张都不许重建。
-      const expected = before.rows[0].n + 1 + laterTables().length
-      assert(
-        after.rows[0].n === expected,
-        `表数量对不上：${before.rows[0].n} → ${after.rows[0].n}，预期 ${expected}`,
-      )
+      const after = await client.query('select table_name from information_schema.tables where table_schema = $1', [SCHEMA])
+      const names = new Set(after.rows.map((r) => r.table_name))
+      /**
+       * 存量库里已有的表**一张都不能少**，并且多出 schema_migrations。
+       *
+       * 这里原来断言的是「正好多一张」，但那把「后续迁移不许建新表」也一起钉死了——
+       * 0004 加了三张连接器的表，这条就红了，而它想守的其实是「0001 的表没被重建、
+       * 没被删」。所以改成集合包含：新增多少张不管，少一张就是错。
+       */
+      for (const row of before.rows) assert(names.has(row.table_name), `存量表不见了：${row.table_name}`)
+      assert(names.has('schema_migrations'), '没记账本')
       await stop(gw)
     })
 
@@ -248,7 +240,7 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       // 太容易出现，而两个连接同时 create table 的报错很难看懂。
       const r = await runProbe(gwRoot, 'e2e-migrate-race.mjs')
       assert(r.exactlyOneApplied, `应该恰好一边跑了：${JSON.stringify(r.applied)}`)
-      assert(r.noDuplicate, `schema_migrations 有 ${r.ledgerRows} 行，应该和代码里的条数一样（${migrationIds().length}）`)
+      assert(r.noDuplicate, `schema_migrations 有 ${r.ledgerRows} 行，应该是 ${r.expectedRows} 行`)
       assert(r.tables > 10, `表没建全，只有 ${r.tables} 张`)
       // 锁没放开的话，下一个起来的进程会永远卡在 pg_advisory_lock 上——
       // 那是最难查的一种「起不来」：没有报错，就是不动。

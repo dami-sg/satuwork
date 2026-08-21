@@ -15,9 +15,9 @@
 
 1. Gateway 是唯一聊天 UI：侧栏是助理名册，主区是那个助理的长对话（产品形态，不是 25 屏后台）。Bot 无头，不发 SPA
 2. 一家公司一台 Debian 运行机器。部署按 **(account, botId) pair**，不是按账号。一个 Bot 进程恰好一个 Bot，进程内没有多名册
-3. 模型 / Skill / MCP / Bot 定义分 **全局** 和 **公司** 两层，存在 Gateway。部署实例钉目录里的那一颗（`SATUWORK_BOT_ID`）；未设该环境变量的本地进程才种 `default`
+3. 模型 / Skill / MCP 定义分 **全局** 和 **公司** 两层，存在 Gateway。Bot 多一层：公司那一层是**一份带版本号的模版**，员工在它上面建自己的 Bot。部署实例钉目录里的那一颗（`SATUWORK_BOT_ID`）；未设该环境变量的本地进程才种 `default`
 4. 浏览器只打 Gateway。Gateway 把该 pair 的 SSE / 发消息反代到席位实例。全文 JSONL 留在机器。Gateway 只存**索引**
-5. Gateway 做公司级审计（登录、改配置、用了哪个官方/公司 Bot）
+5. Gateway 做公司级审计（登录、改配置、改模版、谁建了哪个 Bot）
 
 **先不做：**
 
@@ -27,7 +27,7 @@
 - 重写 Cordis / 会话 JSONL / SQLite / pi-agent-core
 - 电脑（box）、子代理、群、项目
 - 一个进程里跑多个 Bot；聊天绕过 Gateway 直连实例
-- 把用户自建 Bot 默认同步到 Gateway（公司要共用，由管理员做成公司 Bot）
+- 把某个人的 Bot 分享给同事（自建的只有本人看得见；要全公司一致，改模版）
 
 ---
 
@@ -72,12 +72,12 @@ Gateway **不跑** 一轮对话，不当聊天的工作副本。浏览器聊天�
 | 运行机器 | Gateway 登记，配对接入 | 一家公司**可以有多台**。每台有一个「最多几个激活账号」的容量 |
 | 访问地址 | Gateway 分配 | 公司记录里的 `accessUrl`（派机器时写入）。**聊天 Host 是 Gateway**，不是这个地址 |
 | pair 实例 | 运行机器 | 一个 (account, botId) 一个 Bot 进程 + 一份 `$SATUWORK_HOME` + 一套瘦桌面。无头。同一账号的多个 pair **共用一个 Linux 用户**，因而共用 `~/work` |
-| Bot | 定义在 Gateway（全局/公司） | 侧栏里的一个人。有自己的长会话。部署实例只钉 `SATUWORK_BOT_ID` 那一颗 |
+| Bot | 定义在 Gateway（全局 / 员工自建） | 侧栏里的一个人。有自己的长会话。自建的长在**公司 Bot 模版**上，只有本人看得见。部署实例只钉 `SATUWORK_BOT_ID` 那一颗 |
 | 会话 | 只在实例上 | JSONL。根事件带 `botId` |
 | 会话索引 | Gateway | 能找到会话的指针，没有正文 |
 | 审计事件 | Gateway | 谁在何时做了什么，不是聊天全文 |
 
-席位按**账号**计，不按 Bot 实例。`owner` 不占席位。用全局 Bot 或公司 Bot、同一账号再部署几个 pair，**都不多占席位**。3 席 × N 个 Bot = 最多 3N 个进程。
+席位按**账号**计，不按 Bot 实例。`owner` 不占席位。用全局 Bot、或自己建几个 Bot 再各部署一个 pair，**都不多占席位**。3 席 × N 个 Bot = 最多 3N 个进程。
 
 ### 3.0 多机调度
 
@@ -168,8 +168,8 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 | 角色 | 账号类型 | 谁 | 在 Gateway 管什么 |
 |---|---|---|---|
 | `owner` | 系统管理员 | 平台，不属于任何公司 | 所有注册公司；所有注册用户与公司管理员；模型供应商与可用模型（密钥只在这里）；全站日常模型 / utility 模型；系统级 Skill / MCP / 默认 Bot；订阅套餐；全站统计；Bot 运行包版本 |
-| `admin` | 公司管理员 | 属于一家公司 | 本公司席位；本公司员工；对话审计（索引 + 按需拉全文）；费用；公司统计；公司 scope 的 Skill / MCP / Bot；给员工 deploy pair |
-| `member` | 公司员工 | 属于一家公司 | 只能看自己的统计。聊天走 Gateway UI，Gateway 反代到该 pair 的实例 |
+| `admin` | 公司管理员 | 属于一家公司 | 本公司席位；本公司员工；对话审计（索引 + 按需拉全文）；费用；公司统计；公司 scope 的 Skill / MCP；**公司 Bot 模版**（全公司 Bot 的底座）；给员工 deploy pair |
+| `member` | 公司员工 | 属于一家公司 | 只能看自己的统计。**自己建 Bot**（用公司模版当底座），自己部署、自己删。聊天走 Gateway UI，Gateway 反代到该 pair 的实例 |
 
 公司管理员**不管**供应商、不管日常/utility、不管套餐 SKU、不管全局目录。员工在 Gateway **没有**公司管理入口。
 
@@ -187,7 +187,7 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 - 公司、账号、角色（`owner` / `admin` / `member`）、套餐、席位
 - 机器池：派机器、收回、记录该公司的访问地址
 - 按 pair 部署：`PUT {machine.host}/seats/{seatId}` 交给机器管家，由它在本机建 linux 用户、起 `slim-desktop@` 与 `satuwork-bot@`
-- 目录：模型、Skill、MCP、Bot，每条带 `scope: global | company` 和 `companyId?`
+- 目录：模型、Skill、MCP、Bot，每条带 `scope: global | company | user`（`user` 的还带 `accountId`）。公司那一层的 Bot 配置是**一份模版**，不是一批 Bot
 - 平台密钥（模型 / 需鉴权的 MCP），由 `owner` 配置。**不**下发到浏览器，**也不下发到 Bot 磁盘/环境**。公司不再各自贴 key
 - 模型代理：`GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages`。鉴权是席位 API Key（`sk_sw_`）或登录 JWT；`sat_` 不行。上游 key 由 Gateway 按 provider 选取（平台密钥 > 环境变量）
 - 平台模型角色：`owner` 指定全站 **日常任务模型**（daily）和 **utility 模型**（轻量/快速），以及可用模型白名单。经平台 settings 读写，出现在 `GET /me` 里给 Bot 读。只存 provider + model，密钥仍按供应商留在 Gateway，不下发
@@ -221,15 +221,31 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 |---|---|---|---|
 | 全局 | `owner` | 所有公司的所有账号 | Gateway |
 | 公司 | 该公司 `admin` | 该公司账号 | Gateway |
-| 我的 | 仅本地未设 `SATUWORK_BOT_ID` 时种 `default` | 该进程 | 该实例 |
+| 我的 | 该员工自己 | **只有他本人** | Gateway |
+| 本地 | 仅本地未设 `SATUWORK_BOT_ID` 时种 `default` | 该进程 | 该实例 |
 
 目录种类：Bot、Skill、MCP、模型。模型密钥在平台，由 `owner` 配，不按公司、不按用户散落。可用模型由 `owner` 从 pi-ai 目录里放开。
+
+### Bot 模版（公司这一层）
+
+公司这一层**不再是一批共享的 Bot**，而是一份所有人共用的底座：
+
+| 在模版里（公司统一） | 在每个 Bot 上（各人自己） |
+|---|---|
+| 系统提示词、行为边界、记忆策略、挂哪些 Skill / MCP | 名字、头像、简介、开场白、一段**追加**提示词 |
+
+- 模版每保存一次，`version` **加一**。不是时间戳——时钟一歪（机器时区、库恢复）就会出现「新的比旧的还早」，只增的整数不会
+- 员工的 Bot **不存副本**：读的时候拿当前模版现合成（`publicBot`）。所以「模版改了要同步」不是一个要去触发的动作，没有副本也就没有会漂的东西
+- 追加提示词拼在模版提示词**后面**，不覆盖它。覆盖式的自定义会让模版形同虚设：第一个想改口气的人就把底座替掉了，之后公司再改模版他永远跟不上
+- 跑着的席位**自己跟上**：实例每分钟打一次 `/runtime/catalog/version`，指纹变了才重拉整份目录（那一份带 MCP 明文 token，不该每分钟流动一次）。基线取自上一次拉目录时一起给的 `stamp`，不是第一次探针的结果——否则「拉完目录」到「第一次探针」之间落地的改动会永远丢掉
+- admin 另有一个「立即下发」：把本公司已部署的席位挨个重铺。它会断掉正在进行的对话，所以不自动，只在「现在就要」和「那台机器上的东西不对」时按
+- 一个人最多建几个 Bot 有上限（`GATEWAY_MAX_USER_BOTS`，默认 10）：每个 Bot 是机器上的一个真实进程，不是一行配置
 
 **物化规则：**
 
 - 部署实例：`GET /runtime/catalog?botId=`，只钉这一颗（`origin: global|company` + 远程 id），会话写在本机。提示词和官方挂载只读。不种 `default`，不自建
 - 本地无 Gateway / 未设 `SATUWORK_BOT_ID`：可种 `origin: local` 的 `default`，便于单机验收
-- 公司要复用某个定义：admin 在 Gateway 做成公司 Bot，不是实例自动上传
+- 公司要统一口径：admin 改**公司 Bot 模版**，不是实例自动上传，也不是逐个 Bot 去改
 
 Skill / MCP：**定义**在 Gateway，**进程**跑在实例旁边。实例按当前账号可见集合成请求头里的工具表。公司密钥只下发到实例。
 
@@ -347,8 +363,8 @@ messageCount?
 
 - 登录 / 登出
 - 开通、停用账号或实例；pair 部署 / 批量更新版本
-- 新建 / 修改 / 删除公司 Bot、公司 Skill、公司 MCP、公司模型密钥
-- 账号部署某个全局 / 公司 Bot（钉到该 pair）
+- 新建 / 修改 / 删除公司 Skill、公司 MCP、公司模型密钥；改公司 Bot 模版；员工建 / 改 / 删自己的 Bot
+- 账号部署某个全局 Bot 或自己建的 Bot（钉到该 pair）
 - 套餐、席位变更
 - Gateway 拉取某条会话全文（谁、何时、哪条 sessionId）
 
@@ -479,7 +495,11 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/platform/accounts/:id` | `owner` 账号详情：`apiKey` / `accessToken`（`owner` 账号均为 null）。列表接口永不带这两项 |
 | CRUD | `/orgs/:id` `/orgs/:id/accounts` `/orgs/:id/plan` | 公司管理员：本公司与席位、员工 |
 | GET | `/catalog/models` `/catalog/skills` `/catalog/mcp` `/catalog/bots` | 可见的全局 + 本公司（员工只读） |
-| CRUD | `/orgs/:id/bots` `/orgs/:id/skills` `/orgs/:id/mcp` | 公司目录，公司 admin |
+| CRUD | `/orgs/:id/skills` `/orgs/:id/mcp` | 公司目录，公司 admin |
+| GET | `/orgs/:id/bots` | 该公司看得见的**全局** Bot，加上模版改版前留下、已停用的老公司 Bot（只读 / 可删）。员工自建的不在里面 |
+| GET/PUT | `/orgs/:id/bot-template` | 公司 Bot 模版。读：公司里所有人（员工建 Bot 那一屏要显示继承了什么）。写：公司 admin，每次保存 `version` 加一 |
+| POST | `/orgs/:id/bot-template/redeploy` | admin：把本公司已部署的席位挨个重铺一遍（会断对话）。平时不用——席位自己在盯版本号 |
+| CRUD | `/runtime/bots` `/runtime/bots/:id` | 员工自己的 Bot。POST/PATCH **只收身份字段**（名字、头像、简介、开场白、追加提示词），底座一概不收；DELETE 连席位一起拆 |
 | GET | `/orgs/:id/sessions` | 会话索引检索，公司 admin |
 | GET | `/orgs/:id/sessions/:sessionId` | **现场**向机器拉全文，Gateway 不存，公司 admin |
 | GET | `/orgs/:id/audit` | 公司审计，公司 admin |
@@ -489,7 +509,8 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/runtime/desktop?botId=` | 该 pair 的桌面（noVNC / 密码 / linuxUser / botVersion）。`botId` 必填 |
 | POST | `/runtime/deploy` | `{ botId }` 必填。给当前席位部署该 Bot |
 | POST | `/orgs/:id/accounts/:accountId/deploy` | admin：给该账号部署 `{ botId }` |
-| GET | `/runtime/catalog?botId=` | 实例拉目录。有 `botId` 时只返回那一颗。**只认席位 `sat_`**：这条会带出 MCP 明文 token 与 env，登录 JWT → 401 |
+| GET | `/runtime/catalog?botId=` | 实例拉目录。有 `botId` 时只返回那一颗。响应带 `templateVersion` 与 `stamp`。**只认席位 `sat_`**：这条会带出 MCP 明文 token 与 env，登录 JWT → 401 |
+| GET | `/runtime/catalog/version?botId=` | 「变了没有」的探针，只回 `templateVersion` + `stamp`。实例每分钟打一次，指纹没动就一个字节都不再取。同样只认 `sat_` |
 | PUT | `/platform/bot-releases/:version` | **上传**发布包（body 就是 tgz）。CI 用 `GATEWAY_PLATFORM_TOKEN`，人用 `owner` 登录态 |
 | POST | `/platform/orgs/:id/runtime/update` | 公司批量把已部署 pair 更新到某版本 |
 
@@ -635,7 +656,8 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 | 一个席位 = 一个账号 = 一个进程；一个进程里多个 Bot | 席位仍按账号计。部署按 pair。一个进程恰好一个 Bot。3 席 × N Bot = 3N 进程 |
 | 25 屏产品主路径 | 账号 / 套餐 / 目录 / 聊天名册都在 Gateway；实例无头 |
 | 一家公司一个 admin 后台，兼管供应商和日常/utility | 拆成 owner 控制台与公司后台。供应商、可用模型、日常/utility、套餐 SKU、系统级目录只在 owner；公司 admin 管席位/员工/审计/费用/公司目录；员工只看自己的统计 |
-| 用户自建 Bot 同步到 Gateway | 不同步；部署实例不自建。要共用就做成公司 Bot |
+| 用户自建 Bot 同步到 Gateway | 不同步；部署实例不自建。Bot 在 Gateway 上由本人建（`/runtime/bots`），只有他自己看得见 |
+| 公司这一层是一批共享的 Bot，admin 逐个配 | **已取代**：公司这一层是**一份带版本号的 Bot 模版**，员工在它上面建自己的 Bot；模版一改，全公司跟着走。改版前的公司 Bot 已停用留档，不删（它们名下有席位和会话索引） |
 | `/v1` 只收用户 JWT；`x-api-key` 也当 JWT | `/v1` 收 API Key（`sk_sw_`）或登录 JWT。`sat_` 不行。用量记在该用户 |
 | ~~`linuxUser` = `bot-` + sha256(`accountId` + `\n` + `botId`) 前 12 hex~~ | **已回退**：`linuxUser` = `sw-` + sha256(`accountId`) 前 12 hex，一员工一个账号；席位改由 `seatId` 区分。老机器上残留的 `bot-*` 账号与单元需人工清理（换前缀就是为了让新旧不互相覆盖） |
 | Gateway 用 SSH 部署席位，`machines.sshSecret` 明文存 root 凭据 | **已取代**：机器上常驻 `satuwork-manager`，Gateway 只有可吊销的 `smt_`。ssh* 五列已从库里删除 |

@@ -3,7 +3,7 @@ import type { SessionEvent } from '../session/types.ts'
 import { historySlice } from '../session/replay.ts'
 import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
-import type { ImageRef } from '../agent/index.ts'
+import type { ImageRef, Mention } from '../agent/index.ts'
 
 /**
  * Satuwork 的 HTTP API。无头运行时：不发 SPA，未知路径 JSON 404。
@@ -109,13 +109,22 @@ export function apply(ctx: Context, _config: Config = {}) {
   })
 
   /**
-   * 发消息。
+   * 发消息。三岔，不是两岔：
    *
-   * agent 正在跑就走 **steering**——工具跑到一半也能插话，不用等这一轮结束。
-   * 否则开新的一轮。前端不需要知道这个分支，一个入口就够。
+   * | 情况 | 走法 |
+   * |---|---|
+   * | 没在跑 | 新一轮 |
+   * | 在跑、消息**不带** `@` | steering——工具跑到一半也能插话 |
+   * | 在跑、消息**带** `@` | 入队，这一轮跑完自动接上 |
+   *
+   * 第三岔是必须的：steering 是插进正在进行的那一轮，而那一轮的工具表早就定了，
+   * 而 `@` 的全部意义就是改工具表。插进去的话点名会静静地不起作用。
+   *
+   * **前端需要知道走了哪一岔**（原来那句「不需要知道」不成立了）：排队的那条要画成
+   * 输入框顶上的一行 dock，不是消息气泡。
    */
   ctx.server.post('/api/sessions/:id/messages', async (req, res) => {
-    const body = (await req.json().catch(() => ({}))) as { text?: string; images?: unknown }
+    const body = (await req.json().catch(() => ({}))) as { text?: string; images?: unknown; mentions?: unknown }
     let images: ImageRef[]
     try {
       images = await imageRefs(ctx, body.images)
@@ -124,22 +133,61 @@ export function apply(ctx: Context, _config: Config = {}) {
       res.json({ error: (e as Error).message })
       return
     }
+    const mentions = mentionList(body.mentions)
     // 带图的消息可以没有正文——「这张图什么意思」本来就常常只有一张图。
-    if (!body.text?.trim() && !images.length) {
+    if (!body.text?.trim() && !images.length && !mentions.length) {
       res.status = 400
       res.json({ error: 'text 不能为空' })
       return
     }
-    if (await ctx.agents.steer(req.params.id, body.text ?? '', images)) {
-      res.json({ steered: true })
-      return
+    if (ctx.agents.isRunning(req.params.id)) {
+      if (mentions.length) {
+        try {
+          const row = ctx.agents.enqueue(req.params.id, body.text ?? '', images, mentions)
+          res.json({ queued: true, queueId: row.id })
+        } catch (e) {
+          // 队满。**明说**，不静默丢——用户以为发出去了才是最糟的。
+          res.status = 429
+          res.json({ error: (e as Error).message })
+        }
+        return
+      }
+      if (await ctx.agents.steer(req.params.id, body.text ?? '', images)) {
+        res.json({ steered: true })
+        return
+      }
+      // 刚好在这几毫秒里跑完了：落回下面开新一轮，别把这条丢掉。
     }
     // 不等 turn 跑完就返回：结果通过 SSE 推，HTTP 只负责「收到了」。
-    void ctx.agents.send(req.params.id, body.text ?? '', images).catch((e: Error) => {
+    void ctx.agents.send(req.params.id, body.text ?? '', images, mentions).catch((e: Error) => {
       console.error(`satuwork: agents.send 失败：${e.message}`)
       ctx.logger?.warn?.(`agents.send 失败：${e.message}`)
     })
     res.json({ accepted: true })
+  })
+
+  /** 排着的消息。刷新页面之后 dock 靠它恢复。 */
+  ctx.server.get('/api/sessions/:id/queue', async (req, res) => {
+    res.json({ queued: ctx.agents.queued(req.params.id) })
+  })
+
+  /**
+   * 取消一条排队的消息。
+   *
+   * 已经出队开跑的返回 **409**，不是静默成功：用户点取消的同一刻这一轮正好结束、队首
+   * 被取出开跑，是必然会撞上的竞态。回 200 的话他会以为取消成功了，然后眼看着它跑起来。
+   */
+  ctx.server.delete('/api/sessions/:id/queue/:queueId', async (req, res) => {
+    const r = ctx.agents.cancelQueued(req.params.id, req.params.queueId)
+    if (r === 'cancelled') {
+      res.json({ cancelled: true })
+      return
+    }
+    // 两种失败分开报：**「已经开跑」和「压根没这条」对用户是完全不同的两句话**。
+    // 合成一句「已经开始执行」的话，两个标签页各点一次取消，后点的那个会以为自己
+    // 拦不住一条其实早就被取消掉的消息。
+    res.status = r === 'started' ? 409 : 404
+    res.json({ error: r === 'started' ? '已经开始执行' : '没有这条排队消息' })
   })
 
   /** 中止当前这一轮。 */
@@ -328,6 +376,21 @@ function sse(
           if (queue) queue.push(event)
           else send(event)
         })
+        /**
+         * 排队的消息有变。
+         *
+         * 走同一条流，因为界面要画的是同一屏；而且**队列的真相在这边**——浏览器刷新
+         * 之后必须能把 dock 恢复出来，靠它自己记就会出现「界面上没有但它还是跑了」。
+         * 帧的形状和 `replay/done` 一样是个非会话事件，客户端按 type 分流。
+         */
+        const offQueue = ctx.on('queue/change', (id: string, queued: unknown) => {
+          if (id !== sessionId) return
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'queue/change', queued })}\n\n`))
+          } catch {
+            /* 流已经关了，下一次心跳会清掉 */
+          }
+        })
 
         let replayed = 0
         let firstSeq: number | null = null
@@ -356,6 +419,7 @@ function sse(
             encoder.encode(`event: error\ndata: ${JSON.stringify({ error: (e as Error).message })}\n\n`),
           )
           off()
+          offQueue()
           return controller.close()
         }
 
@@ -387,7 +451,10 @@ function sse(
           `sse: 会话 ${sessionId} 接上，after=${after}，tail=${tail}，重放 ${replayed} 条，live=${live}，还有更早的=${hasMore}`,
         )
         controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ type: 'replay/done', live, firstSeq, hasMore })}\n\n`),
+          encoder.encode(
+            // 队列一起带上：刷新页面之后 dock 要能原样回来。
+            `data: ${JSON.stringify({ type: 'replay/done', live, firstSeq, hasMore, queued: ctx.agents.queued(sessionId) })}\n\n`,
+          ),
         )
 
         const pending = queue
@@ -422,6 +489,7 @@ function sse(
         res._res?.on?.('close', () => {
           clearInterval(beat)
           off()
+          offQueue()
           try {
             controller.close()
           } catch {}
@@ -436,4 +504,24 @@ function sse(
       },
     },
   )
+}
+
+/**
+ * 请求体里的 mentions → 结构。
+ *
+ * **不做归属校验**：这一条是 Gateway 的活（它才知道这把连接属不属于这个账号）。
+ * 席位这边只认形状——它信的是那张 `sat_` 票，票背后是谁由 Gateway 说了算。
+ */
+function mentionList(raw: unknown): Mention[] {
+  if (!Array.isArray(raw)) return []
+  const out: Mention[] = []
+  for (const item of raw.slice(0, 10)) {
+    const o = (item ?? {}) as Record<string, unknown>
+    const id = String(o.id ?? '').trim()
+    const kind = String(o.kind ?? 'connector')
+    if (!id) continue
+    if (kind !== 'connector' && kind !== 'bot' && kind !== 'routine') continue
+    out.push({ kind, id, label: String(o.label ?? '').slice(0, 64) })
+  }
+  return out
 }

@@ -130,14 +130,19 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
     const otherTok = otherLogin.json.token
     const member2Id = m2.json.account.id
 
-    const botARes = await req(gwBase, 'POST', `/orgs/${orgId}/bots`, {
-      token: adminTok,
+    /**
+     * 这两个用**全局 Bot**：下面要验的是「两个人部署同一个 botId，各自拿到不同的
+     * linuxUser 和槽」，而员工自己建的 Bot 只有本人看得见，天然没有「同一个 botId」
+     * 这回事。全局 Bot 是所有人都用得上的那一种，正合适。
+     */
+    const botARes = await req(gwBase, 'POST', '/platform/bots', {
+      token: ownerTok,
       body: { name: '席位 Bot A' },
     })
     assert(botARes.status === 201, `botA ${botARes.status} ${botARes.text}`)
     const botA = botARes.json.bot.id
-    const botBRes = await req(gwBase, 'POST', `/orgs/${orgId}/bots`, {
-      token: adminTok,
+    const botBRes = await req(gwBase, 'POST', '/platform/bots', {
+      token: ownerTok,
       body: { name: '席位 Bot B' },
     })
     assert(botBRes.status === 201, `botB ${botBRes.status} ${botBRes.text}`)
@@ -954,7 +959,8 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         })
         assert(paired.status === 201, `配对 ${paired.status} ${paired.text}`)
 
-        const bot = await req(gwBase, 'POST', `/orgs/${co.company.id}/bots`, {
+        // 管理员也是员工：自己给自己建一个（公司这一层只剩模版，不再建 Bot）。
+        const bot = await req(gwBase, 'POST', '/runtime/bots', {
           token: co.token,
           body: { name: '注定被删的 Bot' },
         })
@@ -976,6 +982,70 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         )
         const after = await req(gwBase, 'GET', `/orgs/${co.company.id}`, { token: ownerTok })
         assert(after.status === 404, `公司应该删掉了，得到 ${after.status}`)
+      } finally {
+        fake.closeAllConnections?.()
+        await new Promise((r) => fake.close(() => r()))
+      }
+    })
+
+    /**
+     * 删一颗 Bot 要连它名下的席位一起拆。
+     *
+     * 只删目录项的话，机器上那套 systemd 单元还在跑、还占着 slot 和端口，而库里已经
+     * 没有任何东西指向它了——下一个人的席位于是起不来，现场没有一条线索指回这次删除。
+     * 全局 Bot 尤其要命：它可能被好几家公司各自部署过，按公司查会漏掉别家那些。
+     */
+    await test('删 Bot 会把它名下的席位一起拆掉，不是只删目录项', async () => {
+      const seen = []
+      const fake = createServer((r, res) => {
+        seen.push(`${r.method} ${r.url}`)
+        res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
+      })
+      await new Promise((ok, bad) => {
+        fake.once('error', bad)
+        fake.listen(8545, '127.0.0.1', ok)
+      })
+      try {
+        const co = await createCompany(req, gwBase, {
+          ownerToken: ownerTok,
+          email: 'admin@delbot.test',
+          password: 'correct-horse',
+          companyName: 'DelBot',
+          slug: 'delbot',
+        })
+        const code = await req(gwBase, 'POST', `/platform/orgs/${co.company.id}/pairing-code`, { token: ownerTok })
+        assert(code.status === 201, `配对码 ${code.status} ${code.text}`)
+        const paired = await req(gwBase, 'POST', '/machines/pair', {
+          body: { code: code.json.code, managerPort: 8545, managerVersion: '1.0.0', protocol: 1 },
+        })
+        assert(paired.status === 201, `配对 ${paired.status} ${paired.text}`)
+
+        const gBot = await req(gwBase, 'POST', '/platform/bots', { token: ownerTok, body: { name: '要被删的全局 Bot' } })
+        assert(gBot.status === 201, `建全局 bot ${gBot.status} ${gBot.text}`)
+        const deployed = await req(gwBase, 'POST', '/runtime/deploy', {
+          token: co.token,
+          body: { botId: gBot.json.bot.id },
+        })
+        assert(deployed.status === 200, `部署 ${deployed.status} ${deployed.text}`)
+        const seatId = deployed.json.seatId
+
+        seen.length = 0
+        const del = await req(gwBase, 'DELETE', `/platform/bots/${gBot.json.bot.id}`, { token: ownerTok })
+        assert(del.status === 200, `删 bot ${del.status} ${del.text}`)
+        assert(del.json.seats === 1, `回执没说拆了几个席位：${del.text}`)
+        assert(
+          seen.some((x) => x === `DELETE /seats/${seatId}`),
+          `管家没收到拆席位的请求，只看到 ${JSON.stringify(seen)}`,
+        )
+        // 库里那一行也得没：留着的话 slot 立刻会被下一个账号分走，而端口还占着。
+        const rt = await req(gwBase, 'GET', `/platform/orgs/${co.company.id}/accounts/${co.account.id}/runtime`, {
+          token: ownerTok,
+        })
+        assert(rt.status === 200, `runtime ${rt.status} ${rt.text}`)
+        assert(
+          !(rt.json.runtimes || []).some((x) => x.seatId === seatId),
+          `席位行还在：${rt.text}`,
+        )
       } finally {
         fake.closeAllConnections?.()
         await new Promise((r) => fake.close(() => r()))

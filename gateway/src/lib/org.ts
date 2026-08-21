@@ -5,7 +5,7 @@
  */
 import { EMAIL_RE, PHONE_RE, SLUG_RE, strField } from './validate.ts'
 import { HttpError } from '../http.ts'
-import { type Account, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRole, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, type Plan, type PlatformSettings, type Role, type SessionIndex, parsePriceMultiplier } from '../db.ts'
+import { type Account, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRole, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, type Plan, type PlatformSettings, type Role, type SessionIndex, parseConnectorPricing, parsePriceMultiplier } from '../db.ts'
 
 export function emailOf(raw: string): string {
   const email = raw.trim().toLowerCase()
@@ -88,6 +88,7 @@ export function publicSettings(s: CompanySettings | PlatformSettings): PlatformS
     utility: { provider: s.utility.provider, model: s.utility.model },
     enabledModels: Array.isArray((s as PlatformSettings).enabledModels) ? (s as PlatformSettings).enabledModels : [],
     priceMultiplier: parsePriceMultiplier((s as PlatformSettings).priceMultiplier),
+    connectorPricing: parseConnectorPricing((s as PlatformSettings).connectorPricing),
     managerVersion: (s as PlatformSettings).managerVersion ?? '',
   }
 }

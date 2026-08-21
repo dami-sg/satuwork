@@ -139,6 +139,15 @@ const chatLive = new Map()
  */
 const chatPages = new Map()
 
+/**
+ * 每条会话排着的消息：`[{ id, text, mentions, images, createdAt }]`。
+ *
+ * **真相在席位那边**，这里只是它推过来的一份副本。放浏览器里自己记的话，刷新一次
+ * 就丢、两个标签页各排各的，而消息其实已经发出去了——「界面上没有但它还是跑了」是
+ * 最糟的一种状态。
+ */
+const chatQueues = new Map()
+
 /** 打开一条会话先要几轮。人来是看最近说了什么的，更早的等他往上翻。 */
 const CHAT_TAIL_TURNS = 20
 
@@ -375,6 +384,11 @@ async function ensureChatSession(botId) {
 
 async function loadChatPage() {
   state.chatCtxOpen = false
+  // 换了会话，上一条还没发出去的 `@` 不该跟过来——它指的是「这一条消息带谁」。
+  state.chatMentions = []
+  state.mentionPick = null
+  // 候选清空：换 Bot 之后连接没变，但换公司/换人之后就变了，重开一页重拉一次不亏。
+  state.mentionOptions = null
   // loadRuntimeBots 由 loadPage 统一拉（名单是全局侧栏，不只这一页要）。
   await loadRuntimeMachine()
   // 上下文占比要知道模型的窗口有多大。新日志的 request/header 自带，老日志没有，
@@ -596,8 +610,22 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
             continue
           }
           if (!ev || typeof ev !== 'object') continue
+          /**
+           * 排队的消息有变。**不是会话事件**，不进事件桶——它还没发生，进了桶就会被
+           * 当成历史画成气泡。它只画在输入框顶上那一行 dock 里。
+           */
+          if (ev.type === 'queue/change') {
+            chatQueues.set(sessionId, Array.isArray(ev.queued) ? ev.queued : [])
+            if (isActive()) paintChatQueue()
+            continue
+          }
           if (ev.type === 'replay/done') {
             disarmStall()
+            // 刷新页面之后 dock 要能原样回来：队列在席位那边，这里只是接住它。
+            if (Array.isArray(ev.queued)) {
+              chatQueues.set(sessionId, ev.queued)
+              if (isActive()) paintChatQueue()
+            }
             // bot 明说历史放完了。它不是会话事件，不进事件桶。
             // 顺带说了这条会话此刻在不在跑——这句是权威，压过扫出来的那个结论。
             if (typeof ev.firstSeq === 'number' || typeof ev.hasMore === 'boolean') {
@@ -2212,6 +2240,8 @@ function chatHeadInline() {
   const menu =
     state.menu === 'chat'
       ? `<div class="satu-menu" data-flip="${String(Boolean(state.menuFlip))}">
+          ${/* 自己建的那种才给设置入口：别人的、全局的，这一页上没有可改的东西。 */ ''}
+          ${isMyBot(bot) ? `<button type="button" class="satu-menuitem" data-act="go" data-href="/bots/${esc(bot.id)}">${t('Bot 设置')}</button>` : ''}
           <button type="button" class="satu-menuitem" data-act="chat-copy-all">${t('复制全文')}</button>
           <button type="button" class="satu-menuitem" data-act="chat-export">${t('导出 Markdown')}</button>
         </div>`
@@ -2238,7 +2268,7 @@ function chatPage() {
   const banner = runtimeDownBanner()
   if (!selected) {
     return `<div class="gw-chat"><section class="gw-chat-main">${banner}
-      <div class="gw-chat-empty-main"><p>${bots.length ? t('从左边选一个 Bot 开始对话。') : t('还没有 Bot。公司后台配置并上线后会出现在这里。')}</p></div>
+      <div class="gw-chat-empty-main"><p>${bots.length ? t('从左边选一个 Bot 开始对话。') : t('还没有 Bot。点左下角「新建 Bot」建一个，它会用公司的 Bot 模版当底座。', 'No bots yet. Use “New bot” at the bottom left — it will run on your company template.')}</p></div>
     </section></div>`
   }
   // 席位没上线：正文换成一块「去部署」，连输入框一起不渲染（见 chatDeployPrompt）。
@@ -2257,7 +2287,10 @@ function chatPage() {
           <button type="button" class="sw-jump" id="chat-jump" data-act="chat-jump" hidden>${ICON_DOWN}${t('回到底部')}</button>
         </div>
         <div class="sw-composer">
+          <div class="sw-queue" id="chat-queue" hidden></div>
           <form id="chat-form" class="sw-composer-box">
+            <div class="sw-pickbox" id="chat-mentionpick" hidden></div>
+            <div class="sw-files" id="chat-mentions" hidden></div>
             <div class="sw-files" id="chat-files" hidden></div>
             <textarea id="chat-input" class="satu-prompt satu-grow" rows="1"
               placeholder="${esc(t('输入消息'))}">${esc(state.chatDraft || '')}</textarea>
@@ -2305,6 +2338,91 @@ function chatPage() {
  * SATUWORK_UPLOAD_MAX。
  */
 const CHAT_PREVIEW_MAX = 25 * 1024 * 1024
+
+/**
+ * 排队 dock：输入框顶上那一行小字。
+ *
+ * **一条一行，纯文字，不展开附件**——图片不出缩略图，`@` 出来的药丸也不画。它是
+ * 「等会儿要说的话」的一个提醒，不是消息气泡的预演；把气泡那一套搬上去，输入框会被
+ * 顶掉半屏。多条就多行，最多画 3 行，再多第一行变成「还有 N 条」。
+ */
+function paintChatQueue() {
+  const box = document.getElementById('chat-queue')
+  if (!box) return
+  const rows = chatQueues.get(state.chatSessionId) || []
+  box.hidden = !rows.length
+  if (!rows.length) {
+    box.innerHTML = ''
+    return
+  }
+  const shown = rows.slice(-3)
+  const hidden = rows.length - shown.length
+  box.innerHTML =
+    (hidden ? `<div class="sw-queue-more">${esc(t(`还有 ${hidden} 条`))}</div>` : '') +
+    shown
+      .map((r) => {
+        const line = (r.text || '').replace(/\s+/g, ' ').trim() || t('（只有附件）')
+        return `<div class="sw-queue-row">
+          <span class="sw-queue-dot" aria-hidden="true"></span>
+          <span class="sw-queue-text">${esc(line)}</span>
+          <button type="button" class="sw-file-x" data-act="chat-queue-cancel" data-id="${esc(r.id)}"
+            aria-label="${esc(t('取消'))}">${ICON_X}</button>
+        </div>`
+      })
+      .join('')
+}
+
+/**
+ * 已经选中的 `@`：输入框上方那排药丸。
+ *
+ * 和 dock 不是一回事——这排是**这一条还没发出去的**消息带着谁，dock 是**已经发出去、
+ * 排着队**的那几条。
+ */
+function paintChatMentions() {
+  const box = document.getElementById('chat-mentions')
+  if (!box) return
+  const picked = state.chatMentions || []
+  box.hidden = !picked.length
+  box.innerHTML = picked
+    .map(
+      (m, i) => `<span class="sw-mention">
+        <span>${esc(m.label)}</span>
+        <button type="button" class="sw-file-x" data-act="chat-mention-drop" data-i="${i}"
+          aria-label="${esc(t('移除'))} ${esc(m.label)}">${ICON_X}</button>
+      </span>`,
+    )
+    .join('')
+}
+
+/** `@` 选单。候选来自 /mentions（现在只有连接器；Bot 和 Routine 以后往里加）。 */
+function paintMentionPick() {
+  const box = document.getElementById('chat-mentionpick')
+  if (!box) return
+  const pick = state.mentionPick
+  if (!pick || !pick.open) {
+    box.hidden = true
+    box.innerHTML = ''
+    return
+  }
+  const q = (pick.q || '').toLowerCase()
+  const taken = new Set((state.chatMentions || []).map((m) => m.id))
+  const list = (state.mentionOptions || [])
+    .filter((m) => !taken.has(m.id))
+    .filter((m) => !q || m.label.toLowerCase().includes(q) || (m.toolkit || '').includes(q))
+    .slice(0, 8)
+  box.hidden = false
+  box.innerHTML = list.length
+    ? list
+        .map(
+          (m, i) => `<button type="button" class="sw-pick${i === (pick.index || 0) ? ' is-on' : ''}"
+        data-act="chat-mention-pick" data-id="${esc(m.id)}">
+        <span>${esc(m.label)}</span>
+        ${m.mentionOnly ? `<small>${esc(t('仅 @ 时可用'))}</small>` : ''}
+      </button>`,
+        )
+        .join('')
+    : `<div class="sw-pick-empty">${esc(t('没有可用的连接。去「连接器」装一个再连上。'))}</div>`
+}
 
 function paintChatFiles() {
   const box = document.getElementById('chat-files')
@@ -2420,10 +2538,14 @@ function pickImages(files) {
 async function sendChat() {
   const text = (state.chatDraft || '').trim()
   const files = state.chatFiles || []
+  const mentions = state.chatMentions || []
   const sessionId = state.chatSessionId
-  if ((!text && !files.length) || !sessionId || state.chatUploading) return
+  if ((!text && !files.length && !mentions.length) || !sessionId || state.chatUploading) return
 
   state.chatDraft = ''
+  state.chatMentions = []
+  closeMentionPick()
+  paintChatMentions()
   const input = document.getElementById('chat-input')
   if (input) {
     input.value = ''
@@ -2439,10 +2561,12 @@ async function sendChat() {
     try {
       for (const f of files) uploaded.push(await uploadChatFile(sessionId, f.file))
     } catch (err) {
-      // 传失败就把草稿和附件原样还回去，别让人重新选一遍文件。
+      // 传失败就把草稿、附件和点名原样还回去，别让人重新选一遍文件、重新 @ 一遍。
       state.chatUploading = false
       state.chatDraft = text
+      state.chatMentions = mentions
       paintChatFiles()
+      paintChatMentions()
       flash('err', t('附件没传上去：') + err.message)
       render()
       return
@@ -2466,15 +2590,42 @@ async function sendChat() {
   state.chatPending = (state.chatPending || []).concat(pending)
   paintChat()
   try {
-    await api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/messages', {
+    const r = await api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/messages', {
       text: body,
       ...(images.length ? { images } : {}),
+      ...(mentions.length ? { mentions: mentions.map((m) => ({ kind: m.kind, id: m.id, label: m.label })) } : {}),
     })
+    /**
+     * 排队了：把刚画上的那条气泡撤掉，改画成输入框顶上的一行。
+     *
+     * 席位那边紧接着会经 SSE 推一次 `queue/change`，这里先自己填一行是为了「点了发送
+     * 立刻有反应」——那一跳来回几百毫秒，中间屏幕上什么都没有的话，人会再按一次。
+     */
+    if (r && r.queued) {
+      state.chatPending = (state.chatPending || []).filter((p) => p !== pending)
+      const rows = chatQueues.get(sessionId) || []
+      chatQueues.set(sessionId, rows.concat({ id: r.queueId, text: body, mentions, createdAt: Date.now() }))
+      paintChat()
+      paintChatQueue()
+    }
+    // Gateway 把失效的点名剔掉了（断了、被公司禁了、根本不是我的）。人要知道为什么，
+    // 不然那几颗药丸就是无声消失的。
+    if (r && Array.isArray(r.droppedMentions) && r.droppedMentions.length) {
+      flash('err', t(`有 ${r.droppedMentions.length} 个 @ 已经失效，这一条没带上它们`))
+      render()
+    }
   } catch (err) {
     // 没发出去就把这条回显撤掉，别让屏幕上留一条其实不存在的消息。
     state.chatPending = (state.chatPending || []).filter((p) => p !== pending)
     // 文件已经传上去了，退回来的只有草稿——附件不还，还了会传第二遍。
     state.chatDraft = text
+    /**
+     * **点名也要还。** 只还正文的话，人按重发时这一条不带任何 `@`——而
+     * `mentionOnly` 的连接（比如个人邮箱）这一轮根本不在工具表里，Bot 会回一句
+     * 「没有可用的邮箱」，用户却以为自己点过名了。
+     */
+    state.chatMentions = mentions
+    paintChatMentions()
     if (uploaded.length) flash('err', t('附件已经在工作区里了，但这条消息没发出去。'))
     if (String(err.message || '').includes('实例还没上线')) state.runtimeError = '实例还没上线'
     else if (!uploaded.length) flash('err', err.message)
@@ -2559,6 +2710,90 @@ async function deployMyRuntime(botId, opts = {}) {
     flash('err', err.message)
   } finally {
     state.deploying = false
+    render()
+  }
+}
+
+
+/* ── `@` 点名 ──────────────────────────────────────────────────────────
+   输入框里打 `@` 弹选单，选中之后变成输入框上方的一颗药丸——**不是**往正文里塞一串
+   字。点名是结构化的东西：它决定这一轮的工具表（`mentionOnly` 的连接只有被点名才
+   出现），而一句「我提到了 Gmail」和「用户点名了这把连接」在进程那边是两回事。 */
+
+/** 光标前面刚打出来的 `@xxx`。不在词首（前面挨着字母）不算，邮箱地址不该触发选单。 */
+function mentionQueryAt(el) {
+  if (!el) return null
+  const pos = el.selectionStart ?? el.value.length
+  const before = el.value.slice(0, pos)
+  const at = before.lastIndexOf('@')
+  if (at < 0) return null
+  const prev = at > 0 ? before[at - 1] : ' '
+  if (!/[\s(（]/.test(prev)) return null
+  const word = before.slice(at + 1)
+  if (/[\s\n]/.test(word)) return null
+  return { at, q: word }
+}
+
+function closeMentionPick() {
+  state.mentionPick = null
+  paintMentionPick()
+}
+
+async function openMentionPick(q) {
+  /**
+   * **只在选单从关到开的那一下重拉候选**，不是每敲一个字拉一次，也不是一整页只拉一次。
+   *
+   * 一页只拉一次的话，人在另一个标签页刚连上的账号 `@` 不出来，只能刷新页面；每敲一个
+   * 字拉一次又太吵。开合这一下正好：`/mentions` 就是两条查询，而人打开选单时本来就
+   * 在等一小会儿。
+   */
+  const opening = !state.mentionPick
+  state.mentionPick = { open: true, q, index: 0 }
+  paintMentionPick()
+  if (opening || !state.mentionOptions) {
+    try {
+      state.mentionOptions = (await api('GET', '/mentions')).mentions || []
+    } catch {
+      state.mentionOptions = state.mentionOptions || []
+    }
+    // 拉回来的时候人可能已经把选单关掉了（打了个空格）。那就别再画。
+    if (state.mentionPick) paintMentionPick()
+  }
+}
+
+/** 选中一个：把输入框里那截 `@xxx` 抹掉，改成上方的一颗药丸。 */
+function takeMention(id) {
+  const one = (state.mentionOptions || []).find((m) => m.id === id)
+  if (!one) return
+  const el = document.getElementById('chat-input')
+  const hit = mentionQueryAt(el)
+  if (el && hit) {
+    const pos = el.selectionStart ?? el.value.length
+    el.value = el.value.slice(0, hit.at) + el.value.slice(pos)
+    el.selectionStart = el.selectionEnd = hit.at
+    state.chatDraft = el.value
+  }
+  const picked = state.chatMentions || []
+  if (!picked.some((m) => m.id === id)) state.chatMentions = picked.concat(one)
+  closeMentionPick()
+  paintChatMentions()
+  el?.focus()
+}
+
+/** 取消一条排队的消息。已经开跑的席位回 409——那时如实说，不装作取消成功。 */
+async function cancelQueued(id) {
+  const sessionId = state.chatSessionId
+  if (!sessionId) return
+  try {
+    await api('DELETE', `/runtime/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(id)}`)
+    chatQueues.set(sessionId, (chatQueues.get(sessionId) || []).filter((r) => r.id !== id))
+    paintChatQueue()
+  } catch (err) {
+    // 409 = 这一刻它正好被取出开跑了。把它从 dock 上撤下来——它已经不在队里了，
+    // 接下来会以正常消息的样子从 SSE 上过来。
+    chatQueues.set(sessionId, (chatQueues.get(sessionId) || []).filter((r) => r.id !== id))
+    paintChatQueue()
+    flash('err', err.status === 409 ? t('这条已经开始执行了') : err.message)
     render()
   }
 }

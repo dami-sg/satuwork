@@ -12,6 +12,9 @@ import { attachMachines } from './routes/machines.ts'
 import { attachCompany } from './routes/company.ts'
 import { attachRuntime } from './routes/runtime.ts'
 import { attachCatalog } from './routes/catalog.ts'
+import { attachConnectors } from './routes/connectors.ts'
+import { attachConnectorMcp } from './routes/mcp.ts'
+import { attachBotTemplate } from './routes/bot-template.ts'
 import { attachSessions } from './routes/sessions.ts'
 import { attachInternal } from './routes/internal.ts'
 
@@ -44,6 +47,9 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   attachCompany(router, ctx)
   attachRuntime(router, ctx)
   attachCatalog(router, ctx)
+  attachConnectors(router, ctx)
+  attachConnectorMcp(router, ctx)
+  attachBotTemplate(router, ctx)
   attachSessions(router, ctx)
   attachInternal(router, ctx)
 }

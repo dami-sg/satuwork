@@ -1,0 +1,113 @@
+/**
+ * `@` 点名与排队。探针在 bot/e2e-mentions.mjs。
+ *
+ * 这一组守的是四条不能塌的线：
+ *
+ *   1. **落盘是结构，进模型是话。** JSONL 里是 `mention` 块，模型收到的是一行
+ *      `[本轮指定：…]`。反过来（把那句话写进正文）就再也分不清「用户点名了这把连接」
+ *      和「用户碰巧打了这几个字」。
+ *   2. **`mentionOnly` 平时不在工具表里。** 个人邮箱得是「我点名了你才能碰」。
+ *   3. **点名是点名，不是限定。** 别的工具一个都不能少，否则「@Gmail 看邮件，然后在
+ *      Notion 建个页面」就成了半个功能。
+ *   4. **带 `@` 的消息排队，不插话。** steering 插进的那一轮工具表早就定了，而 `@` 的
+ *      全部意义就是改工具表。
+ */
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+
+function runProbe(root) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-mentions.mjs')], {
+      cwd: join(root, 'bot'),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, GATEWAY_URL: '', GATEWAY_API_KEY: '', SATUWORK_BOT_ID: '' },
+    })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (err += d))
+    child.on('error', reject)
+    child.on('close', (code) => {
+      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
+      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
+      try {
+        resolve(JSON.parse(line.slice('__RESULT__'.length)))
+      } catch (e) {
+        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
+      }
+    })
+  })
+}
+
+export async function runMentions({ root, test, assert, log }) {
+  log('\n# mentions')
+  let r
+  await test('探针跑得完', async () => {
+    r = await runProbe(root)
+    assert(r && r.plain && r.mentioned && r.jsonl && r.queue && r.window && r.cancelKinds, `结果不完整：${JSON.stringify(r)}`)
+  })
+
+  await test('不点名：「仅 @ 时可用」的那把不在工具表里', () => {
+    assert(r.plain.有默认那把, '普通连接的工具应该在')
+    assert(r.plain.没有仅点名那把, 'mentionOnly 的进了默认工具表，那这个开关就是摆设')
+    assert(r.plain.有别的工具, '别的工具无端少了')
+  })
+
+  await test('点名之后：它进来了，排最前，别的一个没少', () => {
+    assert(r.mentioned.仅点名那把进来了, '点名了还是没进工具表')
+    assert(r.mentioned.别的工具没被拿掉, '点名成了过滤——「@Gmail 看邮件再去 Notion 建页」会废掉')
+    assert(r.mentioned.被点的排最前, '没顶到最前。工具表一长，模型就在前几个里选，点了等于没点')
+    assert(r.mentioned.进模型的是一句话, '模型没收到 [本轮指定：…]')
+    assert(r.mentioned.正文还在, '点名把正文挤掉了')
+  })
+
+  await test('落盘是结构，不是那句话', () => {
+    assert(r.jsonl['有 mention 块'], 'JSONL 里没有 mention 块')
+    assert(r.jsonl['块里带 label'], 'mention 块没带 label，界面翻历史时药丸就是空的')
+    assert(r.jsonl.正文另存一块, '正文没有独立成块')
+    assert(r.jsonl.没把那句话写进正文, '把 [本轮指定：…] 写进了正文——那是给模型的渲染，不是原始记录')
+    assert(r.jsonl.版本号 === r.jsonl.当前版本, `会话版本号该是 v${r.jsonl.当前版本}，实为 v${r.jsonl.版本号}`)
+    assert(r.jsonl.当前版本 === 5, `加了 mention 块就该升到 v5，实为 v${r.jsonl.当前版本}`)
+  })
+
+  await test('上一轮在跑：带 @ 的排队，跑完自己接上', () => {
+    assert(r.queue.在跑, '探针没能把一轮卡住，后面的断言不成立')
+    assert(r.queue.排进去了 && r.queue.能排两条, `排队没生效：${JSON.stringify(r.queue)}`)
+    assert(r.queue.先进的排在前, '队列不是先进先出')
+    assert(r.queue.取消得掉 && r.queue.取消之后剩一条, '取消没生效')
+    assert(r.queue.取消不存在的会说没这条, '取消一个不存在的 id 应该如实说「没这条」')
+    assert(r.queue.队列清空了, '上一轮收口之后队列没接上')
+    assert(r.queue.排队那条真的跑了, '排队的消息最后没跑')
+    assert(r.queue.排队那条带着点名, '排队的那条跑起来时，它带的 @ 丢了')
+  })
+
+  await test('出队之后、agent 建出来之前，这条会话仍然算在跑', () => {
+    /**
+     * runTurn 走到 live.set 之前有好几个 await。那期间 isRunning() 要是 false，
+     * 同一条会话会被开出第二轮并发 agent——事件交错写进同一份 JSONL，用量记两遍。
+     * 探针把 sessions.events 卡住，正好停在那个窗口上。
+     */
+    assert(r.window.出队之后仍然算在跑, 'drainQueue 没占住 starting，这里能挤进第二轮并发 turn')
+  })
+
+  await test('队列里一条跑失败，后面的照跑', () => {
+    // 一条失败就收工的话，后面几条既不跑也不清，dock 上一直挂着，而没有任何东西
+    // 会再来叫醒队列——只能等用户手动再发一条。
+    assert(r.keepGoing.失败那条不挡后面的, '前一条失败把后面的堵死了')
+    assert(r.keepGoing.队列清空了, '失败之后队列没清干净')
+  })
+
+  await test('取消分得清「没这条」和「已经开跑」', () => {
+    // 合成一句「已经开始执行」的话，两个标签页各点一次取消，后点的那个会以为自己
+    // 拦不住一条其实早就被取消掉的消息。
+    assert(r.cancelKinds.没这条, '不存在的 id 该说「没这条」')
+    assert(r.cancelKinds.取消成功, '正常取消失败了')
+    assert(r.cancelKinds.取消过的再取消还是没这条, '取消过的又说成「已经开跑」')
+    assert(r.cancelKinds.已经开跑, '已经出队开跑的该说「已经开跑」，不能说没这条')
+  })
+
+  await test('取消掉的那条一个字都不留在日志里', () => {
+    // 队列不写 JSONL：被取消的消息从没进过模型，写进去会让重放凭空多一条用户消息。
+    assert(r.cancelled.取消的那条没进日志, '取消掉的消息进了 JSONL')
+  })
+}

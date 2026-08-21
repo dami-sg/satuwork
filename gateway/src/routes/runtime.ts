@@ -3,15 +3,78 @@
  */
 import type { ServerResponse } from 'node:http'
 import type { RouteCtx } from './ctx.ts'
-import { HttpError, json, type Router } from '../http.ts'
+import { HttpError, bearer, json, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
 import { KIND, bodyOf, deployOptsOf, strField } from '../lib/validate.ts'
-import { companyMachineOf, deploySeat, publicSeatRuntime } from '../deploy.ts'
-import { defaultBotModel, publicBot, publicCatalog, publicSkill, runtimeServer } from '../lib/catalog.ts'
-import { kindOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
+import type { Account, CatalogItem } from '../db.ts'
+import { companyMachineOf, deploySeat, publicSeatRuntime, releaseSeats } from '../deploy.ts'
+import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
+import { LEGACY_BOT_ICONS, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer } from '../lib/catalog.ts'
+import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
 import { WebToolError } from '../web-tools.ts'
 import { runExtract, runSearch } from '../web-service.ts'
 import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
+
+/**
+ * 一个人最多建几个 Bot。
+ *
+ * 有上限是因为**每个 Bot 都是机器上的一个真实进程**（一个席位一套 systemd 单元、一块
+ * 屏、一个端口），不是一行配置。默认 10 够一个人分工用，真不够就调环境变量，不必改码。
+ */
+export const MAX_USER_BOTS = Math.max(1, Math.trunc(Number(process.env.GATEWAY_MAX_USER_BOTS) || 10))
+
+/**
+ * 「这份目录变了没有」的指纹。
+ *
+ * 四样东西并成一个串：公司模版的版本号、这一颗 Bot 自己的 updatedAt、可见的
+ * Skill/MCP 里最新的那个 updatedAt，以及它们的条数。改模版、改 Bot 的名字头像、
+ * 给公司加一个 MCP、删掉一个 Skill，都会让它变。
+ *
+ * 条数不能省：只看「最新的那个时间」的话，删掉一条不会让任何时间变小，实例就永远
+ * 以为没事。
+ */
+/**
+ * 下发给席位的连接器超时。
+ *
+ * `bot/src/catalog/mcp.ts` 默认只等 8 秒——对本地 MCP 够用，对「发一封邮件」「查一遍
+ * CRM」不够。Gateway 自己对上游是 45 秒（见 routes/mcp.ts），必须比这个数**小**：
+ * 我们要先拿到结果再回答，否则席位那边已经断了，这一次调用记不到结果，钱也说不清。
+ */
+const CONNECTOR_TIMEOUT_MS = 60_000
+
+function catalogStamp(
+  version: number,
+  bot: CatalogItem | undefined,
+  tools: CatalogItem[],
+  /**
+   * 连接器那一截：这个账号的安装和连接。
+   *
+   * **不能省。** 员工装一个连接器、连一个新邮箱、关掉几个工具，`catalog_items` 一个
+   * 字节都不会变，只看上面那三样的话探针会一直判「没变」，工具永远不出现——直到有人
+   * 重新部署。
+   */
+  conn: { updatedAt: number; count: number } = { updatedAt: 0, count: 0 },
+): string {
+  const toolsAt = tools.reduce((n, i) => Math.max(n, i.updatedAt), 0)
+  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}`
+}
+
+/** 这个账号的连接器状态指纹：安装和连接一起算，删一条也要能看出来。 */
+async function connectorStampOf(db: RouteCtx['db'], accountId: string, companyId: string | null) {
+  const installs = await db.connectorInstalls(accountId)
+  const conns = await db.connectionsFor(accountId, companyId)
+  const updatedAt = [...installs, ...conns].reduce((n, r) => Math.max(n, r.updatedAt), 0)
+  return { updatedAt, count: installs.length + conns.length }
+}
+
+/** 自己建的那一颗。别人的、公司的、全局的都不是——改和删都走它。 */
+async function ownBotOf(db: RouteCtx['db'], account: Account, id: string) {
+  const item = await db.catalog((id || '').trim())
+  if (!item || item.kind !== 'bot' || item.scope !== 'user' || item.accountId !== account.id) {
+    throw new HttpError(404, '没有这个 Bot')
+  }
+  return item
+}
 
 export function attachRuntime(router: Router, ctx: RouteCtx) {
   const { db, keys } = ctx
@@ -64,21 +127,99 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const account = await requireSeatOnly(req, db)
     const companyId = account.role === 'owner' ? null : account.companyId
     const botId = (req.query.get('botId') || '').trim()
-    let bots = await db.visibleCatalog('bot', companyId)
+    let bots = await db.botsFor(companyId, account.id)
     if (botId) {
       const hit = bots.find((b) => b.id === botId)
       if (!hit) throw new HttpError(404, '没有这个 Bot')
       bots = [hit]
     }
-    const pinned = await defaultBotModel(db)
-    const s = await db.platformSettings()
+    const { pinned, tpl } = await botContext(db, companyId)
+    const skills = await db.visibleCatalog('skill', companyId)
+    const servers = await db.visibleCatalog('mcp', companyId)
+
+    /**
+     * 连接器合成出来的 MCP 记录：这个账号每一把 `active` 的连接一条。
+     *
+     * `mentionOnly` 的**不进默认表**——它的全部意思就是「只有我 @ 你的时候才用你」，
+     * 进了默认表等于这个开关没打开。它由发消息那一轮按 mentions 单独注入。
+     *
+     * endpoint 指回 Gateway 自己（`/mcp/connectors/:id`），票就用席位这次带来的
+     * `sat_`——同一把票，不用再去库里取一次，也不会取错人。
+     */
+    const connectorItems = await db.visibleCatalog('connector', companyId)
+    const blocked = blockMapOf(connectorItems)
+    const conns = (await db.connectionsFor(account.id, companyId)).filter((c) => c.status === 'active')
+    const synth = conns
+      .map((c) => {
+        const item = connectorItems.find((i) => i.id === c.connectorId && i.scope === 'global')
+        if (!item || blocked.get(item.id)?.blocked) return null
+        return runtimeConnectorServer(c, item, {
+          origin: originOf(req),
+          token: bearer(req) ?? '',
+          botId,
+          timeoutMs: CONNECTOR_TIMEOUT_MS,
+        })
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+    /**
+     * **`mentionOnly` 的也下发**，只是带个标记。
+     *
+     * 席位那边照样连上、照样注册工具，但不进默认工具表——只有这一轮被 `@` 点名才进。
+     * 不下发是不行的：真被点名时再去握手就晚了，那一轮已经在组请求了。
+     */
+    const synthIds = synth.filter((x) => !x.mentionOnly).map((x) => x.id)
+
+    // 席位要知道 utility 是谁：网页提取的摘要走它。挑模型是平台的事，所以是下发的，
+    // 不是席位自己在 cordis.yml 里配的——那等于给了一条绕过平台配置的暗路。
+    const settings = await db.platformSettings()
+
     json(res, 200, {
-      bots: bots.map((b) => publicBot(b, pinned)),
-      skills: (await db.visibleCatalog('skill', companyId)).map(publicSkill),
-      servers: (await db.visibleCatalog('mcp', companyId)).map(runtimeServer),
-      // 席位要知道 utility 是谁：网页提取的摘要走它。挑模型是平台的事，所以是下发的，
-      // 不是席位自己在 cordis.yml 里配的——那等于给了一条绕过平台配置的暗路。
-      models: { daily: s.daily, utility: s.utility },
+      // 实例照着这个数字判断「底座换了没有」。和下面那条探针给的是同一个值。
+      templateVersion: tpl.version,
+      models: { daily: settings.daily, utility: settings.utility },
+      /**
+       * **这一份内容的指纹，和探针给的算法完全一样。**
+       *
+       * 一起给出来，实例才有一个和这份数据同时刻的基线。少了它，实例只能拿第一次探针
+       * 的结果当基线，而在「拉完目录」到「第一次探针」之间落地的改动就永远丢了——
+       * 那两件事之间隔着一整轮插件启动，几百毫秒到几十秒都可能。
+       */
+      stamp: catalogStamp(tpl.version, botId ? bots[0] : undefined, [...skills, ...servers], await connectorStampOf(db, account.id, companyId)),
+      /**
+       * 连接器绑账号、不绑 Bot：合成出来的那几条挂到**每一颗** Bot 的 `mcps` 上。
+       * 席位那边 `toolSchemasFor()` 照现有逻辑按 `mcps` 过滤，一行都不用改。
+       */
+      bots: bots.map((b) => {
+        const pub = publicBot(b, pinned, tpl)
+        return { ...pub, mcps: [...pub.mcps, ...synthIds] }
+      }),
+      skills: skills.map(publicSkill),
+      servers: [...servers.map(runtimeServer), ...synth],
+    })
+  })
+
+  /**
+   * 「有没有变」的探针。席位实例每分钟打一次，指纹没动就什么都不做。
+   *
+   * 为什么不让实例直接重拉整份目录：那一份里带着 MCP 的明文 token 和全部 Skill 正文，
+   * 一家公司几十个席位每分钟各拉一遍，既是没必要的字节，也是没必要的密钥流动。
+   */
+  router.get('/runtime/catalog/version', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    const botId = (req.query.get('botId') || '').trim()
+    const tplItem = companyId ? await db.botTemplate(companyId) : undefined
+    const version = Number((tplItem?.definition as { version?: unknown } | undefined)?.version) || 1
+    const bots = await db.botsFor(companyId, account.id)
+    const bot = botId ? bots.find((b) => b.id === botId) : undefined
+    if (botId && !bot) throw new HttpError(404, '没有这个 Bot')
+    const tools = [
+      ...(await db.visibleCatalog('skill', companyId)),
+      ...(await db.visibleCatalog('mcp', companyId)),
+    ]
+    json(res, 200, {
+      templateVersion: version,
+      stamp: catalogStamp(version, bot, tools, await connectorStampOf(db, account.id, companyId)),
     })
   })
 
@@ -195,15 +336,113 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   router.get('/runtime/bots', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireSeat(account)
-    // 平台指定的那一对，整份名册共用一次——每行各读一次设置没有意义。
-    const pinned = await defaultBotModel(db)
+    // 平台指定的那一对和公司模版，整份名册共用一次——每行各读一遍没有意义。
+    const { pinned, tpl } = await botContext(db, account.companyId)
     const bots = await Promise.all(
-      (await db.visibleCatalog('bot', account.companyId)).map(async (item) => ({
-        ...publicBot(item, pinned),
+      (await db.botsFor(account.companyId, account.id)).map(async (item) => ({
+        ...publicBot(item, pinned, tpl),
         runtime: await pairRuntime(db, account, item.id),
       })),
     )
-    json(res, 200, { bots })
+    json(res, 200, { bots, quota: { used: await db.countUserBots(account.id), max: MAX_USER_BOTS } })
+  })
+
+  /**
+   * 自己建一个 Bot。
+   *
+   * **这一层只收身份**：名字、头像、简介、开场白，外加一段追加提示词。人设、行为边界、
+   * 记忆策略、能用哪些 Skill / MCP 全部来自公司模版（见 lib/catalog.ts 的 publicBot），
+   * 这里既不存也不收——收了就会有人以为自己改得动，而下一次读仍然是模版那一份。
+   *
+   * 建完还没有席位。要真的能聊，得再点一次「部署」（`POST /runtime/deploy`）——一个
+   * Bot 一个进程，那是机器上的真实开销，不该在填完名字的一瞬间悄悄发生。
+   */
+  router.post('/runtime/bots', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireSeat(account)
+    const body = bodyOf(req)
+    const used = await db.countUserBots(account.id)
+    if (used >= MAX_USER_BOTS) throw new HttpError(409, `最多建 ${MAX_USER_BOTS} 个 Bot`)
+    const item = await db.insertCatalog({
+      kind: 'bot',
+      scope: 'user',
+      companyId: account.companyId,
+      accountId: account.id,
+      name: botNameOf(body.name),
+      definition: {
+        description: strField(body, 'description', false),
+        greeting: strField(body, 'greeting', false),
+        extraPrompt: extraPromptOf(body.extraPrompt),
+        icon: botIconOf(body.icon, 'company'),
+        enabled: true,
+      },
+    })
+    await db.audit({
+      companyId: account.companyId!,
+      accountId: account.id,
+      action: 'bot.create',
+      detail: { id: item.id, name: item.name },
+    })
+    const { pinned, tpl } = await botContext(db, account.companyId)
+    json(res, 201, { bot: { ...publicBot(item, pinned, tpl), runtime: null } })
+  })
+
+  /** 改自己那一个。同样只认身份字段——底座在模版里，这里传什么都不看。 */
+  router.patch('/runtime/bots/:id', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const item = await ownBotOf(db, account, req.params.id)
+    const body = bodyOf(req)
+    const def = { ...(item.definition as Record<string, unknown>) }
+    if (body.description !== undefined) def.description = String(body.description).trim()
+    if (body.greeting !== undefined) def.greeting = String(body.greeting).trim()
+    if (body.extraPrompt !== undefined) def.extraPrompt = extraPromptOf(body.extraPrompt)
+    // 跨层级的键（全局那套）当没传，保留原值——跟平台侧那条 patch 一个规矩。
+    // 走 botIconOf 的话不认识的键会落回默认头像，改一次名字顺手把头像也冲了。
+    if (typeof body.icon === 'string') {
+      const key = LEGACY_BOT_ICONS[body.icon.trim()] ?? body.icon.trim()
+      if (iconSetFor('company').has(key)) def.icon = key
+    }
+    if (typeof body.enabled === 'boolean') def.enabled = body.enabled
+    const next = await db.updateCatalog(item.id, {
+      name: body.name !== undefined ? botNameOf(body.name) : undefined,
+      definition: def,
+    })
+    await db.audit({
+      companyId: account.companyId!,
+      accountId: account.id,
+      action: 'bot.update',
+      detail: { id: item.id, name: next.name },
+    })
+    const { pinned, tpl } = await botContext(db, account.companyId)
+    json(res, 200, { bot: { ...publicBot(next, pinned, tpl), runtime: await pairRuntime(db, account, next.id) } })
+  })
+
+  /**
+   * 删自己那一个，**连席位一起拆**。
+   *
+   * 只删目录项的话，机器上那套 systemd 单元还在跑、还占着 slot 和端口，而库里已经没有
+   * 任何东西指向它了——下一个人的席位起不来，现场没有一条线索指回这次删除。
+   */
+  router.delete('/runtime/bots/:id', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const item = await ownBotOf(db, account, req.params.id)
+    const seat = await db.seatRuntime(account.id, item.id)
+    if (seat) {
+      try {
+        await releaseSeats(db, [seat])
+      } catch (e) {
+        throw new HttpError(502, `席位没拆干净，先重试或者联系管理员：${(e as Error).message}`)
+      }
+      await db.deleteSeatRuntimeOf(account.id, item.id)
+    }
+    await db.deleteCatalog(item.id)
+    await db.audit({
+      companyId: account.companyId!,
+      accountId: account.id,
+      action: 'bot.delete',
+      detail: { id: item.id, name: item.name, seat: seat?.seatId ?? null },
+    })
+    json(res, 200, { deleted: true, id: item.id })
   })
 
   router.get('/runtime/bots/:id/session', async (req, res) => {
@@ -249,7 +488,8 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   router.get('/runtime/bots/:id', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const bot = await visibleBotOf(db, account, req.params.id)
-    json(res, 200, { bot: { ...publicBot(bot, await defaultBotModel(db)), runtime: await pairRuntime(db, account, bot.id) } })
+    const { pinned, tpl } = await botContext(db, account.companyId)
+    json(res, 200, { bot: { ...publicBot(bot, pinned, tpl), runtime: await pairRuntime(db, account, bot.id) } })
   })
 
   router.get('/runtime/sessions/:id/events', async (req, res) => {
@@ -304,11 +544,77 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
           return { path: String(o.path ?? ''), mime: String(o.mime ?? '') }
         })
       : undefined
+    /**
+     * `@` 点名。**Gateway 必须逐个校验，不能原样透传。**
+     *
+     * 席位那边收到什么就注入什么——它信的是那张 `sat_` 票，票背后是谁由我们说了算。
+     * 不属于这个账号的、断了的、公司禁了的一律**剔掉**，并在响应里说明是哪几条；
+     * 不是让整条消息失败：用户那句话没有错，错的是一个已经失效的点名。
+     */
+    const wanted = Array.isArray(body.mentions) ? body.mentions.slice(0, 10) : []
+    const mentions: { kind: string; id: string; label: string }[] = []
+    const dropped: string[] = []
+    if (wanted.length) {
+      const companyId = account.role === 'owner' ? null : account.companyId
+      const items = await db.visibleCatalog('connector', companyId)
+      const blocks = blockMapOf(items)
+      const defs = new Map(items.filter((i) => i.scope === 'global').map((i) => [i.id, connectorDefOf(i)]))
+      const conns = new Map(
+        (await db.connectionsFor(account.id, companyId)).filter((c) => c.status === 'active').map((c) => [c.id, c]),
+      )
+      for (const raw of wanted) {
+        const o = (raw ?? {}) as Record<string, unknown>
+        const id = String(o.id ?? '').trim()
+        const kind = String(o.kind ?? 'connector')
+        const conn = kind === 'connector' ? conns.get(id) : undefined
+        const def = conn ? defs.get(conn.connectorId) : undefined
+        if (!conn || !def || !def.enabled || blocks.get(conn.connectorId)?.blocked) {
+          if (id) dropped.push(id)
+          continue
+        }
+        mentions.push({ kind: 'connector', id, label: `${def.name} (${conn.label})` })
+      }
+    }
+
     await proxyJson(
       res,
       'POST',
       `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/messages`,
-      images?.length ? { text: strField(body, 'text', false), images } : { text: strField(body, 'text') },
+      {
+        text: strField(body, 'text', images?.length || mentions.length ? false : true),
+        ...(images?.length ? { images } : {}),
+        ...(mentions.length ? { mentions } : {}),
+      },
+      await seatBearer(db, account.id),
+      target.machineToken,
+      // 剔掉了什么要说出来：界面上那几颗药丸得消失，而人要知道为什么。
+      dropped.length ? { droppedMentions: dropped } : undefined,
+    )
+  })
+
+  /** 排着的消息。刷新页面之后 dock 靠它恢复——队列的真相在席位那边，不在浏览器。 */
+  router.get('/runtime/sessions/:id/queue', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/queue`,
+      undefined,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
+  /** 取消一条。已经开跑的席位会回 409，原样透出去——界面据此把那一行改成气泡。 */
+  router.delete('/runtime/sessions/:id/queue/:queueId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    await proxyJson(
+      res,
+      'DELETE',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/queue/${encodeURIComponent(req.params.queueId)}`,
+      undefined,
       await seatBearer(db, account.id),
       target.machineToken,
     )

@@ -452,6 +452,28 @@ window.SATU_I18N = {
     'No manager release yet. Push a manager-v* tag from CI.',
   '机器心跳时拿到期望版本，自己换版并在失败时回滚。留空表示跟最新发布走。':
     'Machines pick up the desired version on heartbeat, upgrade themselves and roll back on failure. Empty means follow the latest release.',
+  // ── Bot 模版与自建 Bot ──────────────────────────────────────────────
+  'Bot 模版': 'Bot template',
+  '新建 Bot': 'New bot',
+  保存模版: 'Save template',
+  立即下发到全部席位: 'Push to all seats now',
+  '立即下发到全部席位？': 'Push to all seats now?',
+  下发: 'Push',
+  '其它 Bot': 'Other bots',
+  '这个 Bot 的补充说明': 'This bot’s own note',
+  继承自公司模版: 'Inherited from the company template',
+  'Bot 设置': 'Bot settings',
+  补充说明: 'Own note',
+  名字: 'Name',
+  头像: 'Avatar',
+  '全局 Bot': 'Global bots',
+  全局: 'Global',
+  '例如：回访助手': 'e.g. Follow-up assistant',
+  一句话说清它管什么: 'One line on what it handles',
+  '可留空。写了就接在公司人设后面。': 'Optional — appended after the company persona.',
+  '例如：你专门跟进华东区的客户回访，回复里带上客户名和上次联系时间。':
+    'e.g. You follow up with East-region customers; always include the customer name and last contact date.',
+
   // ── 平台机器管理页 ────────────────────────────────────────────────
   '移除这台机器的登记？': 'Remove this machine?',
   移除: 'Remove',

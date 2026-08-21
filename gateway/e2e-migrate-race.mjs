@@ -40,15 +40,15 @@ try {
   const [ra, rb] = await Promise.all([migrate(a, schema), migrate(b, schema)])
   out.applied = [ra.applied, rb.applied]
   // 恰好一边跑了、另一边看到已经跑过了。谁先谁后不重要。
-  // 两个进程同时起：该跑的那几条只能由**一边**跑完，另一边一条都不跑。
-  // 写死「加起来等于 1」是把「只有一条迁移」当成了前提，加一条迁移就会假红。
+  // 一边把**全部**迁移跑了，另一边一条都没跑。谁先谁后不重要，数字跟着迁移条数走。
   out.exactlyOneApplied =
-    (ra.applied.length === 0) !== (rb.applied.length === 0) &&
-    ra.applied.length + rb.applied.length === MIGRATIONS.length
+    ra.applied.length + rb.applied.length === MIGRATIONS.length &&
+    (ra.applied.length === 0 || rb.applied.length === 0)
   out.current = ra.current
 
   const rows = await setup.query(`select id from ${schema}.schema_migrations`)
   out.ledgerRows = rows.rows.length
+  out.expectedRows = MIGRATIONS.length
   out.noDuplicate = rows.rows.length === MIGRATIONS.length
 
   const tables = await setup.query(

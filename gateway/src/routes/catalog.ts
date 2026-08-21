@@ -7,6 +7,7 @@ import { HttpError, type Req, type Router, json } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { kindOf, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
 import { type Account, type CatalogItem, type CatalogKind } from '../db.ts'
+import { releaseSeats } from '../deploy.ts'
 
 export function attachCatalog(router: Router, ctx: RouteCtx) {
   const { db, keys } = ctx
@@ -160,6 +161,14 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
     icons: readonly string[]
     /** 能挂的分组。全局 Bot 挂不了公司分组——那是某一家公司的东西。 */
     groups(owner: CatalogOwner): Promise<{ id: string; name: string }[]>
+    /**
+     * 这一层还建不建 Bot。
+     *
+     * 平台侧建的是全局 Bot，照旧。**公司侧不再建**——公司这一层现在是一份 Bot 模版
+     * （见 routes/bot-template.ts），Bot 由员工自己建（`POST /runtime/bots`）。这里
+     * 只剩「看」和「删」，为的是收拾 0003 停用掉的那批老公司 Bot。
+     */
+    createsBots: boolean
   }
 
   const PLATFORM_SCOPE: CatalogRouteScope = {
@@ -178,6 +187,7 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
     async groups() {
       return []
     },
+    createsBots: true,
   }
 
   const COMPANY_SCOPE: CatalogRouteScope = {
@@ -199,6 +209,7 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
     async groups(owner) {
       return (await db.groupsOf(owner.companyId!)).map((g) => ({ id: g.id, name: g.name }))
     },
+    createsBots: false,
   }
 
   /** 这一层**自己拥有**的那一条。全局层只认全局项，公司层只认本公司项——改和删都走它。 */
@@ -261,20 +272,22 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       })
     })
 
-    router.post(`${s.base}/bots`, async (req, res) => {
-      const { account, owner } = await s.write(req)
-      await s.ensure(req)
-      const body = bodyOf(req)
-      const item = await db.insertCatalog({
-        kind: 'bot',
-        scope: owner.scope,
-        companyId: owner.companyId,
-        name: botNameOf(body.name),
-        definition: await newBotDefinition(owner, body),
+    if (s.createsBots) {
+      router.post(`${s.base}/bots`, async (req, res) => {
+        const { account, owner } = await s.write(req)
+        await s.ensure(req)
+        const body = bodyOf(req)
+        const item = await db.insertCatalog({
+          kind: 'bot',
+          scope: owner.scope,
+          companyId: owner.companyId,
+          name: botNameOf(body.name),
+          definition: await newBotDefinition(owner, body),
+        })
+        await auditCatalog(owner, account.id, 'catalog.create', { kind: 'bot', id: item.id })
+        json(res, 201, { bot: publicBot(item, await defaultBotModel(db)) })
       })
-      await auditCatalog(owner, account.id, 'catalog.create', { kind: 'bot', id: item.id })
-      json(res, 201, { bot: publicBot(item, await defaultBotModel(db)) })
-    })
+    }
 
     router.get(`${s.base}/bots/:botId`, async (req, res) => {
       const owner = await s.read(req)
@@ -282,25 +295,47 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       json(res, 200, { bot: publicBot(item, await defaultBotModel(db)) })
     })
 
-    router.patch(`${s.base}/bots/:botId`, async (req, res) => {
-      const { account, owner } = await s.write(req)
-      const item = await ownedItem(owner, req.params.botId, 'bot', '没有这个助理')
-      const body = bodyOf(req)
-      const def = await applyBotPatch(owner, botDefOf(item.definition), body)
-      const next = await db.updateCatalog(item.id, {
-        name: body.name !== undefined ? botNameOf(body.name) : undefined,
-        definition: def,
+    if (s.createsBots) {
+      router.patch(`${s.base}/bots/:botId`, async (req, res) => {
+        const { account, owner } = await s.write(req)
+        const item = await ownedItem(owner, req.params.botId, 'bot', '没有这个助理')
+        const body = bodyOf(req)
+        const def = await applyBotPatch(owner, botDefOf(item.definition), body)
+        const next = await db.updateCatalog(item.id, {
+          name: body.name !== undefined ? botNameOf(body.name) : undefined,
+          definition: def,
+        })
+        await auditCatalog(owner, account.id, 'catalog.update', { kind: 'bot', id: item.id })
+        json(res, 200, { bot: publicBot(next, await defaultBotModel(db)) })
       })
-      await auditCatalog(owner, account.id, 'catalog.update', { kind: 'bot', id: item.id })
-      json(res, 200, { bot: publicBot(next, await defaultBotModel(db)) })
-    })
+    }
 
+    /**
+     * 删一颗 Bot，**连它名下的席位一起拆**。
+     *
+     * 只删目录项的话，机器上那套 systemd 单元还在跑、还占着 slot 和端口，而库里已经
+     * 没有任何东西指向它了——下一个人的席位于是起不来，现场没有一条线索指回这次删除
+     * （理由见 deploy.ts 的 releaseSeats）。删账号、删公司走的都是同一条规矩。
+     *
+     * 按 botId 查席位、不按公司：全局 Bot 可能被好几家公司各自部署过。
+     *
+     * 拆不掉就 502 并且**不删目录项**——留着比留下一批谁也看不见、还占着端口的席位好。
+     */
     router.delete(`${s.base}/bots/:botId`, async (req, res) => {
       const { account, owner } = await s.write(req)
       const item = await ownedItem(owner, req.params.botId, 'bot', '没有这个助理')
+      const seats = await db.seatRuntimesOfBot(item.id)
+      if (seats.length) {
+        try {
+          await releaseSeats(db, seats)
+        } catch (e) {
+          throw new HttpError(502, `席位没拆干净，先重试或者等机器恢复：${(e as Error).message}`)
+        }
+        for (const seat of seats) await db.deleteSeatRuntimeOf(seat.accountId, seat.botId)
+      }
       await db.deleteCatalog(item.id)
-      await auditCatalog(owner, account.id, 'catalog.delete', { kind: 'bot', id: item.id })
-      json(res, 200, { deleted: true, id: item.id })
+      await auditCatalog(owner, account.id, 'catalog.delete', { kind: 'bot', id: item.id, seats: seats.length })
+      json(res, 200, { deleted: true, id: item.id, seats: seats.length })
     })
 
     // ── Skill ──────────────────────────────────────────────────────────
