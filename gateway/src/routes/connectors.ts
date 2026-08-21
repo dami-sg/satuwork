@@ -15,6 +15,9 @@ import { COMPANY_CONNECTION_LABEL, CONNECTION_LABEL_RE, DEFAULT_CONNECTION_LABEL
 import { publicConnection, publicInstall } from '../lib/connectors.ts'
 import { publicPlatformCred } from '../lib/org.ts'
 
+/** 授权回来之后那一页要说的三种话。见 authDonePage。 */
+type AuthDone = 'ok' | 'pending' | 'failed'
+
 /** 供应商侧的失败一律转成 HTTP，别把栈丢给调用方。 */
 function asHttp(e: unknown): never {
   if (e instanceof ProviderError) {
@@ -244,6 +247,58 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   }
 
   /**
+   * 授权完之后那一页。**它唯一的正事是关掉自己。**
+   *
+   * 页面里一个字节的用户数据都没有：这条回调无登录态，谁都打得到（`?c=` 只是个 id），
+   * 所以只说「成不成」，不说是谁的哪个账号。
+   *
+   * 只有成了才自动关。没成的话那句话得留在屏幕上让人读完——自动关掉等于把唯一一次
+   * 说明的机会也关了。关不掉（不是脚本开出来的窗口，比如人手动打开了这个地址）就把
+   * 按钮和那条回去的链接留着，别让人对着一个不知道该干什么的页面。
+   */
+  function authDonePage(done: AuthDone, back: string): string {
+    const say = {
+      ok: { icon: '✓', title: '授权完成', body: '这个页面可以关掉了，回 Satuwork 继续。' },
+      pending: { icon: '…', title: '还在等供应商确认', body: '授权可能还没走完。关掉这一页，回 Satuwork 里看那把连接的状态。' },
+      failed: { icon: '!', title: '授权没成功', body: '关掉这一页，回 Satuwork 里再连一次。' },
+    }[done]
+    // 自动关只给成功那一档。400ms 是让人来得及看见那个勾，不是等什么东西。
+    const auto = done === 'ok' ? 'setTimeout(close, 400)' : ''
+    return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${say.title}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font: 15px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #faf8f5; color: #2b2622; }
+  @media (prefers-color-scheme: dark) { body { background: #1b1917; color: #ece7e1; } }
+  main { max-width: 320px; padding: 32px 24px; text-align: center; }
+  .mark { width: 44px; height: 44px; margin: 0 auto 16px; border-radius: 999px; display: flex;
+    align-items: center; justify-content: center; font-size: 22px; background: #c05621; color: #fff; }
+  h1 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+  p { margin: 0 0 20px; opacity: 0.75; }
+  button { font: inherit; padding: 8px 18px; border: 0; border-radius: 999px; cursor: pointer;
+    background: #c05621; color: #fff; }
+  a { display: block; margin-top: 12px; font-size: 13px; color: inherit; opacity: 0.6; }
+</style></head>
+<body><main>
+  <div class="mark">${say.icon}</div>
+  <h1>${say.title}</h1>
+  <p>${say.body}</p>
+  <button id="x" type="button">关掉这一页</button>
+  <a href="${back}">或者回 Satuwork</a>
+</main>
+<script>
+  // 这一页是 window.open 开出来的，所以关得掉自己。
+  var close = function () { window.close() }
+  document.getElementById('x').addEventListener('click', close)
+  ${auto}
+</script>
+</body></html>`
+  }
+
+  /**
    * 供应商的 OAuth 回调。**无登录态**——它是浏览器的顶层跳转，带不了 Authorization 头。
    *
    * 所以这里**一个字节都不信**：`?c=` 只用来找回是哪一行，状态一律回头问供应商。
@@ -256,10 +311,13 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   router.get('/oauth/connectors/callback', async (req, res) => {
     const id = (req.query.get('c') || '').trim()
     const row = id ? await db.connectorConnection(id) : undefined
+    // 这一页要说的话，取决于上游怎么答。问不到就当「还没完成」——那是实情。
+    let done: AuthDone = 'pending'
     if (row?.externalId) {
       try {
         const provider = await providerFor(db, row.vendor)
         const st = await provider.status(row.externalId)
+        done = st.status === 'active' ? 'ok' : st.status === 'pending' ? 'pending' : 'failed'
         if (st.status !== 'pending') {
           await db.updateConnectorConnection(row.id, {
             status: st.status === 'active' ? 'active' : 'failed',
@@ -272,9 +330,21 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
         // 用户看到的是从 Google 跳回来的一个白屏。
       }
     }
-    // 回到连接器那一屏，而不是渲染一个「授权成功」的死页面：人是从那里出发的。
-    res.writeHead(302, { location: `/connectors${row ? `/${encodeURIComponent(row.connectorId)}` : ''}` })
-    res.end()
+    /**
+     * **不跳回应用，把这一页关掉。**
+     *
+     * 授权是在**新开的那一页**里做的（见 `gateway/ui/pages-connectors.js` 的
+     * `conn-add-account`），原来那一页原封不动地在旁边等着。这一页的使命到授权完成
+     * 为止，302 回 `/connectors/:id` 只会在旁边多开一个应用副本——人正看着的那一页
+     * 还在另一个标签里，两份状态从此各走各的。
+     *
+     * 关掉之后原来那一页拿回焦点，会自己重取一次账号列表（`authReturn`），新连上的
+     * 那一把就出现了。
+     *
+     * 早先这里跳回去是对的：那时是整页跳走的，不跳回来人就留在供应商的域名上。
+     */
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(authDonePage(done, row ? `/connectors/${encodeURIComponent(row.connectorId)}` : '/'))
   })
 
   /**

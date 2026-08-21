@@ -336,12 +336,18 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
     })
 
     await test('回调不信参数：上游还没 ACTIVE 就仍然是 pending', async () => {
-      // 不能用 req()：fetch 默认跟着 302 走，看到的会是跳过去那一页的状态码。
       const cb = await fetch(`${base}/oauth/connectors/callback?c=${encodeURIComponent(firstConnId)}&status=success`, {
         redirect: 'manual',
       })
-      assert(cb.status === 302, `回调应该 302 回连接器页，实际 ${cb.status}`)
-      assert(cb.headers.get('location').startsWith('/connectors/'), `跳错地方了：${cb.headers.get('location')}`)
+      // 授权是在新开的那一页里做的，这一页的正事是关掉自己——不再跳回应用（跳回去等于
+      // 在旁边多开一个副本，而人正看着的那一页在另一个标签里）。
+      assert(cb.status === 200, `回调该自己渲染一页，实际 ${cb.status}`)
+      assert(!cb.headers.get('location'), `还在往回跳：${cb.headers.get('location')}`)
+      const page = await cb.text()
+      assert(page.includes('window.close'), '这一页不会关掉自己')
+      // 还没 ACTIVE 就别说「授权完成」，也别自动关——那句话得留在屏幕上让人读完。
+      assert(!page.includes('授权完成'), '上游还没确认就说成功了')
+      assert(!page.includes('setTimeout'), '没成功还自动关，人来不及看那句说明')
       const detail = await req(base, 'GET', `/me/connectors/${connectorId}`, { token: memberTok })
       const one = detail.json.connections.find((c) => c.id === firstConnId)
       assert(one.status === 'pending', `上游没 ACTIVE，我们不能自己变 active：${one.status}`)
@@ -349,7 +355,10 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
 
     await test('上游 ACTIVE 之后回调把它转正', async () => {
       mock.seen.activate(firstExternal)
-      await fetch(`${base}/oauth/connectors/callback?c=${encodeURIComponent(firstConnId)}`, { redirect: 'manual' })
+      const cb = await fetch(`${base}/oauth/connectors/callback?c=${encodeURIComponent(firstConnId)}`, { redirect: 'manual' })
+      const page = await cb.text()
+      assert(page.includes('授权完成'), '成了却没说成了')
+      assert(page.includes('setTimeout'), '成了就该自己关掉，别让人再点一次')
       const detail = await req(base, 'GET', `/me/connectors/${connectorId}`, { token: memberTok })
       const one = detail.json.connections.find((c) => c.id === firstConnId)
       assert(one.status === 'active', `应该转正了，实际 ${one.status}`)
