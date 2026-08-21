@@ -7,6 +7,7 @@ import { SQL as m0006 } from './0006-web-calls.ts'
 import { SQL as m0007 } from './0007-usage-charges.ts'
 import { SQL as m0008 } from './0008-llm-cache-write.ts'
 import { SQL as m0009 } from './0009-multiplier-precision.ts'
+import { SQL as m0010 } from './0010-machine-telemetry.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -47,6 +48,7 @@ export const MIGRATIONS: Migration[] = [
   { id: '0007-usage-charges', name: '计费账本：三条计费路唯一的钱', sql: m0007 },
   { id: '0008-llm-cache-write', name: 'llm_calls 记下缓存写的 token', sql: m0008 },
   { id: '0009-multiplier-precision', name: '账本的倍率换成 double precision', sql: m0009 },
+  { id: '0010-machine-telemetry', name: '机器自报的负载与日志占用，以及日志上限', sql: m0010 },
 ]
 
 /**

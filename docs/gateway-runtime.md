@@ -109,7 +109,70 @@ Gateway 没有任何能登录这台机器的凭据，只能在心跳响应里把
 已经在跑的席位不会被重启：桌面和 bot 是在旧时区下起来的，libc 把时区缓存在进程里。
 要让某个席位跟上，重新部署它。
 
-### 3.2 通联状态
+### 3.2 机器负载与日志占用
+
+管家每 30 秒采一次样，**搭心跳带上来**（不另开一条上行：机器本来就在敲门，多一条只是
+多一个会失败、会重试、会被防火墙拦住的东西）：
+
+| 项 | 内容 |
+| --- | --- |
+| CPU | 核数、**两次采样之间**的占用、`load1` |
+| 内存 | 总量、已用（Linux 上按 `MemAvailable` 算，不是 `MemFree`）、交换区 |
+| 磁盘 | 每个真块设备一行（按设备去重，`/` 和 `/home` 同盘只算一次），口径同 `df` |
+| 出网 | 累计字节 + **速率**，回环和 docker/veth 这些虚拟网卡不算 |
+| 日志 | journal 有多大、`/var/log` 有多大、当前上限、上次清理的结果 |
+
+Gateway 侧存**最近一份**（`machines.telemetry`，jsonb），不建流水表——这一格答的是「这台
+机器现在怎么样」，按 30 秒一行存，一台机器一个月就是八万多行，换来一条谁也不会去查的
+曲线。要趋势那是监控系统的活儿。
+
+`telemetryAt` 记的是 **Gateway 收到的时刻**，不是机器自报的采样时刻：机器的钟可能是歪
+的，而界面上那句「3 分钟前」必须准（同 `heartbeatAge`）。
+
+上报的是**网络数据**，进库前整份按形状收（`gateway/src/lib/telemetry.ts`）：数字必须有限
+非负、百分比夹到 0–1、数组和字符串有上限并去掉控制字符。一台报疯了的机器不该把这一页
+搞坏。心跳里**两份都没有**（老管家）时整格不动，**只报了一半时另一半沿用上一轮**——管家
+重启之后负载立刻就有，而日志占用要异步走一遍目录树才出得来，中间那几百毫秒里打的心跳
+只带得动一半；照直存下去，机器每重启一次界面上的日志占用就空一次。
+
+CPU 占用和出网速率允许是 `null`（第一次采样只存基准、计数器回绕），界面上写「取样中」
+——**不能编一个 0**：失联机器的 0% 和空闲机器的 0% 看着一样，结论正相反。
+
+### 3.3 日志清理
+
+席位机器上的日志只有一个去处：**journald**。bot、桌面、管家三个 systemd 单元都不写日志
+文件，`/seats/:id/logs` 和 `/logs` 读的也是 journal。所以「日志把盘吃满了」等价于「journal
+太大了」，清理也只有一个动作：`journalctl --rotate` 之后 `--vacuum-size`。
+
+（先 rotate 再 vacuum：vacuum 只删得掉已归档的文件，正在写的那个——通常也是最大的那个
+——不归档就一直留着，于是「清理成功、一个字节没少」。）
+
+上限走和时区同一条路：`machines.logCapMb` 是**期望值**，心跳响应带下去，超了由管家自己
+清（每 30 分钟查一次，两次清理之间至少隔 10 分钟）。机器上的优先级是
+`SATUWORK_LOG_CAP_MB`（本地钉子）> Gateway 下发 > 默认 1024 MB。
+
+| `logCapMb` | 含义 |
+| --- | --- |
+| 空（null） | 没人指定过，跟管家默认的 1024 MB 走 |
+| `0` | 明确**不要**管家动这台机器的 journal |
+| 正整数 | 超过这个数就清，清到它的六成（留出余量，否则每半小时清一次、每次只腾几兆） |
+
+空和 0 **不是一回事**：把「没指定」当成 0，等于在谁也没按过的机器上把清理静默关掉，而盘
+写满的表现不是一句报错，是 bot 起不来、桌面黑屏，**那时连日志都写不进去**，事后连查都
+没得查。
+
+`/var/log` 里别的文件归 logrotate 管，管家**只报大小不动手**——伸手进去删是在和系统自己
+的轮转策略打架。最大的几个非 journal 文件跟着上报，大得离谱时人看得见。
+
+手动清理走 `POST /platform/machines/:id/logs/vacuum`，**留审计**：这一下会永久删掉最老的
+那截 journal，而那截日志正是事后复盘的材料。
+
+这条反代**不能用默认的 15 秒超时**（`MANAGER_VACUUM_TIMEOUT_MS` = 240 秒）：那一头做的是
+真活儿，管家自己给 rotate 和 vacuum 的预算就是 60 + 120 秒。按 15 秒掐断的话，一台 journal
+攒到几个 G 的机器上会回一句「实例还没上线」，而清理正干得好好的——人看着报错就再点一次。
+管家那边另有一道单飞闸，同一时刻只跑一轮。
+
+### 3.4 通联状态
 
 每台机器算一个 `link`（`publicMachine` 带出去，界面上是一盏灯）。**判据只有一个：最近
 一次心跳有多久了**，阈值按管家的心跳周期（`MANAGER_HEARTBEAT_MS`，30 秒）取倍数：
@@ -607,7 +670,7 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 | GET | `/internal/manager-releases/:version` | 管家自升级拉包 |
 | GET | `/platform/desktop-ticket?seatId=` | owner 支持入口：替某个席位签一张桌面票。走审计 |
 | POST | `/internal/machines` | 引导票登记机器（无 UI 版，e2e/smoke 用）。响应带一次 `token`（`smt_`） |
-| POST | `/internal/machines/:id/heartbeat` | 该机器的 `smt_`；票必须对应 `:id`。**也是自升级和时区的下发通道**：body 带 `managerVersion`/`protocol`/`arch`/`timezone`（实际时区）/`seats`，响应带 `desiredManagerVersion`/`url`/`sha256`/`timezone`（期望时区）/`minNode`/`minProtocol` |
+| POST | `/internal/machines/:id/heartbeat` | 该机器的 `smt_`；票必须对应 `:id`。**也是自升级、时区和日志上限的下发通道**：body 带 `managerVersion`/`protocol`/`arch`/`timezone`（实际时区）/`metrics`/`logs`/`seats`，响应带 `desiredManagerVersion`/`url`/`sha256`/`timezone`（期望时区）/`logCapMb`/`minNode`/`minProtocol` |
 | POST | `/internal/instances/:accountId/ready` | 该机器的 `smt_`。body `{ host, botId }`，`botId` 必填；pair 必须已部署；机器必须属于该账号的公司 |
 | POST | `/internal/sessions/index` | 该机器的 `smt_`。公司从机器派生，不能替别的公司报索引 |
 

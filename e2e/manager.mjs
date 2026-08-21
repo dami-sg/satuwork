@@ -599,6 +599,255 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
     })
 
 
+    await test('机器负载：管家自己采样，四项都给得出，而且认票', async () => {
+      // 这条路补的是「没有 SSH 就看不见机器」剩下的最后一块：diag 答某个席位的现场，
+      // logs 答它卡在哪一步，这里答的是**机器本身还剩多少余量**——而这一层的故障是
+      // 先慢后崩，盘写满之后连日志都写不进去，事后连查都没得查。
+      const anon = await fetch(`${mgrBase}/metrics`)
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+
+      const r = await req(mgrBase, 'GET', '/metrics', { token: machineTok })
+      assert(r.status === 200, `metrics ${r.status} ${r.text}`)
+      const m = r.json.metrics
+      assert(m, `没给出负载：${r.text.slice(0, 200)}`)
+      assert(m.cpu.cores > 0, `核数 ${m.cpu.cores}`)
+      // usage 允许是 null（第一次采样只存基准），但**不能是编出来的 0**——两者在
+      // 界面上完全不同：一个是「取样中」，一个是「这台机器闲着」。
+      assert(m.cpu.usage === null || (m.cpu.usage >= 0 && m.cpu.usage <= 1), `CPU 占用越界：${m.cpu.usage}`)
+      assert(m.memory.total > 0 && m.memory.used >= 0, `内存 ${JSON.stringify(m.memory)}`)
+      assert(m.memory.usage >= 0 && m.memory.usage <= 1, `内存占用越界：${m.memory.usage}`)
+      assert(Array.isArray(m.disks) && m.disks.length >= 1, `至少要报得出根分区：${JSON.stringify(m.disks)}`)
+      assert(m.disks.every((d) => d.total > 0 && d.usage >= 0 && d.usage <= 1), `盘的数不对：${JSON.stringify(m.disks)}`)
+      assert(m.net && 'txBytes' in m.net && 'txRate' in m.net, `出网那格缺字段：${JSON.stringify(m.net)}`)
+      assert(r.json.logs && typeof r.json.logs.journalBytes === 'number', `日志占用该一起给：${r.text.slice(0, 200)}`)
+
+      // /health 上也要有：那条是探活兼现场快照，人手工 curl 时看的就是它。
+      const health = await req(mgrBase, 'GET', '/health', { token: machineTok })
+      assert(health.json.metrics && health.json.logs, '/health 也该带上负载与日志占用')
+    })
+
+    await test('日志清理：认票、给得出结果，keepMb 不合法就 400', async () => {
+      const anon = await fetch(`${mgrBase}/logs/vacuum`, { method: 'POST' })
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+
+      const bad = await req(mgrBase, 'POST', '/logs/vacuum', { token: machineTok, body: { keepMb: -5 } })
+      assert(bad.status === 400, `负数该 400，实际 ${bad.status} ${bad.text}`)
+
+      // 同时来三个只该跑一轮。Gateway 那边超时重试、或者人手抖多点两下时，两个
+      // `journalctl --rotate` 叠着跑只会更慢，还会把 lastVacuum 搅成前一轮的 before
+      // 配后一轮的 after。搭同一趟车的请求拿到的是同一个结果，`at` 因此一样。
+      const burst = await Promise.all(
+        [0, 1, 2].map(() => req(mgrBase, 'POST', '/logs/vacuum', { token: machineTok, body: {} })),
+      )
+      assert(burst.every((x) => x.status === 200), `并发清理 ${burst.map((x) => x.status).join(',')}`)
+      const ats = new Set(burst.map((x) => x.json.vacuum.at))
+      // 不断言恰好 1：最先那个真跑完之后才轮到的请求，本来就该另起一轮。没有单飞闸
+      // 的话这里必然是 3。
+      assert(ats.size <= 2, `三个并发请求跑出了 ${ats.size} 轮清理，单飞闸没起作用`)
+
+      const r = await req(mgrBase, 'POST', '/logs/vacuum', { token: machineTok, body: {} })
+      assert(r.status === 200, `vacuum ${r.status} ${r.text}`)
+      const v = r.json.vacuum
+      // dryRun 下不真去动开发机的 journal，但**形状必须完整**——界面就是照着这几个
+      // 字段说「腾出了多少」的，少一个就只能显示空白。
+      assert(v && typeof v.before === 'number' && typeof v.after === 'number' && typeof v.freed === 'number', `结果缺字段：${r.text.slice(0, 200)}`)
+      assert(v.keepMb > 0, `keepMb ${v.keepMb}`)
+      assert(r.json.logs.lastVacuum, '清完之后日志占用里要记着这一次')
+    })
+
+    await test('负载搭心跳上报：Gateway 存最近一份，坏值夹紧不入库', async () => {
+      // 上报的是**网络数据**：它会原样进 jsonb、再原样画进浏览器。所以这条盯的不是
+      // 「存没存下来」，而是「一台报疯了的机器能不能把这一页搞坏」——占用 340%、
+      // 二十块盘、挂载点里带换行，这些都不该活着走到界面上。
+      const { createRequire } = await import('node:module')
+      const require = createRequire(new URL('../gateway/package.json', import.meta.url))
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      const fake = '00000000-0000-4000-8000-0000000000fe'
+      const fakeTok = 'smt_e2e-telemetry-probe'
+      try {
+        await client.query('set search_path to e2e_manager')
+        await client.query(
+          `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token)
+           values ($1, 'http://10.0.0.98:8443', $2, $3, $3, $3, 2, 10, $4)`,
+          [fake, orgId, Date.now(), fakeTok],
+        )
+        // 造一台假机器来测，不动真管家那台：真管家每 30 秒心跳一次，会把断言要看的
+        // 那份数据覆盖掉，断言就成了掷骰子。
+        const hb = await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, {
+          token: fakeTok,
+          body: {
+            managerVersion: 'e2e-1',
+            protocol: 2,
+            node: process.versions.node,
+            seats: [],
+            metrics: {
+              uptime: 3600,
+              cpu: { cores: 8, usage: 3.4, load1: 1.5 },
+              memory: { total: 16e9, used: 8e9, usage: 0.5, swapTotal: 0, swapUsed: 0 },
+              disks: Array.from({ length: 20 }, (_, i) => ({ mount: `/m${i}\nUser=root`, total: 1e9, used: 9e8, free: 1e8, usage: 0.9 })),
+              net: { txBytes: 1e9, rxBytes: 2e9, txRate: -7, rxRate: 1234, interfaces: ['eth0'] },
+            },
+            logs: { journalBytes: 5e8, varLogBytes: 6e8, capMb: 1024, capSource: 'default', top: [], lastVacuum: null },
+          },
+        })
+        assert(hb.status === 200, `heartbeat ${hb.status} ${hb.text}`)
+
+        const card = await req(gwBase, 'GET', `/platform/machines/${fake}`, { token: ownerTok })
+        assert(card.status === 200, `detail ${card.status} ${card.text}`)
+        const tm = card.json.machine.telemetry
+        assert(tm && tm.metrics && tm.logs, `自报数据没存下来：${card.text.slice(0, 300)}`)
+        assert(tm.metrics.cpu.usage === 1, `占用 340% 该被夹到 1，实际 ${tm.metrics.cpu.usage}`)
+        assert(tm.metrics.disks.length === 12, `盘的条数该有上限，实际 ${tm.metrics.disks.length}`)
+        assert(!/[\n\r]/.test(tm.metrics.disks[0].mount), `挂载点里的换行没洗掉：${JSON.stringify(tm.metrics.disks[0].mount)}`)
+        // 负的速率不是「往回发」，是计数器出了问题：宁可当成没有，也不能画一根倒着长的条。
+        assert(tm.metrics.net.txRate === null, `负速率该当成没有，实际 ${tm.metrics.net.txRate}`)
+        // 年龄由 Gateway 算，按**收到的时刻**——机器的钟可能是歪的，而界面上那句
+        // 「3 分钟前」必须准。
+        assert(typeof card.json.machine.telemetryAge === 'number' && card.json.machine.telemetryAge < 10_000, `telemetryAge=${card.json.machine.telemetryAge}`)
+
+        // 老管家不带这两格。**整格不动**才对——写一份空的进去，会把上一轮好好的
+        // 数据抹掉，界面上看着就是「这台机器突然什么都不报了」。
+        await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, {
+          token: fakeTok,
+          body: { managerVersion: 'e2e-1', protocol: 2, node: process.versions.node, seats: [] },
+        })
+        const after = await req(gwBase, 'GET', `/platform/machines/${fake}`, { token: ownerTok })
+        assert(after.json.machine.telemetry, '老管家的一轮心跳把上一份自报数据抹掉了')
+
+        // **只报了一半的那一轮，另一半要沿用上一次。** 管家重启之后负载是同步采的、
+        // 立刻就有，而日志占用要异步走一遍目录树；中间那几百毫秒里正好打了一轮心跳
+        // 的话 logs 就是空的——照直存下去，机器每重启一次界面上的日志占用就空一次。
+        const halfOnly = await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, {
+          token: fakeTok,
+          body: {
+            managerVersion: 'e2e-1',
+            protocol: 2,
+            node: process.versions.node,
+            seats: [],
+            metrics: {
+              uptime: 7200,
+              cpu: { cores: 8, usage: 0.1, load1: 0.5 },
+              memory: { total: 16e9, used: 4e9, usage: 0.25, swapTotal: 0, swapUsed: 0 },
+              disks: [{ mount: '/', total: 1e9, used: 5e8, free: 5e8, usage: 0.5 }],
+              net: { txBytes: 2e9, rxBytes: 3e9, txRate: 100, rxRate: 200, interfaces: ['eth0'] },
+            },
+          },
+        })
+        assert(halfOnly.status === 200, `半份心跳 ${halfOnly.status} ${halfOnly.text}`)
+        const merged = (await req(gwBase, 'GET', `/platform/machines/${fake}`, { token: ownerTok })).json.machine.telemetry
+        assert(merged.metrics.cpu.usage === 0.1, `新的那一半没写进去：${JSON.stringify(merged.metrics.cpu)}`)
+        assert(merged.logs && merged.logs.journalBytes === 5e8, `没报的那一半被抹掉了：${JSON.stringify(merged.logs)}`)
+
+        // **公司里的普通成员看不到这份数据。** `GET /orgs/:id/machine` 是给他们拿访问
+        // 地址用的，而自报数据里有挂载点、网卡名、/var/log 底下的文件路径——那是运维
+        // 要看的机器内情，不是员工该拿到的东西（和 arch、token 同一条线）。
+        const adminLogin2 = await req(gwBase, 'POST', '/auth/login', {
+          body: { email: 'admin@mgrtest.local', password: 'manager-admin-1234' },
+        })
+        const asOrg = await req(gwBase, 'GET', `/orgs/${orgId}/machine`, { token: adminLogin2.json.token })
+        assert(asOrg.status === 200, `公司侧那条 ${asOrg.status} ${asOrg.text}`)
+        assert(!('telemetry' in asOrg.json.machine), `自报数据漏给了公司成员：${asOrg.text.slice(0, 300)}`)
+      } finally {
+        await client.query('delete from machines where id = $1', [fake]).catch(() => {})
+        await client.end().catch(() => {})
+      }
+    })
+
+    await test('日志上限：平台钉一个数，心跳带下去，管家真的认了', async () => {
+      // 和时区、管家版本同一条路：Gateway 没有登录这台机器的凭据，只能把期望值放进
+      // 心跳响应，机器自己去收敛。所以要盯的是整条链，而不只是「存住了没有」。
+      const id = await machineIdOf(req, gwBase, ownerTok, orgId)
+      const url = `/platform/machines/${id}/log-cap`
+
+      // 越界和小数要拒；**类型也要拒**——只做 Number() 强转的话，`true` 变成 1、
+      // `[]` 变成 0，而 0 在这里的意思是「这台机器别自动清日志」，一个空数组把清理
+      // 关掉是最不该悄悄发生的那种事。
+      for (const bad of ['-1', '99999999', '3.5', [], true, { mb: 900 }]) {
+        const r = await req(gwBase, 'PUT', url, { token: ownerTok, body: { logCapMb: bad } })
+        assert(r.status === 400, `${JSON.stringify(bad)} 该 400，实际 ${r.status} ${r.text}`)
+      }
+
+      // **数字和字符串都要收。** 界面走 FormData 给的是字符串，脚本和 curl 直接给
+      // 数字——只认一种就是给调用方挖坑（同 registerFromBody 那条注释）。
+      const asNumber = await req(gwBase, 'PUT', url, { token: ownerTok, body: { logCapMb: 512 } })
+      assert(asNumber.status === 200, `JSON 数字该收下，实际 ${asNumber.status} ${asNumber.text}`)
+      assert(asNumber.json.machine.logCapMb === 512, `没存住：${asNumber.json.machine.logCapMb}`)
+
+      const set = await req(gwBase, 'PUT', url, { token: ownerTok, body: { logCapMb: '900' } })
+      assert(set.status === 200, `设上限 ${set.status} ${set.text}`)
+      assert(set.json.machine.logCapMb === 900, `没存住：${set.json.machine.logCapMb}`)
+      assert(set.json.pending === true, '机器还没认，这一刻只能是 pending')
+
+      // 真的进了心跳响应——那是机器唯一的依据。
+      const hb = await req(gwBase, 'POST', `/internal/machines/${id}/heartbeat`, {
+        token: machineTok,
+        body: { managerVersion: 'e2e-1', protocol: 2, node: process.versions.node, seats: [] },
+      })
+      assert(hb.json.logCapMb === 900, `心跳没下发上限：${JSON.stringify(hb.json.logCapMb)}`)
+
+      // 真管家下一轮心跳（≤30 秒）会把它收下。等它，别只验 Gateway 那半边——两边
+      // 各自看着都对、合起来不通，是这类握手最常见的坏法。给两轮多的余量（和注销
+      // 那条同一个口径）：看到就走，等满是机器真没收。
+      let applied = null
+      for (let i = 0; i < 140; i++) {
+        const r = await req(mgrBase, 'GET', '/metrics', { token: machineTok })
+        if (r.json?.logs?.capMb === 900) {
+          applied = r.json.logs
+          break
+        }
+        await new Promise((r) => setTimeout(r, 500))
+      }
+      assert(applied, '管家一直没收下这个上限')
+      assert(applied.capSource === 'gateway', `来源该是 gateway，实际 ${applied.capSource}`)
+
+      // 清空 = 不再指定，**回到管家的默认**。这里必须验管家那边真的回去了：
+      // 只要 Gateway 那格清了、机器上还钉着 900，界面写的「跟默认走」就是句假话。
+      const clear = await req(gwBase, 'PUT', url, { token: ownerTok, body: { logCapMb: '' } })
+      assert(clear.status === 200 && clear.json.machine.logCapMb === null, `清空 ${clear.status} ${clear.text}`)
+      // 清空之后机器回落到自己的默认值（一个数），拿它和 null 比永远不相等——按那么
+      // 算的话，「不再指定」会从此挂着一句「等机器认」，而根本没有指令在路上。
+      assert(clear.json.pending === false, `清空不该是 pending：${clear.text}`)
+      let reverted = null
+      for (let i = 0; i < 140; i++) {
+        const r = await req(mgrBase, 'GET', '/metrics', { token: machineTok })
+        if (r.json?.logs?.capSource === 'default') {
+          reverted = r.json.logs
+          break
+        }
+        await new Promise((r) => setTimeout(r, 500))
+      }
+      assert(reverted, '清空之后管家没回到默认上限')
+      assert(reverted.capMb === 1024, `默认上限该是 1024，实际 ${reverted.capMb}`)
+    })
+
+    await test('平台端手动清理日志：只有 owner，走审计，结果回得来', async () => {
+      const id = await machineIdOf(req, gwBase, ownerTok, orgId)
+      const url = `/platform/machines/${id}/logs/vacuum`
+
+      const anon = await req(gwBase, 'POST', url)
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+      const adminLogin = await req(gwBase, 'POST', '/auth/login', {
+        body: { email: 'admin@mgrtest.local', password: 'manager-admin-1234' },
+      })
+      const asAdmin = await req(gwBase, 'POST', url, { token: adminLogin.json.token })
+      assert(asAdmin.status === 403, `公司管理员该 403，实际 ${asAdmin.status}`)
+
+      const r = await req(gwBase, 'POST', url, { token: ownerTok, body: {} })
+      assert(r.status === 200, `清理 ${r.status} ${r.text}`)
+      assert(r.json.vacuum && typeof r.json.vacuum.freed === 'number', `结果没回来：${r.text.slice(0, 200)}`)
+
+      // 这一下会在机器上永久删掉最老的那截 journal，而那截日志正是事后复盘的材料。
+      // 谁在什么时候按的，必须留得下来。
+      const audit = await req(gwBase, 'GET', `/orgs/${orgId}/audit`, { token: ownerTok })
+      const rows = audit.json.events || audit.json.rows || []
+      assert(
+        rows.some((e) => e.action === 'machine.logs.vacuum'),
+        `审计里没有 machine.logs.vacuum：${JSON.stringify(rows.map((e) => e.action)).slice(0, 300)}`,
+      )
+    })
+
     await test('平台钉住的管家版本要存得住，并且真的下发给机器', async () => {
       // 这一条曾经是**假通过**的：路由层收下 managerVersion、拼进 next、返回 200，
       // 而 db.putPlatformSettings 拼 payload 时根本没写这个字段，读端也没解析它。

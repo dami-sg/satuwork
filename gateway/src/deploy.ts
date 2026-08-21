@@ -240,9 +240,36 @@ export function normalizeTimezone(raw: string): string | null | undefined {
  *
  * `arch` 也只在这一侧给：它是选发布包的依据（包里带原生二进制，架构不对就起不来），
  * 平台侧排查「为什么这台升不上去」第一眼看的就是它。公司管理员用不着，也不该看。
+ *
+ * **负载和日志占用同理，也只在这一侧。** `GET /orgs/:id/machine` 是给公司里任何一个
+ * 成员看的（他们要拿访问地址），而那份自报数据里有挂载点、网卡名、`/var/log` 底下
+ * 的文件路径——运维要看的机器内情，不是员工该拿到的东西。
  */
 export function ownerMachine(m: Machine) {
-  return { ...publicMachine(m), arch: m.arch, token: m.token || null }
+  const now = Date.now()
+  return {
+    ...publicMachine(m),
+    arch: m.arch,
+    telemetry: m.telemetry,
+    telemetryAt: m.telemetryAt,
+    /**
+     * 这份自报数据收到多久了。
+     *
+     * 年龄由这里算，不留给界面拿 telemetryAt 去减本地时钟——理由和 heartbeatAge 一样：
+     * 管理员的机器和 Gateway 差几分钟是常事，而这一格答的恰恰是「这份数还新不新」，
+     * 算错了整块就是在骗人。
+     */
+    telemetryAge: m.telemetryAt ? Math.max(0, now - m.telemetryAt) : null,
+    /**
+     * 期望的日志上限。空 = 没人指定过，跟管家默认走；0 = 明确不清。
+     *
+     * 机器**实际**在用的那个数在 `telemetry.logs.capMb` 里——两格分开，界面才说得清
+     * 「指令下了」和「机器认了」（机器上还可以用 SATUWORK_LOG_CAP_MB 本地钉死，那时
+     * 两个数就是对不上的，而那正是要看得见的事）。
+     */
+    logCapMb: m.logCapMb,
+    token: m.token || null,
+  }
 }
 
 export function publicSeatRuntime(

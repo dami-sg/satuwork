@@ -11,6 +11,7 @@ import { installScript } from '../install.ts'
 import { proxyJson, proxySse } from '../lib/runtime.ts'
 import { parseBotVersion, publicBotRelease, storeUploadedRelease } from '../releases.ts'
 import { requireOrg, requireOwner, requireReleaseAuthor, requireUser } from '../lib/guards.ts'
+import { MANAGER_VACUUM_TIMEOUT_MS, MAX_LOG_CAP_MB } from '../lib/telemetry.ts'
 import { signDesktopTicket } from '../crypto.ts'
 import { type Account, type CatalogItem, type Machine, type SeatRuntime } from '../db.ts'
 
@@ -452,6 +453,95 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     const next = await db.updateMachine(machine.id, { timezone })
     await auditMachine(next, account.id, 'machine.timezone', { machineId: next.id, timezone })
     json(res, 200, { machine: ownerMachine(next), pending: Boolean(timezone) && next.currentTimezone !== timezone })
+  })
+
+  /**
+   * 日志相关的那两个「多少 MB」。**数字和字符串都收**。
+   *
+   * 界面走 FormData 拿到的是字符串，脚本和 curl 直接给数字——让一个数值字段只认
+   * 字符串，是给调用方挖坑（同 registerFromBody 里那条注释）。`intField` 在这儿不
+   * 合用：它对 3.5 静默取整，而这两个值一个是「盘上留多少日志」、一个是「清到多
+   * 少」，写错了不该被悄悄改成另一个数。
+   *
+   * 返回 undefined = 没填（上限那条据此清空，清理那条据此用管家的默认目标）。
+   * **空串和 0 是两回事**，所以空串在这里变成 undefined，0 原样留下。
+   */
+  function logMbField(body: Record<string, unknown>, key: string): number | undefined {
+    const raw = body[key]
+    if (raw == null) return undefined
+    // **只收数字和字符串两种类型**，别的一律 400。不卡类型直接丢给 `Number()` 的话，
+    // `true` 会变成 1、`[]` 会变成 0、`["512"]` 会变成 512——而 0 在这里的意思是
+    // 「这台机器别自动清日志」，一个空数组把清理关掉，是最不该悄悄发生的那种事。
+    if (typeof raw !== 'number' && typeof raw !== 'string') {
+      throw new HttpError(400, `${key} 须为 0–${MAX_LOG_CAP_MB} 的整数`)
+    }
+    const v = typeof raw === 'string' ? raw.trim() : raw
+    if (v === '') return undefined
+    const n = typeof v === 'number' ? v : Number(v)
+    if (!Number.isInteger(n) || n < 0 || n > MAX_LOG_CAP_MB) {
+      throw new HttpError(400, `${key} 须为 0–${MAX_LOG_CAP_MB} 的整数`)
+    }
+    return n
+  }
+
+  /**
+   * 设这台机器的 journal 上限，MB。
+   *
+   * 和时区、管家版本同一条路：**这里只是把期望值钉住**，真正 `journalctl
+   * --vacuum-size` 的是机器上的管家，下一轮心跳把这个数带下去，超了它自己清。
+   *
+   * 传空串 = 不再指定，跟管家的默认走（1 GB）；传 `0` = 明确不要它动 journal。
+   * **这两者不是一回事**，所以空串存 null 而不是 0——把「没指定」当成 0，等于在
+   * 谁也没按过的机器上把清理静默关掉，而盘写满时连日志都写不进去，事后连查都没得查。
+   */
+  router.put('/platform/machines/:id/log-cap', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const logCapMb = logMbField(bodyOf(req), 'logCapMb') ?? null
+    const next = await db.updateMachine(machine.id, { logCapMb })
+    await auditMachine(next, account.id, 'machine.log-cap', { machineId: next.id, logCapMb })
+    json(res, 200, {
+      machine: ownerMachine(next),
+      // 机器认没认得等下一轮心跳。界面据此把话说全，别写成「已生效」。
+      //
+      // **清空那一支永远不是 pending。** 清空之后机器回落到自己的默认值（一个数），
+      // 拿它和 null 比永远不相等——照那么算，「不再指定」会从此挂着一句「等机器认」，
+      // 而根本没有指令在路上。
+      pending: logCapMb != null && next.telemetry?.logs?.capMb !== logCapMb,
+    })
+  })
+
+  /**
+   * 立刻清一次这台机器的日志。
+   *
+   * 平时不用按——超过上限时管家自己会清。它存在是为了两种时候：盘已经快满了，等不
+   * 到下一轮检查（半小时一次）；以及刚把上限调小，想当场看到效果。
+   *
+   * **走审计。** 这一下会在机器上永久删掉最老的那截 journal，而那截日志正是事后
+   * 复盘的材料——谁在什么时候按的，得留得下来。
+   */
+  router.post('/platform/machines/:id/logs/vacuum', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    if (!machine.host) throw new HttpError(503, INSTANCE_DOWN)
+    const keepMb = logMbField(bodyOf(req), 'keepMb')
+    await auditMachine(machine, account.id, 'machine.logs.vacuum', { machineId: machine.id, keepMb: keepMb ?? null })
+    await proxyJson(
+      res,
+      'POST',
+      `${machineBase(machine.host)}/logs/vacuum`,
+      keepMb === undefined ? {} : { keepMb },
+      undefined,
+      machine.token || undefined,
+      undefined,
+      // **不能用默认的 15 秒。** 这一头是真活儿：先 rotate 再删文件，管家自己给的
+      // 预算是 60 + 120 秒。按 15 秒掐断的话，一台 journal 攒到几个 G 的机器上会回
+      // 一句「实例还没上线」——而清理正干得好好的。人看着报错就再点一次，于是同一
+      // 台机器上叠着跑两轮 journalctl（管家那边另有一道单飞闸，见 logdisk.ts）。
+      MANAGER_VACUUM_TIMEOUT_MS,
+    )
   })
 
   /** 钉一个管家版本。换版、自检、失败回滚都在机器上做，这里只下指令。 */

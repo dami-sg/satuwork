@@ -9,6 +9,7 @@ import { accessUrlFor } from '../lib/catalog.ts'
 import { bodyOf, intField, strField } from '../lib/validate.ts'
 import { callerAccountId, requireBootstrapMachine, requireInternalCaller, requireMachine } from '../lib/guards.ts'
 import { instanceHostOf, sourceIpOf } from '../lib/runtime.ts'
+import { telemetryOf } from '../lib/telemetry.ts'
 import { type Machine } from '../db.ts'
 
 /**
@@ -160,8 +161,15 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     // 界面上；不认识的名字宁可当成「没报」，也不要存一个假的实际值进去，那会让
     // 「改上了没有」这个判断永远错。老管家不报，那时保持原样。
     const reportedTz = typeof body.timezone === 'string' ? normalizeTimezone(body.timezone) : undefined
+    // 负载与日志占用。**整份按形状收**（见 lib/telemetry.ts）——它来自网络，会原样
+    // 存进 jsonb 再画进浏览器。两份都没有（老管家）时 telemetryOf 给 undefined，
+    // 那一格就不动：写一份空的进去会把上一轮好好的数据抹掉。
+    const telemetry = telemetryOf(body, machine.telemetry)
     const next = await db.updateMachine(machine.id, {
       lastHeartbeatAt: Date.now(),
+      // 采样时刻按**收到的时刻**记，不采信机器自报的 at：机器的钟可能是歪的，而
+      // 界面上那句「3 分钟前」必须准。同一个理由见 publicMachine 的 heartbeatAge。
+      ...(telemetry ? { telemetry, telemetryAt: Date.now() } : {}),
       ...(managerVersion ? { managerVersion } : {}),
       ...(Number.isInteger(protocol) ? { protocol } : {}),
       ...(arch ? { arch } : {}),
@@ -176,6 +184,9 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       sha256: desired?.sha256 ?? null,
       // 期望时区。空 = 没人指定过，管家什么都不做——**不是**「改成 UTC」。
       timezone: next.timezone,
+      // journal 上限，MB。和时区一条路：这里只是下指令，清不清、什么时候清由管家
+      // 决定。null = 没人指定过，管家跟自己的默认走；0 = 明确不要它动 journal。
+      logCapMb: next.logCapMb,
       minNode: MIN_MANAGER_NODE,
       minProtocol: MIN_MANAGER_PROTOCOL,
     })
