@@ -4,6 +4,17 @@
  * **必须最后一个加载**：这里的顶层语句会立刻跑起来，而它们要用到前面所有文件里的东西。
  * index.html 里那串 `data-app-part` 的顺序就是依赖顺序，别调。
  */
+/**
+ * 一段文本切成站点数组。换行、逗号、分号、空格都当分隔符——从别处粘一份清单进来时，
+ * 那几种混着出现是常态。服务端还会逐条归一化（catalog.ts 的 botSiteOf），这里只管切开。
+ */
+function sitesOf(text) {
+  return String(text || '')
+    .split(/[\s,;]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+}
+
 async function runConfirm() {
   const c = state.confirm
   if (!c) return
@@ -577,6 +588,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
         skills: a.skills,
         mcps: a.mcps,
         guards: Object.fromEntries((a.guards || []).map((g) => [g.id, !!g.on])),
+        browser: { on: !!a.browserOn, sites: sitesOf(a.browserSites) },
         memory: { on: a.memoryOn, scope: a.scope, kinds: a.kinds, ttl: a.ttl, cap: a.cap, confirm: a.confirmOn, pii: a.piiOn },
       })
       state.template = data.template
@@ -747,6 +759,13 @@ document.getElementById('app').addEventListener('click', async (e) => {
     render()
     return
   }
+  if (act === 'bot-browser') {
+    const d = editingDraft()
+    if (!d) return
+    setEditingDraft({ ...d, browserOn: !d.browserOn })
+    render()
+    return
+  }
   if (act === 'bot-pii') {
     const d = editingDraft()
     if (!d) return
@@ -800,6 +819,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
         skills: a.skills,
         mcps: a.mcps,
         guards: Object.fromEntries((a.guards || []).map((g) => [g.id, !!g.on])),
+        browser: { on: !!a.browserOn, sites: sitesOf(a.browserSites) },
         memory: { on: a.memoryOn, scope: a.scope, kinds: a.kinds, ttl: a.ttl, cap: a.cap, confirm: a.confirmOn, pii: a.piiOn },
       })
       state.bot = data.bot

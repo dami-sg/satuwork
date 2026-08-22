@@ -15,11 +15,15 @@ import { type Machine } from '../db.ts'
 /**
  * 席位报上来的 guard / outcome 只认这两张表里的值。
  *
- * 和 `gateway/src/lib/catalog.ts` 的 BOT_GUARD_IDS 是同一套键，外加 `escalate`
- * ——转人工不是一条开关，但它和那三条走同一条上报路。
+ * 和 `gateway/src/lib/catalog.ts` 的 BOT_GUARD_IDS 是同一套键，外加 `escalate` 和
+ * `browser`——转人工不是一条开关，浏览器那道硬黑名单也不是（它谁都关不掉），但两者
+ * 都和那三条走同一条上报路。分开记是为了让翻审计的人看得出**是不是开关挡的**：
+ * 一条 `no-external` 的记录管理员可以去把开关关掉，一条 `browser` 的关不掉。
  */
-const GUARD_IDS = new Set(['high-risk', 'pii', 'no-external', 'escalate'])
-const GUARD_OUTCOMES = new Set(['blocked', 'approved', 'denied', 'timeout', 'redacted', 'escalated'])
+const GUARD_IDS = new Set(['high-risk', 'pii', 'no-external', 'escalate', 'browser'])
+// `noted` 是事后补记的一笔（动作跑完了才发现它发出了写请求，而当时没弹过卡片），
+// 不是一次表态。混在同一张表里上报，但看审计的人要分得出来。
+const GUARD_OUTCOMES = new Set(['blocked', 'approved', 'denied', 'timeout', 'redacted', 'escalated', 'noted'])
 
 export function attachInternal(router: Router, ctx: RouteCtx) {
   const { db } = ctx

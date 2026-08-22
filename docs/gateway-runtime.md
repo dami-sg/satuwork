@@ -295,7 +295,7 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 
 | 在模版里（公司统一） | 在每个 Bot 上（各人自己） |
 |---|---|
-| 系统提示词、行为边界、记忆策略、挂哪些 Skill / MCP | 名字、头像、简介、开场白、一段**追加**提示词 |
+| 系统提示词、行为边界、记忆策略、挂哪些 Skill / MCP、**能不能操作浏览器和允许哪些站点** | 名字、头像、简介、开场白、一段**追加**提示词 |
 
 - 模版每保存一次，`version` **加一**。不是时间戳——时钟一歪（机器时区、库恢复）就会出现「新的比旧的还早」，只增的整数不会
 - 员工的 Bot **不存副本**：读的时候拿当前模版现合成（`publicBot`）。所以「模版改了要同步」不是一个要去触发的动作，没有副本也就没有会漂的东西
@@ -316,6 +316,16 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 | 拦截个人敏感信息 | 出站参数里的手机号、身份证号（校验位）、银行卡号（Luhn）。**邮箱不算**——算进去邮件类连接器整个不能用 | 拆开写的号码、图片里的号码 |
 | 高风险操作需确认 | 会毁东西的、或者「对外 + 写」的调用，停在执行前等人在对话里点批准；`bash` 按命令判（`rm -rf` 要问，`ls` 不问） | — |
 | 升级人工的条件 | 原样进系统提示词，配一把 `escalate_to_human` 工具；另外连着被挡 3 次自动改口劝转人工 | 它是判断题，写不成拦截规则 |
+
+浏览器（`browser.*`，见 [browser-tools.md](./browser-tools.md)）在模版里是**能力**，不是
+第四条边界——那三条的语义是「要不要收紧」，默认全开等于最严；这一个是「要不要放开」，
+默认关才是最严，并排放会让人读反。它落在三处：
+
+| 落点 | 管什么 | 受开关影响吗 |
+|---|---|---|
+| `browser.on` | 关着就不注册那几把工具，调也调不通 | 不受。这是能力，不是边界 |
+| 硬黑名单（回环、内网、非 http；按**解析到的 IP** 判） | 防的是用浏览器回头打自己的 bot 口 / CDP 口 / 管家口 | **谁都关不掉**。审计里记成 `guard: browser`，和三条开关分得开 |
+| `browser.sites` 站点白名单 | 「禁止访问未授权的外部系统」在网页这一侧的样子 | 受 `no-external`。关掉它就等于说「可以去名单外的地方」 |
 
 几条要点：
 
@@ -594,8 +604,14 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
     app/                       该席位的 Bot 代码（cordis.yml 的监听口逐席位 sed）
     chrome/                    Chrome --user-data-dir
     config/ share/ cache/      XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_CACHE_HOME
+    bin/seat-chrome            Chrome 包装脚本（带 --remote-debugging-port 和上面那份 profile）
     bot.env  desktop.env  vnc-passwd
 ```
+
+`bot.env` 和 `desktop.env` 都带 CDP 口（`SATUWORK_CDP_PORT` / `CDP`，同一个值）：桌面那套
+靠它拼包装脚本，Bot 进程靠它连上员工正在看的那个浏览器。**两份都要有**——bot 单元的
+`EnvironmentFile` 只读 `bot.env`，只写进 desktop.env 的话，浏览器工具连不上自己席位的
+浏览器（见 [browser-tools.md](./browser-tools.md) §3）。
 
 发布包解到 `/opt/satuwork/releases/{version}/`，**全机共享**：同一版本的第二个席位不再重解一遍。
 

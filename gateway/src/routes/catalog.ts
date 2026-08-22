@@ -2,7 +2,7 @@
  * Bot / Skill / MCP 的定义构造，以及平台与公司两套 CRUD——它们共用同一个工厂。
  */
 import type { RouteCtx } from './ctx.ts'
-import { COMPANY_BOT_ICONS, CatalogOwner, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
+import { COMPANY_BOT_ICONS, CatalogOwner, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botBrowserOf, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
 import { HttpError, type Req, type Router, json } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { kindOf, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
@@ -23,6 +23,7 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       greeting: typeof body.greeting === 'string' ? body.greeting.trim() : '',
       escalate: typeof body.escalate === 'string' ? body.escalate.trim() : '',
       guards: botGuardsOf(body.guards),
+      browser: botBrowserOf(body.browser),
       memory: botMemoryOf(body.memory),
       icon: botIconOf(body.icon, owner.scope),
       provider: pinned.provider,
@@ -40,6 +41,7 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
     if (body.escalate !== undefined) def.escalate = String(body.escalate).trim()
     // 传来的是「改动的那几个开关」，跟库里现有的合并——只改一个不该把另外两个带回默认。
     if (body.guards !== undefined) def.guards = botGuardsOf(body.guards, botGuardsOf(def.guards))
+    if (body.browser !== undefined) def.browser = botBrowserOf(body.browser, botBrowserOf(def.browser))
     if (body.memory !== undefined) def.memory = botMemoryOf(body.memory, botMemoryOf(def.memory))
     // 写入也走一遍归一化：老键（chat 这些）映射到新的一套，另一层级的键当没传、保留原值。
     if (typeof body.icon === 'string') {

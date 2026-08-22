@@ -229,6 +229,10 @@ SATUWORK_BOT_ID=$SATUWORK_BOT_ID
 SATUWORK_HOME=$SEAT_DIR
 SATUWORK_PORT=$BOT_PORT
 SATUWORK_WORK_DIR=$WORK_DIR
+# 桌面上那个 Chrome 的 CDP 口。**bot.env 也要有一份**：它原先只写进 desktop.env，
+# 而 bot 单元的 EnvironmentFile 是 bot.env——于是 Bot 进程看不见这个端口，浏览器
+# 那几把工具连不上自己席位的浏览器。两份写的是同一个值，来源都是 $CDP。
+SATUWORK_CDP_PORT=$CDP
 DISPLAY=$DISPLAY_VAR
 XDG_SESSION_TYPE=x11
 XDG_CONFIG_HOME=$SEAT_DIR/config

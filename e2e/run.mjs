@@ -35,6 +35,7 @@ import { runMaxSteps } from './max-steps.mjs'
 import { runToolCalls } from './toolcalls.mjs'
 import { runShutdown } from './shutdown.mjs'
 import { runGuards } from './guards.mjs'
+import { runBrowser } from './browser.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
 import { uiSource } from './ui-dom.mjs'
@@ -2077,6 +2078,15 @@ async function runGateway() {
     assert(tpl.guards && tpl.guards['high-risk'] === true && tpl.guards.pii === true, `默认守卫 ${JSON.stringify(tpl.guards)}`)
     assert(tpl.memory && tpl.memory.on === true && tpl.memory.scope === '所属分组', `默认记忆 ${JSON.stringify(tpl.memory)}`)
     assert(tpl.memory.cap === 20 && tpl.memory.ttl === '90 天', `默认上限/时长 ${JSON.stringify(tpl.memory)}`)
+    /**
+     * 浏览器**默认关着**，站点清单默认是空的。
+     *
+     * 和上面那三条守卫的默认值方向相反，这不是笔误：那三条是「要不要收紧」，全开等于
+     * 最严；这一条是「要不要放开」，关着才是最严。它握着的是员工本人在那些网站上的
+     * 登录态，一次误开等于以他的名义做了一件事。
+     */
+    assert(tpl.browser && tpl.browser.on === false, `浏览器默认该是关的 ${JSON.stringify(tpl.browser)}`)
+    assert(Array.isArray(tpl.browser.sites) && !tpl.browser.sites.length, `站点默认该是空的 ${JSON.stringify(tpl.browser)}`)
 
     const saved = await req(base, 'PUT', `/orgs/${inviteOrg}/bot-template`, {
       token: tok,
@@ -2086,12 +2096,27 @@ async function runGateway() {
         guards: { pii: false },
         // 认不出的记录类型丢掉；注入上限按 5–50 收口。
         memory: { scope: '全公司', kinds: ['流程', '瞎写的'], ttl: '永久保留', cap: 999, confirm: false },
+        // 站点这一栏收的是人随手粘进来的东西：整条 URL、带 *. 的写法、大小写混着。
+        // 本机和内网地址无论怎么写都不许进——那不是「外部系统」。
+        browser: {
+          on: true,
+          sites: ['https://App.Example.com/inbox?x=1', '*.foo.cn', '127.0.0.1', 'localhost', 'nas.local', 'erp', 'app.example.com'],
+        },
       },
     })
     assert(saved.status === 200, `存 ${saved.status} ${saved.text}`)
     assert(saved.json.template.version === tpl.version + 1, `版本号没加一：${saved.json.template.version}`)
     const g = saved.json.template.guards
     assert(g.pii === false && g['high-risk'] === true && g['no-external'] === true, `守卫合并 ${JSON.stringify(g)}`)
+    const br = saved.json.template.browser
+    assert(br.on === true, `浏览器没开起来 ${JSON.stringify(br)}`)
+    assert(br.sites.includes('app.example.com'), `整条 URL 没收成域名 ${JSON.stringify(br.sites)}`)
+    assert(br.sites.includes('foo.cn'), `*. 前缀没去掉 ${JSON.stringify(br.sites)}`)
+    // 重复的只留一条：同一个域名写两遍（一次带协议一次不带）是最常见的粘贴结果。
+    assert(br.sites.filter((x) => x === 'app.example.com').length === 1, `没去重 ${JSON.stringify(br.sites)}`)
+    for (const bad of ['127.0.0.1', 'localhost', 'nas.local', 'erp']) {
+      assert(!br.sites.includes(bad), `${bad} 不该进白名单 ${JSON.stringify(br.sites)}`)
+    }
     const m = saved.json.template.memory
     assert(m.scope === '全公司' && m.ttl === '永久保留', `记忆 ${JSON.stringify(m)}`)
     assert(m.kinds.length === 1 && m.kinds[0] === '流程', `认不出的类型没丢 ${JSON.stringify(m.kinds)}`)
@@ -2103,6 +2128,7 @@ async function runGateway() {
     assert(back.json.template.escalate.includes('转人工'), `升级条件 ${back.json.template.escalate}`)
     assert(back.json.template.guards.pii === false, '守卫没落库')
     assert(back.json.template.memory.cap === 50 && back.json.template.memory.scope === '全公司', '记忆没落库')
+    assert(back.json.template.browser.on === true && back.json.template.browser.sites.includes('foo.cn'), '浏览器那两格没落库')
 
     // 自建的 Bot 不存自己的一份——读出来就是模版这一份。
     const made = await req(base, 'POST', '/runtime/bots', { token: tok, body: { name: '记忆助手' } })
@@ -2110,6 +2136,7 @@ async function runGateway() {
     assert(made.json.bot.guards.pii === false, `没继承守卫 ${JSON.stringify(made.json.bot.guards)}`)
     assert(made.json.bot.memory.cap === 50, `没继承记忆 ${JSON.stringify(made.json.bot.memory)}`)
     assert(made.json.bot.escalate.includes('转人工'), '没继承升级条件')
+    assert(made.json.bot.browser && made.json.bot.browser.on === true, `没继承浏览器能力 ${JSON.stringify(made.json.bot.browser)}`)
     await req(base, 'DELETE', `/runtime/bots/${made.json.bot.id}`, { token: tok })
   })
 
@@ -2892,6 +2919,7 @@ async function main() {
     await runMaxSteps({ root, test, assert, log })
     await runToolCalls({ root, test, assert, log })
     await runGuards({ root, test, assert, log })
+    await runBrowser({ root, test, assert, log })
     // 关进程那条放在最后：它把 Gateway 起起来又掐掉，后面再挂用例只会跟它抢端口。
     await runShutdown({ gwRoot, test, start, waitHttp, assert, log })
   } finally {

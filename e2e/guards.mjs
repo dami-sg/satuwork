@@ -259,6 +259,72 @@ export async function runGuards({ root, test, assert, log }) {
     assert(e.理由说的是真工具, `卡片上那句话还在说壳的名字：${e.理由说的是真工具}`)
   })
 
+  await test('浏览器：没开这项能力就调不通，白名单外的站点拦下', () => {
+    const bad = all(r.browser)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
+    assert(r.browserBlockedRuns === 3, `被拦的导航还是跑了（放行的应当只有 3 次）：${r.browserBlockedRuns}`)
+  })
+
+  await test('浏览器：回环、内网、非 http 一律拦，关掉开关也拦', () => {
+    /**
+     * 这条是整组里最重要的一个。
+     *
+     * 硬黑名单防的不是「越权访问未授权的外部系统」——那是一条管理员可以关掉的开关；
+     * 它防的是**用浏览器回头打自己**：席位上听着 bot 口（3200+N）、CDP 口（9222+N）和
+     * 管家的口。挂在那条开关底下的话，管理员为了让 Bot 去个名单外的站点顺手一关，
+     * 就把「Bot 能给自己发指令」一起放开了，而界面上没有任何东西会提示这件事。
+     */
+    const bad = all(r.browserHard)
+    assert(!bad.length, `硬黑名单漏了：${bad.join('、')}`)
+    const still = all(r.browserHardStaysOn)
+    assert(!still.length, `关掉 no-external 之后这几条也跟着松了：${still.join('、')}`)
+  })
+
+  await test('浏览器：只读的那几把也走白名单', () => {
+    // 把一张登录后的页面读进模型，正是这条边界最该管的动作，不是最不该管的。
+    const bad = all(r.browserRead)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
+  })
+
+  await test('浏览器：认不出来的元素要问，不是放行', () => {
+    /**
+     * 先写的是「没名字就放行」，那是个真洞：企业后台里的删除按钮常常只有一个垃圾桶
+     * 图标，既没有文字也没有 aria-label，快照里就是 `- button "" [@e12]`。照那条规则，
+     * 一次不可逆的删除**一张卡片都不会弹**，而 tool/policy 里也不会留下任何东西。
+     */
+    const a = r.browserApproval
+    assert(a.没名字的按钮要问, '只有图标的按钮被放行了')
+    assert(a.没名字也没角色的要问, '连角色都认不出来的元素被放行了')
+    assert(a.没名字的链接不问, '没文字的链接也弹卡，那是噪音')
+  })
+
+  await test('浏览器：放行时把允许的站点推给服务，事后补记漏掉的写', () => {
+    /**
+     * 两件事都在策略之外，但只有策略知道该什么时候做：
+     *
+     *  1. 策略只判「动手之前停在哪一页」，而一次调用当中页面还会跳（302、点开新标签页、
+     *     页内脚本自己走）。名单推下去，服务在读回内容之前用同一套判据再判一次。
+     *  2. 提交判据是启发式，一定会漏。漏掉的那次至少要在会话日志里留得下一条 noted——
+     *     没有它，「事后查得到」这句话只是文档上的一句话。
+     */
+    const push = all(r.scopePush)
+    assert(!push.length, `作用域下推这几条不对：${push.join('、')}`)
+    const note = all(r.noteWrites)
+    assert(!note.length, `事后补记这几条不对：${note.join('、')}`)
+  })
+
+  await test('浏览器：像提交的才弹卡片，点一下看看的不弹', () => {
+    /**
+     * `browser_click` 正好是 `external + write`，照通用规则判就是每一次点击都弹一张
+     * 卡片——那不是收紧边界，那是让人学会闭眼点批准（bash 那条分支写过同一件事）。
+     *
+     * 反过来也要钉住：「先 type 再 press Enter」和 `submit: true` 是同一件事，
+     * 放过其中一个，模型换个写法就绕过去了——而它换写法不需要任何恶意。
+     */
+    const bad = all(r.browserApproval)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
+  })
+
   await test('策略够得着目录：serverOf 这个接缝类型检查看不见，得靠断言守着', () => {
     // 策略是 `reflect.get('catalog') as { serverOf?… }` 取的服务——目录那边没有这个
     // 方法，tsc 一声不吭，而运行时每一次 mcp_* 调用都会被判成「不属于任何已授权的

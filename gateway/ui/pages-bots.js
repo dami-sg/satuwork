@@ -202,6 +202,7 @@ function capabilityPanel(a, opts, ro) {
       <div style="display: flex; flex-wrap: wrap; gap: 6px;">${chips(names(a.skills, opts.skills))}</div>
       <span class="satu-panel-title" style="margin-top: var(--space-2);">${t('可用 MCP 服务器')}</span>
       <div style="display: flex; flex-wrap: wrap; gap: 6px;">${chips(names(a.mcps, opts.mcps))}</div>
+      ${browserBlock(a, true)}
     </div>`
   }
   return `<div class="satu-panel">
@@ -210,7 +211,43 @@ function capabilityPanel(a, opts, ro) {
     <span class="satu-panel-title" style="margin-top: var(--space-2);">${t('可用 MCP 服务器')}</span>
     ${botPicks('mcps', opts.mcps, a.mcps, t('没有可选项'))}
     <span style="font-size: 12px; color: var(--muted-foreground);">${t('未勾选的能力，Agent 在任务中不可调用。')}</span>
+    ${browserBlock(a, false)}
   </div>`
+}
+
+/**
+ * 浏览器这一格摆在**能力**里，不摆在行为边界里。
+ *
+ * 那三条边界的语义是「要不要收紧」，默认全开等于最严；这一个是「要不要放开」，默认
+ * 关才是最严。方向相反的东西并排放，管理员读到的会是「都打着勾＝都管着」。
+ *
+ * 站点列表只在开着的时候露出来：关着的时候它是一片没有任何作用的输入框，而一片看着
+ * 能填的输入框比没有这一格更容易让人以为自己配好了。
+ */
+function browserBlock(a, ro) {
+  const on = !!a.browserOn
+  const desc = t(
+    '让它操作席位桌面上那个浏览器，复用你已经登录的会话',
+    'Let it drive the browser on the seat desktop, reusing sessions you already signed into',
+  )
+  const toggle = botToggle(t('允许操作浏览器', 'Allow browser control'), desc, on, ro ? '' : 'bot-browser')
+  if (!on) return toggle
+  const sites = String(a.browserSites || '')
+  const list = ro
+    ? `<div style="display: flex; flex-wrap: wrap; gap: 6px;">${
+        sites.split('\n').map((x) => x.trim()).filter(Boolean).map((x) => `<span class="tag tag-neutral">${esc(x)}</span>`).join(' ') ||
+        `<span style="font-size: 12px; color: var(--muted-foreground);">${t('没有')}</span>`
+      }</div>`
+    : `<textarea class="input" id="bot-browser-sites" rows="4" data-bot="browserSites" placeholder="example.com&#10;erp.mycompany.cn">${esc(sites)}</textarea>`
+  return `${toggle}
+    <div class="field" style="margin-top: var(--space-2);">
+      <label for="bot-browser-sites">${t('允许打开的站点', 'Sites it may open')}</label>
+      ${list}
+    </div>
+    <span style="font-size: 12px; color: var(--muted-foreground);">${t(
+      '一行一个域名，含子域（写 example.com 就覆盖 app.example.com）。没列出来的站点一律拦下——这把工具用的是你本人的登录态，一次误开就等于以你的名义做了一件事。本机地址和内网地址无论怎么填都不放行。',
+      'One domain per line; subdomains are included (example.com covers app.example.com). Anything not listed is blocked — this tool acts with your own signed-in session, so one wrong site means something done in your name. Loopback and private addresses are never allowed, no matter what you type.',
+    )}</span>`
 }
 
 function memoryPanel(a, ro) {
