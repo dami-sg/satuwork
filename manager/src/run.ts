@@ -73,3 +73,18 @@ export function tailError(r: RunResult, fallback: string): string {
   const body = [err && `stderr: ${err.slice(-400)}`, out && `stdout: ${out.slice(-400)}`].filter(Boolean).join(' | ')
   return body ? `${head} — ${body}` : head || fallback
 }
+
+/**
+ * 跑一遍，只要 stdout；非零和抛异常都当「什么都没看到」。
+ *
+ * 「看一眼现场」这类活儿（诊断、回收端口）不该因为少一个工具就整件挂掉——老镜像
+ * 上没有 ss、没有 journalctl 是常事，而那正是最需要看现场的时候。
+ */
+export async function tryRun(file: string, args: string[], timeout = 8000): Promise<string> {
+  try {
+    const r = await run(file, args, { timeout })
+    return r.code === 0 ? r.stdout : ''
+  } catch {
+    return ''
+  }
+}

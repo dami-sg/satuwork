@@ -256,6 +256,21 @@ enable_and_restart() {
 enable_and_restart "slim-desktop@$SEAT_ID.service"
 enable_and_restart "satuwork-bot@$SEAT_ID.service"
 
+# 占着这个 pid 的是哪个席位。认不出来回空。
+#
+# **不能只比 Linux 用户名。** 一个员工的所有席位共用一个账号，于是同账号下另一块屏
+# 的 x11vnc 蹲在这个口上时，`owner = $LINUX_USER` 是成立的——这道自证会放它过去，
+# 而界面上「打开桌面」进的是另一块屏，口令永远对不上。正是这道自证要拦的那种事。
+#
+# XDG_RUNTIME_DIR 是 /tmp/xdg-runtime-$SEAT_ID，逐席位唯一，slim-desktop.sh 在起任何
+# 东西之前就 export 了；bot.env 里也有同一条。三个监听进程都带着自己那一份。
+# `|| true` 写在命令替换**里面**——和下面 verify_seat_listener 里 pid= 那处同一个理由：
+# errtrace 会让 ERR trap 在子 shell 里先响，写在外面拦不住那一声。进程刚退时
+# /proc/<pid>/environ 就没了，而那恰恰是这个函数最常被调用的时刻。
+seat_of_pid() {
+  printf '%s' "$(tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n 's|^XDG_RUNTIME_DIR=/tmp/xdg-runtime-||p' | head -1 || true)"
+}
+
 # ── 部署完自证：那两个端口上蹲着的得是**这个席位的**进程 ────────────────
 # 「起完就算成功」在这里是不够的。机器上完全可能有另一套 VNC 占着 6081——这台就
 # 撞过：一个 Aug 16 起的 x11vnc :3 + websockify 0.0.0.0:6081 → localhost:5902，口令在
@@ -265,7 +280,7 @@ enable_and_restart "satuwork-bot@$SEAT_ID.service"
 # 输口令永远 password check failed，重新部署多少次都一样。这种失败不会自己浮出来，
 # 只能靠人去 ps 里翻。所以在这里就断掉，把原因写进部署错误里报回 Gateway。
 verify_seat_listener() {
-  local port="$1" what="$2" pid owner
+  local port="$1" what="$2" pid owner holder
   # 等 30 秒。**新建席位第一次起屏比想象的慢**：adduser、daemon-reload、Xvfb 就绪、
   # 上一轮残留的端口释放，叠起来轻松过十秒——等太短会把「慢」判成「坏」。
   for _ in $(seq 1 120); do
@@ -278,16 +293,36 @@ verify_seat_listener() {
     # SIGPIPE——那同样是非零。）
     pid=$(ss -ltnp 2>/dev/null | grep -E ":${port}\b" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)
     if [ -n "${pid:-}" ]; then
-      # 同上：pid 是上一条 ss 抓的，进程完全可能在这一瞬已经退了，ps 于是非零。
-      # 那时该走下面「被别人占着」的 ${owner:-?} 分支，而不是让整个部署崩掉。
+      # 同上：pid 是上一条 ss 抓的，进程完全可能在这一瞬已经退了，读 environ、跑 ps
+      # 于是都可能空手而归。那时该继续等，而不是让整个部署崩掉。
+      holder=$(seat_of_pid "$pid" || true)
+      [ "$holder" = "$SEAT_ID" ] && return 0
       owner=$(ps -o user:32= -p "$pid" 2>/dev/null | tr -d ' ' || true)
-      [ "$owner" = "$LINUX_USER" ] && return 0
+      # 认不出席位、用户又对得上：多半是本席位刚 fork 出来还没走到 export，也可能
+      # 进程已经退了。**不据此放行**（放行就是上面那个「进的是另一块屏」的洞），
+      # 继续绕圈；真起不来的话，下面那句超时告警会兜住，且不算部署失败。
+      if [ -z "$holder" ] && [ "$owner" = "$LINUX_USER" ]; then
+        sleep 0.25
+        continue
+      fi
       # 端口被**别人**占着：这是确定的错误，而且没人去动它就永远不会自己好。
       # 这一条必须让部署失败——否则又变成「部署成功但连进去是另一套 VNC」。
-      echo "端口 $port（$what）被 ${owner:-?} 的进程 $pid 占着，不是这个席位的：" >&2
-      ps -o pid,user:32,cmd -p "$pid" >&2 || true
-      echo "这台机器上有别的 VNC/桌面在跑。确认无用后停掉它再重新部署——" >&2
-      echo "不停的话「打开桌面」进的是那一套，口令永远对不上。" >&2
+      #
+      # 话要说准。管家在跑这个脚本之前已经清过一轮占口的席位（见 reclaim.ts），
+      # 所以走到这里的两种情况都不是「有别的 VNC 在跑」那么简单：占口的若是另一个
+      # 席位，说明它是在这次部署途中才起来的（或者这个脚本是被手工跑的，前面那一层
+      # 压根没跑）——两种的处置完全不同，别混成一句。
+      if [ -n "$holder" ]; then
+        echo "端口 $port（$what）被席位 $holder 的进程 $pid 占着，不是这个席位（$SEAT_ID）：" >&2
+        ps -o pid,user:32,cmd -p "$pid" >&2 || true
+        echo "部署前那一轮端口回收之后它才起来的，或者这个脚本是手工跑的（没走管家那一层）。" >&2
+        echo "从管家重新部署一次即可——回收会先把这个口要回来。" >&2
+      else
+        echo "端口 $port（$what）被 ${owner:-?} 的进程 $pid 占着，它不是任何一个 satuwork 席位：" >&2
+        ps -o pid,user:32,cmd -p "$pid" >&2 || true
+        echo "这台机器上有别的 VNC/桌面在跑。确认无用后停掉它再重新部署——" >&2
+        echo "不停的话「打开桌面」进的是那一套，口令永远对不上。" >&2
+      fi
       exit 43
     fi
     sleep 0.25

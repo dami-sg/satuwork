@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { run } from './run.ts'
+import { tryRun } from './run.ts'
 import { seat, type SeatRecord } from './seats.ts'
 
 /**
@@ -59,7 +59,10 @@ interface PortInfo {
   pid?: string
   user?: string
   cmd?: string
-  /** 占着这个口的是不是本席位那个用户。false = 撞上了别人的东西。 */
+  /**
+   * 占着这个口的是不是**本席位**（不是「本席位那个用户」——见 portOf）。
+   * false = 撞上了别人的东西，undefined = 认不出来（进程刚退、environ 读不到）。
+   */
   mine?: boolean
 }
 
@@ -78,16 +81,6 @@ interface FileInfo {
   size?: number
   mtime?: string
   note?: string
-}
-
-/** 把命令跑一遍，失败不抛——诊断本身不该因为少一个工具就整份挂掉。 */
-async function tryRun(file: string, args: string[], timeout = 8000): Promise<string> {
-  try {
-    const r = await run(file, args, { timeout })
-    return r.code === 0 ? r.stdout : ''
-  } catch {
-    return ''
-  }
 }
 
 /**
@@ -128,8 +121,15 @@ async function unitOf(unit: string): Promise<UnitInfo> {
   }
 }
 
-/** 谁在听这个端口。`ss -ltnp` 要 root 才给得出 pid——管家正是以 root 跑的。 */
-async function portOf(port: number, what: string, linuxUser: string): Promise<PortInfo> {
+/**
+ * 谁在听这个端口。`ss -ltnp` 要 root 才给得出 pid——管家正是以 root 跑的。
+ *
+ * **`mine` 按席位判，不按 Linux 用户名判。** 一个员工的所有席位共用一个账号，按用户
+ * 名判的话，同账号下另一块屏的 x11vnc 蹲在这个口上会被认成「是本席位的」——而那正
+ * 是这份报告要抓的头号故障（连得上、口令永远不对）。判据和 processesOf 里的 mine
+ * 是同一条：席位目录逐席位唯一，用户名不是。
+ */
+async function portOf(port: number, what: string, seatDir: string): Promise<PortInfo> {
   const out = await tryRun('ss', ['-ltnp'])
   const line = out.split('\n').find((l) => new RegExp(`[:.]${port}\\b`).test(l))
   if (!line) return { port, what, listening: false }
@@ -144,7 +144,7 @@ async function portOf(port: number, what: string, linuxUser: string): Promise<Po
     pid,
     user: user || '?',
     cmd: scrub(rest.join(' ')).slice(0, 200),
-    mine: user === linuxUser,
+    mine: ownsSeat(pid, seatDir),
   }
 }
 
@@ -252,9 +252,9 @@ export async function diagnose(seatId: string, lines = 40): Promise<DiagResult> 
   const [units, ports, processes, browser, journalRaw] = await Promise.all([
     Promise.all([unitOf(desktopUnit), unitOf(botUnit)]),
     Promise.all([
-      portOf(rfb, 'x11vnc', row.linuxUser),
-      portOf(row.novncPort, 'websockify', row.linuxUser),
-      portOf(row.botPort, 'bot', row.linuxUser),
+      portOf(rfb, 'x11vnc', row.seatDir),
+      portOf(row.novncPort, 'websockify', row.seatDir),
+      portOf(row.botPort, 'bot', row.seatDir),
     ]),
     processesOf(row),
     browserOf(),
@@ -278,7 +278,7 @@ export async function diagnose(seatId: string, lines = 40): Promise<DiagResult> 
   // ── 把「一眼能看出的不对劲」直接写成人话，别让人自己去比对上面那堆字段 ──
   for (const p of ports) {
     if (!p.listening) notes.push(`端口 ${p.port}（${p.what}）没人在听`)
-    else if (p.mine === false) notes.push(`端口 ${p.port}（${p.what}）被 ${p.user} 占着，不是本席位的 ${row.linuxUser}——这正是「连得上但口令不对」的典型成因`)
+    else if (p.mine === false) notes.push(`端口 ${p.port}（${p.what}）被 ${p.user} 的进程 ${p.pid} 占着，不是本席位的（同一个员工的另一块屏也算）——这正是「连得上但口令不对」的典型成因`)
   }
   const desktop = units[0]
   if (desktop.active !== 'active') notes.push(`${desktopUnit} 不是 active（${desktop.active}/${desktop.sub}）`)

@@ -36,6 +36,85 @@ stop_unit() {
 stop_unit "$BOT_UNIT"
 stop_unit "$DESKTOP_UNIT"
 
+# ── 单元停了，进程未必死了 ────────────────────────────────────────────
+# `slim-desktop@` 是 PAMName=login 起的：Xvfb / x11vnc / websockify 落在 logind 的
+# session scope 里，而多屏部署又要求 logind 的 KillUserProcesses=no（否则停一块屏会
+# 连坐同一个员工的其它屏）。两条加在一起 = 上面那个 stop_unit **够不着它们**，
+# 连 `systemctl kill` 也够不着——它杀的是单元自己的 cgroup。
+#
+# 于是席位拆完，5910/6081 上还蹲着这个席位的 x11vnc 和 websockify，指着一个已经被
+# rm 掉的 vnc-passwd（启动时就打开了，文件删掉照样服务）。Gateway 那边行一删，槽位
+# 立刻分给下一个席位——下一次部署撞上同一个口，报「端口被别人占着」，而那个「别人」
+# 正是刚拆掉的这个席位。真跑出来过：sw-…-7bbe43f21941 的 x11vnc 占着 5910。
+#
+# 按 XDG_RUNTIME_DIR 认领：它是 /tmp/xdg-runtime-$SEAT_ID，**逐席位唯一**，
+# slim-desktop.sh 在起任何东西之前就 export 了，所有子进程都带着。命令行认不出来
+# ——`Xvfb :10`、`websockify 127.0.0.1:6081` 里没有席位标识，而同一个员工的几块屏
+# 还共用一个 Linux 账号，按用户杀会把别的屏一起带走。
+seat_pids() {
+  local pid
+  for pid in /proc/[0-9]*; do
+    pid="${pid##*/}"
+    grep -qzFx "XDG_RUNTIME_DIR=/tmp/xdg-runtime-$SEAT_ID" "/proc/$pid/environ" 2>/dev/null || continue
+    printf '%s\n' "$pid"
+  done
+}
+
+# 这个席位的进程开在哪些显示号上。**杀之前问，杀完就问不出来了。**
+seat_displays() {
+  local pid
+  for pid in $(seat_pids); do
+    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^DISPLAY=://p'
+  done | sort -u
+}
+
+# X 的锁和 socket。**必须由这个脚本（root）来删。**
+#
+# slim-desktop.sh 里也有一句 `rm -f /tmp/.X$N-lock`，但那是**以席位用户**跑的：
+# /tmp 带 sticky 位，删不掉别人建的文件，`rm -f` 连报错都被 `|| true` 吞了。于是下
+# 一个拿到这个槽位的席位若属于另一个员工（另一个 Linux 账号），端口都清干净了，锁
+# 还在——Xvfb 报「Server is already active for display N」起不来，桌面单元进重启循
+# 环，而部署那边只留一句「30 秒还没起来」的告警，不算失败。**又是「装作成功」。**
+#
+# Xvfb 收到 TERM 通常会自己收拾这两个文件，但走到下面 SIGKILL 那一步就不会了。
+drop_x_locks() {
+  local d
+  for d in "$@"; do
+    case "$d" in
+      *[!0-9]* | '') continue ;;
+    esac
+    rm -f "/tmp/.X$d-lock" "/tmp/.X11-unix/X$d" 2>/dev/null ||
+      warn "显示 :$d 的锁没删掉，下一个用这个槽位的席位 Xvfb 会起不来"
+  done
+}
+
+# 杀掉逃出去的进程，并把它们开在哪些显示号上留给 ESCAPEE_DISPLAYS——**不是 local**，
+# 外面那句 drop_x_locks 要用。
+ESCAPEE_DISPLAYS=""
+kill_escapees() {
+  local pids
+  pids=$(seat_pids | tr '\n' ' ')
+  [ -n "${pids// /}" ] || return 0
+  ESCAPEE_DISPLAYS=$(seat_displays | tr '\n' ' ')
+  warn "单元停了但还有进程活着（从 logind session 里逃掉的）：$pids"
+  # 先 TERM：x11vnc / websockify 收到会自己关掉 socket 和 X 连接。5 秒不走再补刀。
+  kill -TERM $pids 2>/dev/null
+  for _ in $(seq 1 20); do
+    [ -n "$(seat_pids)" ] || return 0
+    sleep 0.25
+  done
+  pids=$(seat_pids | tr '\n' ' ')
+  [ -n "${pids// /}" ] || return 0
+  warn "还剩 $pids，改用 SIGKILL"
+  kill -KILL $pids 2>/dev/null
+  sleep 0.5
+}
+kill_escapees
+# **清锁只做这一处。** kill_escapees 有好几条 return（TERM 就够时会提前回来），在
+# 函数里清就得每条路上都写一遍，漏一条就是漏一次。显示号是它在进程还活着时取好放
+# 进 ESCAPEE_DISPLAYS 的——杀完再问就问不出来了。
+drop_x_locks ${ESCAPEE_DISPLAYS:-}
+
 rm -rf "/etc/systemd/system/$BOT_UNIT.d" "/etc/systemd/system/$DESKTOP_UNIT.d" ||
   warn "drop-in 没删干净"
 systemctl daemon-reload >/dev/null 2>&1 || warn "daemon-reload 失败"
@@ -52,7 +131,15 @@ rm -rf "/tmp/xdg-runtime-$SEAT_ID" || warn "运行时目录没删干净"
 #
 # `is-active` 对 activating / deactivating 也回非零，那两种状态下进程还在、端口还
 # 占着——所以按状态名判，不按退出码判。
+#
+# **逃出去的进程和单元同等看待。** 它们占的是同一组端口，而 Gateway 拿这个退出码
+# 决定「这行能不能删、槽位能不能让出去」。单元停了但进程还在时报成功，等于把一个
+# 还占着 5910 的席位从库里抹掉——下一个人的席位起不来，且没有任何地方说得出为什么。
 rc=0
+if [ -n "$(seat_pids)" ]; then
+  warn "SIGKILL 之后仍有进程活着：$(seat_pids | tr '\n' ' ')"
+  rc=1
+fi
 for unit in "$BOT_UNIT" "$DESKTOP_UNIT"; do
   state=$(systemctl is-active "$unit" 2>/dev/null)
   case "$state" in
