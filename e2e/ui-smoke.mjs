@@ -1127,6 +1127,51 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(page.includes('成员') && page.includes('订阅'), '成员或订阅那两块没画出来')
     })
 
+    await test('机器详情的「部署的 Bot」：模版版本单独一列，出错的那行也还看得见', async () => {
+      /**
+       * 这张表原来只说「装的是哪个发布包」。模版版本一度是**塞进「版本 / 错误」那一格**
+       * 的——那格出错时画的是 lastError，于是「这台跑的是哪一版模版」恰恰在出错时消失，
+       * 而那正是最该看见它的时候。所以单独一列。
+       *
+       * 没报到过的画「—」，不画 v0：那是「这台席位从来没报过」，多半意味着上面的 bot
+       * 进程不在了，和「跑着旧版本」要查的是两件事。
+       */
+      const ui = await boot(ownerToken)
+      const mid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+      ui.state.path = `/machines/${mid}`
+      ui.state.machineDetail = {
+        no: 1,
+        machine: {
+          id: mid, host: 'http://10.0.0.12:8443', paired: true, pairedAt: Date.now(),
+          managerVersion: '0.3.1+abc-arm64', protocol: 1, lastError: null,
+          lastHeartbeatAt: Date.now() - 12000, link: 'online', heartbeatAge: 12000,
+          timezone: null, currentTimezone: 'Asia/Singapore', arch: 'arm64',
+          telemetry: null, telemetryAt: null, telemetryAge: null, logCapMb: null,
+        },
+        accounts: 2, maxAccounts: 10, seats: 3, full: false,
+        botVersions: [{ version: '0.1.10+06f047e-arm64', seats: 3 }], botOutdated: false,
+        tplVersions: [{ version: 5, seats: 1 }, { version: 4, seats: 1 }, { version: null, seats: 1 }],
+        managerDesired: null, managerOutdated: false, managerPending: false, timezonePending: false,
+        company: { id: 'c1', name: 'Acme', slug: 'acme' },
+        seatList: [
+          { seatId: 'sw-1', botId: 'b1', botName: '我的助手', linuxUser: 'u1', who: 'vzz@x.com', whoName: 'vzz', slot: 0, status: 'ready', botVersion: '0.1.10+06f047e-arm64', tplVersion: 5, tplSyncedAt: Date.now() - 60000, lastError: null, deployedAt: Date.now(), orphan: false },
+          { seatId: 'sw-2', botId: 'b2', botName: '回访助手', linuxUser: 'u2', who: 'lee@x.com', whoName: '李四', slot: 1, status: 'error', botVersion: '0.1.10+06f047e-arm64', tplVersion: 4, tplSyncedAt: Date.now() - 7200000, lastError: '端口被占用', deployedAt: Date.now(), orphan: false },
+          { seatId: 'sw-3', botId: 'b3', botName: '新来的', linuxUser: 'u3', who: 'new@x.com', whoName: '新人', slot: 2, status: 'ready', botVersion: '0.1.10+06f047e-arm64', tplVersion: null, tplSyncedAt: null, lastError: null, deployedAt: Date.now(), orphan: false },
+        ],
+      }
+      ui.render()
+      const html = ui.html()
+      assert(html.includes('部署的 Bot'), '席位表没画出来')
+      assert(html.includes('>v5<') && html.includes('>v4<'), `模版那一列没画出版本号`)
+      // 出错的那一行：错误照常显示，而模版版本**不跟着消失**——这正是分列的理由。
+      assert(html.includes('端口被占用'), '出错的那行没显示错误')
+      // 错误那串在 title 和正文里各出现一次，取**最后**一次之后的片段：模版那一格排在
+      // 它后面，还在，就说明分列真的把它救出来了。
+      assert(html.split('端口被占用').pop().includes('>v4<'), '出错的那行把模版版本吃掉了')
+      // 版本汇总那一格同理：两个「版本」是两件会各自落后的事。
+      assert(html.includes('v5 × 1') && html.includes('还没报到 × 1'), '版本面板没汇总模版版本')
+    })
+
     await test('机器管理：菜单在「机器配置」上面，列表和详情画得出，公司侧进不去', async () => {
       // 这一页答的是「平台上挂着哪些机器」，公司详情里那块「运行机器」答的是「这家
       // 有几台」。断言分三层：入口在不在、两张页面画不画得出、以及**没派给公司的机器
