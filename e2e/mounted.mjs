@@ -1,0 +1,59 @@
+/**
+ * 真实组合里，该在的服务和工具在不在。探针在 bot/e2e-mounted.mjs。
+ *
+ * 补一次事故补出来的：`BrowserService` 上写了 `static inject = ['logger']`，而 logger
+ * 根本不是服务——那条 inject 永远满足不了，服务不启动，依赖它的十二把工具跟着一直挂着。
+ * **一声不响**：进程起来了、健康检查通过、类型检查干净、日志一个字都没有，只有模型在
+ * 对话里说「我没有这个功能」。
+ *
+ * 别的套件都测不到这一类：它们各自 `ctx.plugin(服务)` 手动挂，**绕过了 inject**。
+ * 真正的组合只发生在 Loader 读 cordis.yml 那一刻。
+ */
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+
+function runProbe(root) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-mounted.mjs')], {
+      cwd: join(root, 'bot'),
+      env: { ...process.env, SATUWORK_HOME: '/tmp/satuwork-e2e-mounted', SATUWORK_PORT: '18124' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (d) => (out += d))
+    child.stderr.on('data', (d) => (err += d))
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('探针 40 秒没跑完'))
+    }, 40000)
+    child.on('error', reject)
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
+      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
+      resolve(JSON.parse(line.slice('__RESULT__'.length)))
+    })
+  })
+}
+
+export async function runMounted({ root, test, assert, log }) {
+  log('\n# mounted')
+  const r = await runProbe(root)
+
+  await test('cordis.yml 里挂的服务，一个不少地起来了', () => {
+    /**
+     * 挂不上的插件**不会报错，只会一直挂着**（cordis 的 inject 就是这个语义）。
+     * 所以这条断言看的是「起来了没有」，不是「有没有出错」——后者永远是没有。
+     */
+    const down = Object.entries(r.provided).filter(([, ok]) => !ok).map(([k]) => k)
+    assert(!down.length, `这几个服务没起来（多半是它们的 inject 满足不了）：${down.join('、')}`)
+  })
+
+  await test('工具表和 cordis.yml 对得上：一把不少，也没有多出来的', () => {
+    // 少一把的代价是模型说「我没有这个功能」，而所有别的信号都是绿的——那正是这条
+    // 断言存在的全部理由。多出来的也要管：一把没进过名单的工具是没被审视过的工具。
+    assert(!r.missing.length, `少了这几把工具：${r.missing.join('、')}`)
+    assert(!r.extra.length, `多了这几把没在名单里的工具：${r.extra.join('、')}`)
+  })
+}
