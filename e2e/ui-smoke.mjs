@@ -1103,13 +1103,10 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(list.includes('UI-SMOKE-公司'), '列表没画出归属公司')
       assert(list.includes('未分配'), '没派给公司的机器没标出来——它恰恰是这一页要看见的那种')
       assert(list.includes('data-href="/machines/ffffffff-0000-4000-8000-000000000000"'), '行点不进详情')
-      // 负载那一格画的是**最吃紧的那一项**（这台是盘 92%），并且要进最响的那一档
-      // 颜色——这张表存在的意义就是在机器写满之前看见它。
-      assert(/satu-gauge" data-level="hot"/.test(list), '92% 的盘没进最响那一档，红线就白划了')
-      assert(list.includes('盘 / 92%'), `列表里没写出最吃紧的那一项：${list.slice(list.indexOf('satu-gauge') - 200, list.indexOf('satu-gauge') + 200)}`)
-      // 没报过的那台给「—」，不给 0%：失联机器的 0% 和空闲机器的 0% 看着一样、
-      // 结论正相反。
-      assert(!/satu-gauge[^>]*><span style="width: 0\.0%/.test(list), '没报过的机器被画成了 0%')
+      // **列表里不再有「负载」那一列**（e116054：八列在常见窗口下会把「最近心跳」挤出
+      // 屏幕，砍掉负载列之后才放得下）。这里原来钉的三条都是那一格的，跟着一起撤——
+      // 留着的话就是三条永远红的断言，钉的是一个已经不存在的控件。刻度分档改由下面
+      // 详情页那一段钉（meter / pctText 只剩它在用了）。
 
       ui.state.path = '/machines/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
       ui.state.machineDetail = {
@@ -1148,6 +1145,9 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(detail.includes('机器负载'), '详情页没有负载那块')
       assert(detail.includes('8 核') && detail.includes('23%'), `CPU 那行不对：${detail.slice(detail.indexOf('机器负载'), detail.indexOf('机器负载') + 600)}`)
       assert(detail.includes('92%'), '磁盘占用没画出来')
+      // 92% 的盘要进最响的那一档颜色——这几根条存在的意义就是在机器写满之前看见它。
+      // （列表那一列砍掉之后，这里是唯一还钉着分档的地方。）
+      assert(/satu-gauge" data-level="hot"/.test(detail), '92% 的盘没进最响那一档，红线就白划了')
       assert(detail.includes('MB/s'), '出网速率没画出来')
       // 数是机器自报的、隔一轮心跳才来一次，所以必须先说清楚它有多新——不然一台失联
       // 机器上的「CPU 5%」看着和好机器一模一样。
