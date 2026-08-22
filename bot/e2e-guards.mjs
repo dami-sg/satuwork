@@ -50,10 +50,15 @@ const bots = {
   b9: { id: 'b9', name: '开了浏览器且关掉了外部系统那条', origin: 'company', mcps: [], browser: { on: true, sites: ['example.com'] }, guards: { 'high-risk': false, pii: false, 'no-external': false } },
   b10: { id: 'b10', name: '没开浏览器', origin: 'company', mcps: [], guards: { 'high-risk': false, pii: false, 'no-external': false } },
   b11: { id: 'b11', name: '浏览器要确认', origin: 'company', mcps: [], browser: { on: true, sites: ['example.com'] }, guards: { 'high-risk': true, pii: false, 'no-external': false } },
+  // 通配符那一组：一条只配一层子域，一条配同一层里的一段前缀。
+  b12: { id: 'b12', name: '通配站点', origin: 'company', mcps: [], browser: { on: true, sites: ['*.example.com', 'erp-*.corp.com'] }, guards: { 'high-risk': false, pii: false, 'no-external': true } },
+  // 后缀放开和全局放开各一颗。b14 那颗尤其要盯住：名单开到最大，回环和内网**照样**拦。
+  b13: { id: 'b13', name: '后缀放开', origin: 'company', mcps: [], browser: { on: true, sites: ['example.*'] }, guards: { 'high-risk': false, pii: false, 'no-external': true } },
+  b14: { id: 'b14', name: '全局放开', origin: 'company', mcps: [], browser: { on: true, sites: ['*.*'] }, guards: { 'high-risk': false, pii: false, 'no-external': true } },
 }
 
 const sessions = fakeSessions({ s1: 'b1', s2: 'b2', s3: 'b3', s4: 'b4', s5: 'b-不存在', s6: 'b6', s7: 'b7', s8: 'b1',
-  s8b: 'b8', s9: 'b9', s10: 'b10', s11: 'b11' })
+  s8b: 'b8', s9: 'b9', s10: 'b10', s11: 'b11', s12: 'b12', s13: 'b13', s14: 'b14' })
 
 const ctx = new Context()
 ctx.provide('logger', { warn() {}, info() {}, error() {} })
@@ -468,6 +473,43 @@ out.record = {
     相似域名不放行: (await nav('s8b', 'https://evil-example.com')).failed === true,
     白名单外被拦: (await nav('s8b', 'https://other.com')).failed === true,
   }
+  /**
+   * 通配符。**`*` 只在一段标签之内顶字符，不跨点**——这是整条设计的全部安全性所在：
+   * 跨点的话 `*.com` 就等于整个互联网，而它在界面上看起来只是一条普通的白名单。
+   *
+   * 另一半是「写得越具体，覆盖面越窄」：裸域名含子域，带 `*` 的按字面配。这条顺序反
+   * 过来的话，管理员为了收紧而加的那个 `*` 反而把口子开大了。
+   */
+  out.browserWildcard = {
+    一层子域放行: (await nav('s12', 'https://app.example.com/x')).failed !== true,
+    // 配上了就连子域一起算——和裸域名那条是同一个口径。
+    子域的子域也放行: (await nav('s12', 'https://a.b.example.com')).failed !== true,
+    // `*.` 明说了前面要有东西，所以主站自己不算。想连自己一起覆盖就写裸域名。
+    主站自己不放行: (await nav('s12', 'https://example.com')).failed === true,
+    段内前缀能配上: (await nav('s12', 'https://erp-hz.corp.com')).failed !== true,
+    前缀对不上就拦: (await nav('s12', 'https://erp.corp.com')).failed === true,
+    别家的域名照样拦: (await nav('s12', 'https://app.evil.com')).failed === true,
+    // 后缀放开：同一家公司的 .cn 和 .com 一条搞定，连子域。
+    后缀放开_cn: (await nav('s13', 'https://example.cn')).failed !== true,
+    后缀放开_com的子域: (await nav('s13', 'https://app.example.com')).failed !== true,
+    后缀放开不认别人家: (await nav('s13', 'https://notexample.cn')).failed === true,
+    // 全局放开：公网什么都能开。
+    全局放开: (await nav('s14', 'https://anything.io/x')).failed !== true,
+  }
+  /**
+   * **名单开到最大，回环和内网照样拦。**
+   *
+   * 这条是「宽窄归管理员定、打不打得到自己不归」这句话的实证。硬黑名单跑在名单**之前**，
+   * 任何配置都关不掉它——`*.*` 放开的是整个公网，不是这台机器自己。少了这条断言，
+   * 哪天有人把两层判据合成一层，界面上看不出任何变化。
+   */
+  out.browserAllStillBlocked = {
+    回环: (await nav('s14', 'http://127.0.0.1:3200/api')).failed === true,
+    内网: (await nav('s14', 'http://10.0.0.5/')).failed === true,
+    file协议: (await nav('s14', 'file:///etc/passwd')).failed === true,
+    不带点的主机名: (await nav('s14', 'http://erp/')).failed === true,
+  }
+
   out.browserHard = {
     回环被拦: (await nav('s8b', 'http://127.0.0.1:3200/api')).failed === true,
     localhost被拦: (await nav('s8b', 'http://localhost:9222/json')).failed === true,

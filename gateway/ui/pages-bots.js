@@ -238,15 +238,25 @@ function browserBlock(a, ro) {
         sites.split('\n').map((x) => x.trim()).filter(Boolean).map((x) => `<span class="tag tag-neutral">${esc(x)}</span>`).join(' ') ||
         `<span style="font-size: 12px; color: var(--muted-foreground);">${t('没有')}</span>`
       }</div>`
-    : `<textarea class="input" id="bot-browser-sites" rows="4" data-bot="browserSites" placeholder="example.com&#10;erp.mycompany.cn">${esc(sites)}</textarea>`
+    : /**
+       * **多行的不能用 `.input` 那个药丸圆角。**
+       *
+       * `border-radius: 999px` 是给单行控件用的——高度一固定，999px 就是两头半圆，全站
+       * 的输入框都长这样。textarea 一高上去，同一个值把边框摊成一个椭圆，域名从弧线里
+       * 溢出来。仓库里已经栽过一次（发信卡的正文那格，`.sw-mail-text`）。
+       *
+       * 配法照同一页上那个 MCP 环境变量框（`#tl-env`）抄：等宽 + 12.5px。那一格和这一格
+       * 是同一种东西——一行一个标识符，读的时候是在比对字符，不是在读句子。
+       */
+      `<textarea class="input" id="bot-browser-sites" rows="4" data-bot="browserSites" style="border-radius: var(--radius-md); resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.7;" placeholder="example.com&#10;*.erp.mycompany.cn">${esc(sites)}</textarea>`
   return `${toggle}
     <div class="field" style="margin-top: var(--space-2);">
       <label for="bot-browser-sites">${t('允许打开的站点', 'Sites it may open')}</label>
       ${list}
     </div>
     <span style="font-size: 12px; color: var(--muted-foreground);">${t(
-      '一行一个域名，含子域（写 example.com 就覆盖 app.example.com）。没列出来的站点一律拦下——这把工具用的是你本人的登录态，一次误开就等于以你的名义做了一件事。本机地址和内网地址无论怎么填都不放行。',
-      'One domain per line; subdomains are included (example.com covers app.example.com). Anything not listed is blocked — this tool acts with your own signed-in session, so one wrong site means something done in your name. Loopback and private addresses are never allowed, no matter what you type.',
+      '一行一个。写 example.com 覆盖它和全部子域；* 顶一段标签里的字符、不跨点（erp-*.corp.com 配 erp-hz.corp.com）；example.* 放开后缀（.cn 和 .com 都算）；*.* 是全部放开。配上了就连子域一起算。没列出来的站点一律拦下——这把工具用的是你本人的登录态，一次误开就等于以你的名义做了一件事。填多宽由你定，但本机地址和内网地址是另一层管的，怎么填都不放行。',
+      'One entry per line. A bare domain covers it and all subdomains (example.com covers app.example.com); * matches within one label and never crosses a dot (erp-*.corp.com matches erp-hz.corp.com); example.* opens the suffix (.cn and .com both count); *.* opens everything. Whatever matches, its subdomains match too. Anything not listed is blocked — this tool acts with your own signed-in session, so one wrong site means something done in your name. How wide you go is your call, but loopback and private addresses are handled by a separate layer and are never allowed, no matter what you type.',
     )}</span>`
 }
 

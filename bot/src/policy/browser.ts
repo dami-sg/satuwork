@@ -86,18 +86,66 @@ export function blockedHost(host: string | null): string | null {
 }
 
 /**
+ * 一条带 `*` 的站点 → 正则。
+ *
+ * **`*` 只在一段标签之内顶字符，不跨点。** 这是整条通配符设计的全部安全性所在：跨点的话
+ * `*.com` 就等于整个互联网，而它在界面上看起来只是一条普通的白名单。所以 `*` 展开成
+ * `[a-z0-9-]+`（域名标签的字符集），点保持是点。
+ *
+ * 顺带一条：**至少配一个字符**，不是零个。`*.example.com` 不该把 `.example.com` 或者
+ * `example.com` 本身算进去——想连自己一起覆盖就写裸域名，那是另一种写法，语义更宽也更
+ * 直白。
+ */
+function wildcardRe(site: string): RegExp {
+  const body = site
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[a-z0-9-]+')
+  return new RegExp(`^${body}$`)
+}
+
+/** 全部放开的两种写法。Gateway 那边把单个 `*` 归一到 `*.*`，这里两种都认。 */
+const ALL = new Set(['*', '*.*'])
+
+/**
  * 这个主机在公司白名单里吗。
  *
- * **含子域**：`example.com` 覆盖 `app.example.com`。SaaS 在 `login.` / `app.` / `api.`
- * 之间来回跳是常态，逐个子域列一定会漏，而漏掉的表现是任务跑到一半被拦在半路。
+ * 一条规则贯穿所有写法：**按标签配，配上了就连它的子域一起算。**
  *
- * 反过来不成立：写 `app.example.com` 不会放行 `example.com`，更不会放行
- * `evil-example.com`（endsWith 前面那个点就是为它加的）。
+ * | 写的 | 配得上 | 配不上 |
+ * | --- | --- | --- |
+ * | `example.com` | 它自己、`app.example.com`、`a.b.example.com` | `evil-example.com` |
+ * | `*.example.com` | `app.example.com`、`a.b.example.com` | `example.com` 自己 |
+ * | `erp-*.corp.com` | `erp-hz.corp.com` | `erp.corp.com` |
+ * | `example.*` | `example.cn`、`app.example.com` | `notexample.cn` |
+ * | `*.*` | 什么都行 | — |
+ *
+ * `*` 顶的是**一段标签之内**的字符（`[a-z0-9-]+`），不跨点；跨点的活由「配上了含子域」
+ * 那一半去干。两件事分开之后，`*.example.com` 是「至少一层子域」，而 `example.com` 是
+ * 「它自己和所有子域」——差别在要不要主站，而不是层数。
+ *
+ * **这份名单只管「能去哪些外部站点」。** 回环、内网、非 http 由 `blockedHost` 单独拦，
+ * 那一层跑在这之前、谁都关不掉——所以哪怕这儿写着 `*.*`，放开的也是整个公网，不是这台
+ * 机器自己。两件事分层的意义就在这儿：宽窄归管理员定，「打不打得到自己」不归。
+ *
+ * 名单是从目录同步下来的，**不假设它一定过过 Gateway 的 `botSiteOf`**——同步下来的东西
+ * 不该被当成已经验过。`*` 不跨点这一条在这儿是独立成立的。
  */
 export function siteAllowed(host: string, sites: readonly string[]): boolean {
   for (const raw of sites) {
     const site = String(raw || '').trim().toLowerCase()
     if (!site) continue
+    if (ALL.has(site)) return true
+    if (site.includes('*')) {
+      const re = wildcardRe(site)
+      // 配上本身，或者它的子域——和裸域名那条是同一个口径。
+      if (re.test(host)) return true
+      const dot = host.indexOf('.')
+      for (let i = dot; i > 0; i = host.indexOf('.', i + 1)) {
+        if (re.test(host.slice(i + 1))) return true
+      }
+      continue
+    }
     if (host === site) return true
     if (host.endsWith(`.${site}`)) return true
   }

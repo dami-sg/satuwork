@@ -2101,7 +2101,19 @@ async function runGateway() {
         // 本机和内网地址无论怎么写都不许进——那不是「外部系统」。
         browser: {
           on: true,
-          sites: ['https://App.Example.com/inbox?x=1', '*.foo.cn', '127.0.0.1', 'localhost', 'nas.local', 'erp', 'app.example.com'],
+          sites: [
+            'https://App.Example.com/inbox?x=1',
+            '*.foo.cn',
+            'erp-*.corp.com',
+            // 后缀放开、全局放开：开多宽是管理员的决定，这一层不拦。
+            'mycompany.*',
+            '*',
+            '127.0.0.1',
+            'localhost',
+            'nas.local',
+            'erp',
+            'app.example.com',
+          ],
         },
       },
     })
@@ -2112,7 +2124,20 @@ async function runGateway() {
     const br = saved.json.template.browser
     assert(br.on === true, `浏览器没开起来 ${JSON.stringify(br)}`)
     assert(br.sites.includes('app.example.com'), `整条 URL 没收成域名 ${JSON.stringify(br.sites)}`)
-    assert(br.sites.includes('foo.cn'), `*. 前缀没去掉 ${JSON.stringify(br.sites)}`)
+    /**
+     * 通配符**留着**，不再像早先那样把 `*.` 一剥了事。
+     *
+     * 剥掉的话 `*.foo.cn` 会被悄悄放宽成 `foo.cn`——管理员写 `*` 是想收紧（只要子域，
+     * 不要主站），而系统的处理是把它改成更宽的那个意思，界面上还照样显示成他写的样子。
+     */
+    assert(br.sites.includes('*.foo.cn'), `通配符被剥掉了 ${JSON.stringify(br.sites)}`)
+    assert(br.sites.includes('erp-*.corp.com'), `段内通配没收下 ${JSON.stringify(br.sites)}`)
+    assert(br.sites.includes('mycompany.*'), `后缀放开没收下 ${JSON.stringify(br.sites)}`)
+    /**
+     * 单个 `*` 归一到 `*.*`：两种写法是同一个意思，存成一种，界面上和审计里才只有一个
+     * 样子——否则同一件事在不同公司的配置里长得不一样，翻记录的人得先认出它们是一回事。
+     */
+    assert(br.sites.includes('*.*') && !br.sites.includes('*'), `单个 * 没归一到 *.* ${JSON.stringify(br.sites)}`)
     // 重复的只留一条：同一个域名写两遍（一次带协议一次不带）是最常见的粘贴结果。
     assert(br.sites.filter((x) => x === 'app.example.com').length === 1, `没去重 ${JSON.stringify(br.sites)}`)
     for (const bad of ['127.0.0.1', 'localhost', 'nas.local', 'erp']) {
@@ -2129,7 +2154,7 @@ async function runGateway() {
     assert(back.json.template.escalate.includes('转人工'), `升级条件 ${back.json.template.escalate}`)
     assert(back.json.template.guards.pii === false, '守卫没落库')
     assert(back.json.template.memory.cap === 50 && back.json.template.memory.scope === '全公司', '记忆没落库')
-    assert(back.json.template.browser.on === true && back.json.template.browser.sites.includes('foo.cn'), '浏览器那两格没落库')
+    assert(back.json.template.browser.on === true && back.json.template.browser.sites.includes('*.foo.cn'), '浏览器那两格没落库')
 
     // 自建的 Bot 不存自己的一份——读出来就是模版这一份。
     const made = await req(base, 'POST', '/runtime/bots', { token: tok, body: { name: '记忆助手' } })
