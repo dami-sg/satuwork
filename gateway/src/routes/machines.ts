@@ -11,7 +11,7 @@ import { installScript } from '../install.ts'
 import { proxyJson, proxySse } from '../lib/runtime.ts'
 import { parseBotVersion, publicBotRelease, storeUploadedRelease } from '../releases.ts'
 import { requireOrg, requireOwner, requireReleaseAuthor, requireUser } from '../lib/guards.ts'
-import { MANAGER_VACUUM_TIMEOUT_MS, MAX_LOG_CAP_MB } from '../lib/telemetry.ts'
+import { MANAGER_VACUUM_TIMEOUT_MS, MAX_LOG_CAP_MB, METRIC_RETENTION_MS, MINUTE_MS } from '../lib/telemetry.ts'
 import { signDesktopTicket } from '../crypto.ts'
 import { type Account, type CatalogItem, type Machine, type SeatRuntime } from '../db.ts'
 
@@ -457,6 +457,53 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     const next = await db.updateMachine(machine.id, { timezone })
     await auditMachine(next, account.id, 'machine.timezone', { machineId: next.id, timezone })
     json(res, 200, { machine: ownerMachine(next), pending: Boolean(timezone) && next.currentTimezone !== timezone })
+  })
+
+  /**
+   * 这台机器一段时间里的负载归档，**按分钟**。日视图吃它。
+   *
+   * **范围由界面按浏览器时区圈好了传上来**（`from`/`to`，epoch 毫秒）：格子按 UTC 整分
+   * 存，「今天」是哪 24 小时得由看的人那本日历说了算。服务端不猜时区——猜错的表现是
+   * 曲线整体错位几小时，而那种错最难被认出来是时区问题。
+   *
+   * 没有数据的分钟**不会有行**。前端据此画空档，不是画 0——一台没在报的机器和一台
+   * 闲着的机器，结论正相反。
+   */
+  router.get('/platform/machines/:id/metrics', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const machine = await machineOr404(req.params.id)
+    const from = Math.trunc(Number(req.query.get('from')))
+    const to = Math.trunc(Number(req.query.get('to')))
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) throw new HttpError(400, 'from/to 不合法')
+    // 一天是 1440 行。**上限卡在两天**：日视图最长的一天也就 25 小时（夏令时那天），
+    // 再大的范围这张表不该一次吐出来——那既不是这一页会问的问题，也不是它扛得住的
+    // 返回体（一个月就是四万多行）。
+    if (to - from > 2 * 24 * 60 * MINUTE_MS) throw new HttpError(400, '时间范围太大，一次最多两天')
+    // **这里不扫保留期。** 清理挂在心跳上（每台机器整点那一分钟扫一次，见
+    // internal.ts 的 rollUp）——写入是自动的，清理也得是自动的；挂在「有人打开这一
+    // 页」上的话，没人看图的部署里那张表只涨不清。
+    const rows = await db.machineMetricMinutes(machine.id, from, to)
+    json(res, 200, {
+      from,
+      to,
+      // 保留期一起给出去：界面据此说得清「那天太久了，归档已经清掉」，而不是含混地
+      // 显示一片空白让人以为机器那天没开。
+      retentionMs: METRIC_RETENTION_MS,
+      minutes: rows.map((r) => ({
+        minuteStart: r.minuteStart,
+        samples: r.samples,
+        // 平均值在这一层除出来：库里存的是 sum，累加才能是纯 `+`（见迁移 0012）。
+        cpuAvg: r.samples ? r.cpuSum / r.samples : null,
+        cpuMax: r.cpuMax,
+        memAvg: r.samples ? r.memSum / r.samples : null,
+        memMax: r.memMax,
+        diskAvg: r.samples ? r.diskSum / r.samples : null,
+        diskMax: r.diskMax,
+        txBytes: r.txBytes,
+        rxBytes: r.rxBytes,
+      })),
+    })
   })
 
   /**

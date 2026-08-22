@@ -1096,11 +1096,11 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(list.includes('data-href="/machines/ffffffff-0000-4000-8000-000000000000"'), '行点不进详情')
       // 负载那一格画的是**最吃紧的那一项**（这台是盘 92%），并且要进最响的那一档
       // 颜色——这张表存在的意义就是在机器写满之前看见它。
-      assert(/satu-meter" data-level="hot"/.test(list), '92% 的盘没进最响那一档，红线就白划了')
-      assert(list.includes('盘 / 92%'), `列表里没写出最吃紧的那一项：${list.slice(list.indexOf('satu-meter') - 200, list.indexOf('satu-meter') + 200)}`)
+      assert(/satu-gauge" data-level="hot"/.test(list), '92% 的盘没进最响那一档，红线就白划了')
+      assert(list.includes('盘 / 92%'), `列表里没写出最吃紧的那一项：${list.slice(list.indexOf('satu-gauge') - 200, list.indexOf('satu-gauge') + 200)}`)
       // 没报过的那台给「—」，不给 0%：失联机器的 0% 和空闲机器的 0% 看着一样、
       // 结论正相反。
-      assert(!/satu-meter[^>]*><span style="width: 0\.0%/.test(list), '没报过的机器被画成了 0%')
+      assert(!/satu-gauge[^>]*><span style="width: 0\.0%/.test(list), '没报过的机器被画成了 0%')
 
       ui.state.path = '/machines/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
       ui.state.machineDetail = {
@@ -1191,7 +1191,51 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(env.includes('SATUWORK_LOG_CAP_MB'), '本机钉死那句话没画出来')
       assert(!env.includes('已下指令，机器现在用的是'), '本机钉死时不该一直说「等机器认」')
 
+      // ── 负载那块的两档：实时 / 日 ──────────────────────────────────
       ui.state.machineDetail = asIs
+      ui.render()
+      const live = ui.html()
+      assert(live.includes('data-act="machine-load-tab"'), '负载那块没有档位切换')
+      assert(!/data-tab="month"/.test(live), '月那一档已经取消了，不该还画着')
+
+      // 「日」这一档吃的是另一条接口（按分钟归的档），所以要连数据一起摆进去。
+      // key 对不上时界面只会写「载入中」——那条比对本身也顺带验到了。
+      const today = new Date()
+      const p2 = (n) => String(n).padStart(2, '0')
+      const dayKey = `${today.getFullYear()}-${p2(today.getMonth() + 1)}-${p2(today.getDate())}`
+      const at = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 9, 30).getTime()
+      ui.state.machineLoadTab = 'day'
+      ui.state.machineLoadDate = dayKey
+      ui.state.machineLoadMinutes = {
+        key: `${asIs.machine.id}|day|${dayKey}`,
+        retentionMs: 30 * 24 * 3600_000,
+        minutes: [
+          { minuteStart: at, samples: 2, cpuAvg: 0.2, cpuMax: 0.85, memAvg: 0.5, memMax: 0.6, diskAvg: 0.9, diskMax: 0.92, txBytes: 1024 * 1024, rxBytes: 2048 },
+          { minuteStart: at + 60_000, samples: 2, cpuAvg: 0.1, cpuMax: 0.2, memAvg: 0.5, memMax: 0.5, diskAvg: 0.9, diskMax: 0.9, txBytes: 2048, rxBytes: 1024 },
+        ],
+      }
+      ui.render()
+      const day = ui.html()
+      assert(day.includes('satu-bars'), '日视图没画出柱图')
+      assert(day.includes('data-act="machine-load-date"'), '日视图没有日期选择器')
+      // 峰值必须单独说出来：均值 20%，而那一分钟真冲到过 85%——人要找的就是它。
+      assert(day.includes('85%'), `峰值没画出来：${day.slice(day.indexOf('satu-bars') - 400, day.indexOf('satu-bars'))}`)
+      // 有数据的格子远少于总格数，这句话要如实说，不能把空档说成 0。
+      // 09:30 和 09:31 落在**同一个 10 分钟格**里，所以是 1 格不是 2——这正是「库里按
+      // 分钟存、画的时候并成 10 分钟」那句话的意思。
+      assert(/1 \/ 144 格有数据/.test(day), `没说清多少格有数据：${day.slice(day.indexOf('出网合计') - 100, day.indexOf('出网合计') + 200)}`)
+
+      // 超出保留期的那一天：要说「已经清掉了」，不是含混地空一片让人以为机器没开。
+      const old2 = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 60)
+      const oldKey = `${old2.getFullYear()}-${p2(old2.getMonth() + 1)}-${p2(old2.getDate())}`
+      ui.state.machineLoadDate = oldKey
+      ui.state.machineLoadMinutes = { key: `${asIs.machine.id}|day|${oldKey}`, retentionMs: 30 * 24 * 3600_000, minutes: [] }
+      ui.render()
+      assert(ui.html().includes('保留期'), '超出保留期的那天没说清是被清掉了')
+
+      ui.state.machineLoadTab = 'live'
+      ui.state.machineLoadDate = ''
+      ui.state.machineLoadMinutes = null
       ui.render()
       assert(detail.includes('data-form="machine-capacity"'), '改容量的表单没接上')
       assert(detail.includes('data-form="machine-company"'), '改归属的表单没接上')

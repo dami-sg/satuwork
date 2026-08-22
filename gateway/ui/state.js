@@ -171,6 +171,24 @@ const state = {
   listPage: {},
   /** 机器详情页那一份：卡片、席位清单、可改派的公司清单。 */
   machineDetail: null,
+  /**
+   * 机器负载那一块看的是哪一档：`live`（机器自报的最近一份）| `day`（按分钟归的档）。
+   *
+   * 和列表的筛选、翻页一样是**看的姿势**，不是数据——从详情退回列表再进来，人还想
+   * 停在刚才那一档上。
+   */
+  machineLoadTab: 'live',
+  /** 日视图看哪一天（`YYYY-MM-DD`，浏览器本地日历）。空 = 今天，跨了零点也不会僵住。 */
+  machineLoadDate: '',
+  /**
+   * 拉回来的分钟格，连同它是**给谁拉的**（`机器|day|日期`）。
+   *
+   * 带着 key 存，是因为换机器、换日期之后旧数据还在内存里：不比对的话，新的一份没
+   * 到之前会拿上一天的曲线顶着画一整屏——那比空着糟得多（同 machineDetail 那条）。
+   */
+  machineLoadMinutes: null,
+  machineLoadBusy: false,
+  machineLoadError: '',
   botLatest: null,
   managerLatest: null,
   managerReleases: null,

@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineTriggers, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineTriggers, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -253,6 +253,22 @@ export function machineOf(r: Row): Machine {
     logCapMb: numOrNull(r.logCapMb),
     removedAt: numOrNull(r.removedAt),
     token: str(r.token || ''),
+  }
+}
+
+export function machineMetricMinuteOf(r: Row): MachineMetricMinute {
+  return {
+    machineId: str(r.machineId),
+    minuteStart: num(r.minuteStart),
+    samples: num(r.samples),
+    cpuSum: num(r.cpuSum),
+    cpuMax: num(r.cpuMax),
+    memSum: num(r.memSum),
+    memMax: num(r.memMax),
+    diskSum: num(r.diskSum),
+    diskMax: num(r.diskMax),
+    txBytes: num(r.txBytes),
+    rxBytes: num(r.rxBytes),
   }
 }
 

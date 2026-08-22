@@ -374,6 +374,10 @@ document.getElementById('app').addEventListener('click', async (e) => {
     await upgradeManager(btn)
     return
   }
+  if (act === 'machine-load-tab') {
+    await switchMachineLoadTab(btn.getAttribute('data-machine'), btn.getAttribute('data-tab'))
+    return
+  }
   if (act === 'machine-logs-vacuum') {
     vacuumLogs(btn)
     return
@@ -1741,6 +1745,12 @@ document.getElementById('app').addEventListener('change', async (e) => {
   }
   if (el instanceof HTMLInputElement && el.id === 'chat-file') {
     await takeChatFiles(el)
+    return
+  }
+  // 日期选择器：换一天就是换一份数据，直接去拉。**不走表单提交**——一个日期框旁边
+  // 再挂一颗「查询」按钮，是让人多点一下才看得到本该跟手出来的东西。
+  if (el instanceof HTMLInputElement && el.getAttribute('data-act') === 'machine-load-date') {
+    await switchMachineLoadTab(el.getAttribute('data-machine'), null, el.value)
     return
   }
   if (el instanceof HTMLSelectElement && el.getAttribute('data-act') === 'logs-source') {
