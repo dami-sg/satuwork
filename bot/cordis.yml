@@ -55,6 +55,12 @@
 - name: './src/web-search/index.ts'
 - name: './src/tools/web.ts'
 
+# 席位桌面上那个 Chrome 的遥控器（CDP，127.0.0.1:$SATUWORK_CDP_PORT）。
+# **连的是员工自己在用的那一个**——登录态就在那份 profile 里，这是整套工具唯一的理由。
+# 工具本身能不能进工具表，看公司模版里的 browser.on；每一次调用拦不拦，在 policy。
+- name: './src/browser/index.ts'
+- name: './src/browser/tools.ts'
+
 # 翻自己的历史：history_read / history_search。只读，走 sessions 服务不碰文件系统。
 # 它是上下文压缩的前提——压掉的那一段还调得回来，压缩才不是有损的。
 - name: './src/tools/history.ts'

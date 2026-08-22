@@ -92,6 +92,85 @@ export const BOT_GUARD_IDS = ['high-risk', 'pii', 'no-external'] as const
 export const DEFAULT_BOT_GUARDS: Record<string, boolean> = { 'high-risk': true, pii: true, 'no-external': true }
 
 /**
+ * 浏览器能力。**不是第四个行为边界开关。**
+ *
+ * 那三个开关的语义是「要不要收紧」，默认全开等于最严；这一个是「要不要放开」，默认
+ * 关才是最严。方向相反的东西摆进同一列勾选框，管理员读到的是「都打着勾＝都管着」，
+ * 而其中一个的勾恰恰是放开。所以它和 skills / mcps 一样属于「这份底座带哪些能力」。
+ *
+ * 席位那边靠它决定 browser_* 进不进工具表（bot/src/agent 的 toolSchemasFor），以及
+ * 每一次调用拦不拦（bot/src/policy 的 checkExternal）。两层缺一不可：前者只是遮掩，
+ * 模型直接报一个没在表里的名字照样调得到。
+ */
+export interface BotBrowser {
+  on: boolean
+  /**
+   * 允许打开的站点。**空列表 = 除硬黑名单外全拦**，不是全放。
+   *
+   * 装完就能用和默认最严之间选后者：这把工具握着的是员工本人在那些网站上的登录态，
+   * 一次误开的代价是以他的名义做了一件事，而不是读到一点不该读的东西。
+   *
+   * 存的是**裸域名**，匹配时含子域（`example.com` 覆盖 `app.example.com`）——SaaS 在
+   * `login.` / `app.` / `api.` 之间来回跳是常态，逐个子域列一定会漏，而漏掉的表现是
+   * 任务跑到一半被拦在半路。
+   */
+  sites: string[]
+}
+
+export const DEFAULT_BOT_BROWSER: BotBrowser = { on: false, sites: [] }
+
+/** 站点最多几条。够写下一家公司真正在用的那些系统，又不至于变成一份等于没有的清单。 */
+export const MAX_BROWSER_SITES = 50
+
+/**
+ * 这些后缀永远不许进白名单：它们指的都是这台机器或这个内网，不是「外部系统」。
+ *
+ * 真正的强制点在席位那边，按**解析到的 IP** 判（bot/src/policy/browser.ts）——DNS 是
+ * 管理员改不了的，一个解析到 127.0.0.1 的公网域名照样能绕过这里的字符串检查。这一份
+ * 只是不让它被写进配置，省得管理员以为自己配好了。
+ */
+const LOCAL_SUFFIX = ['.local', '.localhost', '.internal', '.home.arpa']
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/
+
+/**
+ * 归一化一条站点。认不出来的返回 null，**由调用方丢掉，不报错**——界面上那个输入框
+ * 里粘一整条 URL 是最常见的用法，把 `https://app.example.com/inbox?x=1` 收成
+ * `app.example.com` 比回一句「格式不对」有用得多。
+ */
+export function botSiteOf(v: unknown): string | null {
+  let s = typeof v === 'string' ? v.trim().toLowerCase() : ''
+  if (!s) return null
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+  s = s.split('/')[0].split('?')[0].split('#')[0]
+  s = s.replace(/^\*\./, '').replace(/^\.+/, '').replace(/\.+$/, '')
+  // 端口不参与匹配：同一个站点换个口还是同一个站点，而带上端口只会让人漏配。
+  s = s.replace(/:\d+$/, '')
+  if (!s || s.length > 253) return null
+  // **只收域名，不收 IP。** 公网 IP 直连的业务系统极少，而放开 IP 字面量正好是
+  // 「把 10.0.0.5 混进白名单」最省事的写法。
+  if (IPV4.test(s) || s.includes(':')) return null
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s)) return null
+  // 顶级域得是字母：挡掉 `foo.123` 这种，也顺手挡掉写漏了的 IP。
+  if (!/\.[a-z]{2,}$/.test(s)) return null
+  if (LOCAL_SUFFIX.some((suffix) => s.endsWith(suffix))) return null
+  return s
+}
+
+/** 只认 on 和 sites，其余键丢掉；没传的沿用 base，所以改一个不会把另一个带回默认。 */
+export function botBrowserOf(v: unknown, base: BotBrowser = DEFAULT_BOT_BROWSER): BotBrowser {
+  const raw = objOf(v)
+  const on = typeof raw.on === 'boolean' ? raw.on : base.on
+  if (!Array.isArray(raw.sites)) return { on, sites: base.sites.slice() }
+  const sites: string[] = []
+  for (const item of raw.sites) {
+    const site = botSiteOf(item)
+    if (site && !sites.includes(site)) sites.push(site)
+    if (sites.length >= MAX_BROWSER_SITES) break
+  }
+  return { on, sites }
+}
+
+/**
  * 记忆设置。scope / kinds / ttl 存的就是这几个中文原串——它们同时是界面上的选项值，
  * 前端只翻显示的那一份（见 app.js 里 MEMORY_* 那几个常量），两边对的是同一套键。
  */
@@ -216,6 +295,7 @@ export interface BotTemplate {
   prompt: string
   escalate: string
   guards: Record<string, boolean>
+  browser: BotBrowser
   memory: BotMemory
   skills: string[]
   mcps: string[]
@@ -232,6 +312,7 @@ export function defaultBotTemplate(now = Date.now()): BotTemplate {
     prompt: DEFAULT_BOT_PROMPT,
     escalate: '',
     guards: { ...DEFAULT_BOT_GUARDS },
+    browser: { ...DEFAULT_BOT_BROWSER, sites: [] },
     memory: { ...DEFAULT_BOT_MEMORY, kinds: [...DEFAULT_BOT_MEMORY.kinds] },
     skills: [],
     mcps: [],
@@ -250,6 +331,7 @@ export function botTemplateOf(item: CatalogItem | undefined): BotTemplate {
     prompt: typeof def.prompt === 'string' && def.prompt.trim() ? def.prompt : base.prompt,
     escalate: typeof def.escalate === 'string' ? def.escalate : '',
     guards: botGuardsOf(def.guards),
+    browser: botBrowserOf(def.browser),
     memory: botMemoryOf(def.memory),
     skills: idList(def.skills),
     mcps: idList(def.mcps),
@@ -315,6 +397,7 @@ export async function applyTemplatePatch(db: Db, companyId: string, cur: BotTemp
     prompt: prompt || cur.prompt,
     escalate: body.escalate !== undefined ? String(body.escalate).trim() : cur.escalate,
     guards: body.guards !== undefined ? botGuardsOf(body.guards, cur.guards) : cur.guards,
+    browser: body.browser !== undefined ? botBrowserOf(body.browser, cur.browser) : cur.browser,
     memory: body.memory !== undefined ? botMemoryOf(body.memory, cur.memory) : cur.memory,
     skills: Array.isArray(body.skills) ? await assignedIds(db, owner, 'skill', body.skills) : cur.skills,
     mcps: Array.isArray(body.mcps) ? await assignedIds(db, owner, 'mcp', body.mcps) : cur.mcps,
@@ -359,6 +442,7 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
       greeting: typeof def.greeting === 'string' ? def.greeting : '',
       escalate: template.escalate,
       guards: template.guards,
+      browser: template.browser,
       memory: template.memory,
       icon: botIconOf(def.icon, 'company'),
       provider: pinned.provider,
@@ -392,6 +476,7 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
     greeting: typeof def.greeting === 'string' ? def.greeting : '',
     escalate: typeof def.escalate === 'string' ? def.escalate : '',
     guards: botGuardsOf(def.guards),
+    browser: botBrowserOf(def.browser),
     memory: botMemoryOf(def.memory),
     icon: botIconOf(def.icon, item.scope),
     provider: pinned.provider,

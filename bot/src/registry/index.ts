@@ -37,11 +37,42 @@ export interface BotRecord {
    * 降级成「一条都不拦」等于让一次版本回退悄悄拆掉全公司的边界。
    */
   guards?: Record<string, boolean>
+  /**
+   * 浏览器能力。**缺字段按关算**，和 guards 那条正好相反——它不是一道边界，是一把
+   * 工具；「老 Gateway 没下发」在这里的正确读法是「这家公司还没开过它」。
+   */
+  browser?: BotBrowser
   /** 什么情况下该转人工。模版上的一段自由文本，进系统提示词，也是硬触发的说明。 */
   escalate?: string
   /** 这份底座是模版的第几版。排错时回答「这台跟上了没有」。 */
   templateVersion?: number
   createdAt: number
+}
+
+/**
+ * 浏览器能力。和 Gateway 的 BotBrowser 是同一个形状（gateway/src/lib/catalog.ts），
+ * 改一边就要改另一边——两个包各自打包，中间没有共享类型。
+ */
+export interface BotBrowser {
+  on: boolean
+  /** 裸域名，匹配含子域。空 = 除硬黑名单外全拦，不是全放。 */
+  sites: string[]
+}
+
+/** 出厂值：关着，一条站点都没有。 */
+export const DEFAULT_BROWSER: BotBrowser = { on: false, sites: [] }
+
+/**
+ * 这个 Bot 的浏览器能力。**认不出来一律按关算。**
+ *
+ * `guards` 那边缺字段按全开（宁可多拦），这边缺字段按关（宁可不给）——两条都是往严了
+ * 走，只是「严」在两件事上指向相反的默认值。
+ */
+export function browserOf(bot: { browser?: BotBrowser } | undefined): BotBrowser {
+  const raw = bot?.browser
+  if (!raw || typeof raw !== 'object' || raw.on !== true) return { ...DEFAULT_BROWSER, sites: [] }
+  const sites = Array.isArray(raw.sites) ? raw.sites.filter((s): s is string => typeof s === 'string' && !!s.trim()) : []
+  return { on: true, sites: sites.map((s) => s.trim().toLowerCase()) }
 }
 
 /** 行为边界的出厂值：三条全开。和 Gateway 的 DEFAULT_BOT_GUARDS 是同一套键。 */
@@ -177,6 +208,7 @@ export class AgentRegistry extends Service {
     skills?: string[]
     mcps?: string[]
     guards?: Record<string, boolean>
+    browser?: BotBrowser
     escalate?: string
     templateVersion?: number
   }): BotRecord {
@@ -202,6 +234,9 @@ export class AgentRegistry extends Service {
       // 没下发就沿用上一次同步到的那份，再没有才回落全开（guardsOf 干的活）。
       // 一次「目录里这个字段暂时没了」不该表现成边界被拆掉。
       guards: input.guards ?? current?.guards,
+      // 同上：没下发就沿用上一次同步到的那份。一次「字段暂时没了」不该表现成
+      // 浏览器能力被悄悄关掉——那会让一个跑了一半的任务在下一次调用时突然被拦。
+      browser: input.browser ?? current?.browser,
       escalate: typeof input.escalate === 'string' ? input.escalate : current?.escalate,
       templateVersion:
         typeof input.templateVersion === 'number' ? input.templateVersion : current?.templateVersion,

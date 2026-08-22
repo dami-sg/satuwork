@@ -497,6 +497,7 @@ async function loadBotTemplate() {
 function draftFromTemplate(tpl) {
   if (!tpl) return null
   const saved = tpl.guards && typeof tpl.guards === 'object' ? tpl.guards : {}
+  const br = tpl.browser && typeof tpl.browser === 'object' ? tpl.browser : {}
   const mem = tpl.memory && typeof tpl.memory === 'object' ? tpl.memory : {}
   return {
     prompt: tpl.prompt || '',
@@ -504,6 +505,10 @@ function draftFromTemplate(tpl) {
     skills: Array.isArray(tpl.skills) ? tpl.skills.slice() : [],
     mcps: Array.isArray(tpl.mcps) ? tpl.mcps.slice() : [],
     guards: DEFAULT_BOT_GUARDS.map((g) => ({ ...g, on: typeof saved[g.id] === 'boolean' ? saved[g.id] : g.on })),
+    // 站点在草稿里是一整段文本（一行一个），保存时才切成数组——输入框里敲到一半的
+    // 那一行不该在每次按键时都被切一次、归一化一次，光标会跳。
+    browserOn: br.on === true,
+    browserSites: (Array.isArray(br.sites) ? br.sites : []).join('\n'),
     memoryOn: mem.on !== false,
     scope: MEMORY_SCOPES.includes(mem.scope) ? mem.scope : '所属分组',
     kinds: Array.isArray(mem.kinds) ? mem.kinds.filter((k) => MEMORY_KINDS.includes(k)) : ['偏好', '事实'],
@@ -526,6 +531,7 @@ async function loadSkills() {
 function draftFromBot(bot) {
   // 行为边界：文案在这边（要跟着界面语言走），开关从服务端来，按 id 贴回去。
   const saved = bot.guards && typeof bot.guards === 'object' ? bot.guards : {}
+  const br = bot.browser && typeof bot.browser === 'object' ? bot.browser : {}
   const mem = bot.memory && typeof bot.memory === 'object' ? bot.memory : {}
   return {
     name: bot.name || '',
@@ -541,6 +547,8 @@ function draftFromBot(bot) {
     groups: [],
     kbs: [],
     guards: DEFAULT_BOT_GUARDS.map((g) => ({ ...g, on: typeof saved[g.id] === 'boolean' ? saved[g.id] : g.on })),
+    browserOn: br.on === true,
+    browserSites: (Array.isArray(br.sites) ? br.sites : []).join('\n'),
     escalate: bot.escalate || '',
     memories: [],
     memoryOn: mem.on !== false,

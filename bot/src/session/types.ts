@@ -180,8 +180,17 @@ export interface SessionEventMap {
     callId: string
     /** 工具名。审计里「拦了什么」就靠它，别指望事后从 callId 反查。 */
     name: string
-    guard: 'high-risk' | 'pii' | 'no-external' | 'escalate'
-    outcome: 'blocked' | 'approved' | 'denied' | 'timeout' | 'redacted' | 'escalated'
+    /**
+     * 哪条边界表的态。三条开关之外还有两个：`escalate`（转人工，不是开关），
+     * `browser`（浏览器那道谁都关不掉的硬黑名单）。分开记才看得出**是不是开关挡的**。
+     */
+    guard: 'high-risk' | 'pii' | 'no-external' | 'escalate' | 'browser'
+    /**
+     * `noted` 是**事后**记的一笔，不是一次表态：动作已经跑完了，只是它引发了写请求
+     * 而当时没有弹过卡片。提交判据是启发式（一个只有图标的删除按钮就没有名字），
+     * 漏掉的那次至少要在日志里留得下。
+     */
+    outcome: 'blocked' | 'approved' | 'denied' | 'timeout' | 'redacted' | 'escalated' | 'noted'
     reason: string
   }
 

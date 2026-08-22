@@ -1,6 +1,6 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { gatewayToken, gatewayUrl } from '../llm/gateway.ts'
-import { guardsOf, type BotRecord } from '../registry/index.ts'
+import { browserOf, guardsOf, type BotRecord } from '../registry/index.ts'
 import { mcpToolName, mcpToolRisk, McpHttpClient, type JsonRpcTool } from './mcp.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -29,6 +29,7 @@ interface RemoteBot {
    * 不动——最难查的一类，因为每一处看起来都对。
    */
   guards?: Record<string, boolean>
+  browser?: { on?: boolean; sites?: string[] }
   escalate?: string
   templateVersion?: number
 }
@@ -204,6 +205,8 @@ export class CatalogService extends Service {
          * 看不出这三个开关到底是开是关。
          */
         guards: guardsOf(b),
+        // 和 guards 同一个理由：管理员开了浏览器、席位跟没跟上，光看版本号看不出来。
+        browser: browserOf(b),
         escalate: b.escalate ?? '',
       })),
       skills: this.ctx.storage.collection<CachedSkill>('skills').list().map((r) => ({
@@ -437,6 +440,9 @@ export class CatalogService extends Service {
       mcps: Array.isArray(b.mcps) ? b.mcps : [],
       // 模版的三样。没有这一行，「保存即生效」对行为边界就是句空话。
       guards: b.guards,
+      browser: b.browser && typeof b.browser === 'object'
+        ? { on: b.browser.on === true, sites: Array.isArray(b.browser.sites) ? b.browser.sites : [] }
+        : undefined,
       escalate: b.escalate,
       templateVersion: typeof b.templateVersion === 'number' ? b.templateVersion : this.templateVersion,
     })
