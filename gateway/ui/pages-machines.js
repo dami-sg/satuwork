@@ -40,34 +40,6 @@ function machineLinkCell(m) {
   </span>`
 }
 
-/**
- * 列表里的那一格负载：**最吃紧的那一项**，不是三项并排。
- *
- * 这张表要答的是「哪台机器要出事了」，而一行只有一百多像素——三个 40% 挤在一起，
- * 谁也不会去逐行比对。所以只画最高的那一项并写出它是谁（「盘 92%」），另外两项进
- * title，想看全的点进详情页。
- *
- * 没报过的给「—」，**不给 0%**：一台失联机器的 0% 和一台空闲机器的 0% 看着一样，
- * 而结论完全相反。
- */
-function machineLoadCell(m) {
-  const load = (m.telemetry && m.telemetry.metrics) || null
-  if (!load) return `<span style="font-size: 13px; color: var(--muted-foreground);">—</span>`
-  const disks = load.disks || []
-  const worstDisk = disks.reduce((a, b) => (b.usage > (a ? a.usage : -1) ? b : a), null)
-  const items = [
-    { key: t('CPU'), usage: load.cpu ? load.cpu.usage : null },
-    { key: t('内存'), usage: load.memory ? load.memory.usage : null },
-    { key: worstDisk ? `${t('盘')} ${worstDisk.mount}` : t('盘'), usage: worstDisk ? worstDisk.usage : null },
-  ]
-  const worst = items.reduce((a, b) => ((b.usage ?? -1) > (a.usage ?? -1) ? b : a), items[0])
-  const title = items.map((x) => `${x.key} ${pctText(x.usage)}`).join(' · ')
-  return `<span style="display: flex; align-items: center; gap: var(--space-2); min-width: 0;" title="${esc(title)}">
-    ${meter(worst.usage)}
-    <span style="font-size: 12.5px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(worst.key)} ${esc(pctText(worst.usage))}</span>
-  </span>`
-}
-
 function machinesPage() {
   const all = state.allMachines || []
   const totals = state.machineTotals || { machines: 0, paired: 0, online: 0, accounts: 0, max: 0, seats: 0 }
@@ -78,7 +50,14 @@ function machinesPage() {
   // 先筛后分页。**上面那排计数不能跟着分页走**：它们答的是「这一档有几台」，
   // 按当前这一页去数，「失联 3 台」会随着翻页变成 1 台——那是句假话。
   const view = pageSlice('machines', rows)
-  const cols = '120px minmax(180px, 2fr) minmax(120px, 1.2fr) 110px 72px minmax(130px, 1.2fr) minmax(140px, 1.2fr) minmax(110px, 1fr)'
+  // **列数受这块面板的宽度约束，加列之前先量。** 原来八列，容器窄于 1082px 就开始
+  // 溢出（各列最小宽 + 7 个间距 + 内边距，量出来的不是算出来的），而这块面板在常见
+  // 窗口下只有 980 上下——最后一列被切掉，而那一列是「最近心跳」，恰恰是这张表最要
+  // 紧的一眼：机器还活着吗。
+  //
+  // 砍掉的是「负载」那一列：详情页有完整的 CPU / 内存 / 磁盘面板，而列表这一格本来
+  // 就只画三项里最吃紧的那一项，是最容易割舍的。剩下七列的门槛降到 940px。
+  const cols = '120px minmax(180px, 2fr) minmax(120px, 1.2fr) 110px 72px minmax(140px, 1.2fr) minmax(110px, 1fr)'
   const dim = (text) =>
     `<span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(text || '—')}</span>`
   const tabs = MACHINE_FILTERS.map((f) => {
@@ -103,7 +82,6 @@ function machinesPage() {
         }
         <span style="font-size: 13px;">${m.paired ? `${esc(card.accounts)} / ${esc(card.maxAccounts)}` : '—'}${card.full ? ` <span class="tag">${t('已满')}</span>` : ''}</span>
         ${dim(String(card.seats))}
-        ${machineLoadCell(m)}
         ${dim(m.managerVersion || t('未知'))}
         ${dim(m.lastHeartbeatAt ? sinceMs(m.heartbeatAge) : t('从未心跳'))}
       </div>`
@@ -126,7 +104,7 @@ function machinesPage() {
         <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">${tabs}</div>
         <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
           <div class="satu-memberhead" style="grid-template-columns: ${cols};">
-            <span>${t('状态')}</span><span>${t('机器')}</span><span>${t('归属公司')}</span><span>${t('账号位')}</span><span>${t('已部署 Bot')}</span><span>${t('负载')}</span><span>${t('管家版本')}</span><span>${t('最近心跳')}</span>
+            <span>${t('状态')}</span><span>${t('机器')}</span><span>${t('归属公司')}</span><span>${t('账号位')}</span><span>${t('已部署 Bot')}</span><span>${t('管家版本')}</span><span>${t('最近心跳')}</span>
           </div>
           ${body || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${all.length ? t('这一档下没有机器') : t('还没有机器配对进来。到某家公司的详情页生成配对码，在那台 Debian 上跑一条命令即可。')}</div>`}
           ${listPager('machines', view, '台')}
