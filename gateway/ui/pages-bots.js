@@ -238,7 +238,17 @@ function browserBlock(a, ro) {
         sites.split('\n').map((x) => x.trim()).filter(Boolean).map((x) => `<span class="tag tag-neutral">${esc(x)}</span>`).join(' ') ||
         `<span style="font-size: 12px; color: var(--muted-foreground);">${t('没有')}</span>`
       }</div>`
-    : `<textarea class="input" id="bot-browser-sites" rows="4" data-bot="browserSites" placeholder="example.com&#10;erp.mycompany.cn">${esc(sites)}</textarea>`
+    : /**
+       * **多行的不能用 `.input` 那个药丸圆角。**
+       *
+       * `border-radius: 999px` 是给单行控件用的——高度一固定，999px 就是两头半圆，全站
+       * 的输入框都长这样。textarea 一高上去，同一个值把边框摊成一个椭圆，域名从弧线里
+       * 溢出来。仓库里已经栽过一次（发信卡的正文那格，`.sw-mail-text`）。
+       *
+       * 配法照同一页上那个 MCP 环境变量框（`#tl-env`）抄：等宽 + 12.5px。那一格和这一格
+       * 是同一种东西——一行一个标识符，读的时候是在比对字符，不是在读句子。
+       */
+      `<textarea class="input" id="bot-browser-sites" rows="4" data-bot="browserSites" style="border-radius: var(--radius-md); resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.7;" placeholder="example.com&#10;erp.mycompany.cn">${esc(sites)}</textarea>`
   return `${toggle}
     <div class="field" style="margin-top: var(--space-2);">
       <label for="bot-browser-sites">${t('允许打开的站点', 'Sites it may open')}</label>
