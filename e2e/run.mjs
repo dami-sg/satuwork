@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { runRuntimePath } from './runtime-path.mjs'
 import { runGatewayChat } from './gateway-chat.mjs'
 import { runDeployErrors } from './deploy-errors.mjs'
+import { runPairing } from './pairing.mjs'
 import { runMachineDeploy } from './machine-deploy.mjs'
 import { runLlmUsage } from './llm-usage.mjs'
 import { runMarkdown } from './markdown.mjs'
@@ -2872,6 +2873,7 @@ async function main() {
       treeHas,
     })
     await runDeployErrors({ root, test, assert, log })
+    await runPairing({ root, test, assert, log })
     await runMachineDeploy({
       gwRoot,
       test,

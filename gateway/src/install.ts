@@ -10,6 +10,14 @@
  *
  * 脚本本身要能重复跑：换过配对码、或者管家版本升不动了，重跑一次就是修复手段。
  *
+ * **带不带 `--code`，重跑的语义不一样。** 不带码 = 只重装、身份不动；带码 = 按这张码
+ * 重配。后者原来是失效的：管家看见本地已有 manager.json 就直接说「已配对」，配对码看
+ * 都不看，而这个脚本判成功的唯一依据又是「那个文件在不在」——于是机器在平台上被删掉
+ * 之后带新码重跑，脚本一秒打印 Paired，Gateway 那边一次 `POST /machines/pair` 都没收到，
+ * 管家拿着一个已经不存在的 machineId 一直发心跳收 401（401 被刻意设计成不据此自毁），
+ * 人只看到界面上始终没有这台机器。两处一起改：管家那边见码就用码（见 manager/src/
+ * pair.ts），这边改成等 manager.json 的内容**变掉**——重配一定会换票，所以内容一定会变。
+ *
  * **脚本内容全部英文。** 它跑在别人的服务器上，那儿的 locale 可能是 `C`——中文
  * 输出会变成一屏乱码，而这恰好是装机出问题时唯一能看的东西。仓库里其余地方的
  * 注释仍然用中文：那些不会打到那台机器的终端上。
@@ -24,8 +32,9 @@ export function installScript(gatewayUrl: string): string {
 #
 #   curl -fsSL ${gatewayUrl}/install-manager.sh | sudo bash -s -- --code SW-XXXX-XXXX
 #
-# Safe to re-run: it reinstalls and restarts the service. An already paired
-# machine stays paired.
+# Safe to re-run: it reinstalls and restarts the service. Without --code an
+# already paired machine keeps its identity; with --code it re-pairs using that
+# code, and falls back to the old identity if the code is used up or expired.
 set -euo pipefail
 
 GATEWAY_URL=${JSON.stringify(gatewayUrl)}
@@ -155,6 +164,13 @@ else
   echo "    note: this manager package has no manager-confirm.sh; rollback safety net is off until the next upgrade" >&2
 fi
 
+# Remember what the current identity looks like before restarting. With --code,
+# "the file exists" does not mean "pairing succeeded": a manager.json left over
+# from an earlier pairing exists too. Re-pairing always rotates the token, so the
+# file contents are guaranteed to change - that is what we wait for.
+PREV_STATE=""
+[ -f /etc/satuwork/manager.json ] && PREV_STATE=$(sha256sum /etc/satuwork/manager.json | cut -d' ' -f1)
+
 echo "==> Starting"
 systemctl daemon-reload
 systemctl enable --now satuwork-manager-confirm.timer >/dev/null
@@ -162,12 +178,24 @@ systemctl enable satuwork-manager.service >/dev/null
 systemctl restart satuwork-manager.service
 
 echo "==> Waiting for pairing"
+PAIRED=0
 for _ in $(seq 1 30); do
-  if [ -f /etc/satuwork/manager.json ]; then break; fi
+  if [ -f /etc/satuwork/manager.json ]; then
+    # No code: nothing should re-pair, so the file existing is the whole test.
+    if [ -z "$CODE" ]; then PAIRED=1; break; fi
+    if [ "$(sha256sum /etc/satuwork/manager.json | cut -d' ' -f1)" != "$PREV_STATE" ]; then PAIRED=1; break; fi
+  fi
   sleep 1
 done
-if [ ! -f /etc/satuwork/manager.json ]; then
-  echo "pairing did not complete. Check: journalctl -u satuwork-manager -n 50" >&2
+if [ "$PAIRED" != 1 ]; then
+  if [ -n "$PREV_STATE" ]; then
+    # Identity unchanged: the code did not take. The manager keeps running on the
+    # old identity, so the machine is not lost - but this re-pair failed, and the
+    # usual reason is a code that was already used or has expired.
+    echo "pairing with this code did not take; the machine kept its previous identity." >&2
+    echo "The code is single use and expires in 30 minutes - generate a fresh one on the company page." >&2
+  fi
+  echo "Check: journalctl -u satuwork-manager -n 50" >&2
   exit 1
 fi
 # The pairing code is single use; no reason to leave it on disk.
