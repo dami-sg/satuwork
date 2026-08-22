@@ -329,6 +329,7 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 - 员工的 Bot **不存副本**：读的时候拿当前模版现合成（`publicBot`）。所以「模版改了要同步」不是一个要去触发的动作，没有副本也就没有会漂的东西
 - 追加提示词拼在模版提示词**后面**，不覆盖它。覆盖式的自定义会让模版形同虚设：第一个想改口气的人就把底座替掉了，之后公司再改模版他永远跟不上
 - 跑着的席位**自己跟上**：实例每分钟打一次 `/runtime/catalog/version`，指纹变了才重拉整份目录（那一份带 MCP 明文 token，不该每分钟流动一次）。基线取自上一次拉目录时一起给的 `stamp`，不是第一次探针的结果——否则「拉完目录」到「第一次探针」之间落地的改动会永远丢掉
+- **席位跟上了没有，平台看得见**：探针捎带 `?have=<席位这会儿跑的版本>`，Gateway 把它连同收到的时刻记在 `seat_runtimes.tplVersion / tplSyncedAt` 上（迁移 0013），「Bot 模版」那一页据此显示「3/4 在 v5」并点名落后的那几台。这条回报是**单独的一个数**，不是拿 Gateway 发了什么反推的——「进程死了」「机器断网」「拉取一直失败」在界面上原本和「一切正常」长得一模一样。汇报时刻兼作心跳：版本对得上、汇报停在两小时前，说明那个进程已经不在了
 - admin 另有一个「立即下发」：把本公司已部署的席位挨个重铺。它会断掉正在进行的对话，所以不自动，只在「现在就要」和「那台机器上的东西不对」时按
 - 一个人最多建几个 Bot 有上限（`GATEWAY_MAX_USER_BOTS`，默认 10）：每个 Bot 是机器上的一个真实进程，不是一行配置
 
@@ -683,7 +684,7 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | POST | `/runtime/deploy` | `{ botId }` 必填。给当前席位部署该 Bot |
 | POST | `/orgs/:id/accounts/:accountId/deploy` | admin：给该账号部署 `{ botId }` |
 | GET | `/runtime/catalog?botId=` | 实例拉目录。有 `botId` 时只返回那一颗。响应带 `templateVersion` 与 `stamp`。**只认席位 `sat_`**：这条会带出 MCP 明文 token 与 env，登录 JWT → 401 |
-| GET | `/runtime/catalog/version?botId=` | 「变了没有」的探针，只回 `templateVersion` + `stamp`。实例每分钟打一次，指纹没动就一个字节都不再取。同样只认 `sat_` |
+| GET | `/runtime/catalog/version?botId=&have=` | 「变了没有」的探针，只回 `templateVersion` + `stamp`。实例每分钟打一次，指纹没动就一个字节都不再取。`have` 是席位自报的当前模版版本，顺路记成同步状态（见上）。同样只认 `sat_` |
 | PUT | `/platform/bot-releases/:version` | **上传**发布包（body 就是 tgz）。CI 用 `GATEWAY_PLATFORM_TOKEN`，人用 `owner` 登录态 |
 | POST | `/platform/orgs/:id/runtime/update` | 公司批量把已部署 pair 更新到某版本 |
 

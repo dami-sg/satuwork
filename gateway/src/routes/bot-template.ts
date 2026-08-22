@@ -63,8 +63,42 @@ export function attachBotTemplate(router: Router, ctx: RouteCtx) {
         skills: (await db.visibleCatalog('skill', req.params.id)).map((i) => ({ id: i.id, name: i.name })),
         mcps: (await db.visibleCatalog('mcp', req.params.id)).map((i) => ({ id: i.id, name: i.name })),
       },
+      // 员工看不到这一份：他要的是「我的 Bot 继承了什么」，不是全公司谁的席位落后了。
+      ...(account.role === 'member' ? {} : { sync: await syncOf(req.params.id, tpl.version) }),
     })
   })
+
+  /**
+   * 「改完到底铺下去没有」——这一页唯一答不了、又最该答的问题。
+   *
+   * 版本号是保存的那一刻就 +1 的，界面上立刻显示 v5；可席位换没换是另一回事，中间隔着
+   * 一轮探针、一次拉取，以及所有会出错的地方（进程死了、机器断网、拉取一直失败）。没有
+   * 这一格的时候，这三种情况和「一切正常」在界面上长得一模一样。
+   *
+   * 只数**已经部署好的**席位：还没部署、部署失败的不该算进「多少台跟上了」的分母——
+   * 它们落后的原因不在模版这一层，混进来会把一个能看懂的数字变成一个吓人的数字。
+   */
+  async function syncOf(companyId: string, version: number) {
+    const rows = (await db.seatRuntimesOf(companyId)).filter((s) => s.status === 'ready')
+    // 名字一次查齐，不按席位一个个查：一家公司几十个席位就是几十次往返，而这一页每次
+    // 打开都要走一遍。
+    const names = new Map((await db.accountsOf(companyId)).map((a) => [a.id, a.name || a.email]))
+    const seats = rows.map((r) => ({
+      seatId: r.seatId,
+      botId: r.botId,
+      accountId: r.accountId,
+      name: names.get(r.accountId) || '',
+      version: r.tplVersion,
+      syncedAt: r.tplSyncedAt,
+    }))
+    return {
+      version,
+      total: seats.length,
+      synced: seats.filter((s) => s.version === version).length,
+      // 落后的排在前面：这一格是拿来找那几台的，不是拿来看花名册的。
+      seats: seats.sort((a, b) => (a.version ?? -1) - (b.version ?? -1) || a.seatId.localeCompare(b.seatId)),
+    }
+  }
 
   /**
    * 改模版。保存即生效：版本号 +1，公司里所有 Bot 下一次被读到时合成的就是新的这份。
@@ -95,7 +129,12 @@ export function attachBotTemplate(router: Router, ctx: RouteCtx) {
       action: 'bot-template.update',
       detail: { version: next.version, skills: next.skills.length, mcps: next.mcps.length },
     })
-    json(res, 200, { template: publicTemplate(next, await defaultBotModel(db)) })
+    // 保存完顺手回一份同步状态：这一刻它一定是「0 台跟上」，而那正是要让人看见的——
+    // 版本号跳到 v5 不等于席位到了 v5，两个数字并排出现，这件事才说得清。
+    json(res, 200, {
+      template: publicTemplate(next, await defaultBotModel(db)),
+      sync: await syncOf(req.params.id, next.version),
+    })
   })
 
   /**

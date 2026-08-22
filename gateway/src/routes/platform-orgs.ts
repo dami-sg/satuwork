@@ -6,7 +6,7 @@ import { HttpError, json, type Router } from '../http.ts'
 import { MIN_PASSWORD, hashPassword } from '../crypto.ts'
 import { amountMilsOf, bodyOf, bonusMilsOf, dateMsOf, endOfPeriod, payStatusOf, periodOf, seatsOf, strField } from '../lib/validate.ts'
 import { balanceOf, orderKindOf, publicInvoice, publicPlanOrder, publicPlanSku, publicTopup, syncInvoiceOfOrder, syncTopupOfOrder } from '../lib/billing.ts'
-import { emailOf, expiresAtOf, orgSummary, phoneOf, publicAccount, publicCompany, publicPlan, slugOf, websiteOf } from '../lib/org.ts'
+import { emailOf, expiresAtOf, orgSummary, patchAccount, phoneOf, publicAccount, publicCompany, publicPlan, slugOf, websiteOf } from '../lib/org.ts'
 import { requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
 import { type PlanSku } from '../db.ts'
 
@@ -47,6 +47,32 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
       apiKey: secrets?.apiKey ?? null,
       accessToken: secrets?.accessToken ?? null,
     })
+  })
+
+  /**
+   * 改一个账号的状态（以及名字 / 角色）。「用户」那一页上那颗「停用 / 启用」按的就是它。
+   *
+   * 为什么平台这一层要单独有一条：公司侧那条挂在 `/orgs/:id/accounts/:accountId` 上，
+   * 拿不到**不属于任何公司**的平台账号；而这一页列的恰恰是所有人，包括那几个。
+   *
+   * 规矩一条都没重写，全在 `patchAccount` 里和公司侧共用——「不能改自己」「待接受不能
+   * 被直接激活」「至少留一个管理员」「重新激活要占席位」在两条路上必须是同一份，抄成
+   * 两份的那天起它们就开始各自漂移。
+   */
+  router.patch('/platform/accounts/:id', async (req, res) => {
+    const actor = await requireUser(req, db, keys)
+    requireOwner(actor)
+    const row = await db.account(req.params.id)
+    if (!row) throw new HttpError(404, '账号不存在')
+    const { account, patch } = await patchAccount(db, actor, row, bodyOf(req))
+    await db.audit({
+      // 平台账号不属于任何公司，那一条就记在平台名下（同 bot-release.upload 那几条）。
+      companyId: row.companyId ?? '',
+      accountId: actor.id,
+      action: 'account.update',
+      detail: { id: row.id, name: patch.name, role: patch.role, status: patch.status, from: 'platform' },
+    })
+    json(res, 200, { account: publicAccount(account) })
   })
 
   router.post('/platform/orgs', async (req, res) => {

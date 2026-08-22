@@ -9,7 +9,7 @@ import { balanceOf } from '../lib/billing.ts'
 import { parseBilling } from '../db.ts'
 import { bodyOf, deployOptsOf, strField, usd, usdMicros } from '../lib/validate.ts'
 import { companyMachineOf, deploySeat, listSeatRuntime, publicMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
-import { companyStatusOf, emailOf, groupRoleOf, membersInCompany, phoneOf, publicAccount, publicCompany, publicGroup, publicPlan, publicSettings, roleOf, slugOf, stringIds, websiteOf } from '../lib/org.ts'
+import { companyStatusOf, emailOf, groupRoleOf, membersInCompany, patchAccount, phoneOf, publicAccount, publicCompany, publicGroup, publicPlan, publicSettings, roleOf, slugOf, stringIds, websiteOf } from '../lib/org.ts'
 import { desktopTicketFor, machineHostOf, machineHostResolver } from '../lib/machines.ts'
 import { inviteLinkOf, issueInvite, losingAdmin, rangeQuery, requireOrg, requireOwner, requireUser, statusOf, usagePayload } from '../lib/guards.ts'
 import { randomUUID } from 'node:crypto'
@@ -384,39 +384,8 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     requireOrg(actor, req.params.id, true)
     const row = await db.account(req.params.accountId)
     if (!row || row.companyId !== req.params.id) throw new HttpError(404, '账号不存在')
-    const body = bodyOf(req)
-    if (row.id === actor.id && (body.role || body.status)) throw new HttpError(400, '不能改自己的角色或状态')
-    const patch: { name?: string; role?: Role; status?: AccountStatus; tokenRevokedAt?: number | null } = {}
-    if (body.name != null) {
-      const name = strField(body, 'name')
-      if (!name) throw new HttpError(400, 'name 不能为空')
-      patch.name = name
-    }
-    if (body.role !== undefined && body.role !== '') patch.role = roleOf(body.role)
-    if (body.status !== undefined && body.status !== '') patch.status = statusOf(body.status)
-    const nextRole = patch.role ?? row.role
-    const nextStatus = patch.status ?? row.status
-    if (patch.status === 'invited' && row.status !== 'invited') {
-      throw new HttpError(400, '已激活的账号不能退回待接受，需要重设口令请用重置链接')
-    }
-    if (patch.status === 'active' && row.status === 'invited') {
-      throw new HttpError(400, '待接受的账号不能由管理员直接激活，对方需用邀请链接设置口令')
-    }
-    if (losingAdmin(row, nextRole, nextStatus) && await db.adminCount(row.companyId!) <= 1) {
-      throw new HttpError(409, '至少要留一个管理员')
-    }
-    if (patch.status === 'disabled') patch.tokenRevokedAt = Date.now()
-    // 停用的人重新激活会多占一个席位。满了就不让激活——先加席位，或者停掉别人。
-    // 检查和写入放在同一个事务里，并先锁住套餐行，否则两个人同时激活会一起挤进来。
-    const next = await db.tx(async () => {
-      if (patch.status === 'active' && row.status === 'disabled') {
-        await db.lockPlan(row.companyId!)
-        const seats = (await db.plan(row.companyId!))?.seats ?? 0
-        const used = await db.accountCount(row.companyId!)
-        if (used >= seats) throw new HttpError(409, '席位已满，先加席位或停用其他成员', { seats, used })
-      }
-      return db.updateAccount(row.id, patch)
-    })
+    // 规矩在 lib/org.ts 的 patchAccount 里，和平台那条路共用一份（见那儿的注释）。
+    const { account: next, patch } = await patchAccount(db, actor, row, bodyOf(req))
     await db.audit({
       companyId: row.companyId,
       accountId: actor.id,

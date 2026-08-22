@@ -257,6 +257,21 @@ export async function machineCard(
   const botVersions = [...counts.entries()]
     .map(([version, n]) => ({ version: version || null, seats: n }))
     .sort((a, b) => b.seats - a.seats)
+  /**
+   * 同一份清单，按**席位自报的模版版本**再数一遍。
+   *
+   * 和 botVersions 并排给出来，因为这台机器上「装的是哪个包」和「跑的是哪一版模版」是
+   * 两件会各自落后的事：包升到最新了、模版却还停在三版之前，只看上面那一行看不出来。
+   * `null` 是「这台席位还没报到过」，不是第 0 版——两者在界面上分开说。
+   */
+  const tplCounts = new Map<number | null, number>()
+  for (const r of seatRows) {
+    if (r.status === 'none') continue
+    tplCounts.set(r.tplVersion ?? null, (tplCounts.get(r.tplVersion ?? null) ?? 0) + 1)
+  }
+  const tplVersions = [...tplCounts.entries()]
+    .map(([version, n]) => ({ version, seats: n }))
+    .sort((a, b) => b.seats - a.seats)
   const desired = (await desiredManagerRelease(db, machine))?.version ?? null
   // 席位清单给平台端的日志选择器用：要看某个席位的 bot 日志，得先知道有哪些席位。
   const seatList =
@@ -281,6 +296,7 @@ export async function machineCard(
     seats,
     full,
     botVersions,
+    tplVersions,
     botOutdated: Boolean(latest.botLatest) && botVersions.some((v) => v.version !== latest.botLatest),
     managerDesired: desired,
     managerOutdated:

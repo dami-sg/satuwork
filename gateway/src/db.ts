@@ -414,6 +414,15 @@ export class Db {
   }
 
   /** 还能管事的管理员：未停用的 admin（含待接受）。最后一个管理员靠它守门。 */
+  /**
+   * 还能登录的系统管理员有几个。停用最后一个之前要问它——平台账号不属于任何公司，
+   * adminCount 那条按公司数的检查够不着它，而停完就再没有任何一条路能把它开回来。
+   */
+  async activeOwnerCount(): Promise<number> {
+    const r = await this.one("select count(*) as n from accounts where role = 'owner' and status != 'disabled'")
+    return Number(r?.n ?? 0)
+  }
+
   async adminCount(companyId: string): Promise<number> {
     const r = await this.one(
       "select count(*) as n from accounts where \"companyId\" = ? and role = 'admin' and status != 'disabled'",
@@ -2200,6 +2209,23 @@ export class Db {
   async seatRuntimesOfAccount(accountId: string): Promise<SeatRuntime[]> {
     const rows = await this.many('select * from seat_runtimes where "accountId" = ? order by slot', [accountId])
     return rows.map(seatRuntimeOf)
+  }
+
+  /**
+   * 席位报到：它现在跑的是模版第几版。
+   *
+   * 单独一条窄更新，不走 upsertSeatRuntime：那条是部署路径的整行覆盖，用它写这两列，
+   * 等于每次重铺都拿部署那一刻的旧数字把席位刚报上来的盖掉。反过来也一样——这条
+   * **只碰这两列**，正在并发跑的部署改的 status / botVersion 一个字都不动。
+   *
+   * 行不存在就什么都不做（0 行受影响）：席位拆了、库里的行先没了，而那个进程还在最后
+   * 探一轮，这不是错误，不该让探针那条路 500。
+   */
+  async noteSeatTemplate(accountId: string, botId: string, version: number): Promise<void> {
+    await this.run(
+      'update seat_runtimes set "tplVersion" = ?, "tplSyncedAt" = ? where "accountId" = ? and "botId" = ?',
+      [version, Date.now(), accountId, botId],
+    )
   }
 
   async upsertSeatRuntime(row: SeatRuntime): Promise<SeatRuntime> {

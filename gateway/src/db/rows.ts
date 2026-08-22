@@ -309,6 +309,8 @@ export function seatRuntimeOf(r: Row): SeatRuntime {
     deployedAt: numOrNull(r.deployedAt),
     updatedAt: num(r.updatedAt),
     botVersion: strOrNull(r.botVersion),
+    tplVersion: numOrNull(r.tplVersion),
+    tplSyncedAt: numOrNull(r.tplSyncedAt),
   }
 }
 export function botReleaseOf(r: Row): BotRelease {

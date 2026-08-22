@@ -15,6 +15,28 @@ function sitesOf(text) {
     .filter(Boolean)
 }
 
+/**
+ * 改一个账号的状态。「用户」那一页的行上和账号详情页上按的是同一颗。
+ *
+ * 改完**两份都刷**：详情页开着的时候，只刷列表会让眼前这一页还显示旧状态；只刷详情
+ * 则是退回列表之后看见的是旧的。两条都很便宜，各刷各的比记住「现在在哪一页」可靠。
+ */
+async function setUserStatus(id, next) {
+  state.busy = true
+  render()
+  try {
+    await api('PATCH', `/platform/accounts/${encodeURIComponent(id)}`, { status: next })
+    await loadUsers().catch(() => {})
+    if (state.userDetail?.account?.id === id) await loadUserDetail(id).catch(() => {})
+    flash('ok', next === 'disabled' ? t('已停用这个账号', 'Account disabled') : t('已启用这个账号', 'Account enabled'))
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.busy = false
+  }
+  render()
+}
+
 async function runConfirm() {
   const c = state.confirm
   if (!c) return
@@ -26,6 +48,9 @@ async function runConfirm() {
       await Promise.all([loadOrgs().catch(() => {}), loadCompanyDetail(c.id)])
       flash('ok', c.next === 'disabled' ? '已停用公司' : '已启用公司')
       render()
+      return
+    } else if (c.kind === 'user-status') {
+      await setUserStatus(c.id, c.next)
       return
     } else if (c.kind === 'redeploy-bot') {
       render()
@@ -407,6 +432,30 @@ document.getElementById('app').addEventListener('click', async (e) => {
     await refreshMachine(btn.getAttribute('data-id'), btn.getAttribute('data-scope') || '')
     return
   }
+  if (act === 'user-status') {
+    const id = btn.getAttribute('data-id')
+    const next = btn.getAttribute('data-next')
+    const name = btn.getAttribute('data-name') || id
+    if (!id || !next) return
+    // 启用不弹确认：它没有会让人后悔的即时后果（席位满了会被服务端 409 挡回来）。
+    if (next === 'active') {
+      await setUserStatus(id, next)
+      return
+    }
+    state.confirm = {
+      title: '停用这个账号？',
+      body: t(
+        `${name} 手上的登录票会当场作废，下一次请求就被挡回登录页，也不能再登进来。TA 的会话记录和文件都留着，随时可以再启用。`,
+        `${name} is signed out immediately — their tokens are revoked and they cannot sign back in. Session history and files are kept; you can re-enable them at any time.`,
+      ),
+      label: '停用',
+      kind: 'user-status',
+      id,
+      next,
+    }
+    render()
+    return
+  }
   if (act === 'seat-open') {
     const id = btn.getAttribute('data-id')
     const member = (state.accounts || []).find((x) => x.id === id)
@@ -603,6 +652,11 @@ document.getElementById('app').addEventListener('click', async (e) => {
       state.template = data.template
       // 按回执重建草稿：被归一化过的字段（越界的注入上限、认不出的选项）当场就看得见。
       state.templateDraft = draftFromTemplate(data.template)
+      // 保存这一刻同步状态一定是「0 台跟上」，这正是要立刻显示的：版本号跳到新的一版，
+      // 不代表席位已经在跑那一版。
+      state.templateSync = data.sync || null
+      // 刚保存的这一刻一定有人没跟上，轮询从这里起（跟上了它自己会停）。
+      syncTemplatePoll()
       flash('ok', t(`已保存，模版现在是 v${data.template.version}`, `Saved — the template is now v${data.template.version}`))
     } catch (err) {
       /**
@@ -881,6 +935,9 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.routineRuns = []
     state.routineError = ''
     syncRoutinePoll()
+    // 模版那一页的同步轮询同理：不清掉的话，登出之后它还在每 15 秒问一次。
+    state.templateSync = null
+    syncTemplatePoll()
     state.me = null
     state.loginError = ''
     state.profileDraft = null

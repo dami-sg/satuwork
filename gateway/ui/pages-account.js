@@ -1,3 +1,24 @@
+/**
+ * 「停用 / 启用」那颗按钮。**这一页和账号详情页共用**，两处的规矩必须一样。
+ *
+ * 什么时候一颗都不给：
+ *
+ *  - **自己**。服务端也挡着（`不能改自己的角色或状态`）——一个人在这一页上把自己停掉，
+ *    下一次请求就 401，谁也开不回来。
+ *  - **待接受**。它要停也停得掉，但那一步该在「重发邀请 / 撤销」那条路上做，不是在
+ *    这里；而「启用」更不行——口令得由本人用邀请链接设，管理员直接激活等于凭空造出一个
+ *    没有口令的活账号（服务端同样挡着）。
+ *
+ * 停用是**掉线级**的动作（`tokenRevokedAt` 当场作废他手上的票），所以先弹确认；启用不弹，
+ * 它没有会让人后悔的即时后果，顶多因为席位满了被 409 挡回来。
+ */
+function userStatusButton(a) {
+  if (!a || a.id === memberMeId() || a.status === 'invited') return ''
+  const next = a.status === 'disabled' ? 'active' : 'disabled'
+  const label = next === 'disabled' ? t('停用') : t('启用')
+  return `<button type="button" class="satu-linkbtn"${next === 'disabled' ? ' style="color: var(--color-accent-800);"' : ''} data-act="user-status" data-id="${esc(a.id)}" data-next="${next}" data-name="${esc(a.name || a.email || '')}" ${state.busy ? 'disabled' : ''}>${label}</button>`
+}
+
 /** 平台用户、套餐与订单、余额面板，以及「我的资料」。 */
 function usersPage() {
   const view = pageSlice('users', state.users)
@@ -5,6 +26,7 @@ function usersPage() {
     .map((a) => {
       const company = a.company ? `${a.company.name} (${a.company.slug})` : t('平台')
       const initial = (a.email || '·').slice(0, 1).toUpperCase()
+      const st = MEMBER_STATUS[a.status] || MEMBER_STATUS.active
       return `<div class="satu-memberrow" style="cursor: pointer;" data-act="go" data-href="/users/${esc(a.id)}">
         <div style="min-width: 0; display: flex; align-items: center; gap: var(--space-3);">
           <span style="width: 34px; height: 34px; flex: none; border-radius: 999px; background: var(--color-accent-200); color: var(--color-accent-800); display: flex; align-items: center; justify-content: center; font-family: var(--font-heading);">${esc(initial)}</span>
@@ -14,9 +36,12 @@ function usersPage() {
           </div>
         </div>
         ${roleTag(a.role)}
+        ${/* 状态原来是**空的一格**：这一页列着全平台的人，而「这个人还能不能登录」正是
+             owner 最常来这一页问的一件事，得从行上就看得见，不用点进去。 */ ''}
+        <span class="tag ${st.tag}">${t(st.label)}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(fmtTime(a.createdAt))}</span>
-        <div></div>
-        <div></div>
+        ${/* 按钮自己带 data-act，点它不会顺着行跳进详情（事件委托取的是最里面那个）。 */ ''}
+        <span style="display: flex; justify-content: flex-end;">${userStatusButton(a)}</span>
       </div>`
     })
     .join('')
@@ -30,7 +55,7 @@ function usersPage() {
         ${flashes()}
         <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
           <div class="satu-memberhead">
-            <span>${t('账号')}</span><span>${t('角色')}</span><span>${t('加入时间')}</span><span></span><span></span>
+            <span>${t('账号')}</span><span>${t('角色')}</span><span>${t('状态')}</span><span>${t('加入时间')}</span><span></span>
           </div>
           ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有用户')}</div>`}
           ${listPager('users', view, '个')}
@@ -74,7 +99,7 @@ function userDetailPage() {
           <div class="satu-kv"><span>${t('名称')}</span><span>${esc(a.name || '—')}</span></div>
           <div class="satu-kv"><span>${t('角色')}</span><span>${roleTag(a.role)}</span></div>
           <div class="satu-kv"><span>${t('公司')}</span><span>${esc(company ? `${company.name} (${company.slug})` : t('平台'))}</span></div>
-          <div class="satu-kv"><span>${t('状态')}</span><span class="tag ${st.tag}">${t(st.label)}</span></div>
+          <div class="satu-kv"><span>${t('状态')}</span><span style="display: flex; align-items: center; gap: var(--space-3);"><span class="tag ${st.tag}">${t(st.label)}</span>${userStatusButton(a)}</span></div>
           <div class="satu-kv"><span>${t('加入时间')}</span><span>${esc(fmtTime(a.createdAt))}</span></div>
         </div>
         <div class="satu-panel">

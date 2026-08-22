@@ -612,8 +612,15 @@ function companyDetailPage() {
     .map((m) => {
       const st = MEMBER_STATUS[m.status] || MEMBER_STATUS.active
       const runtimes = Array.isArray(m.runtimes) ? m.runtimes : []
+      // 这一列本来只说「装的是哪个包」。模版版本跟在后面：一眼扫下去，落在旧版上的那
+      // 几行就自己跳出来了，不用挨个点开。
       const env = runtimes.length
-        ? runtimes.map((rt) => esc(rt.botVersion || rt.botId || rt.status || '—')).join(' · ')
+        ? runtimes
+            .map((rt) => {
+              const base = esc(rt.botVersion || rt.botId || rt.status || '—')
+              return rt.tplVersion ? `${base} · ${t('模版', 'tpl')} v${esc(String(rt.tplVersion))}` : base
+            })
+            .join(' · ')
         : t('未部署')
       return `<div class="satu-memberrow" style="grid-template-columns: ${envCols};">
       <button type="button" class="satu-linkbtn" data-act="seat-open" data-id="${esc(m.id)}" style="min-width: 0; display: flex; align-items: center; gap: var(--space-3); text-align: left; padding: 0; border: 0; background: transparent;">
@@ -881,6 +888,7 @@ function machineCard(orgId, card) {
     ${timezoneRow(orgId, m, card)}
     ${managerVersionRow(orgId, m, card)}
     ${botVersionRow(orgId, card)}
+    ${botTemplateRow(card)}
     ${m.lastError ? `<div class="satu-kv"><span>lastError</span><span>${esc(m.lastError)}</span></div>` : ''}
     <form data-form="machine" data-id="${esc(orgId)}" data-machine="${esc(m.id)}" style="display: flex; gap: var(--space-2); align-items: flex-end;">
       <div class="field" style="margin: 0; flex: 1;">
@@ -1003,6 +1011,27 @@ function botVersionRow(orgId, card) {
   return `<div class="satu-kv"><span>${t('Bot 运行时')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${text}${note}${btn}</span></div>`
 }
 
+/**
+ * 这台机器上的席位在跑哪一版**公司模版**。
+ *
+ * 和上面那行「Bot 运行时」是两件事：那行说的是装了哪个发布包，这行说的是跑着哪一版
+ * 模版。两者会各自落后——包升到最新了、模版还停在三版之前，只看上面那行看不出来。
+ *
+ * 数字是**席位自己报上来的**（探针捎回，见迁移 0013）。没报到过的单独说，不混进某个
+ * 版本号里：那多半意味着那台上的 bot 进程不在了，而它和「跑着旧版本」要查的是两件事。
+ */
+function botTemplateRow(card) {
+  const list = card.tplVersions || []
+  if (!list.length) return ''
+  const known = list.filter((v) => v.version)
+  const unknown = list.find((v) => !v.version)
+  const text = [
+    ...known.map((v) => `v${esc(String(v.version))} × ${v.seats}`),
+    ...(unknown ? [t(`还没报到 × ${unknown.seats}`, `never reported × ${unknown.seats}`)] : []),
+  ].join('、')
+  return `<div class="satu-kv"><span>${t('Bot 模版')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${text}</span></div>`
+}
+
 function botNameOfId(id) {
   const b = (state.bots || []).find((x) => x.id === id)
   return (b && b.name) || id || '—'
@@ -1027,6 +1056,14 @@ function seatEnvModal() {
         <div class="satu-kv"><span>${t('VNC 密码')}</span><span>${esc(pw)} <button type="button" class="satu-linkbtn" data-act="seat-reveal">${state.seatReveal ? t('隐藏') : t('显示')}</button></span></div>
         <div class="satu-kv"><span>${t('状态')}</span><span>${esc(rt.status || '—')}</span></div>
         <div class="satu-kv"><span>${t('Bot 版本')}</span><span>${esc(rt.botVersion || t('未部署'))}</span></div>
+        <!-- 两个「版本」问的是两件事：装的是哪个发布包、跑的是哪一版公司模版。后者由席位
+             自己报上来，所以还带着「什么时候报的」——版本号对得上、汇报停在两小时前，
+             说明那个进程已经不在了。 -->
+        <div class="satu-kv"><span>${t('模版版本')}</span><span>${
+          rt.tplVersion
+            ? esc(`v${rt.tplVersion} · ${ago(rt.tplSyncedAt)}`)
+            : t('还没报到过', 'never reported')
+        }</span></div>
         ${rt.lastError ? `<div class="satu-kv"><span>lastError</span><span>${esc(rt.lastError)}</span></div>` : ''}
       </div>`
         })

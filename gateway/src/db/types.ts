@@ -353,6 +353,17 @@ export interface SeatRuntime {
   deployedAt: number | null
   updatedAt: number
   botVersion: string | null
+  /**
+   * 这台席位**自己报的**模版版本，以及 Gateway 收到那次汇报的时刻。
+   *
+   * 空 = 从来没报到过（老行、刚部署完还没探第一轮），不是「第 0 版」。
+   *
+   * **这两列不走 upsertSeatRuntime**：部署那条路只写它自己知道的东西，席位跑到第几版
+   * 不在其中。要写用 db.noteSeatTemplate——否则每次重铺都会把席位刚报上来的数字盖成
+   * 部署那一刻的旧值。
+   */
+  tplVersion: number | null
+  tplSyncedAt: number | null
 }
 
 /** 发布包的种类。bot 装到席位上，manager 是机器管家自己。 */

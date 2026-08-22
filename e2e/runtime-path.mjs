@@ -316,6 +316,29 @@ await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2
       assert(rolledPrompt === nextPrompt, `名册里的人设没跟着换：${rolledPrompt}`)
 
       /**
+       * **反过来这条也得通：席位跟上了，平台那边看得见。**
+       *
+       * 上面验的是「席位换没换」，问的人是探针自己。管理员手上没有探针——他在
+       * 「Bot 模版」那一页上看到的是 Gateway 记下来的那个数（席位捎在探针上报回来的，
+       * 见 0013 那条迁移）。这两个数字断在中间的话，界面会一直显示「未同步」，而实际
+       * 早就换好了——比不显示更糟，因为它会让人去按「立即下发」，把所有人正在进行的
+       * 对话掐掉。
+       */
+      const syncDeadline = Date.now() + 20000
+      let sync = null
+      while (Date.now() < syncDeadline) {
+        const page = await req(gwBase, 'GET', `/orgs/${orgId}/bot-template`, { token: adminTok })
+        sync = page.json?.sync || null
+        if (sync && sync.synced === sync.total && sync.total > 0) break
+        await sleep(300)
+      }
+      assert(sync, '模版接口没给出同步状态')
+      assert(sync.total === 1, `已部署席位数 ${sync.total}`)
+      assert(sync.synced === 1, `平台还认为没席位跟上：${JSON.stringify(sync.seats)}`)
+      assert(sync.seats[0].version === wantVersion, `平台记下的版本 v${sync.seats[0].version}，实际 v${wantVersion}`)
+      assert(sync.seats[0].syncedAt > 0, '没记下汇报时刻')
+
+      /**
        * **行为边界也一样跟着跑。**
        *
        * 上面那一段验的是提示词。三个开关走的是同一条路（目录探针 → 指纹变了 → 重拉 →

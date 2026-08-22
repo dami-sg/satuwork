@@ -40,6 +40,38 @@ function machineLinkCell(m) {
   </span>`
 }
 
+/**
+ * 一格负载：**最吃紧的那一项**，不是三项并排。
+ *
+ * 一行只有一百多像素，三个 40% 挤在一起谁也不会去逐行比对。所以只画最高的那一项并
+ * 写出它是谁（「盘 92%」），另外两项进 title，想看全的去机器详情页。
+ *
+ * 没报过的给「—」，**不给 0%**：一台失联机器的 0% 和一台空闲机器的 0% 看着一样，
+ * 而结论完全相反。
+ *
+ * **调用方在 pages-audit.js**（公司详情页机器卡片里的 machineLoadRow）。机器列表页
+ * 曾经也用它，那一列在 e116054 里被砍掉了，函数跟着删——但那次漏看了这个调用方，于是
+ * 只要那台机器报过负载，公司详情页就整页抛 ReferenceError、一个字都画不出来。删一个
+ * 渲染函数之前先全仓搜一遍名字：这一层没有类型检查兜着。
+ */
+function machineLoadCell(m) {
+  const load = (m.telemetry && m.telemetry.metrics) || null
+  if (!load) return `<span style="font-size: 13px; color: var(--muted-foreground);">—</span>`
+  const disks = load.disks || []
+  const worstDisk = disks.reduce((a, b) => (b.usage > (a ? a.usage : -1) ? b : a), null)
+  const items = [
+    { key: t('CPU'), usage: load.cpu ? load.cpu.usage : null },
+    { key: t('内存'), usage: load.memory ? load.memory.usage : null },
+    { key: worstDisk ? `${t('盘')} ${worstDisk.mount}` : t('盘'), usage: worstDisk ? worstDisk.usage : null },
+  ]
+  const worst = items.reduce((a, b) => ((b.usage ?? -1) > (a.usage ?? -1) ? b : a), items[0])
+  const title = items.map((x) => `${x.key} ${pctText(x.usage)}`).join(' · ')
+  return `<span style="display: flex; align-items: center; gap: var(--space-2); min-width: 0;" title="${esc(title)}">
+    ${meter(worst.usage)}
+    <span style="font-size: 12.5px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(worst.key)} ${esc(pctText(worst.usage))}</span>
+  </span>`
+}
+
 function machinesPage() {
   const all = state.allMachines || []
   const totals = state.machineTotals || { machines: 0, paired: 0, online: 0, accounts: 0, max: 0, seats: 0 }
@@ -709,6 +741,9 @@ function machineVersionPanel(card) {
     <div class="satu-kv"><span>${t('管家版本')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${esc(m.managerVersion || '—')}${mgrNote}${mgrBtn}</span></div>
     <div class="satu-kv"><span>${t('期望版本')}</span><span>${esc(card.managerDesired || t('跟平台的最新发布走'))}</span></div>
     <div class="satu-kv"><span>${t('Bot 运行时')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${botText}${card.botOutdated ? ` · ${t('最新')} ${esc(state.botLatest || '')}` : ''}${botBtn}</span></div>
+    ${/* 装的是哪个包、跑的是哪一版公司模版，两件事各自会落后。渲染函数在 pages-audit.js，
+         那一页的机器卡片画的是同一行——同一台机器不该在两个页面上说两种话。 */ ''}
+    ${botTemplateRow(card)}
     <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('一台机器上同时躺着几个 Bot 版本不是错误——有的部署得早。「全部升级」把这台机器上的 Bot 逐个重铺到最新版，正在进行的对话会断。')}</p>
   </div>`
 }
@@ -748,7 +783,9 @@ function machineSeatsPanel(card) {
         <span style="font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(s.botName || s.botId)}</span>
         <span class="tag ${st.tag}">${t(st.label)}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(String(s.slot))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(s.lastError || '')}">${esc(s.lastError || s.botVersion || t('未部署'))}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(s.lastError || '')}">${esc(
+          s.lastError || [s.botVersion, s.tplVersion ? `${t('模版', 'tpl')} v${s.tplVersion}` : ''].filter(Boolean).join(' · ') || t('未部署'),
+        )}</span>
         <span style="display: flex; gap: var(--space-3); justify-content: flex-end;">
           <button type="button" class="satu-linkbtn" data-act="machine-logs" data-scope="platform" data-machine="${esc(card.machine.id)}" data-seat="${esc(s.seatId)}">${t('日志')}</button>
           ${/* 「清理」只画在没有主人的席位上（orphan 由接口给，见 withSeatNames）。

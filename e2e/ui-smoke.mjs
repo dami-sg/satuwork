@@ -656,6 +656,32 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(html.includes('已停用'), '没标出停用掉的老公司 Bot')
       // 公司管理员这一页不该再有「新建 Bot」——Bot 由员工自己建。
       assert(!html.includes('data-act="bot-create"'), '公司侧还留着建公司 Bot 的入口')
+
+      /**
+       * 席位同步那一格。**落后的那台必须点名**：只报一个「1/2」的比分，管理员知道有事
+       * 却不知道是谁，下一步只能去按「立即下发」，而那会掐掉全公司正在进行的对话。
+       */
+      ui.state.templateSync = {
+        version: 3,
+        total: 2,
+        synced: 1,
+        seats: [
+          { seatId: 's-2', botId: 'b2', accountId: 'a2', name: '李四', version: null, syncedAt: null },
+          { seatId: 's-1', botId: 'b1', accountId: 'a1', name: '张三', version: 3, syncedAt: Date.now() - 60000 },
+        ],
+      }
+      ui.render()
+      const synced = ui.html()
+      assert(synced.includes('席位同步'), '没画出同步那一格')
+      assert(synced.includes('1/2 在 v3'), `比分没画对：${synced.includes('1/2') ? 'v?' : '没有比分'}`)
+      assert(synced.includes('李四') && synced.includes('还没报到过'), '落后的那台没点名')
+      assert(!synced.includes('张三'), '跟上的那台不该占地方')
+
+      // 员工那边接口不给这一格（state.templateSync 是 null），这时候整块都不该出现——
+      // 空着一个「0/0」比没有更难懂。
+      ui.state.templateSync = null
+      ui.render()
+      assert(!ui.html().includes('席位同步'), '没有同步数据时还画了那一格')
     })
 
     await test('只读地看别人维护的 Bot：页面上不留任何按了没反应的控件', async () => {
@@ -1011,6 +1037,94 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         /data-act="machine-refresh"[^>]*data-id="org-1"/.test(stale),
         `刷新按钮没带上公司 id：${stale}`,
       )
+    })
+
+    await test('用户列表：状态那一格有东西，能按着停用；自己和待接受的不给按钮', async () => {
+      /**
+       * 这一页原来最后两列是**空的**（表头两个 `<span></span>`，行里两个 `<div></div>`），
+       * 于是「这个人还能不能登录」在全平台唯一列全部账号的这一页上看不见，也改不了。
+       *
+       * 按钮该不该出现是这条用例的重点：
+       *  - 自己那一行不能有——把自己停掉之后下一次请求就 401，谁也开不回来（服务端也挡）
+       *  - 待接受那一行不能有「启用」——口令得由本人用邀请链接设
+       */
+      const ui = await boot(ownerToken)
+      ui.state.path = '/users'
+      const meId = ui.state.me?.account?.id || 'me-1'
+      ui.state.users = [
+        { id: meId, email: 'owner@x.com', name: '我自己', role: 'owner', status: 'active', createdAt: Date.now() - 86400000, company: null },
+        { id: 'u-active', email: 'a@acme.test', name: '在职的', role: 'admin', status: 'active', createdAt: Date.now() - 86400000, company: { id: 'c1', name: 'Acme', slug: 'acme' } },
+        { id: 'u-off', email: 'b@acme.test', name: '停用的', role: 'member', status: 'disabled', createdAt: Date.now() - 86400000, company: { id: 'c1', name: 'Acme', slug: 'acme' } },
+        { id: 'u-inv', email: 'c@acme.test', name: '待接受的', role: 'member', status: 'invited', createdAt: Date.now() - 3600000, company: { id: 'c1', name: 'Acme', slug: 'acme' } },
+      ]
+      ui.render()
+      const html = ui.html()
+      assert(html.includes('已激活') && html.includes('已停用') && html.includes('待接受'), '状态那一格还是空的')
+      assert(html.includes('data-act="user-status" data-id="u-active" data-next="disabled"'), '在职的那行没有「停用」')
+      assert(html.includes('data-act="user-status" data-id="u-off" data-next="active"'), '停用的那行没有「启用」')
+      assert(!html.includes('data-id="u-inv"'), '待接受的那行不该给状态按钮')
+      assert(!html.includes(`data-act="user-status" data-id="${meId}"`), '自己那行不该给状态按钮')
+    })
+
+    await test('公司详情页：机器报了负载也画得出来，不是整页白屏', async () => {
+      /**
+       * 这一页曾经整页画不出来：机器卡片里那格负载的渲染函数（machineLoadCell）在
+       * 「机器列表砍掉负载那一列」时被一并删掉，而它**还有第二个调用方**——就是这里。
+       * 于是只要那台机器报过负载，整页抛 ReferenceError，屏幕上停在上一屏，控制台之外
+       * 一个字都没有。
+       *
+       * 所以这条断言的不是某一行长什么样，而是**这一页画得出来**：owner 侧最常点开的
+       * 一页，此前在 ui-smoke 里一条覆盖都没有。
+       */
+      const ui = await boot(ownerToken)
+      ui.state.path = '/companies/org-1'
+      ui.state.org = {
+        id: 'org-1', name: 'UI-SMOKE-公司', slug: 'smoke', status: 'active',
+        contactName: '张三', contactPhone: '+65 68886888', contactEmail: 'a@x.com',
+        address: '', website: '', accessUrl: '', createdAt: Date.now() - 86400000, machineId: null,
+      }
+      ui.state.plan = { seats: 3, used: 2, expiresAt: Date.now() + 86400000 }
+      ui.state.seats = { total: 3, used: 2 }
+      ui.state.accounts = [{ id: 'a1', name: '李四', email: 'l@x.com', role: 'member', status: 'active', lastSeenAt: Date.now() - 60000, runtimes: [] }]
+      ui.state.billing = { plan: { period: '月付', amount: '$200.00' }, invoices: [] }
+      // 拉不到的那几份在真实加载里也是这些默认值（各自带 .catch），照抄过来。
+      ui.state.charges = null
+      ui.state.orgTopups = []
+      ui.state.planSkus = []
+      ui.state.releases = []
+      ui.state.latestRelease = null
+      ui.state.machines = [{
+        no: 1,
+        machine: {
+          id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', host: 'http://10.0.0.12:8443', paired: true,
+          pairedAt: Date.now(), managerVersion: '0.3.1+abc-arm64', protocol: 1, lastError: null,
+          lastHeartbeatAt: Date.now() - 12000, link: 'online', heartbeatAge: 12000,
+          timezone: null, currentTimezone: 'Asia/Singapore', arch: 'arm64',
+          // 报过负载的机器**才**触发那一格。盘 92%：和列表页那个 fixture 同一个数。
+          telemetry: {
+            metrics: {
+              uptime: 3600,
+              cpu: { cores: 8, usage: 0.23, load1: 1.8 },
+              memory: { total: 16 * 1024 ** 3, used: 9 * 1024 ** 3, usage: 0.56, swapTotal: 0, swapUsed: 0 },
+              disks: [{ mount: '/', total: 100 * 1024 ** 3, used: 92 * 1024 ** 3, free: 8 * 1024 ** 3, usage: 0.92 }],
+              net: { txBytes: 0, rxBytes: 0, txRate: 0, rxRate: 0, interfaces: ['eth0'] },
+            },
+            logs: { journalBytes: 3.4 * 1024 ** 3, varLogBytes: 0, capMb: 1024, capSource: 'default', top: [], lastVacuum: null },
+          },
+          telemetryAt: Date.now() - 12000, telemetryAge: 12000, logCapMb: null,
+        },
+        accounts: 2, maxAccounts: 10, seats: 1, full: false,
+        botVersions: [{ version: '0.9.0+aaa-arm64', seats: 1 }], botOutdated: false,
+        managerDesired: null, managerOutdated: false, managerPending: false, timezonePending: false,
+        company: { id: 'org-1', name: 'UI-SMOKE-公司', slug: 'smoke', status: 'active' },
+      }]
+      ui.render()
+      const page = ui.html()
+      assert(page.includes('公司信息'), '公司详情页没画出来')
+      assert(page.includes('UI-SMOKE-公司'), '标题没画出公司名')
+      // 那一格：最吃紧的是盘 92%，写出来的是它，不是三项并排。
+      assert(page.includes('盘 / 92%'), `机器负载那一格没画出来：${page.includes('负载') ? '有「负载」但没有数值' : '连「负载」都没有'}`)
+      assert(page.includes('成员') && page.includes('订阅'), '成员或订阅那两块没画出来')
     })
 
     await test('机器管理：菜单在「机器配置」上面，列表和详情画得出，公司侧进不去', async () => {

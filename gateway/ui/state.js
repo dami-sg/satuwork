@@ -117,6 +117,8 @@ const state = {
   template: null,
   templateDraft: null,
   templateOptions: { skills: [], mcps: [] },
+  // 席位跟上模版没有。接口只给管理员，所以 null = 没有这一格，不是「一台席位都没有」。
+  templateSync: null,
   /** 「新建 Bot」弹窗那份表单；null 表示没开。 */
   newBot: null,
   newBotError: '',
