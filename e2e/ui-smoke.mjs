@@ -545,12 +545,22 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       /**
        * 统计屏上那三颗胶囊只刷过汇总，底下的计费明细还留着上一个窗口的行——同一屏
        * 两张表各说各的时间段，人只会以为数字算错了。这条钉的是「窗口只有一个来源」。
+       *
+       * 只比到「几乎同时」，不比毫秒：`7d`/今天/用量那几档的边界是**此刻**，每次调用
+       * 现取，前后两次天然差几毫秒。拿 === 比的话这条会随机红，红的还是时钟不是窗口
+       * 来源。真走岔了算法差的是小时和天，这个容差照样拦得住。
        */
+      const NEAR_MS = 2000
+      const sameWindow = (a, b, what) => {
+        assert(a && b, `${what}：窗口是空的`)
+        assert(Math.abs(a.from - b.from) < NEAR_MS, `${what}：起点差了 ${a.from - b.from}ms`)
+        assert(Math.abs(a.to - b.to) < NEAR_MS, `${what}：终点差了 ${a.to - b.to}ms`)
+      }
+
       const ui = await boot(ownerToken)
       ui.state.path = '/stats'
       ui.state.statsRange = '7d'
-      const seven = ui.chargesWindow('platform')
-      assert(seven.from === ui.statsWindow().from && seven.to === ui.statsWindow().to, '统计屏的明细没跟着统计窗口')
+      sameWindow(ui.chargesWindow('platform'), ui.statsWindow(), '统计屏的明细没跟着统计窗口')
       ui.state.statsRange = 'month'
       ui.state.statsMonth = '2026-02'
       const feb = ui.chargesWindow('platform')
@@ -559,8 +569,7 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       // 用量屏跟的是它自己那排胶囊，不是统计的。
       ui.state.path = '/usage'
       ui.state.usageRange = '近 7 天'
-      const usage = ui.chargesWindow('org')
-      assert(usage && usage.from === ui.usageRangeMs('近 7 天').from, '用量屏的明细没跟着范围胶囊')
+      sameWindow(ui.chargesWindow('org'), ui.usageRangeMs('近 7 天'), '用量屏的明细没跟着范围胶囊')
 
       // 账单页和平台的公司详情没有范围控件，那里就是全时段。
       ui.state.path = '/billing'
