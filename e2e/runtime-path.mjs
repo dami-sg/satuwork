@@ -339,6 +339,30 @@ await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0', note: 'e2
       assert(sync.seats[0].syncedAt > 0, '没记下汇报时刻')
 
       /**
+       * **`have` 是外面来的数，得当外面来的数看。**
+       *
+       * 这一列在库里是 int。越界的值直接送进去会让 PG 抛 22003，整条探针 500——而这条路
+       * 是席位判断「目录变了没有」的唯一入口，500 之后它这一轮既拿不到 stamp 也不会重拉，
+       * 等于一个畸形参数就能把一台席位卡住，界面上却只显示它一直落后。
+       *
+       * 认不出来的值当没带：照常回 200，库里那个数一个字都不动。
+       */
+      for (const bad of ['99999999999', '5.5', '-1', 'abc']) {
+        const probe = await req(
+          gwBase,
+          'GET',
+          `/runtime/catalog/version?botId=${encodeURIComponent(remoteBotId)}&have=${encodeURIComponent(bad)}`,
+          { token: seatAccess },
+        )
+        assert(probe.status === 200, `have=${bad} 把探针打成了 ${probe.status} ${probe.text}`)
+      }
+      const afterBad = await req(gwBase, 'GET', `/orgs/${orgId}/bot-template`, { token: adminTok })
+      assert(
+        afterBad.json?.sync?.seats?.[0]?.version === wantVersion,
+        `畸形的 have 改动了库里的版本：${JSON.stringify(afterBad.json?.sync?.seats)}`,
+      )
+
+      /**
        * **行为边界也一样跟着跑。**
        *
        * 上面那一段验的是提示词。三个开关走的是同一条路（目录探针 → 指纹变了 → 重拉 →

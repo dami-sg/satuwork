@@ -655,8 +655,9 @@ document.getElementById('app').addEventListener('click', async (e) => {
       // 保存这一刻同步状态一定是「0 台跟上」，这正是要立刻显示的：版本号跳到新的一版，
       // 不代表席位已经在跑那一版。
       state.templateSync = data.sync || null
-      // 刚保存的这一刻一定有人没跟上，轮询从这里起（跟上了它自己会停）。
-      syncTemplatePoll()
+      // 刚保存的这一刻一定有人没跟上，轮询从这里起（跟上了、或者数字连着几轮不动，它
+      // 自己会停）。
+      tplSyncWake()
       flash('ok', t(`已保存，模版现在是 v${data.template.version}`, `Saved — the template is now v${data.template.version}`))
     } catch (err) {
       /**
@@ -670,6 +671,16 @@ document.getElementById('app').addEventListener('click', async (e) => {
       if (err.status === 409) {
         const fresh = await api('GET', `${base}/bot-template`).catch(() => null)
         if (fresh?.template) state.template = fresh.template
+        /**
+         * **同步那一格也得跟着换。** 只换 template 的话，页面上的版本号跳到了别人刚存的
+         * 那一版，而同步状态还是上一版那份快照——于是它会拿旧的「4/4 已同步」去配新的
+         * 版本号，显示成「4/4 在 v6」，而此刻一台跑 v6 的席位都没有。这一格恰恰是给人
+         * 判断「要不要按立即下发」用的。
+         */
+        if (fresh) {
+          state.templateSync = fresh.sync || null
+          tplSyncWake()
+        }
         flash('err', t('别人刚改过这份模版。你写的还在，再点一次「保存模版」就是覆盖他的。', 'Someone just changed this template. Your edits are kept — press Save again to overwrite theirs.'))
       } else {
         flash('err', err.message)
@@ -678,6 +689,13 @@ document.getElementById('app').addEventListener('click', async (e) => {
       state.busy = false
       render()
     }
+    return
+  }
+  if (act === 'tpl-sync-refresh') {
+    // 自动刷新在数字连着几轮不动之后会停（见 tplSyncWant）。这颗按钮既问一次，也把那个
+    // 静默计数清零——等于「再盯两分钟」。
+    await refreshTemplateSync()
+    tplSyncWake()
     return
   }
   if (act === 'template-redeploy') {

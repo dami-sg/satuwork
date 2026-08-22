@@ -677,6 +677,29 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(synced.includes('李四') && synced.includes('还没报到过'), '落后的那台没点名')
       assert(!synced.includes('张三'), '跟上的那台不该占地方')
 
+      /**
+       * **别人在你开着这一页时改了模版**：轮询拿回来的那份是服务端按新版本数的，而页面上
+       * 这份 state.template 还停在你打开时的旧版本。这一格必须整个按服务端那份的
+       * `sync.version` 算——混着用的话，「落后的有谁」按旧版本筛出空集，于是它画成绿色写
+       * 「每台都在跑这一版」，而同一行的标签是「0/2」。
+       */
+      ui.state.templateSync = {
+        version: 4,
+        total: 2,
+        synced: 0,
+        seats: [
+          { seatId: 's-1', botId: 'b1', accountId: 'a1', name: '张三', version: 3, syncedAt: Date.now() - 60000 },
+          { seatId: 's-2', botId: 'b2', accountId: 'a2', name: '李四', version: 3, syncedAt: Date.now() - 60000 },
+        ],
+      }
+      ui.render()
+      const ahead = ui.html()
+      assert(ahead.includes('0/2 在 v4'), `比分该按服务端那份的版本算：${ahead.includes('0/2') ? '版本号不对' : '没有比分'}`)
+      assert(!ahead.includes('公司里每台已部署的席位都在跑这一版'), '一台都没跟上却说全跟上了')
+      assert(ahead.includes('张三') && ahead.includes('李四'), '两台都落后，都该点名')
+      // 没跟上的时候留一颗手动的「刷新」：自动刷新会在数字不动几轮之后停下来。
+      assert(ahead.includes('data-act="tpl-sync-refresh"'), '停了自动刷新之后没有手动的路')
+
       // 员工那边接口不给这一格（state.templateSync 是 null），这时候整块都不该出现——
       // 空着一个「0/0」比没有更难懂。
       ui.state.templateSync = null

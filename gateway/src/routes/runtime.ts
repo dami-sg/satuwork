@@ -245,7 +245,14 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
      * 记到哪一行去。席位实例一定带（deploy 下发的 SATUWORK_BOT_ID），不带的是脚本。
      */
     const have = Number(req.query.get('have'))
-    if (botId && Number.isFinite(have) && have > 0) await db.noteSeatTemplate(account.id, botId, have)
+    /**
+     * **整数、且在 int4 里**。这一列是 `int`，一个 `have=99999999999` 会让 PG 抛
+     * 22003、整条探针 500——而这条路是席位判断「目录变了没有」的唯一入口，500 之后它
+     * 这一轮既拿不到 stamp 也不会重拉。一个畸形参数就能把一台席位卡住，而界面上只会
+     * 显示它一直落后。认不出来的值当没带：报不上来不是错误，下一轮再说。
+     */
+    const sane = Number.isInteger(have) && have > 0 && have <= 2147483647
+    if (botId && sane) await db.noteSeatTemplate(account.id, botId, have)
     const tools = [
       ...(await db.visibleCatalog('skill', companyId)),
       ...(await db.visibleCatalog('mcp', companyId)),
