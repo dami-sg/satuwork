@@ -1201,7 +1201,7 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
           lastHeartbeatAt: null,
           heartbeatAge: null,
           managerVersion: null,
-          // 没配对的机器什么都不报。这一台在下面用来验「没报」和「报了 0」画得不一样。
+          // 没配对的机器什么都不报。
           telemetry: null,
           telemetryAt: null,
           telemetryAge: null,
