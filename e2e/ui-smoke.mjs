@@ -1039,6 +1039,33 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       )
     })
 
+    await test('用户列表：状态那一格有东西，能按着停用；自己和待接受的不给按钮', async () => {
+      /**
+       * 这一页原来最后两列是**空的**（表头两个 `<span></span>`，行里两个 `<div></div>`），
+       * 于是「这个人还能不能登录」在全平台唯一列全部账号的这一页上看不见，也改不了。
+       *
+       * 按钮该不该出现是这条用例的重点：
+       *  - 自己那一行不能有——把自己停掉之后下一次请求就 401，谁也开不回来（服务端也挡）
+       *  - 待接受那一行不能有「启用」——口令得由本人用邀请链接设
+       */
+      const ui = await boot(ownerToken)
+      ui.state.path = '/users'
+      const meId = ui.state.me?.account?.id || 'me-1'
+      ui.state.users = [
+        { id: meId, email: 'owner@x.com', name: '我自己', role: 'owner', status: 'active', createdAt: Date.now() - 86400000, company: null },
+        { id: 'u-active', email: 'a@acme.test', name: '在职的', role: 'admin', status: 'active', createdAt: Date.now() - 86400000, company: { id: 'c1', name: 'Acme', slug: 'acme' } },
+        { id: 'u-off', email: 'b@acme.test', name: '停用的', role: 'member', status: 'disabled', createdAt: Date.now() - 86400000, company: { id: 'c1', name: 'Acme', slug: 'acme' } },
+        { id: 'u-inv', email: 'c@acme.test', name: '待接受的', role: 'member', status: 'invited', createdAt: Date.now() - 3600000, company: { id: 'c1', name: 'Acme', slug: 'acme' } },
+      ]
+      ui.render()
+      const html = ui.html()
+      assert(html.includes('已激活') && html.includes('已停用') && html.includes('待接受'), '状态那一格还是空的')
+      assert(html.includes('data-act="user-status" data-id="u-active" data-next="disabled"'), '在职的那行没有「停用」')
+      assert(html.includes('data-act="user-status" data-id="u-off" data-next="active"'), '停用的那行没有「启用」')
+      assert(!html.includes('data-id="u-inv"'), '待接受的那行不该给状态按钮')
+      assert(!html.includes(`data-act="user-status" data-id="${meId}"`), '自己那行不该给状态按钮')
+    })
+
     await test('公司详情页：机器报了负载也画得出来，不是整页白屏', async () => {
       /**
        * 这一页曾经整页画不出来：机器卡片里那格负载的渲染函数（machineLoadCell）在

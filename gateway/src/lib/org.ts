@@ -4,8 +4,9 @@
  * 从 routes.ts 拆出来的——那个文件曾经是 5700 行，前 1900 行全是这类帮手。
  */
 import { EMAIL_RE, PHONE_RE, SLUG_RE, strField } from './validate.ts'
+import { losingAdmin, statusOf } from './guards.ts'
 import { HttpError } from '../http.ts'
-import { type Account, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRate, type ModelRole, type BillingSettings, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, type Plan, type PlatformSettings, type Role, type SessionIndex, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier } from '../db.ts'
+import { type Account, type AccountStatus, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRate, type ModelRole, type BillingSettings, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, type Plan, type PlatformSettings, type Role, type SessionIndex, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier } from '../db.ts'
 import { WEB_BACKENDS, WEB_DOCUMENT } from '../db/types.ts'
 import { VENDORS } from '../connectors/index.ts'
 
@@ -143,6 +144,68 @@ export async function publicPlan(db: Db, plan: Plan | undefined, used: number) {
     expiresAt: plan?.expiresAt ?? null,
     updatedAt: plan?.updatedAt ?? 0,
   }
+}
+
+/**
+ * 改一个账号的名字 / 角色 / 状态，**规矩全在这里**。
+ *
+ * 两条路进来：公司管理员改自己公司的人（`PATCH /orgs/:id/accounts/:accountId`），以及
+ * 系统管理员在平台的「用户」那一页上改任何人（`PATCH /platform/accounts/:id`）。**规矩
+ * 只能有一份**——「不能改自己」「待接受不能被直接激活」「至少留一个管理员」「重新激活
+ * 要占席位」这几条，抄成两份的那一天起，两条路就开始各自漂移，而漂移的方向恰好是没人
+ * 会去测的那一边。
+ *
+ * 鉴权不在这里：谁能碰这个账号由路由自己判（公司侧 requireOrg，平台侧 requireOwner）。
+ * 审计也不在这里，两边记的 action 不一样。
+ */
+export async function patchAccount(
+  db: Db,
+  actor: Account,
+  row: Account,
+  body: { name?: unknown; role?: unknown; status?: unknown },
+): Promise<{ account: Account; patch: { name?: string; role?: Role; status?: AccountStatus } }> {
+  if (row.id === actor.id && (body.role || body.status)) throw new HttpError(400, '不能改自己的角色或状态')
+  const patch: { name?: string; role?: Role; status?: AccountStatus; tokenRevokedAt?: number | null } = {}
+  if (body.name != null) {
+    const name = strField(body as Record<string, unknown>, 'name')
+    if (!name) throw new HttpError(400, 'name 不能为空')
+    patch.name = name
+  }
+  if (body.role !== undefined && body.role !== '') patch.role = roleOf(body.role)
+  if (body.status !== undefined && body.status !== '') patch.status = statusOf(body.status)
+  const nextRole = patch.role ?? row.role
+  const nextStatus = patch.status ?? row.status
+  if (patch.status === 'invited' && row.status !== 'invited') {
+    throw new HttpError(400, '已激活的账号不能退回待接受，需要重设口令请用重置链接')
+  }
+  if (patch.status === 'active' && row.status === 'invited') {
+    throw new HttpError(400, '待接受的账号不能由管理员直接激活，对方需用邀请链接设置口令')
+  }
+  if (row.companyId && losingAdmin(row, nextRole, nextStatus) && (await db.adminCount(row.companyId)) <= 1) {
+    throw new HttpError(409, '至少要留一个管理员')
+  }
+  /**
+   * 系统管理员这一层同理：**最后一个还能登录的 owner 不许停**。
+   *
+   * 平台账号不属于任何公司，上面那条按公司数的检查够不着它。把最后一个 owner 停掉之后，
+   * 没有任何一条路能再把它开回来——这一层的写入口全都 requireOwner。
+   */
+  if (!row.companyId && row.role === 'owner' && patch.status === 'disabled' && (await db.activeOwnerCount()) <= 1) {
+    throw new HttpError(409, '至少要留一个能登录的系统管理员')
+  }
+  if (patch.status === 'disabled') patch.tokenRevokedAt = Date.now()
+  // 停用的人重新激活会多占一个席位。满了就不让激活——先加席位，或者停掉别人。
+  // 检查和写入放在同一个事务里，并先锁住套餐行，否则两个人同时激活会一起挤进来。
+  const account = await db.tx(async () => {
+    if (patch.status === 'active' && row.status === 'disabled' && row.companyId) {
+      await db.lockPlan(row.companyId)
+      const seats = (await db.plan(row.companyId))?.seats ?? 0
+      const used = await db.accountCount(row.companyId)
+      if (used >= seats) throw new HttpError(409, '席位已满，先加席位或停用其他成员', { seats, used })
+    }
+    return db.updateAccount(row.id, patch)
+  })
+  return { account, patch }
 }
 
 export async function orgSummary(db: Db, c: Company) {

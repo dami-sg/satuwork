@@ -914,6 +914,104 @@ async function runGateway() {
     assert(appJs.includes('function userDetailPage'), '缺 userDetailPage')
   })
 
+  await test('平台侧改账号状态：停用当场断票，启用回得来，自己改不动', async () => {
+    /**
+     * 「用户」那一页上的「停用 / 启用」。它**不能**走公司侧那条
+     * `/orgs/:id/accounts/:accountId`——那一页列的是全平台的人，包括不属于任何公司的
+     * 平台账号，那条路根本够不着。
+     *
+     * 另起一家公司做这件事：停用会把那个人手上的票当场作废（tokenRevokedAt），拿主用例
+     * 里那几个共用账号来试，后面所有用例的票都会跟着死。
+     */
+    const org = await req(base, 'POST', '/platform/orgs', {
+      token: ownerTok,
+      body: {
+        name: 'UserStatus', slug: 'userstatus', contactName: '钱七',
+        contactPhone: '+86 13800000001', contactEmail: 'c@userstatus.test',
+        adminEmail: 'admin@userstatus.test', adminPassword: 'correct-horse-2',
+      },
+    })
+    assert(org.status === 201, `建公司 ${org.status} ${org.text}`)
+    const orgId2 = org.json.company.id
+    const up = await req(base, 'PUT', `/platform/orgs/${orgId2}/plan`, { token: ownerTok, body: { seats: 3 } })
+    assert(up.status === 200, `加席位 ${up.status} ${up.text}`)
+    /**
+     * 要停的是**第二个成员**，不是那家公司唯一的管理员——后者会被「至少要留一个管理员」
+     * 挡下（这条规矩两条路共用，公司侧的用例里已经验过）。这条用例问的是另一件事：
+     * 平台这条路本身通不通。
+     */
+    const made = await req(base, 'POST', `/orgs/${orgId2}/accounts`, {
+      token: ownerTok,
+      body: { email: 'staff@userstatus.test', password: 'correct-horse-3', name: '员工', role: 'member' },
+    })
+    assert(made.status === 201, `建成员 ${made.status} ${made.text}`)
+    const theirAccountId = made.json.account.id
+    const login = await req(base, 'POST', '/auth/login', {
+      body: { email: 'staff@userstatus.test', password: 'correct-horse-3' },
+    })
+    assert(login.status === 200, `登录 ${login.status} ${login.text}`)
+    const theirTok = login.json.token
+
+    // 非 owner 碰不到这条路：它是平台那一页的入口，公司管理员不该能改别家公司的人。
+    const denied = await req(base, 'PATCH', `/platform/accounts/${theirAccountId}`, {
+      token: theirTok,
+      body: { status: 'disabled' },
+    })
+    assert(denied.status === 403, `非 owner 也能改 ${denied.status} ${denied.text}`)
+
+    const off = await req(base, 'PATCH', `/platform/accounts/${theirAccountId}`, {
+      token: ownerTok,
+      body: { status: 'disabled' },
+    })
+    assert(off.status === 200 && off.json.account.status === 'disabled', `停用 ${off.status} ${off.text}`)
+    // 停用的**当下**就该断，不是等票过期：手上那张 JWT 还没到期，但它必须不好使了。
+    const stale = await req(base, 'GET', '/me', { token: theirTok })
+    assert(stale.status === 401, `停用之后旧票还能用 ${stale.status}`)
+    const reLogin = await req(base, 'POST', '/auth/login', {
+      body: { email: 'staff@userstatus.test', password: 'correct-horse-3' },
+    })
+    assert(reLogin.status !== 200, `停用之后还登得进来 ${reLogin.status} ${reLogin.text}`)
+
+    const on = await req(base, 'PATCH', `/platform/accounts/${theirAccountId}`, {
+      token: ownerTok,
+      body: { status: 'active' },
+    })
+    assert(on.status === 200 && on.json.account.status === 'active', `启用 ${on.status} ${on.text}`)
+    const backIn = await req(base, 'POST', '/auth/login', {
+      body: { email: 'staff@userstatus.test', password: 'correct-horse-3' },
+    })
+    assert(backIn.status === 200, `启用之后登不回来 ${backIn.status} ${backIn.text}`)
+
+    // 自己改不动：一个人在这一页上把自己停掉，下一次请求就 401，谁也开不回来。
+    const ownerRow = (await req(base, 'GET', '/platform/accounts', { token: ownerTok })).json.accounts.find(
+      (a) => a.role === 'owner',
+    )
+    const self = await req(base, 'PATCH', `/platform/accounts/${ownerRow.id}`, {
+      token: ownerTok,
+      body: { status: 'disabled' },
+    })
+    assert(self.status === 400, `owner 把自己停掉了 ${self.status} ${self.text}`)
+
+    // 待接受的不能被管理员直接激活——口令得由本人用邀请链接设。规矩和公司侧那条共用
+    // 一份（lib/org.ts 的 patchAccount），这里验的是平台这条路也走的是那一份。
+    const invited = await req(base, 'POST', `/orgs/${orgId2}/accounts/members`, {
+      token: ownerTok,
+      body: { email: 'pending@userstatus.test', name: '待接受', role: 'member' },
+    })
+    assert(invited.status === 201, `邀请 ${invited.status} ${invited.text}`)
+    const force = await req(base, 'PATCH', `/platform/accounts/${invited.json.user.id}`, {
+      token: ownerTok,
+      body: { status: 'active' },
+    })
+    assert(force.status === 400, `待接受被直接激活了 ${force.status} ${force.text}`)
+
+    const missing = await req(base, 'PATCH', '/platform/accounts/no-such-account', {
+      token: ownerTok,
+      body: { status: 'disabled' },
+    })
+    assert(missing.status === 404, `不存在的账号 ${missing.status}`)
+  })
+
   await test('API Key 调 /v1/models；access token 调 /me；交叉 401', async () => {
     const adminMe = await req(base, 'GET', '/me', { token })
     const adminId = adminMe.json.account.id

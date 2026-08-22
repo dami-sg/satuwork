@@ -414,6 +414,15 @@ export class Db {
   }
 
   /** 还能管事的管理员：未停用的 admin（含待接受）。最后一个管理员靠它守门。 */
+  /**
+   * 还能登录的系统管理员有几个。停用最后一个之前要问它——平台账号不属于任何公司，
+   * adminCount 那条按公司数的检查够不着它，而停完就再没有任何一条路能把它开回来。
+   */
+  async activeOwnerCount(): Promise<number> {
+    const r = await this.one("select count(*) as n from accounts where role = 'owner' and status != 'disabled'")
+    return Number(r?.n ?? 0)
+  }
+
   async adminCount(companyId: string): Promise<number> {
     const r = await this.one(
       "select count(*) as n from accounts where \"companyId\" = ? and role = 'admin' and status != 'disabled'",
