@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { bootConfig, seatAssets, seatsPath } from './config.ts'
+import { reclaimSeatPorts } from './reclaim.ts'
 import { ensureRelease, releaseDir } from './releases.ts'
 import { run, tailError } from './run.ts'
 
@@ -76,6 +77,26 @@ export async function deploySeat(spec: SeatSpec, token: string): Promise<SeatRec
   }
 }
 
+/**
+ * 把回收时停掉的席位从名册里销号。改动过返回 true，调用方据此决定要不要落盘。
+ *
+ * **留着它们是会骗人的。** 下一次部署撞上同一个口时，classifyHolder 拿名册判「占口
+ * 的那个席位还活着吗」——名册里还挂着一个已经被自己停掉的席位，判断依据就成了一份
+ * 自己造出来的假象，处置会从「孤儿，清掉」滑到「名册里活着的席位」那一格。
+ *
+ * 逐个判在不在，不是照着 retired 数一数就落盘：回收清掉的**多半是名册里本来就没有
+ * 的孤儿**（那正是这条路最常见的入口），那种情况一个字都没改，不该白写一次盘。
+ */
+export function pruneRetired(reg: Record<string, SeatRecord>, retired: string[]): boolean {
+  let changed = false
+  for (const id of retired) {
+    if (!(id in reg)) continue
+    delete reg[id]
+    changed = true
+  }
+  return changed
+}
+
 async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
   const reg = load()
   const base: SeatRecord = {
@@ -109,6 +130,27 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
   } catch (e) {
     return fail(e instanceof Error ? e.message : String(e))
   }
+
+  // ── 先把这三个口要回来 ──────────────────────────────────────────────
+  // 单元停了、进程没死是这一层的常态（logind session scope + KillUserProcesses=no，
+  // 见 reclaim.ts）。上一个席位拆掉之后留下的 x11vnc 会一直蹲在 5910 上，而 Gateway
+  // 那边行一删槽位就分给了下一个人——不先清，这次部署必然撞在同一个口上。
+  //
+  // 该不该清只有管家判得了：脚本手里没有名册。清不动的当场失败，理由说清楚——比
+  // 让 deploy-seat.sh 干等 30 秒再报一句「被别人占着」有用得多。
+  const reclaimed = await reclaimSeatPorts(
+    {
+      seatId: spec.seatId,
+      display: spec.ports.display,
+      vncPort: spec.ports.vncPort,
+      novncPort: spec.ports.novncPort,
+      botPort: spec.ports.botPort,
+    },
+    Object.values(reg),
+  )
+  for (const line of reclaimed.freed) console.log(`satuwork-manager: 席位 ${spec.seatId} 部署前回收端口：${line}`)
+  if (pruneRetired(reg, reclaimed.retired)) save(reg)
+  if (reclaimed.blocked.length) return fail(reclaimed.blocked.join('；'))
 
   const r = await run('bash', [join(seatAssets(), 'deploy-seat.sh')], {
     timeout: 900_000,
