@@ -262,7 +262,21 @@ export async function runGuards({ root, test, assert, log }) {
   await test('浏览器：没开这项能力就调不通，白名单外的站点拦下', () => {
     const bad = all(r.browser)
     assert(!bad.length, `这几条不对：${bad.join('、')}`)
-    assert(r.browserBlockedRuns === 3, `被拦的导航还是跑了（放行的应当只有 3 次）：${r.browserBlockedRuns}`)
+    assert(r.browserBlockedRuns === 5, `被拦的导航还是跑了（放行的应当只有 5 次）：${r.browserBlockedRuns}`)
+  })
+
+  await test('浏览器：通配符只在一段之内顶字符，不跨点', () => {
+    /**
+     * **`*` 不跨点是这条设计的全部安全性所在。** 跨点的话 `*.com` 就等于整个互联网，
+     * 而它在界面上看起来只是一条普通的白名单——管理员填的时候不会觉得自己开了那么大
+     * 的口子。（`*.com` 本身在 Gateway 那边就存不进去，要求至少两段钉死；这里钉的是
+     * 席位这侧的匹配，它不假设名单一定过过那道关。）
+     *
+     * 另一半是「写得越具体，覆盖面越窄」：裸域名含子域，带 `*` 的按字面配。这条顺序
+     * 反过来的话，管理员为了收紧而加的那个 `*` 反而把口子开大了。
+     */
+    const bad = all(r.browserWildcard)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
   })
 
   await test('浏览器：回环、内网、非 http 一律拦，关掉开关也拦', () => {

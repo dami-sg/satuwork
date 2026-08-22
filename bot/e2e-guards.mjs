@@ -50,10 +50,12 @@ const bots = {
   b9: { id: 'b9', name: '开了浏览器且关掉了外部系统那条', origin: 'company', mcps: [], browser: { on: true, sites: ['example.com'] }, guards: { 'high-risk': false, pii: false, 'no-external': false } },
   b10: { id: 'b10', name: '没开浏览器', origin: 'company', mcps: [], guards: { 'high-risk': false, pii: false, 'no-external': false } },
   b11: { id: 'b11', name: '浏览器要确认', origin: 'company', mcps: [], browser: { on: true, sites: ['example.com'] }, guards: { 'high-risk': true, pii: false, 'no-external': false } },
+  // 通配符那一组：一条只配一层子域，一条配同一层里的一段前缀。
+  b12: { id: 'b12', name: '通配站点', origin: 'company', mcps: [], browser: { on: true, sites: ['*.example.com', 'erp-*.corp.com'] }, guards: { 'high-risk': false, pii: false, 'no-external': true } },
 }
 
 const sessions = fakeSessions({ s1: 'b1', s2: 'b2', s3: 'b3', s4: 'b4', s5: 'b-不存在', s6: 'b6', s7: 'b7', s8: 'b1',
-  s8b: 'b8', s9: 'b9', s10: 'b10', s11: 'b11' })
+  s8b: 'b8', s9: 'b9', s10: 'b10', s11: 'b11', s12: 'b12' })
 
 const ctx = new Context()
 ctx.provide('logger', { warn() {}, info() {}, error() {} })
@@ -468,6 +470,24 @@ out.record = {
     相似域名不放行: (await nav('s8b', 'https://evil-example.com')).failed === true,
     白名单外被拦: (await nav('s8b', 'https://other.com')).failed === true,
   }
+  /**
+   * 通配符。**`*` 只在一段标签之内顶字符，不跨点**——这是整条设计的全部安全性所在：
+   * 跨点的话 `*.com` 就等于整个互联网，而它在界面上看起来只是一条普通的白名单。
+   *
+   * 另一半是「写得越具体，覆盖面越窄」：裸域名含子域，带 `*` 的按字面配。这条顺序反
+   * 过来的话，管理员为了收紧而加的那个 `*` 反而把口子开大了。
+   */
+  out.browserWildcard = {
+    一层子域放行: (await nav('s12', 'https://app.example.com/x')).failed !== true,
+    // 不跨点：两层的配不上「任意一段 + .example.com」。
+    两层子域不放行: (await nav('s12', 'https://a.b.example.com')).failed === true,
+    // 带 * 的按字面配，不额外含子域——想连自己一起覆盖就写裸域名。
+    裸域名自己不放行: (await nav('s12', 'https://example.com')).failed === true,
+    段内前缀能配上: (await nav('s12', 'https://erp-hz.corp.com')).failed !== true,
+    前缀对不上就拦: (await nav('s12', 'https://erp.corp.com')).failed === true,
+    别家的域名照样拦: (await nav('s12', 'https://app.evil.com')).failed === true,
+  }
+
   out.browserHard = {
     回环被拦: (await nav('s8b', 'http://127.0.0.1:3200/api')).failed === true,
     localhost被拦: (await nav('s8b', 'http://localhost:9222/json')).failed === true,

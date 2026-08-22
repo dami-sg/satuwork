@@ -248,15 +248,15 @@ function browserBlock(a, ro) {
        * 配法照同一页上那个 MCP 环境变量框（`#tl-env`）抄：等宽 + 12.5px。那一格和这一格
        * 是同一种东西——一行一个标识符，读的时候是在比对字符，不是在读句子。
        */
-      `<textarea class="input" id="bot-browser-sites" rows="4" data-bot="browserSites" style="border-radius: var(--radius-md); resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.7;" placeholder="example.com&#10;erp.mycompany.cn">${esc(sites)}</textarea>`
+      `<textarea class="input" id="bot-browser-sites" rows="4" data-bot="browserSites" style="border-radius: var(--radius-md); resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.7;" placeholder="example.com&#10;*.erp.mycompany.cn">${esc(sites)}</textarea>`
   return `${toggle}
     <div class="field" style="margin-top: var(--space-2);">
       <label for="bot-browser-sites">${t('允许打开的站点', 'Sites it may open')}</label>
       ${list}
     </div>
     <span style="font-size: 12px; color: var(--muted-foreground);">${t(
-      '一行一个域名，含子域（写 example.com 就覆盖 app.example.com）。没列出来的站点一律拦下——这把工具用的是你本人的登录态，一次误开就等于以你的名义做了一件事。本机地址和内网地址无论怎么填都不放行。',
-      'One domain per line; subdomains are included (example.com covers app.example.com). Anything not listed is blocked — this tool acts with your own signed-in session, so one wrong site means something done in your name. Loopback and private addresses are never allowed, no matter what you type.',
+      '一行一个域名。写 example.com 覆盖它和全部子域；要更窄就用 *，它只在一段里顶字符、不跨点（*.example.com 只配一层子域，erp-*.corp.com 配得上 erp-hz.corp.com）。至少要有两段钉死，所以 *.com 这种填不进来。没列出来的站点一律拦下——这把工具用的是你本人的登录态，一次误开就等于以你的名义做了一件事。本机地址和内网地址无论怎么填都不放行。',
+      'One domain per line. A bare domain covers it and all subdomains (example.com covers app.example.com). Use * to narrow it down — * matches within one label and never crosses a dot (*.example.com matches one level of subdomain, erp-*.corp.com matches erp-hz.corp.com). At least two labels must be literal, so *.com will not be accepted. Anything not listed is blocked — this tool acts with your own signed-in session, so one wrong site means something done in your name. Loopback and private addresses are never allowed, no matter what you type.',
     )}</span>`
 }
 

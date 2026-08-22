@@ -110,9 +110,15 @@ export interface BotBrowser {
    * 装完就能用和默认最严之间选后者：这把工具握着的是员工本人在那些网站上的登录态，
    * 一次误开的代价是以他的名义做了一件事，而不是读到一点不该读的东西。
    *
-   * 存的是**裸域名**，匹配时含子域（`example.com` 覆盖 `app.example.com`）——SaaS 在
-   * `login.` / `app.` / `api.` 之间来回跳是常态，逐个子域列一定会漏，而漏掉的表现是
-   * 任务跑到一半被拦在半路。
+   * 两种写法（匹配逻辑在 bot/src/policy/browser.ts 的 siteAllowed）：
+   *
+   * - **裸域名**：`example.com` 覆盖它自己和全部子域。SaaS 在 `login.` / `app.` /
+   *   `api.` 之间来回跳是常态，逐个子域列一定会漏，而漏掉的表现是任务跑到一半被拦。
+   * - **带 `*` 的**：`*` 只在**一段标签之内**顶字符，不跨点。`*.example.com` 是「任意
+   *   一段 + .example.com」，`erp-*.corp.com` 能配上 `erp-hz.corp.com`。
+   *
+   * `*` 不跨点是这条设计的全部安全性所在：跨点的话 `*.com` 就等于整个互联网，而它
+   * 看起来只是一条普通的白名单。
    */
   sites: string[]
 }
@@ -142,16 +148,30 @@ export function botSiteOf(v: unknown): string | null {
   if (!s) return null
   s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
   s = s.split('/')[0].split('?')[0].split('#')[0]
-  s = s.replace(/^\*\./, '').replace(/^\.+/, '').replace(/\.+$/, '')
+  s = s.replace(/^\.+/, '').replace(/\.+$/, '')
   // 端口不参与匹配：同一个站点换个口还是同一个站点，而带上端口只会让人漏配。
   s = s.replace(/:\d+$/, '')
   if (!s || s.length > 253) return null
   // **只收域名，不收 IP。** 公网 IP 直连的业务系统极少，而放开 IP 字面量正好是
   // 「把 10.0.0.5 混进白名单」最省事的写法。
   if (IPV4.test(s) || s.includes(':')) return null
-  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s)) return null
-  // 顶级域得是字母：挡掉 `foo.123` 这种，也顺手挡掉写漏了的 IP。
-  if (!/\.[a-z]{2,}$/.test(s)) return null
+  const labels = s.split('.')
+  if (labels.length < 2) return null
+  // 每段只收字母数字、连字符和 `*`；空段（`a..b`）不收。
+  if (!labels.every((l) => /^[a-z0-9*-]+$/.test(l))) return null
+  /**
+   * **至少要有两段是钉死的。**
+   *
+   * 这条是通配符唯一的闸。`*.com`、`*.co`、`*.*` 这些看起来只是一条普通白名单，实际
+   * 等于整个互联网——而管理员填的时候不会觉得自己开了那么大的口子。要求两段钉死之后，
+   * 能写出来的最宽的东西是 `*.example.com`，那就是它字面上的意思。
+   *
+   * 代价是 `mycompany.*`（同一家公司的 .cn 和 .com）不收，得写两行。这个取舍是有意的：
+   * 顶级域通配是最容易失手的一种，而写两行的成本是两行。
+   */
+  if (labels.filter((l) => !l.includes('*')).length < 2) return null
+  // 顶级域得是字母，而且不能带通配：挡掉 `foo.123`、`foo.*`，也顺手挡掉写漏了的 IP。
+  if (!/^[a-z]{2,}$/.test(labels[labels.length - 1])) return null
   if (LOCAL_SUFFIX.some((suffix) => s.endsWith(suffix))) return null
   return s
 }

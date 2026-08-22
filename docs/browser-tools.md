@@ -249,8 +249,27 @@ Bot 都看得见——这是[产品定的唯一共享入口](../manager/src/seat
 | 站点白名单 | 目标域名在不在 `browser.sites` 里 | 受 `no-external`，审计记 `guard: no-external` |
 
 白名单从**模版**来，和 `mcps` 同一层、同一条同步通道（catalog → `roster.pin` →
-`BotRecord`）。模版一改版本号 +1，席位一分钟内跟上。匹配**含子域**：`example.com` 覆盖
-`app.example.com`，但不覆盖 `evil-example.com`（`endsWith` 前面那个点就是为它加的）。
+`BotRecord`）。模版一改版本号 +1，席位一分钟内跟上。
+
+两种写法，**写得越具体覆盖面越窄**：
+
+| 写法 | 配得上 | 配不上 |
+| --- | --- | --- |
+| `example.com`（裸域名，含子域） | `example.com`、`app.example.com`、`a.b.example.com` | `evil-example.com`（`endsWith` 前面那个点就是为它加的） |
+| `*.example.com` | `app.example.com` | `example.com` 自己、`a.b.example.com` |
+| `erp-*.corp.com` | `erp-hz.corp.com` | `erp.corp.com` |
+
+**`*` 只在一段标签之内顶字符，不跨点**（展开成 `[a-z0-9-]+`）。这是整条通配符设计的
+全部安全性所在：跨点的话 `*.com` 就等于整个互联网，而它在界面上看起来只是一条普通的
+白名单。保存时还要求**至少两段是钉死的**，所以 `*.com`、`mycompany.*`、`*` 这几种存不
+进去——代价是同一家公司的 `.cn` 和 `.com` 得写两行，而顶级域通配恰恰是最容易失手的一种。
+
+顺序也不能反：裸域名含子域、带 `*` 的按字面配。反过来的话，管理员为了收紧而加的那个
+`*` 反而把口子开大了。
+
+> **公共后缀这一层没有处理。** `co.uk` 写成裸域名会覆盖整个 `.co.uk`，写成 `*.co.uk`
+> 也一样——两段钉死那条闸拦不住它。要真拦得住得带一份 PSL（几千条，还要跟着更新），
+> 而半份清单只会给人一种「已经管住了」的错觉。这条记在这儿，别当它不存在。
 
 「目标域名」怎么取：`browser_navigate` 看参数里的 url；`click` / `snapshot` / `read` 这些
 没有 url 的，看**当前页面**的域名——它们作用在那一页上。**只读的那几把也照判**：把一张

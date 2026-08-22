@@ -86,18 +86,47 @@ export function blockedHost(host: string | null): string | null {
 }
 
 /**
- * 这个主机在公司白名单里吗。
+ * 一条带 `*` 的站点 → 正则。
  *
- * **含子域**：`example.com` 覆盖 `app.example.com`。SaaS 在 `login.` / `app.` / `api.`
- * 之间来回跳是常态，逐个子域列一定会漏，而漏掉的表现是任务跑到一半被拦在半路。
+ * **`*` 只在一段标签之内顶字符，不跨点。** 这是整条通配符设计的全部安全性所在：跨点的话
+ * `*.com` 就等于整个互联网，而它在界面上看起来只是一条普通的白名单。所以 `*` 展开成
+ * `[a-z0-9-]+`（域名标签的字符集），点保持是点。
  *
- * 反过来不成立：写 `app.example.com` 不会放行 `example.com`，更不会放行
- * `evil-example.com`（endsWith 前面那个点就是为它加的）。
+ * 顺带一条：**至少配一个字符**，不是零个。`*.example.com` 不该把 `.example.com` 或者
+ * `example.com` 本身算进去——想连自己一起覆盖就写裸域名，那是另一种写法，语义更宽也更
+ * 直白。
+ */
+function wildcardRe(site: string): RegExp {
+  const body = site
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[a-z0-9-]+')
+  return new RegExp(`^${body}$`)
+}
+
+/**
+ * 这个主机在公司白名单里吗。两种写法：
+ *
+ * - **裸域名含子域**：`example.com` 覆盖它自己和 `app.example.com`。SaaS 在 `login.` /
+ *   `app.` / `api.` 之间来回跳是常态，逐个子域列一定会漏，而漏掉的表现是任务跑到一半
+ *   被拦在半路。反过来不成立：写 `app.example.com` 不会放行 `example.com`，更不会放行
+ *   `evil-example.com`（`endsWith` 前面那个点就是为它加的）。
+ * - **带 `*` 的按字面配**，不再额外含子域：`*.example.com` 就是「任意一段 +
+ *   .example.com」，配得上 `app.example.com`，配不上 `a.b.example.com`，也配不上
+ *   `example.com` 自己。写得越具体，覆盖面越窄——这条顺序不能反过来。
+ *
+ * 白名单本身在 Gateway 那边过 `botSiteOf`，`*.com` 这类进不来（要求至少两段钉死）。
+ * 但这里**不假设**它一定过过那道关：名单是从目录同步下来的，而同步下来的东西不该被
+ * 当成已经验过。`[a-z0-9-]+` 不跨点这一条，在这儿是独立成立的。
  */
 export function siteAllowed(host: string, sites: readonly string[]): boolean {
   for (const raw of sites) {
     const site = String(raw || '').trim().toLowerCase()
     if (!site) continue
+    if (site.includes('*')) {
+      if (wildcardRe(site).test(host)) return true
+      continue
+    }
     if (host === site) return true
     if (host.endsWith(`.${site}`)) return true
   }
