@@ -356,6 +356,10 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
         slot: r.slot,
         status: r.status,
         botVersion: r.botVersion ?? null,
+        // 席位自报的模版版本。这一页排查的是「那台机器上的东西不对」，而「装的包是新的、
+        // 跑的模版是三版之前的」正是其中一种，光看 botVersion 看不出来。
+        tplVersion: r.tplVersion ?? null,
+        tplSyncedAt: r.tplSyncedAt ?? null,
         lastError: r.lastError,
         deployedAt: r.deployedAt,
       }

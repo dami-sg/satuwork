@@ -741,6 +741,9 @@ function machineVersionPanel(card) {
     <div class="satu-kv"><span>${t('管家版本')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${esc(m.managerVersion || '—')}${mgrNote}${mgrBtn}</span></div>
     <div class="satu-kv"><span>${t('期望版本')}</span><span>${esc(card.managerDesired || t('跟平台的最新发布走'))}</span></div>
     <div class="satu-kv"><span>${t('Bot 运行时')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${botText}${card.botOutdated ? ` · ${t('最新')} ${esc(state.botLatest || '')}` : ''}${botBtn}</span></div>
+    ${/* 装的是哪个包、跑的是哪一版公司模版，两件事各自会落后。渲染函数在 pages-audit.js，
+         那一页的机器卡片画的是同一行——同一台机器不该在两个页面上说两种话。 */ ''}
+    ${botTemplateRow(card)}
     <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('一台机器上同时躺着几个 Bot 版本不是错误——有的部署得早。「全部升级」把这台机器上的 Bot 逐个重铺到最新版，正在进行的对话会断。')}</p>
   </div>`
 }
@@ -780,7 +783,9 @@ function machineSeatsPanel(card) {
         <span style="font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(s.botName || s.botId)}</span>
         <span class="tag ${st.tag}">${t(st.label)}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(String(s.slot))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(s.lastError || '')}">${esc(s.lastError || s.botVersion || t('未部署'))}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(s.lastError || '')}">${esc(
+          s.lastError || [s.botVersion, s.tplVersion ? `${t('模版', 'tpl')} v${s.tplVersion}` : ''].filter(Boolean).join(' · ') || t('未部署'),
+        )}</span>
         <span style="display: flex; gap: var(--space-3); justify-content: flex-end;">
           <button type="button" class="satu-linkbtn" data-act="machine-logs" data-scope="platform" data-machine="${esc(card.machine.id)}" data-seat="${esc(s.seatId)}">${t('日志')}</button>
           ${/* 「清理」只画在没有主人的席位上（orphan 由接口给，见 withSeatNames）。

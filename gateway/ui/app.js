@@ -27,6 +27,7 @@ async function runConfirm() {
       flash('ok', c.next === 'disabled' ? '已停用公司' : '已启用公司')
       render()
       return
+      return
     } else if (c.kind === 'redeploy-bot') {
       render()
       // force 而不是 update：这个按钮的意思是「把席位重铺一遍」，不是「升到新版本」。
@@ -603,6 +604,11 @@ document.getElementById('app').addEventListener('click', async (e) => {
       state.template = data.template
       // 按回执重建草稿：被归一化过的字段（越界的注入上限、认不出的选项）当场就看得见。
       state.templateDraft = draftFromTemplate(data.template)
+      // 保存这一刻同步状态一定是「0 台跟上」，这正是要立刻显示的：版本号跳到新的一版，
+      // 不代表席位已经在跑那一版。
+      state.templateSync = data.sync || null
+      // 刚保存的这一刻一定有人没跟上，轮询从这里起（跟上了它自己会停）。
+      syncTemplatePoll()
       flash('ok', t(`已保存，模版现在是 v${data.template.version}`, `Saved — the template is now v${data.template.version}`))
     } catch (err) {
       /**
@@ -881,6 +887,9 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.routineRuns = []
     state.routineError = ''
     syncRoutinePoll()
+    // 模版那一页的同步轮询同理：不清掉的话，登出之后它还在每 15 秒问一次。
+    state.templateSync = null
+    syncTemplatePoll()
     state.me = null
     state.loginError = ''
     state.profileDraft = null

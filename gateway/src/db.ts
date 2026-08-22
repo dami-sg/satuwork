@@ -2202,6 +2202,23 @@ export class Db {
     return rows.map(seatRuntimeOf)
   }
 
+  /**
+   * 席位报到：它现在跑的是模版第几版。
+   *
+   * 单独一条窄更新，不走 upsertSeatRuntime：那条是部署路径的整行覆盖，用它写这两列，
+   * 等于每次重铺都拿部署那一刻的旧数字把席位刚报上来的盖掉。反过来也一样——这条
+   * **只碰这两列**，正在并发跑的部署改的 status / botVersion 一个字都不动。
+   *
+   * 行不存在就什么都不做（0 行受影响）：席位拆了、库里的行先没了，而那个进程还在最后
+   * 探一轮，这不是错误，不该让探针那条路 500。
+   */
+  async noteSeatTemplate(accountId: string, botId: string, version: number): Promise<void> {
+    await this.run(
+      'update seat_runtimes set "tplVersion" = ?, "tplSyncedAt" = ? where "accountId" = ? and "botId" = ?',
+      [version, Date.now(), accountId, botId],
+    )
+  }
+
   async upsertSeatRuntime(row: SeatRuntime): Promise<SeatRuntime> {
     await this.run(
       `insert into seat_runtimes (

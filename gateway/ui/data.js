@@ -496,6 +496,11 @@ async function loadBotTemplate() {
   state.template = data.template || null
   state.templateOptions = { skills: data.options?.skills || [], mcps: data.options?.mcps || [] }
   state.templateDraft = draftFromTemplate(state.template)
+  // 员工那边这一份是空的（接口只给管理员），所以是 null 不是空对象——「没有这一格」和
+  // 「一台席位都没有」在界面上不是一回事。
+  state.templateSync = data.sync || null
+  // 有席位没跟上就自己隔一会儿再问一次，跟上了就停（见 pages-bots.js）。
+  syncTemplatePoll()
 }
 
 function draftFromTemplate(tpl) {

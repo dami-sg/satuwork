@@ -233,6 +233,19 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const bots = await db.botsFor(companyId, account.id)
     const bot = botId ? bots.find((b) => b.id === botId) : undefined
     if (botId && !bot) throw new HttpError(404, '没有这个 Bot')
+    /**
+     * **顺路把席位自己报的版本记下来。**`?have=` 是它这会儿真正跑着的那一版。
+     *
+     * 为什么捎在探针上、而不是另开一条上报接口：这条路本来就每分钟一趟、本来就带着席位
+     * 的票，多一个查询参数是零成本；单开一条就是把每台席位的请求数翻倍，换来的信息一个
+     * 字节都不多。顺带它还兼了心跳——版本对得上、汇报却停在两小时前，说明那个进程已经
+     * 不在了，而这件事光看版本号看不出来。
+     *
+     * 只在带 botId 时记：这两列挂在 (accountId, botId) 那一行上，没有 botId 就不知道
+     * 记到哪一行去。席位实例一定带（deploy 下发的 SATUWORK_BOT_ID），不带的是脚本。
+     */
+    const have = Number(req.query.get('have'))
+    if (botId && Number.isFinite(have) && have > 0) await db.noteSeatTemplate(account.id, botId, have)
     const tools = [
       ...(await db.visibleCatalog('skill', companyId)),
       ...(await db.visibleCatalog('mcp', companyId)),

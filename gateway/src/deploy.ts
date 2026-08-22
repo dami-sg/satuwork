@@ -287,6 +287,10 @@ export function publicSeatRuntime(
     deployedAt: row.deployedAt,
     updatedAt: row.updatedAt,
     botVersion: row.botVersion ?? null,
+    // 席位自报的模版版本。和 botVersion 并排给出来，界面上那两个「版本」问的是两件事：
+    // 装的是哪个发布包、跑的是哪一版模版。
+    tplVersion: row.tplVersion ?? null,
+    tplSyncedAt: row.tplSyncedAt ?? null,
     ...(opts.includePassword ? { vncPassword: row.vncPassword } : {}),
     ports: {
       display: ports.display,
@@ -305,6 +309,8 @@ export function listSeatRuntime(row: SeatRuntime, managerHost: string | null) {
     // 列表里不签票：这是给管理员看的引用，点进去要走 /runtime/desktop 现签一张。
     novncUrl: novncUrlOf(managerHost, row.seatId) || null,
     botVersion: row.botVersion ?? null,
+    tplVersion: row.tplVersion ?? null,
+    tplSyncedAt: row.tplSyncedAt ?? null,
   }
 }
 
@@ -547,6 +553,10 @@ export async function deploySeat(
             deployedAt: existing?.deployedAt ?? null,
             updatedAt: now,
             botVersion: existing?.botVersion ?? null,
+            // 席位自报的那两列不由这条路写（见 db.noteSeatTemplate）。带上旧值只是为了
+            // 让这个对象是一整行；upsert 的列表里没有它们，写不进去也盖不掉。
+            tplVersion: existing?.tplVersion ?? null,
+            tplSyncedAt: existing?.tplSyncedAt ?? null,
           })
         })
         break

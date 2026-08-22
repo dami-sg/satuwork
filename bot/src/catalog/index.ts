@@ -316,11 +316,9 @@ export class CatalogService extends Service {
    */
   async poll(): Promise<void> {
     if (!this.configured) return
-    const pinId = (process.env.SATUWORK_BOT_ID || '').trim()
-    const url = `${gatewayUrl()}/runtime/catalog/version${pinId ? `?botId=${encodeURIComponent(pinId)}` : ''}`
     let next = ''
     try {
-      const r = await fetch(url, {
+      const r = await fetch(this.probeUrl(), {
         headers: { authorization: `Bearer ${gatewayToken()}` },
         signal: AbortSignal.timeout(10000),
       })
@@ -342,12 +340,50 @@ export class CatalogService extends Service {
      * 拒绝——Node 默认策略是直接终止进程，于是席位上的 bot 每分钟被自己杀一次，日志里
      * 只留一行栈。停在旧目录上是可以忍的，进程反复自杀不行。
      */
+    let applied = false
     try {
-      await this.pull()
+      applied = await this.pull()
     } catch (e) {
       this.lastError = (e as Error).message
       this.ctx.logger?.warn?.(`catalog: 重新拉取失败 ${this.lastError}`)
+      return
     }
+    /**
+     * **真换上了才报。** pull 返回 false 是「这一份没落地」（pin 没成），而 templateVersion
+     * 在那之前就已经从响应里读进来了——这时候报上去，平台会以为这台跟上了，恰恰在它
+     * 没跟上的时候。宁可下一轮再说。
+     */
+    if (!applied) return
+    /**
+     * 换完就**立刻**再探一次，只为把新版本号报上去（`?have=`，见下面 probeUrl）。
+     *
+     * 不这么做的话，平台那边要等下一轮探针才知道这台跟上了——加上发现改动本来就等了
+     * 一轮，管理员按下保存后最坏要盯着「未同步」看两分钟，而那时候席位其实早换好了。
+     * 一次多余的探针换掉这两分钟的谎，划算。
+     *
+     * 报不上去就算了：下一轮探针照样带着同一个数字，不必在这里重试，更不该让它冒出去
+     * 变成一次未处理的拒绝。
+     */
+    await fetch(this.probeUrl(), {
+      headers: { authorization: `Bearer ${gatewayToken()}` },
+      signal: AbortSignal.timeout(10000),
+    }).catch(() => {})
+  }
+
+  /**
+   * 探针地址。`have` 是**这台席位这会儿真正跑着的模版版本**，捎给平台当同步状态用
+   * （见 gateway 的 /runtime/catalog/version）。
+   *
+   * 没拉到过就不带（`templateVersion` 还是 0）：那不是「第 0 版」，是「还没报到过」，
+   * 两者在界面上不是一回事。
+   */
+  private probeUrl(): string {
+    const pinId = (process.env.SATUWORK_BOT_ID || '').trim()
+    const q = new URLSearchParams()
+    if (pinId) q.set('botId', pinId)
+    if (this.templateVersion > 0) q.set('have', String(this.templateVersion))
+    const qs = q.toString()
+    return `${gatewayUrl()}/runtime/catalog/version${qs ? `?${qs}` : ''}`
   }
 
   async pinRemote(remoteId: string): Promise<BotRecord> {

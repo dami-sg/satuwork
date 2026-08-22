@@ -656,6 +656,32 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(html.includes('已停用'), '没标出停用掉的老公司 Bot')
       // 公司管理员这一页不该再有「新建 Bot」——Bot 由员工自己建。
       assert(!html.includes('data-act="bot-create"'), '公司侧还留着建公司 Bot 的入口')
+
+      /**
+       * 席位同步那一格。**落后的那台必须点名**：只报一个「1/2」的比分，管理员知道有事
+       * 却不知道是谁，下一步只能去按「立即下发」，而那会掐掉全公司正在进行的对话。
+       */
+      ui.state.templateSync = {
+        version: 3,
+        total: 2,
+        synced: 1,
+        seats: [
+          { seatId: 's-2', botId: 'b2', accountId: 'a2', name: '李四', version: null, syncedAt: null },
+          { seatId: 's-1', botId: 'b1', accountId: 'a1', name: '张三', version: 3, syncedAt: Date.now() - 60000 },
+        ],
+      }
+      ui.render()
+      const synced = ui.html()
+      assert(synced.includes('席位同步'), '没画出同步那一格')
+      assert(synced.includes('1/2 在 v3'), `比分没画对：${synced.includes('1/2') ? 'v?' : '没有比分'}`)
+      assert(synced.includes('李四') && synced.includes('还没报到过'), '落后的那台没点名')
+      assert(!synced.includes('张三'), '跟上的那台不该占地方')
+
+      // 员工那边接口不给这一格（state.templateSync 是 null），这时候整块都不该出现——
+      // 空着一个「0/0」比没有更难懂。
+      ui.state.templateSync = null
+      ui.render()
+      assert(!ui.html().includes('席位同步'), '没有同步数据时还画了那一格')
     })
 
     await test('只读地看别人维护的 Bot：页面上不留任何按了没反应的控件', async () => {

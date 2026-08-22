@@ -93,6 +93,116 @@ function globalBotsPage() {
     </div>`
 }
 
+/**
+ * 「改完到底铺下去没有」。
+ *
+ * 版本号是保存那一刻就跳的，席位换没换是另一回事——中间隔着一轮探针和一次拉取，以及
+ * 所有会出错的地方。没有这一格的时候，「进程死了」「机器断网」「拉取一直失败」和「一切
+ * 正常」在这一页上长得一模一样，管理员唯一的办法是改完等一会儿、然后去找个人问「你那边
+ * 变了吗」。
+ *
+ * 数字按**席位自己报的版本**算，不是按 Gateway 发了什么算（见 0013 那条迁移）。
+ */
+function templateSyncPanel(version) {
+  const sync = state.templateSync
+  if (!sync) return ''
+  const seats = Array.isArray(sync.seats) ? sync.seats : []
+  const behind = seats.filter((s) => s.version !== version)
+  const done = seats.length > 0 && behind.length === 0
+  const head = seats.length
+    ? `<span class="tag ${done ? 'tag-accent-2' : 'tag-accent'}">${t(`${sync.synced}/${sync.total} 在 v${esc(String(version))}`, `${sync.synced}/${sync.total} on v${esc(String(version))}`)}</span>`
+    : `<span class="tag tag-neutral">${t('没有已部署的席位')}</span>`
+  // 落后的才列出来。跟上的那些列出来只是一张花名册，而这一格是拿来找那几台的。
+  const rows = behind
+    .map(
+      (s) => `<div class="satu-kv">
+        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(s.name || s.seatId)}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground);">${
+          s.version
+            ? t(`v${esc(String(s.version))} · ${esc(ago(s.syncedAt))}`, `v${esc(String(s.version))} · ${esc(ago(s.syncedAt))}`)
+            : t('还没报到过', 'never reported')
+        }</span>
+      </div>`,
+    )
+    .join('')
+  return `
+    <div class="satu-panel" data-tpl-sync>
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;">
+        <span class="satu-panel-title">${t('席位同步')}</span>
+        ${head}
+      </div>
+      ${rows}
+      <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">
+        ${
+          done
+            ? t('公司里每台已部署的席位都在跑这一版。', 'Every deployed seat in the company is running this version.')
+            : t('席位每分钟探一次，换上新版本后立刻报回来。要是有一台一直落后、或者「还没报到过」停了很久，多半是它上面的 bot 进程不在了或者出不了网——去机器那一页看日志。', 'Seats check once a minute and report back as soon as they switch. A seat that stays behind — or has never reported for a long time — usually means its bot process is gone or offline; check the logs on the machines page.')
+        }
+      </p>
+    </div>`
+}
+
+/**
+ * 有席位没跟上的时候，隔一会儿自己再问一次。
+ *
+ * 保存完盯着这一页看的那半分钟，正是这一格唯一有人看的时候——而那时候它显示的一定是
+ * 「0/4」。不自己刷新的话，人得手动重开这一页才看得到「4/4」，于是这一格答的其实是
+ * 「刚才那一刻怎么样」，不是「现在怎么样」。
+ *
+ * 全跟上了就停。开着一个标签页永远每 15 秒一个请求，换不来任何新消息。
+ */
+const TPL_SYNC_POLL_MS = 15000
+let tplSyncTimer = 0
+
+function tplSyncWant() {
+  // 人走开去别的页面了就别再问。
+  if (state.path !== '/bots') return false
+  const sync = state.templateSync
+  const seats = sync && Array.isArray(sync.seats) ? sync.seats : []
+  return seats.some((s) => s.version !== sync.version)
+}
+
+function syncTemplatePoll() {
+  const want = tplSyncWant()
+  if (want && !tplSyncTimer) {
+    tplSyncTimer = setInterval(() => {
+      if (!tplSyncWant()) {
+        syncTemplatePoll()
+        return
+      }
+      void refreshTemplateSync()
+    }, TPL_SYNC_POLL_MS)
+    return
+  }
+  if (!want && tplSyncTimer) {
+    clearInterval(tplSyncTimer)
+    tplSyncTimer = 0
+  }
+}
+
+async function refreshTemplateSync() {
+  const base = catalogBase()
+  if (!base) return
+  let data
+  try {
+    data = await api('GET', `${base}/bot-template`)
+  } catch {
+    // 一次网络抖动不该在这一页上冒一条红字：下一轮 15 秒后就到。
+    return
+  }
+  state.templateSync = data.sync || null
+  /**
+   * **只换这一格，不整页重绘。**
+   *
+   * 这一页正中间是一个大文本框，管理员多半正在里面写人设。整页重绘会把它按 state 重新
+   * 画一遍——文字还在（草稿在 state 里），但光标位置、选区和滚动都没了。为了刷新一行
+   * 状态而打断人打字，不值。
+   */
+  const node = document.querySelector('[data-tpl-sync]')
+  if (node) node.outerHTML = templateSyncPanel(state.template?.version)
+  syncTemplatePoll()
+}
+
 /** 名字长长的一段：这一页改的是全公司的底座，得先把这件事说清楚再让人动手。 */
 function botTemplatePage() {
   const tpl = state.template
@@ -115,6 +225,7 @@ function botTemplatePage() {
           </p>
         </div>
         ${flashes()}
+        ${templateSyncPanel(tpl.version)}
 
         <div class="satu-panel">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);">
