@@ -469,6 +469,10 @@ window.SATU_I18N = {
     'Machines pick up the desired version on heartbeat, upgrade themselves and roll back on failure. Empty means follow the latest release.',
   // ── Bot 模版与自建 Bot ──────────────────────────────────────────────
   'Bot 模版': 'Bot template',
+  // 表头那一格，窄列，只放得下一个词。
+  模版: 'Template',
+  席位同步: 'Seat sync',
+  还没报到过: 'Never reported',
   '新建 Bot': 'New bot',
   保存模版: 'Save template',
   立即下发到全部席位: 'Push to all seats now',

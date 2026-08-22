@@ -767,7 +767,12 @@ const SEAT_STATUS = {
 /** 这台机器上跑着谁。出事时第一眼看的就是它，所以 lastError 直接摊在行里，不藏。 */
 function machineSeatsPanel(card) {
   const seats = card.seatList || []
-  const cols = 'minmax(150px, 1.6fr) minmax(120px, 1.2fr) 90px 72px minmax(140px, 1.2fr) 108px'
+  /**
+   * **加列之前先量**（e116054 那次是列被挤出屏幕才发现的）。量出来的常数：格间距 12px、
+   * 面板左右内边距各 16px。六列的时候最小宽是 150+120+90+72+140+108 + 5×12 + 32 = 772px；
+   * 加上「模版」这 88px 之后是 872px，比机器列表那张表 940 的门槛还低一档，放得下。
+   */
+  const cols = 'minmax(150px, 1.6fr) minmax(120px, 1.2fr) 90px 72px minmax(140px, 1.2fr) 88px 108px'
   const rows = seats
     .map((s) => {
       // 认不出来的状态照原样显示，别硬塞进某一档——多出一个状态时，屏幕上要看得见
@@ -783,9 +788,14 @@ function machineSeatsPanel(card) {
         <span style="font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(s.botName || s.botId)}</span>
         <span class="tag ${st.tag}">${t(st.label)}</span>
         <span style="font-size: 13px; color: var(--muted-foreground);">${esc(String(s.slot))}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(s.lastError || '')}">${esc(
-          s.lastError || [s.botVersion, s.tplVersion ? `${t('模版', 'tpl')} v${s.tplVersion}` : ''].filter(Boolean).join(' · ') || t('未部署'),
-        )}</span>
+        <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(s.lastError || '')}">${esc(s.lastError || s.botVersion || t('未部署'))}</span>
+        ${/* 模版版本**单独一列**，不挤进上面那格：那一格出错时画的是 lastError，而
+             「这台跑的是哪一版模版」恰恰在出错时最该看得见。数字是席位自己报的（探针
+             捎回，见迁移 0013），所以还带着汇报时刻——版本对得上、汇报停在两小时前，
+             说明那个进程已经不在了。 */ ''}
+        <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${esc(
+          s.tplVersion ? t(`模版 v${s.tplVersion} · ${ago(s.tplSyncedAt)}`, `Template v${s.tplVersion} · ${ago(s.tplSyncedAt)}`) : t('这台席位还没报到过', 'This seat has never reported'),
+        )}">${s.tplVersion ? `v${esc(String(s.tplVersion))}` : '—'}</span>
         <span style="display: flex; gap: var(--space-3); justify-content: flex-end;">
           <button type="button" class="satu-linkbtn" data-act="machine-logs" data-scope="platform" data-machine="${esc(card.machine.id)}" data-seat="${esc(s.seatId)}">${t('日志')}</button>
           ${/* 「清理」只画在没有主人的席位上（orphan 由接口给，见 withSeatNames）。
@@ -800,7 +810,7 @@ function machineSeatsPanel(card) {
     <h2 style="font-size: 18px; margin: 0;">${t('部署的 Bot')} <span style="font-size: 13px; font-weight: 400; color: var(--muted-foreground);">${seats.length}</span></h2>
     <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
       <div class="satu-memberhead" style="grid-template-columns: ${cols};">
-        <span>${t('成员 / 实例 ID')}</span><span>Bot</span><span>${t('状态')}</span><span>${t('槽位')}</span><span>${t('版本 / 错误')}</span><span></span>
+        <span>${t('成员 / 实例 ID')}</span><span>Bot</span><span>${t('状态')}</span><span>${t('槽位')}</span><span>${t('版本 / 错误')}</span><span>${t('模版')}</span><span></span>
       </div>
       ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('这台机器上还没有部署 Bot')}</div>`}
     </div>
