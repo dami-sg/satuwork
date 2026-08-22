@@ -1013,6 +1013,67 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       )
     })
 
+    await test('公司详情页：机器报了负载也画得出来，不是整页白屏', async () => {
+      /**
+       * 这一页曾经整页画不出来：机器卡片里那格负载的渲染函数（machineLoadCell）在
+       * 「机器列表砍掉负载那一列」时被一并删掉，而它**还有第二个调用方**——就是这里。
+       * 于是只要那台机器报过负载，整页抛 ReferenceError，屏幕上停在上一屏，控制台之外
+       * 一个字都没有。
+       *
+       * 所以这条断言的不是某一行长什么样，而是**这一页画得出来**：owner 侧最常点开的
+       * 一页，此前在 ui-smoke 里一条覆盖都没有。
+       */
+      const ui = await boot(ownerToken)
+      ui.state.path = '/companies/org-1'
+      ui.state.org = {
+        id: 'org-1', name: 'UI-SMOKE-公司', slug: 'smoke', status: 'active',
+        contactName: '张三', contactPhone: '+65 68886888', contactEmail: 'a@x.com',
+        address: '', website: '', accessUrl: '', createdAt: Date.now() - 86400000, machineId: null,
+      }
+      ui.state.plan = { seats: 3, used: 2, expiresAt: Date.now() + 86400000 }
+      ui.state.seats = { total: 3, used: 2 }
+      ui.state.accounts = [{ id: 'a1', name: '李四', email: 'l@x.com', role: 'member', status: 'active', lastSeenAt: Date.now() - 60000, runtimes: [] }]
+      ui.state.billing = { plan: { period: '月付', amount: '$200.00' }, invoices: [] }
+      // 拉不到的那几份在真实加载里也是这些默认值（各自带 .catch），照抄过来。
+      ui.state.charges = null
+      ui.state.orgTopups = []
+      ui.state.planSkus = []
+      ui.state.releases = []
+      ui.state.latestRelease = null
+      ui.state.machines = [{
+        no: 1,
+        machine: {
+          id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', host: 'http://10.0.0.12:8443', paired: true,
+          pairedAt: Date.now(), managerVersion: '0.3.1+abc-arm64', protocol: 1, lastError: null,
+          lastHeartbeatAt: Date.now() - 12000, link: 'online', heartbeatAge: 12000,
+          timezone: null, currentTimezone: 'Asia/Singapore', arch: 'arm64',
+          // 报过负载的机器**才**触发那一格。盘 92%：和列表页那个 fixture 同一个数。
+          telemetry: {
+            metrics: {
+              uptime: 3600,
+              cpu: { cores: 8, usage: 0.23, load1: 1.8 },
+              memory: { total: 16 * 1024 ** 3, used: 9 * 1024 ** 3, usage: 0.56, swapTotal: 0, swapUsed: 0 },
+              disks: [{ mount: '/', total: 100 * 1024 ** 3, used: 92 * 1024 ** 3, free: 8 * 1024 ** 3, usage: 0.92 }],
+              net: { txBytes: 0, rxBytes: 0, txRate: 0, rxRate: 0, interfaces: ['eth0'] },
+            },
+            logs: { journalBytes: 3.4 * 1024 ** 3, varLogBytes: 0, capMb: 1024, capSource: 'default', top: [], lastVacuum: null },
+          },
+          telemetryAt: Date.now() - 12000, telemetryAge: 12000, logCapMb: null,
+        },
+        accounts: 2, maxAccounts: 10, seats: 1, full: false,
+        botVersions: [{ version: '0.9.0+aaa-arm64', seats: 1 }], botOutdated: false,
+        managerDesired: null, managerOutdated: false, managerPending: false, timezonePending: false,
+        company: { id: 'org-1', name: 'UI-SMOKE-公司', slug: 'smoke', status: 'active' },
+      }]
+      ui.render()
+      const page = ui.html()
+      assert(page.includes('公司信息'), '公司详情页没画出来')
+      assert(page.includes('UI-SMOKE-公司'), '标题没画出公司名')
+      // 那一格：最吃紧的是盘 92%，写出来的是它，不是三项并排。
+      assert(page.includes('盘 / 92%'), `机器负载那一格没画出来：${page.includes('负载') ? '有「负载」但没有数值' : '连「负载」都没有'}`)
+      assert(page.includes('成员') && page.includes('订阅'), '成员或订阅那两块没画出来')
+    })
+
     await test('机器管理：菜单在「机器配置」上面，列表和详情画得出，公司侧进不去', async () => {
       // 这一页答的是「平台上挂着哪些机器」，公司详情里那块「运行机器」答的是「这家
       // 有几台」。断言分三层：入口在不在、两张页面画不画得出、以及**没派给公司的机器

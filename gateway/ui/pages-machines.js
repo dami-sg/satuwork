@@ -40,6 +40,38 @@ function machineLinkCell(m) {
   </span>`
 }
 
+/**
+ * 一格负载：**最吃紧的那一项**，不是三项并排。
+ *
+ * 一行只有一百多像素，三个 40% 挤在一起谁也不会去逐行比对。所以只画最高的那一项并
+ * 写出它是谁（「盘 92%」），另外两项进 title，想看全的去机器详情页。
+ *
+ * 没报过的给「—」，**不给 0%**：一台失联机器的 0% 和一台空闲机器的 0% 看着一样，
+ * 而结论完全相反。
+ *
+ * **调用方在 pages-audit.js**（公司详情页机器卡片里的 machineLoadRow）。机器列表页
+ * 曾经也用它，那一列在 e116054 里被砍掉了，函数跟着删——但那次漏看了这个调用方，于是
+ * 只要那台机器报过负载，公司详情页就整页抛 ReferenceError、一个字都画不出来。删一个
+ * 渲染函数之前先全仓搜一遍名字：这一层没有类型检查兜着。
+ */
+function machineLoadCell(m) {
+  const load = (m.telemetry && m.telemetry.metrics) || null
+  if (!load) return `<span style="font-size: 13px; color: var(--muted-foreground);">—</span>`
+  const disks = load.disks || []
+  const worstDisk = disks.reduce((a, b) => (b.usage > (a ? a.usage : -1) ? b : a), null)
+  const items = [
+    { key: t('CPU'), usage: load.cpu ? load.cpu.usage : null },
+    { key: t('内存'), usage: load.memory ? load.memory.usage : null },
+    { key: worstDisk ? `${t('盘')} ${worstDisk.mount}` : t('盘'), usage: worstDisk ? worstDisk.usage : null },
+  ]
+  const worst = items.reduce((a, b) => ((b.usage ?? -1) > (a.usage ?? -1) ? b : a), items[0])
+  const title = items.map((x) => `${x.key} ${pctText(x.usage)}`).join(' · ')
+  return `<span style="display: flex; align-items: center; gap: var(--space-2); min-width: 0;" title="${esc(title)}">
+    ${meter(worst.usage)}
+    <span style="font-size: 12.5px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(worst.key)} ${esc(pctText(worst.usage))}</span>
+  </span>`
+}
+
 function machinesPage() {
   const all = state.allMachines || []
   const totals = state.machineTotals || { machines: 0, paired: 0, online: 0, accounts: 0, max: 0, seats: 0 }
