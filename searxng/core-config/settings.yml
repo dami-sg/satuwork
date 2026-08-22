@@ -1,0 +1,23 @@
+# 只写要改的几条，其余全部继承镜像里的默认值。
+# 文档：https://docs.searxng.org/admin/settings/
+use_default_settings: true
+
+general:
+  instance_name: 'Satuwork SearXNG'
+  # 出错时不把堆栈甩给访问者。
+  debug: false
+
+search:
+  # **这条是重点**：默认只有 html，没有 json 就没有 API，
+  # gateway/src/web-tools.ts 的 searxng 后端打 /search?format=json 会拿回一坨 HTML。
+  formats:
+    - html
+    - json
+
+server:
+  # 密钥从环境变量 SEARXNG_SECRET 来（仓库根目录的 .env，不进 git），不写死在这里。
+  # 限流器关掉：它是给公开实例挡爬虫的，而这台是自己人用的 API 后端，
+  # 开着的话 web_search 这种不带浏览器指纹的直连请求会被判成机器人。
+  limiter: false
+  public_instance: false
+  image_proxy: true

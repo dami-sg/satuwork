@@ -17,6 +17,9 @@ cd gateway && pnpm dev
 整套跑在容器里：`docker compose up -d`（Gateway + PostgreSQL）。
 Bot 不在 compose 里——它由席位机器上的机器管家按 (账号, botId) 部署，不是容器编排出来的。
 
+compose 里还有一个**可选**的自托管 SearXNG，默认不起，要它才点名：
+`docker compose --profile searxng up -d`，见 [searxng/README.md](searxng/README.md)。
+
 Gateway 的业务数据在 PostgreSQL；宿主机端口用 **5434**（5432 一般已被别的实例占着）。
 `SATUWORK_GATEWAY_HOME` 只放 JWT 密钥对和 Bot 发布包。
 
