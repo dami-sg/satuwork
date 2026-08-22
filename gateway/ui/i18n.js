@@ -1038,4 +1038,40 @@ window.SATU_I18N = {
   '拉不到工具清单': 'Could not fetch the tool list',
   '开着的工具会进你每一个 Bot 的工具表。用不上的关掉——装得多了，工具表会把上下文撑满，模型也更容易选错。':
     'Enabled tools go into every one of your bots. Turn off what you do not need — a long tool list eats context and makes the model pick wrong.',
+
+  // ── 日常任务（右栏那一列，见 pages-routines.js）──────────────────────
+  日常任务: 'Routines',
+  新建日常任务: 'New routine',
+  '日常任务是这个 Bot 按时自己去做的事。': 'Routines are recurring tasks this Bot runs on a schedule.',
+  未命名任务: 'Untitled routine',
+  还没有设定时间: 'No schedule yet',
+  已启用: 'Active',
+  // 「已停用」上面（连接器那一段之前）已经有一条了。**同一个对象里写第二遍不是加译文，
+  // 是把前一条覆盖掉**——真干过一次：这里写了 'Off'，员工列表、审计、Bot 列表三处
+  // 本来的 'Disabled' 跟着一起变了。要不同的说法就换一个中文键，别重复。
+  试跑: 'Test run',
+  '跑着…': 'Running…',
+  立刻跑一次: 'Run it now',
+  先写清楚它每次要做什么: 'Say what it should do first',
+  上一次还在跑: 'The last run is still going',
+  给这条任务起个名字: 'Name this routine',
+  指令: 'Instruction',
+  '每次跑的时候，它要做什么？': 'What should this routine do each time it runs?',
+  什么时候跑: 'When to run',
+  添加时间: 'Add trigger',
+  下一次: 'Next run',
+  运行记录: 'Run history',
+  还没跑过: 'No runs yet',
+  '正在跑…': 'Running…',
+  每小时: 'Hourly',
+  每天: 'Daily',
+  每周: 'Weekly',
+  每月: 'Monthly',
+  多久一次: 'How often',
+  周几: 'Weekday',
+  几号: 'Day of month',
+  几点: 'Time',
+  第几分: 'Minute',
+  删掉这个时间: 'Remove this trigger',
+  '删掉这条日常任务？': 'Delete this routine?',
 }

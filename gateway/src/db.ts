@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
-import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
+import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -2769,6 +2769,180 @@ export class Db {
       lifted.providers.push(provider)
     }
     return lifted
+  }
+
+
+  // ── 日常任务：定义、排期与流水 ────────────────────────────────────────
+
+  /** 这个人在这颗 Bot 上的全部日常任务。侧栏那一列就是它。 */
+  async routinesOf(accountId: string, botId: string): Promise<Routine[]> {
+    const rows = await this.many('select * from routines where "accountId" = ? and "botId" = ? order by "createdAt"', [accountId, botId])
+    return rows.map(routineOf)
+  }
+
+  async routine(id: string): Promise<Routine | undefined> {
+    const r = await this.one('select * from routines where id = ?', [id])
+    return r ? routineOf(r) : undefined
+  }
+
+  async insertRoutine(input: {
+    botId: string
+    accountId: string
+    companyId: string
+    name: string
+    instruction?: string
+    triggers?: RoutineTrigger[]
+    nextRunAt?: number | null
+  }): Promise<Routine> {
+    const now = Date.now()
+    const row: Routine = {
+      id: randomUUID(),
+      botId: input.botId,
+      accountId: input.accountId,
+      companyId: input.companyId,
+      name: input.name,
+      instruction: input.instruction ?? '',
+      active: true,
+      triggers: input.triggers ?? [],
+      nextRunAt: input.nextRunAt ?? null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await this.run(
+      'insert into routines (id, "botId", "accountId", "companyId", name, instruction, active, triggers, "nextRunAt", "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?,?,?)',
+      [row.id, row.botId, row.accountId, row.companyId, row.name, row.instruction, row.active, JSON.stringify(row.triggers), row.nextRunAt, row.createdAt, row.updatedAt],
+    )
+    return row
+  }
+
+  /**
+   * 改一条。**只改传了的字段**——界面上改名字和改触发时间是两次独立的保存，
+   * 整行覆盖会让后到的那次把前一次的输入抹掉。
+   */
+  async updateRoutine(
+    id: string,
+    patch: { name?: string; instruction?: string; active?: boolean; triggers?: RoutineTrigger[]; nextRunAt?: number | null },
+  ): Promise<Routine | undefined> {
+    const sets: string[] = []
+    const args: unknown[] = []
+    if (patch.name !== undefined) (sets.push('name = ?'), args.push(patch.name))
+    if (patch.instruction !== undefined) (sets.push('instruction = ?'), args.push(patch.instruction))
+    if (patch.active !== undefined) (sets.push('active = ?'), args.push(patch.active))
+    if (patch.triggers !== undefined) (sets.push('triggers = ?'), args.push(JSON.stringify(patch.triggers)))
+    if (patch.nextRunAt !== undefined) (sets.push('"nextRunAt" = ?'), args.push(patch.nextRunAt))
+    sets.push('"updatedAt" = ?')
+    args.push(Date.now(), id)
+    await this.run(`update routines set ${sets.join(', ')} where id = ?`, args)
+    return this.routine(id)
+  }
+
+  async deleteRoutine(id: string): Promise<boolean> {
+    return (await this.run('delete from routines where id = ?', [id])) > 0
+  }
+
+  /** 到点该跑的那几条。调度器每一轮问一次。 */
+  async dueRoutines(nowMs: number, limit = 20): Promise<Routine[]> {
+    const rows = await this.many(
+      'select * from routines where active and "nextRunAt" is not null and "nextRunAt" <= ? order by "nextRunAt" limit ?',
+      [nowMs, Math.max(1, Math.trunc(limit))],
+    )
+    return rows.map(routineOf)
+  }
+
+  /**
+   * 抢一条到点的任务：把 `nextRunAt` 从「刚才读到的那个值」换成下一次。
+   *
+   * **条件里必须带上旧值**，不能只按 id 更新。两个 Gateway 进程（升级时的新旧两代、
+   * 或者以后多开）会在同一秒读到同一条，谁都觉得该自己跑——CAS 之后只有一个人的
+   * `rowCount` 是 1，另一个拿到 0 就跳过。少了这一句，每天九点的日报会发两份。
+   */
+  async claimRoutine(id: string, expectedNextRunAt: number, nextRunAt: number | null): Promise<boolean> {
+    const n = await this.run('update routines set "nextRunAt" = ?, "updatedAt" = ? where id = ? and "nextRunAt" = ?', [
+      nextRunAt,
+      Date.now(),
+      id,
+      expectedNextRunAt,
+    ])
+    return n > 0
+  }
+
+  async insertRoutineRun(input: {
+    routineId: string
+    botId: string
+    accountId: string
+    companyId: string
+    trigger: RoutineRunTrigger
+    sessionId?: string | null
+  }): Promise<RoutineRun> {
+    const row: RoutineRun = {
+      id: randomUUID(),
+      routineId: input.routineId,
+      botId: input.botId,
+      accountId: input.accountId,
+      companyId: input.companyId,
+      trigger: input.trigger,
+      status: 'running',
+      sessionId: input.sessionId ?? null,
+      error: null,
+      startedAt: Date.now(),
+      endedAt: null,
+    }
+    await this.run(
+      'insert into routine_runs (id, "routineId", "botId", "accountId", "companyId", trigger, status, "sessionId", error, "startedAt", "endedAt") values (?,?,?,?,?,?,?,?,?,?,?)',
+      [row.id, row.routineId, row.botId, row.accountId, row.companyId, row.trigger, row.status, row.sessionId, row.error, row.startedAt, row.endedAt],
+    )
+    // 只留最近几十条。这张表是「昨晚跑没跑」，留全量只会让侧栏那一列越查越慢。
+    await this.run(
+      'delete from routine_runs where "routineId" = ? and id not in (select id from routine_runs where "routineId" = ? order by "startedAt" desc limit ?)',
+      [input.routineId, input.routineId, ROUTINE_RUNS_KEEP],
+    )
+    return row
+  }
+
+  async finishRoutineRun(id: string, patch: { status: RoutineRunStatus; error?: string | null; sessionId?: string | null }): Promise<void> {
+    const sets = ['status = ?', 'error = ?', '"endedAt" = ?']
+    const args: unknown[] = [patch.status, patch.error ?? null, patch.status === 'running' ? null : Date.now()]
+    if (patch.sessionId !== undefined) (sets.push('"sessionId" = ?'), args.push(patch.sessionId))
+    args.push(id)
+    await this.run(`update routine_runs set ${sets.join(', ')} where id = ?`, args)
+  }
+
+  async routineRuns(routineId: string, limit = 10): Promise<RoutineRun[]> {
+    const rows = await this.many('select * from routine_runs where "routineId" = ? order by "startedAt" desc limit ?', [
+      routineId,
+      Math.max(1, Math.trunc(limit)),
+    ])
+    return rows.map(routineRunOf)
+  }
+
+  /** 这条任务还有没有一次没跑完的。同一条任务不并发跑两次，靠它判。 */
+  async routineRunning(routineId: string): Promise<RoutineRun | undefined> {
+    const r = await this.one('select * from routine_runs where "routineId" = ? and status = \'running\' order by "startedAt" desc limit 1', [
+      routineId,
+    ])
+    return r ? routineRunOf(r) : undefined
+  }
+
+  /**
+   * 把没人再管的「正在跑」收干净。
+   *
+   * 等结果的那个 watcher 是内存里的东西，进程一停就没了；库里那条 `running` 再也不会
+   * 有人来改。不收的话，那条任务从此再也跑不起来（并发判据永远认为它还在跑），而界面上
+   * 是一个永远转着的圈。
+   *
+   * **必须按 `startedAt` 划线，不能把所有 `running` 一把收掉。** 这张表不属于某一个
+   * 进程：升级换版那几十秒里新旧两代同时在跑，无差别地收，就是新进程把旧进程**正在
+   * 等结果**的那一条判成失败——界面当场变红（虽然旧进程跑完会改回来），而且那段窗口里
+   * 并发判据也跟着失效，人这时点「试跑」不再被 409 挡住，两条消息进同一个会话。
+   *
+   * 划线的位置由调用方给：一次运行最多等 `GATEWAY_ROUTINE_TIMEOUT_MS`，比这更老的
+   * `running` 意味着**任何**进程里的 watcher 都已经放弃了，收它不会踩到活人。
+   */
+  async failStaleRoutineRuns(startedBefore: number): Promise<number> {
+    return this.run(
+      "update routine_runs set status = 'error', error = ?, \"endedAt\" = ? where status = 'running' and \"startedAt\" < ?",
+      ['没等到结果就断了（Gateway 重启，或者超过了最长等待时间）', Date.now(), startedBefore],
+    )
   }
 
   // ── Skill 标签。稿子上那八个是初值，建了新的就进这张表。──────────────

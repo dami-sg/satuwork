@@ -68,11 +68,23 @@ function pageAside() {
   if (!hasAside()) return ''
   // 折叠 = 整个不渲染。开关挪到了对话 header 上，这里不用再留一条竖条给人点回去。
   if (!asidePref.open) return ''
+  const detail = Boolean(state.routineOpen && routineOpenRow())
+  /**
+   * 点开一条日常任务时，整栏换成那一屏——但**上面那块屏只是藏起来，不是拿掉**。
+   *
+   * 拿掉的代价是断一次 VNC（见 chat.js 的 syncDesktop：槽没了就卸载）。藏着的时候
+   * 它的 getBoundingClientRect 全是 0，常驻层自己会判成不可见，连接照旧活着；人点
+   * 返回，槽一恢复尺寸，画面就在那儿。
+   */
   return `<aside class="gw-aside">
     <div class="gw-aside-grip" data-act="aside-grip" title="${esc(t('拖动调整宽度'))}"></div>
     <div class="gw-aside-body">
-      <h3>${t('运行环境')}</h3>
-      ${chatMachinePanel()}
+      <div class="gw-aside-stack" ${detail ? 'hidden' : ''}>
+        <h3>${t('运行环境')}</h3>
+        ${chatMachinePanel()}
+        ${routineListPanel()}
+      </div>
+      ${detail ? routineDetailPanel() : ''}
     </div>
   </aside>`
 }

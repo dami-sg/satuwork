@@ -1188,3 +1188,78 @@
   margin: 0 1px;
   max-width: min(34ch, 100%);
 }
+
+/* ── 日常任务（右栏那一列与点进去的那一屏，见 pages-routines.js）──────── */
+
+.sw-rt { display: flex; flex-direction: column; gap: 6px; }
+.sw-rt-head { display: flex; align-items: center; gap: var(--space-2); }
+.sw-rt-head h3 { flex: 1; margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted-foreground); line-height: 30px; }
+.sw-rt-empty { display: flex; flex-direction: column; align-items: center; gap: var(--space-3);
+  padding: var(--space-4) var(--space-2); text-align: center; }
+.sw-rt-empty p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--muted-foreground); }
+.sw-rt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.sw-rt-row { width: 100%; display: flex; align-items: center; gap: var(--space-2); text-align: left;
+  padding: 7px 8px; border: 0; border-radius: var(--radius-md); background: transparent; cursor: pointer;
+  font-family: var(--font-body); color: var(--color-text); }
+.sw-rt-row:hover { background: var(--secondary); }
+.sw-rt-text { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.sw-rt-text b { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-rt-text em { font-style: normal; font-size: 11.5px; color: var(--muted-foreground);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 左边那个圈说的是「上一次跑得怎么样」：绿 = 好，红 = 上次失败了，灰 = 停用了。 */
+.sw-rt-ico { flex: none; display: flex; color: var(--color-accent-2-800); }
+.sw-rt-ico[data-state='off'] { color: var(--muted-foreground); }
+.sw-rt-ico[data-state='err'] { color: var(--color-accent-800); }
+
+.sw-rt-detail { display: flex; flex-direction: column; gap: var(--space-4); }
+.sw-rt-bar { display: flex; align-items: center; gap: var(--space-2); }
+.sw-rt-bar > span { flex: 1; text-align: center; font-size: 13px; font-weight: 600;
+  /* 返回按钮占了左边一格，标题要真的居中就得在右边留同样宽的一格。 */
+  margin-right: 33px; }
+.sw-rt-acts { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.sw-rt-acts .btn, .sw-switch > span { white-space: nowrap; }
+/* .sw-spacer 的 flex:1 是按父级写的（见上面 composer 那两条），这里要自己声明一次。 */
+.sw-rt-acts .sw-spacer, .sw-rt-run .sw-spacer { flex: 1; }
+.sw-rt-acts .btn { padding: 7px 12px; font-size: 13px; }
+/* 开关。一颗按钮，不是 checkbox：整份右栏都是 data-act 分发的，多一种事件源
+   （change 冒泡到 form）只会多一处要记得同步的地方。 */
+.sw-switch { display: inline-flex; align-items: center; gap: 8px; padding: 0; border: 0;
+  background: transparent; cursor: pointer; font-family: var(--font-body); font-size: 13px;
+  color: var(--color-text); }
+.sw-switch > i { width: 34px; height: 20px; border-radius: 999px; background: var(--muted);
+  position: relative; transition: background .15s ease; }
+.sw-switch > i::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  border-radius: 50%; background: var(--popover); box-shadow: var(--shadow-2xs); transition: transform .15s ease; }
+.sw-switch[aria-pressed='true'] > i { background: var(--primary); }
+.sw-switch[aria-pressed='true'] > i::after { transform: translateX(14px); }
+
+.sw-rt-area { border-radius: var(--radius-md); resize: vertical; min-height: 84px; line-height: 1.6;
+  font-family: var(--font-body); }
+.sw-rt-triggers { display: flex; flex-direction: column; gap: 6px; }
+.sw-rt-trigger { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 6px 6px 10px; }
+.sw-rt-sel, .sw-rt-time, .sw-rt-num { font-family: var(--font-body); font-size: 13px; color: var(--color-text);
+  background: transparent; border: 0; padding: 2px 0; }
+.sw-rt-sel:focus-visible, .sw-rt-time:focus-visible, .sw-rt-num:focus-visible { outline: 2px solid var(--ring); border-radius: 4px; }
+.sw-rt-num { width: 3ch; }
+.sw-rt-minute { font-size: 13px; color: var(--muted-foreground); }
+.sw-rt-del { margin-left: auto; padding: 5px; color: var(--muted-foreground); }
+.sw-rt-add { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 6px 10px;
+  border: 1px dashed var(--border); border-radius: var(--radius-md); background: transparent; cursor: pointer;
+  font-family: var(--font-body); font-size: 13px; color: var(--muted-foreground); }
+.sw-rt-add:hover { color: var(--color-text); border-color: var(--color-neutral-600); }
+.sw-rt-next, .sw-rt-none { margin: 0; font-size: 12px; color: var(--muted-foreground); }
+
+.sw-rt-runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.sw-rt-run { display: flex; align-items: center; gap: 8px; padding: 7px 2px; font-size: 13px;
+  border-bottom: 1px solid var(--color-divider); }
+.sw-rt-run:last-child { border-bottom: 0; }
+.sw-rt-runtime { color: var(--color-text); }
+.sw-rt-tag { font-size: 11px; color: var(--muted-foreground); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0 6px; }
+.sw-rt-ok { display: flex; color: var(--color-accent-2-800); }
+.sw-rt-bad { display: flex; color: var(--color-accent-800); }
+.sw-rt-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
+  border-top-color: var(--muted-foreground); animation: sw-spin 700ms linear infinite; }
+@media (prefers-reduced-motion: reduce) { .sw-rt-spin { animation: none; } }

@@ -91,7 +91,13 @@ body { margin: 0; background: var(--color-bg); color: var(--color-text); font-fa
    横线。整栏从顶上直接开始，顶部内边距和 .gw-head 一致，标题看起来就在同一行。 */
 .gw-aside-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-3) var(--space-4) var(--space-4);
   display: flex; flex-direction: column; gap: var(--space-3); }
-.gw-aside-body > h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+/* 「运行环境」那一叠：右栏的常态。点开一条日常任务时它整个 hidden，但**不从 DOM 里
+   拿掉**——里面那块屏是一条 VNC 连接，卸一次就断一次（见 render.js 的 pageAside）。 */
+.gw-aside-stack { display: flex; flex-direction: column; gap: var(--space-3); }
+/* `display: flex` 会盖掉 [hidden] 自带的 display:none（作者样式赢 UA 样式）。少了
+   这一行，点开一条日常任务时那一叠还在原地，两屏叠着画。 */
+.gw-aside-stack[hidden] { display: none; }
+.gw-aside-stack > h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em;
   text-transform: uppercase; color: var(--muted-foreground); line-height: 30px; }
 /* 抓手压在左边框上：可视只有 1px 的边框，但有 7px 的命中区，不然很难抓准。 */
 .gw-aside-grip { position: absolute; left: -3px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 2; }

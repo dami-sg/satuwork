@@ -903,3 +903,151 @@ export function parseConnectorPricing(v: unknown): { defaultMicros: number; byTo
   }
   return { defaultMicros: micros(o.defaultMicros), byToolkit }
 }
+
+// ── 日常任务（routine）────────────────────────────────────────────────
+
+/**
+ * 一个触发器。
+ *
+ * 现在只有 `schedule` 一种，但它是**判别联合**而不是几个平铺的字段：Slack 消息、
+ * Git 事件、Webhook 这些迟早要进来，它们和「每天九点」除了「都会让这条 routine 跑
+ * 起来」以外没有任何共同字段。判别联合让新一种只是多一个成员，老的那种一个字段都
+ * 不用动；平铺的话，第二种进来的当天，一半的列对一半的行是空的。
+ */
+export interface RoutineSchedule {
+  kind: 'schedule'
+  /** 多久一次。`hour` 只看分钟，`week` 看 `weekday`，`month` 看 `day`。 */
+  every: 'hour' | 'day' | 'week' | 'month'
+  /** 本地时间的 `HH:MM`（24 小时制）。`hour` 只用它的分钟部分。 */
+  at: string
+  /** 周几，0 = 周日。`every: 'week'` 才用得上。 */
+  weekday: number
+  /** 几号。`every: 'month'` 才用得上；该月没有这一天就落在最后一天。 */
+  day: number
+  /**
+   * 这个「九点」是哪儿的九点，IANA 名。
+   *
+   * **存在触发器里，不是运行时去问机器。** 人设的是他自己的九点；机器时区是运维
+   * 后来可能改的东西，让它决定已经设好的任务什么时候跑，等于某天早上所有人的日报
+   * 都提前了八小时，而界面上那行字一个字都没变。
+   */
+  tz: string
+}
+
+export type RoutineTrigger = RoutineSchedule
+
+export interface Routine {
+  id: string
+  botId: string
+  accountId: string
+  companyId: string
+  name: string
+  instruction: string
+  active: boolean
+  triggers: RoutineTrigger[]
+  /** 下一次什么时候跑。null = 不排（停用、没触发器、或者算不出来）。 */
+  nextRunAt: number | null
+  /**
+   * **没有 `lastRunAt` 这一列。** 「上一次是什么时候、跑成没跑成」的唯一出处是
+   * `routine_runs`。在这儿再存一份的话，它只能记「上一次被调度器抢到」——而抢到之后
+   * 还可能因为指令空着、错过太久、上一轮没跑完而根本没跑，于是这个字段会在界面上
+   * 说一件不曾发生的事。
+   */
+  createdAt: number
+  updatedAt: number
+}
+
+export type RoutineRunStatus = 'running' | 'ok' | 'error'
+export type RoutineRunTrigger = 'schedule' | 'manual'
+
+export interface RoutineRun {
+  id: string
+  routineId: string
+  botId: string
+  accountId: string
+  companyId: string
+  trigger: RoutineRunTrigger
+  status: RoutineRunStatus
+  sessionId: string | null
+  error: string | null
+  startedAt: number
+  endedAt: number | null
+}
+
+/** 一条 routine 最多挂几个触发器。多到这个数就不是「什么时候跑」，是另一个功能了。 */
+export const ROUTINE_MAX_TRIGGERS = 8
+/** 运行流水只留最近这么多条，再往前的定时删掉——它是「昨晚跑没跑」，不是审计。 */
+export const ROUTINE_RUNS_KEEP = 50
+
+/**
+ * jsonb 里那一坨 → 触发器数组。**认不出来的一律丢掉，不抛。**
+ *
+ * 这条既是读库时的解析，也是写库前的校验——两边同一个函数，库里就不会出现一种
+ * 「存得进去、读出来是别的东西」的形状。丢掉而不是报错，是因为读的那一路没人接得住
+ * 异常：一条脏数据会让整个列表打不开，而它本该只是少一个触发器。
+ */
+export function parseRoutineTriggers(v: unknown): RoutineTrigger[] {
+  const raw = Array.isArray(v) ? v : typeof v === 'string' ? safeArray(v) : []
+  const out: RoutineTrigger[] = []
+  for (const item of raw.slice(0, ROUTINE_MAX_TRIGGERS)) {
+    const o = (item ?? {}) as Record<string, unknown>
+    if (String(o.kind ?? '') !== 'schedule') continue
+    const every = String(o.every ?? 'day')
+    if (every !== 'hour' && every !== 'day' && every !== 'week' && every !== 'month') continue
+    /**
+     * **没写的字段给默认值，写了但不对的一律丢掉。** 这两件事必须分开：
+     *
+     * 前者是省事（每天那一档用不上 `weekday`，不该逼调用方填一个假的）；后者一旦
+     * 也当成「给个默认值」，`weekday: 7`（把周日写成 7 是最自然的手滑）就会静静地
+     * 变成周一——接口回 200，界面上写着「每周一」，人只会以为是自己记错了。丢掉之后
+     * 条数对不上，路由层那一关就会把它变成 400（见 routes/routines.ts 的 triggersOf）。
+     */
+    const at = o.at == null ? '09:00' : String(o.at)
+    if (!/^\d{1,2}:\d{2}$/.test(at)) continue
+    const [h, m] = at.split(':').map((x) => Number(x))
+    if (!(h >= 0 && h < 24 && m >= 0 && m < 60)) continue
+    const weekday = o.weekday == null ? 1 : Math.trunc(Number(o.weekday))
+    if (!(weekday >= 0 && weekday <= 6)) continue
+    const day = o.day == null ? 1 : Math.trunc(Number(o.day))
+    if (!(day >= 1 && day <= 31)) continue
+    out.push({
+      kind: 'schedule',
+      every,
+      at: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`,
+      weekday,
+      day,
+      tz: canonicalTimezone(String(o.tz ?? '')) || 'UTC',
+    })
+  }
+  return out
+}
+
+function safeArray(s: string): unknown[] {
+  try {
+    const v = JSON.parse(s)
+    return Array.isArray(v) ? v : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * IANA 时区名 → 规范拼写；认不出来返回空串。
+ *
+ * 判据是「Intl 认不认」而不是一张名单：名单会过期（时区数据库每年都在改），而
+ * 认不认得出来这件事，唯一有资格回答的就是待会儿真要拿它算时间的那个 Intl。归一到
+ * 规范拼写是必须的（`asia/shanghai` → `Asia/Shanghai`）——机器那边「改上了没有」是按
+ * 字符串比的，两边不走同一套拼法就永远判错（见 deploy.ts 的 normalizeTimezone）。
+ *
+ * 字符集和长度先挡一道：这个值会被拼进机器上的 `timedatectl set-timezone`。
+ */
+export function canonicalTimezone(raw: string): string {
+  const tz = (raw || '').trim()
+  if (!tz) return ''
+  if (tz.length > 64 || !/^[A-Za-z0-9+_-]+(\/[A-Za-z0-9+_-]+)*$/.test(tz) || tz.includes('..')) return ''
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone || tz
+  } catch {
+    return ''
+  }
+}

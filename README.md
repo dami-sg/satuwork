@@ -46,6 +46,13 @@ GATEWAY_DATABASE_URL=... node gateway/scripts/backfill-charges.mjs --dry-run
 
 看一眼条数对不对，再去掉 `--dry-run` 真跑。脚本可以重复跑。
 
+## 日常任务
+
+对话右栏里，一个 Bot 可以有几条「到点自己去做的事」：写清楚指令和时间，Gateway 的调度器
+到点把它发进那个席位的会话，跑完把结果记成一条流水。浏览器关着也照跑。
+
+模型、时区口径、为什么调度器在 Gateway 而不在席位，见 [docs/routines.md](docs/routines.md)。
+
 ## 检查
 
 ```bash
