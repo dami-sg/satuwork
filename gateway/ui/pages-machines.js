@@ -281,10 +281,10 @@ function pctText(x, unknown) {
  * 分开：后者是真的量到了 0，两者结论完全不同，不能长成一个样子（同通联灯那条规矩）。
  */
 function meter(usage) {
-  if (usage == null) return `<span class="satu-meter" data-level="none"></span>`
+  if (usage == null) return `<span class="satu-gauge" data-level="none"></span>`
   const v = Math.min(1, Math.max(0, Number(usage) || 0))
   const level = v >= 0.9 ? 'hot' : v >= 0.75 ? 'warn' : 'ok'
-  return `<span class="satu-meter" data-level="${level}" title="${esc(pctText(v))}"><span style="width: ${(v * 100).toFixed(1)}%;"></span></span>`
+  return `<span class="satu-gauge" data-level="${level}" title="${esc(pctText(v))}"><span style="width: ${(v * 100).toFixed(1)}%;"></span></span>`
 }
 
 /**
@@ -301,20 +301,243 @@ function loadRow(label, usage, value, note, unknown) {
   </span></div>`
 }
 
+// ── 两档：实时 / 日 ───────────────────────────────────────────────────
+//
+// 「实时」是机器自报的那一份快照，「日」画的是 Gateway 按分钟归的档（见迁移 0012）。
+// 两者的**数据源不同**，所以空的原因也不同：前者空是机器没报，后者空是那段时间没攒
+// 下东西——话要分开说，不然人会拿着一个「没有数据」去查错方向。
+
+const LOAD_TABS = [
+  { key: 'live', label: '实时' },
+  { key: 'day', label: '日' },
+]
+
+/** `YYYY-MM-DD`，**本地日历**。不用 toISOString——那是 UTC，晚上八点之后会差一天。 */
+function localDateKey(d) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 当前选的那一天。空 = 今天——不写死进 state，跨了零点也不会僵在昨天。 */
+function loadDateOf() {
+  return state.machineLoadDate || localDateKey(new Date())
+}
+
+/** 和服务端的 METRIC_RETENTION_MS 是同一个数。接口也会把它带回来，以那份为准。 */
+const LOAD_RETENTION_DAYS = 30
+
+/** 归档只留 30 天，日期选择器的下限就是它。再往前不是「没数据」，是已经清掉了。 */
+function loadMinDateOf() {
+  const d = new Date()
+  d.setDate(d.getDate() - (LOAD_RETENTION_DAYS - 1))
+  return localDateKey(d)
+}
+
+/**
+ * 当前这一档要看的时间范围，**按浏览器本地日历圈**。
+ *
+ * 格子在库里是 UTC 整分，「今天」是哪 24 小时只有看的人那本日历说得清。`new Date(y,
+ * m-1, d)` 出来就是本地零点，减出来的 epoch 毫秒正是要传给接口的那两个数。
+ */
+function loadRangeOf() {
+  const [y, mo, d] = loadDateOf().split('-').map(Number)
+  const from = new Date(y, mo - 1, d).getTime()
+  // 用「下一天的零点」而不是 +24h：夏令时那两天一天是 23 或 25 小时。
+  return { from, to: new Date(y, mo - 1, d + 1).getTime() }
+}
+
+/** 这一屏该拿的那份数据叫什么。换机器、换日期都要换一份，比对靠它。 */
+function loadKeyOf(machineId) {
+  return `${machineId}|day|${loadDateOf()}`
+}
+
+/**
+ * 把分钟格折成要画的柱子。
+ *
+ * 库里是一分钟一行，一天 1440 行——**一天画 1440 根柱子既看不清也没必要**，屏幕上
+ * 一根不到半个像素。所以显示时并成 10 分钟一格（144 根），尖峰仍然留得住：并的时候
+ * 峰值取 `max`，不是取均值的均值。
+ *
+ * **没有数据的那一格留空**，不补 0——一台没在报的机器和一台闲着的机器，在这张图上
+ * 必须长得不一样。
+ *
+ * 平均值按 samples 加权：一格只收到 1 笔的，不该和收满 20 笔的那格一样重。
+ */
+const LOAD_SLOT_MINUTES = 10
+
+function loadBuckets(minutes, range) {
+  const slots = []
+  const count = Math.round((range.to - range.from) / (LOAD_SLOT_MINUTES * 60_000))
+  for (let i = 0; i < count; i++) {
+    const at = new Date(range.from + i * LOAD_SLOT_MINUTES * 60_000)
+    const hh = String(at.getHours()).padStart(2, '0')
+    const mm = String(at.getMinutes()).padStart(2, '0')
+    slots.push({
+      // 只有 title：轴上的刻度是按比例挑几格出来标的（见 loadChart），不是每格一个
+      // 标签——144 个数字挤在一起谁也读不出来。
+      title: `${hh}:${mm}`,
+      samples: 0,
+      cpuSum: 0,
+      memSum: 0,
+      diskSum: 0,
+      cpuMax: 0,
+      memMax: 0,
+      diskMax: 0,
+      tx: 0,
+    })
+  }
+  for (const m of minutes || []) {
+    // 按**本地时间轴上的位置**落格，不按 UTC 分钟数取模：夏令时那天一天不是 24 小时，
+    // 取模会让换钟之后的每一格都错位。
+    const i = Math.floor((m.minuteStart - range.from) / (LOAD_SLOT_MINUTES * 60_000))
+    const slot = slots[i]
+    if (!slot) continue
+    slot.samples += m.samples
+    slot.cpuSum += (m.cpuAvg || 0) * m.samples
+    slot.memSum += (m.memAvg || 0) * m.samples
+    slot.diskSum += (m.diskAvg || 0) * m.samples
+    slot.cpuMax = Math.max(slot.cpuMax, m.cpuMax || 0)
+    slot.memMax = Math.max(slot.memMax, m.memMax || 0)
+    slot.diskMax = Math.max(slot.diskMax, m.diskMax || 0)
+    slot.tx += m.txBytes || 0
+  }
+  for (const s of slots) {
+    s.cpu = s.samples ? s.cpuSum / s.samples : null
+    s.mem = s.samples ? s.memSum / s.samples : null
+    s.disk = s.samples ? s.diskSum / s.samples : null
+  }
+  return slots
+}
+
+/**
+ * 一张小柱图。柱高是**均值**，峰值进 tooltip——十分钟里冲顶一分钟，均值看不见，
+ * 但那一分钟正是人要找的，所以峰值另外在标题行里点名。
+ *
+ * 没有数据的那一格不画柱子，鼠标移上去说「没有数据」。补成 0 的话，机器失联那几个
+ * 小时会显示成「一直很闲」。
+ */
+function loadChart(title, slots, pick, opts) {
+  const fmt = (opts && opts.fmt) || ((v) => pctText(v))
+  const top = (opts && opts.max) || 1
+  const peak = slots.reduce((a, s) => (pick(s).peak > (a ? pick(a).peak : -1) ? s : a), null)
+  const cols = slots
+    .map((s) => {
+      const v = pick(s).value
+      const h = v == null ? 0 : Math.max(v > 0 ? 2 : 0, Math.min(100, (v / top) * 100))
+      const label =
+        v == null
+          ? t('没有数据')
+          : `${fmt(v)}${pick(s).peak != null && opts && opts.peak !== false ? ` · ${t('峰')} ${pctText(pick(s).peak)}` : ''}`
+      return `<div class="satu-barcol" title="${esc(`${s.title} · ${label}`)}">
+        <div class="satu-barstack">${v == null ? '' : `<div class="satu-barfill" style="height: ${h.toFixed(1)}%;"></div>`}</div>
+      </div>`
+    })
+    .join('')
+  const head = peak && pick(peak).peak
+    ? `<span style="font-size: 12px; color: var(--muted-foreground);">${t('峰值')} ${esc(fmt(pick(peak).peak))} · ${esc(peak.title)}</span>`
+    : ''
+  return `<div style="display: flex; flex-direction: column; gap: 4px; min-width: 0;">
+    <div style="display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-2);">
+      <span style="font-size: 13px; font-weight: 600;">${esc(title)}</span>${head}
+    </div>
+    ${/* 144 根柱子，间距只能给 1px；再大就把柱子本身挤没了。 */ ''}
+    <div class="satu-bars" style="height: 72px; gap: 1px;">${cols}</div>
+    ${/* 轴上每 6 小时一个标记。逐格标是 144 个数字，一个也读不出来。 */ ''}
+    <div style="display: flex; justify-content: space-between;">
+      ${[0, 0.25, 0.5, 0.75]
+        .map((f) => `<span class="satu-barlabel">${esc((slots[Math.floor(slots.length * f)] || {}).title || '')}</span>`)
+        .join('')}
+      <span class="satu-barlabel">${esc((slots[slots.length - 1] || {}).title || '')}</span>
+    </div>
+  </div>`
+}
+
+/** 「日」那一档的正文。 */
+function loadHistoryBody(card) {
+  const m = card.machine || {}
+  const key = loadKeyOf(m.id)
+  const got = state.machineLoadMinutes
+  if (state.machineLoadError) return `<div class="gw-flash gw-flash-err">${esc(state.machineLoadError)}</div>`
+  // 手上这份不是给这一屏拉的就当没有：宁可写「载入中」，也不要拿上一天的曲线顶着画。
+  if (!got || got.key !== key) {
+    return `<p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('载入中…')}</p>`
+  }
+  const range = loadRangeOf()
+  const slots = loadBuckets(got.minutes, range)
+  const total = (got.minutes || []).reduce((n, x) => n + (x.txBytes || 0), 0)
+  const covered = slots.filter((s) => s.samples).length
+  if (!covered) {
+    // 空的原因分两种，处置完全不同：太久了是「已经清掉，别再找了」，没到保留期外
+    // 则是「那天机器没在报」。混成一句话，人会拿着它去查错方向。
+    const tooOld = range.to < Date.now() - (got.retentionMs || LOAD_RETENTION_DAYS * 86400_000)
+    return `<p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${
+      tooOld
+        ? t('这一天超出了归档的保留期（只留最近 30 天），数据已经清掉了。', 'This day is past the 30-day retention window — the archive for it has been deleted.')
+        : t('这一天没有归档数据。归档是收到心跳才攒的——机器那时可能没上线，或者管家还没升到会报负载的版本。', 'No archive for this day. Archives accrue from heartbeats — the machine may have been offline, or its manager too old to report load.')
+    }</p>`
+  }
+  const maxTx = slots.reduce((a, s) => Math.max(a, s.tx), 0)
+  return `
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-4);">
+      ${loadChart(t('CPU'), slots, (s) => ({ value: s.cpu, peak: s.cpuMax }))}
+      ${loadChart(t('内存'), slots, (s) => ({ value: s.mem, peak: s.memMax }))}
+      ${loadChart(t('磁盘'), slots, (s) => ({ value: s.disk, peak: s.diskMax }))}
+      ${loadChart(t('出网'), slots, (s) => ({ value: s.samples ? s.tx : null, peak: null }), {
+        fmt: (v) => fmtBytes(v),
+        max: maxTx || 1,
+        peak: false,
+      })}
+    </div>
+    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t(
+      `这一天出网合计 ${fmtBytes(total)}，${covered} / ${slots.length} 格有数据。库里按分钟存，画的时候并成 10 分钟一格：柱高是均值，峰值取的是那 10 分钟里最高的那一分钟（标题行和悬停里都有）。空格 = 那段时间没有心跳。`,
+      `${fmtBytes(total)} out on this day; ${covered} of ${slots.length} slots have data. Stored per minute, drawn in 10-minute slots: bars are averages, peaks are the highest minute in the slot. Empty slots = no heartbeat then.`,
+    )}</p>`
+}
+
+/** 两档的切换条，外加「日」那一档的日期选择。 */
+function loadTabsBar(card) {
+  const m = card.machine || {}
+  const tab = state.machineLoadTab
+  const tabs = LOAD_TABS.map(
+    (x) =>
+      `<button type="button" class="btn ${tab === x.key ? 'btn-primary' : ''}" style="padding: 2px 10px; font-size: 12.5px;" data-act="machine-load-tab" data-tab="${x.key}" data-machine="${esc(m.id)}">${t(x.label)}</button>`,
+  ).join('')
+  // 选择器的上下限就是归档的保留期：能点到的日子必须真的有可能有数据。
+  const picker =
+    tab === 'day'
+      ? `<input class="input" type="date" style="width: 160px; padding: 2px 8px; font-size: 12.5px;" value="${esc(loadDateOf())}" min="${esc(loadMinDateOf())}" max="${esc(localDateKey(new Date()))}" data-act="machine-load-date" data-machine="${esc(m.id)}">`
+      : ''
+  return `<div style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
+    ${tabs}${picker}
+    ${state.machineLoadBusy ? `<span style="font-size: 12px; color: var(--muted-foreground);">${t('载入中…')}</span>` : ''}
+  </div>`
+}
+
 /**
  * CPU、内存、盘、出网。
  *
  * 出网那一格**主角是速率不是累计**：累计是「开机以来」，机器一重启就归零，拿它对
  * 月度流量账是错的；而「现在正在往外发多少」才是这一页能答、也答得准的问题。累计
  * 仍然给出来，标明口径，用来看「这台机器一直在往外倒东西吗」。
+ *
+ * 「日」那一档换的是**数据源**，不是同一份数的另一种画法：它吃 Gateway 按分钟归的档
+ * （见 loadHistoryBody），实时这一档吃机器自报的最近一份。
  */
 function machineLoadPanel(card) {
   const m = card.machine || {}
   const load = (m.telemetry && m.telemetry.metrics) || null
   const age = m.telemetryAge == null ? '' : sinceMs(m.telemetryAge)
+  if (state.machineLoadTab !== 'live') {
+    return `<div class="satu-panel">
+      <span class="satu-panel-title">${t('机器负载')}</span>
+      ${loadTabsBar(card)}
+      ${loadHistoryBody(card)}
+    </div>`
+  }
   if (!load) {
     return `<div class="satu-panel">
       <span class="satu-panel-title">${t('机器负载')}</span>
+      ${loadTabsBar(card)}
       <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${
         m.paired
           ? t('这台机器还没报过负载。老版本的管家不报这一项，升级它之后下一轮心跳就有了。', 'This machine has never reported load. Older managers do not report it — upgrade and it arrives on the next heartbeat.')
@@ -330,6 +553,7 @@ function machineLoadPanel(card) {
   const hours = Math.floor(((load.uptime || 0) % 86400) / 3600)
   return `<div class="satu-panel">
     <span class="satu-panel-title">${t('机器负载')}</span>
+    ${loadTabsBar(card)}
     ${/* 数是机器自报的，隔一轮心跳才来一次。先说清楚它有多新，再给数——不然一台失联
           机器上的「CPU 5%」看着和好机器一模一样。 */ ''}
     <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">

@@ -289,6 +289,29 @@ export interface Machine {
   token: string
 }
 
+/**
+ * 一台机器某一分钟的负载归档（见迁移 0012）。
+ *
+ * 存的是 sum + samples 而不是平均值，累加才能是纯 `+`；平均值在读的时候除出来。
+ * 峰值单独一列——一分钟里也可能一笔 5%、一笔 95%。
+ */
+export interface MachineMetricMinute {
+  machineId: string
+  /** 这一格的起点，**UTC 整分**的 epoch 毫秒。按哪本日历分天由界面决定。 */
+  minuteStart: number
+  /** 这一分钟收到几笔有效采样（心跳 30 秒一轮，通常 2 笔）。没有行 = 没有数据，不是 0%。 */
+  samples: number
+  cpuSum: number
+  cpuMax: number
+  memSum: number
+  memMax: number
+  diskSum: number
+  diskMax: number
+  /** 这一分钟**走了多少字节**（增量，不是计数器快照），可以直接相加成一小时、一天。 */
+  txBytes: number
+  rxBytes: number
+}
+
 export interface MachinePairing {
   code: string
   companyId: string

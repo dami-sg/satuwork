@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
-import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
+import { type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -1916,6 +1916,14 @@ export class Db {
    * 一条走主键之外单列的 delete。
    */
   async sweepRemovedMachines(before: number): Promise<number> {
+    // 归档先走。**这条路才是常态**——机器一直没回来收信的，最后都是从这儿被硬删掉
+    // 的；只在 deleteMachine 里清的话，恰恰是「再也没回来那台」的四万多行永远留着。
+    // 先删归档再删机器行：反过来的话，机器行没了就再也定位不到它的归档（同
+    // deleteSeatRuntimesOfMachine 里 instances 排在前面的理由）。
+    await this.run(
+      'delete from machine_metric_minutes where "machineId" in (select id from machines where "removedAt" is not null and "removedAt" < ?)',
+      [before],
+    )
     return this.run('delete from machines where "removedAt" is not null and "removedAt" < ?', [before])
   }
 
@@ -1951,6 +1959,10 @@ export class Db {
 
   /** 只删登记，不碰机器。上面还有席位的话，先走 deleteSeatRuntimesOfMachine。 */
   async deleteMachine(id: string): Promise<void> {
+    // 归档跟着一起走。表上没有外键级联（那张表是按 machineId 裸存的），不在这儿删
+    // 的话，一台被移除的机器会在库里留下四万多行没人认领的曲线——保留期最终会收掉
+    // 它们，但那是三十天之后的事，而且中间谁也查不出这些行属于谁。
+    await this.run('delete from machine_metric_minutes where "machineId" = ?', [id])
     await this.run('delete from machines where id = ?', [id])
   }
 
@@ -2041,6 +2053,61 @@ export class Db {
       ],
     )
     return next
+  }
+
+  // ── 负载归档。心跳每 30 秒往当前那一分钟的格子里累一笔（见迁移 0012）。──
+
+  /**
+   * 把这一轮心跳累进它所属的那一分钟。
+   *
+   * **一条 upsert，不读不算**：累加是纯 `+`、峰值取 `greatest`，两轮心跳撞在一起也
+   * 不会互相盖掉。读出来再改写的话，同一台机器重连时那两笔就会丢一笔。
+   *
+   * `tx`/`rx` 收的是**这一段时间走了多少字节**（增量），不是计数器快照——调用方拿
+   * 相邻两轮的差算，计数器倒退（机器重启）时给 0。
+   */
+  async addMachineMetricSample(
+    machineId: string,
+    minuteStart: number,
+    s: { cpu: number; mem: number; disk: number; tx: number; rx: number },
+  ): Promise<void> {
+    await this.run(
+      `insert into machine_metric_minutes
+         ("machineId", "minuteStart", samples, "cpuSum", "cpuMax", "memSum", "memMax", "diskSum", "diskMax", "txBytes", "rxBytes")
+       values (?,?,1,?,?,?,?,?,?,?,?)
+       on conflict ("machineId", "minuteStart") do update set
+         samples   = machine_metric_minutes.samples + 1,
+         "cpuSum"  = machine_metric_minutes."cpuSum"  + excluded."cpuSum",
+         "cpuMax"  = greatest(machine_metric_minutes."cpuMax",  excluded."cpuMax"),
+         "memSum"  = machine_metric_minutes."memSum"  + excluded."memSum",
+         "memMax"  = greatest(machine_metric_minutes."memMax",  excluded."memMax"),
+         "diskSum" = machine_metric_minutes."diskSum" + excluded."diskSum",
+         "diskMax" = greatest(machine_metric_minutes."diskMax", excluded."diskMax"),
+         "txBytes" = machine_metric_minutes."txBytes" + excluded."txBytes",
+         "rxBytes" = machine_metric_minutes."rxBytes" + excluded."rxBytes"`,
+      [machineId, minuteStart, s.cpu, s.cpu, s.mem, s.mem, s.disk, s.disk, Math.round(s.tx), Math.round(s.rx)],
+    )
+  }
+
+  /** 一段时间里的分钟格，按时间升序。**没有数据的分钟不会有行**——那是空档，不是 0。 */
+  async machineMetricMinutes(machineId: string, from: number, to: number): Promise<MachineMetricMinute[]> {
+    const rows = await this.many(
+      'select * from machine_metric_minutes where "machineId" = ? and "minuteStart" >= ? and "minuteStart" < ? order by "minuteStart"',
+      [machineId, from, to],
+    )
+    return rows.map(machineMetricMinuteOf)
+  }
+
+  /**
+   * 收掉过保留期的归档。
+   *
+   * 一台机器一天 1440 行，三十天四万多行——**这个量必须真的被清**，不像别处那些顺手
+   * 扫一扫的表。所以调用点挂在**心跳**上（每台机器整点那一分钟一次，见 internal.ts
+   * 的 rollUp），不挂在任何一条要人点开才会走的路上：写入是每 30 秒自动的，清理要是
+   * 得等人打开日视图，那句「只留 30 天」在没人看图的部署上就是空话。
+   */
+  async sweepMachineMetricMinutes(before: number): Promise<number> {
+    return this.run('delete from machine_metric_minutes where "minuteStart" < ?', [before])
   }
 
   // ── 配对码。一次性、30 分钟过期，装管家时拿它换这台机器的 smt_。──

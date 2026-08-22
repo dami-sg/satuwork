@@ -9,7 +9,7 @@ import { accessUrlFor } from '../lib/catalog.ts'
 import { bodyOf, intField, strField } from '../lib/validate.ts'
 import { callerAccountId, requireBootstrapMachine, requireInternalCaller, requireMachine } from '../lib/guards.ts'
 import { instanceHostOf, sourceIpOf } from '../lib/runtime.ts'
-import { telemetryOf } from '../lib/telemetry.ts'
+import { METRIC_RETENTION_MS, MINUTE_MS, egressDelta, telemetryOf } from '../lib/telemetry.ts'
 import { type Machine } from '../db.ts'
 
 /**
@@ -141,6 +141,62 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     json(res, 200, { ok: true })
   })
 
+  /** 上一次为哪台机器报过归档写失败。限流靠它，见 warnRollup。 */
+  const rollupWarnedAt = new Map<string, number>()
+
+  /**
+   * 把一轮心跳累进它所属的那一分钟格。
+   *
+   * **CPU 报不出来的那一轮整笔不算。** 管家重启后的第一次采样只存基准（见
+   * metrics.ts），那时 `cpu.usage` 是 null——把它当 0 记进去，重启就会在曲线上砸出
+   * 一个假的谷；只补内存和盘的话，同一行里三个数就不是同一批采样了。一轮 30 秒，
+   * 漏一笔比记错一笔便宜得多。
+   *
+   * 出网记的是**增量**：拿这一轮和上一轮的计数器相减（见 egressDelta）。
+   *
+   * **整块吞掉异常。** 心跳是 Gateway 对这台机器唯一的下行通道——升级版本、时区、
+   * 日志上限都搭在它的响应里。归档写不进去（盘满、锁等超时）就让整轮心跳 500 的话，
+   * 一个「少记一笔曲线」的毛病会连着把自升级和时区下发一起停掉，而界面上那盏灯还是
+   * 绿的（lastHeartbeatAt 在这之前已经更新过了），谁也看不出控制面断了。
+   */
+  async function rollUp(before: Machine, after: Machine, telemetry: ReturnType<typeof telemetryOf>): Promise<void> {
+    const m = telemetry?.metrics
+    if (!m || m.cpu.usage == null) return
+    const prevNet = before.telemetry?.metrics?.net
+    const gap = before.telemetryAt ? (after.telemetryAt ?? Date.now()) - before.telemetryAt : 0
+    // 盘取**最吃紧的那一块**：一台机器好几块盘，曲线上要看的是先满的那一块。
+    const disk = m.disks.reduce((worst, d) => Math.max(worst, d.usage), 0)
+    const minuteStart = Math.floor((after.telemetryAt ?? Date.now()) / MINUTE_MS) * MINUTE_MS
+    try {
+      await db.addMachineMetricSample(after.id, minuteStart, {
+        cpu: m.cpu.usage,
+        mem: m.memory.usage,
+        disk,
+        tx: egressDelta(m.net.txBytes, prevNet?.txBytes, gap),
+        rx: egressDelta(m.net.rxBytes, prevNet?.rxBytes, gap),
+      })
+      // 保留期在这里收，**不挂在「有人打开日视图」上**：写入是每 30 秒自动的，清理
+      // 要是得等人去点一下，那句「只留 30 天」在没人看图的部署上就是空话。整点那一
+      // 分钟扫一次，一台机器一小时一次，绝大多数时候是条没删到东西的索引删除。
+      if (minuteStart % (60 * MINUTE_MS) === 0) await db.sweepMachineMetricMinutes(Date.now() - METRIC_RETENTION_MS)
+    } catch (e) {
+      warnRollup(after.id, e)
+    }
+  }
+
+  /**
+   * 归档写失败时说一句，但**别每 30 秒刷一遍**。
+   *
+   * 这类故障要么一瞬间过去、要么持续几小时（盘满），而后者按机器数乘以每分钟两轮，
+   * 能把日志淹掉——真正要看的那几行反而被挤没了。同一台机器五分钟内只说一次。
+   */
+  function warnRollup(machineId: string, e: unknown): void {
+    const now = Date.now()
+    if (now - (rollupWarnedAt.get(machineId) ?? 0) < 5 * 60_000) return
+    rollupWarnedAt.set(machineId, now)
+    console.warn(`satuwork-gateway: 机器 ${machineId} 的负载归档写失败（心跳照常）：${e instanceof Error ? e.message : String(e)}`)
+  }
+
   router.post('/internal/machines/:id/heartbeat', async (req, res) => {
     const machine = await requireMachine(req, db)
     if (machine.id !== req.params.id) throw new HttpError(403, '机器凭证与路径不符')
@@ -180,6 +236,10 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       ...(reportedTz === undefined ? {} : { currentTimezone: reportedTz }),
       lastError: upgradeError,
     })
+    // 把这一轮累进它所属的那一分钟。日视图从这张表来——`machines.telemetry` 只有
+    // 「现在怎么样」，答不了「今天忙不忙、下午那阵卡是几点」。
+    await rollUp(machine, next, telemetry)
+
     const desired = await desiredManagerRelease(db, next)
     json(res, 200, {
       machine: { id: next.id, lastHeartbeatAt: next.lastHeartbeatAt },

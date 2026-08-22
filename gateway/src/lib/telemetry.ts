@@ -157,6 +157,40 @@ export function normalizeLogUsage(raw: unknown): LogUsage | null {
   }
 }
 
+/** 一分钟的毫秒数。归档按 UTC 整分切格（见迁移 0012）。 */
+export const MINUTE_MS = 60_000
+
+/**
+ * 归档留多久：**30 天**。
+ *
+ * 分钟粒度是为了看得见尖峰，代价是一台机器一天 1440 行。三十天四万多行还算得上一
+ * 张普通的表；留到一年就是五十万行一台，那时它已经是个没人维护的时序库了。再往前
+ * 的回溯该去监控系统。
+ */
+export const METRIC_RETENTION_MS = 30 * 24 * 60 * MINUTE_MS
+
+/**
+ * 相邻两轮心跳之间**走了多少字节**。
+ *
+ * 机器自报的是开机以来的累计值，所以只能靠差值。两处要挡住：
+ *
+ * - **计数器倒退**（机器重启、网卡重建）不是「负流量」，那一笔当 0——把 `now` 整个
+ *   算进去更糟，那等于把开机以来的总量一次性记到这一格头上。
+ * - **上一份太旧**也不算。机器失联一天再回来，中间那一整天的流量会全落进它回来的
+ *   那一分钟里，画出一根凭空的尖峰。宁可漏掉那一段（界面上本来就是空档），也不要
+ *   在一个错的位置堆出一座山。
+ */
+export function egressDelta(
+  now: number,
+  prev: number | undefined,
+  gapMs: number,
+  maxGapMs = 5 * 60_000,
+): number {
+  if (prev == null || !Number.isFinite(prev)) return 0
+  if (gapMs <= 0 || gapMs > maxGapMs) return 0
+  return now >= prev ? now - prev : 0
+}
+
 /**
  * 心跳里的两份自报数据 → 一格 telemetry。`prev` 是库里现存的那一份。
  *

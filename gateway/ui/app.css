@@ -255,12 +255,15 @@ aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; ov
 }
 
 /* ── 占用条（CPU / 内存 / 磁盘 / journal）────────────────────────────
+   **叫 gauge 不叫 meter**：shell.css 里早就有一套 `.satu-meter` / `.satu-meterfill`
+   （Bot 统计页那几条按比例撑满宽度的进度条）。同名而不同形状，晚来的这套会顺着
+   层叠盖上去——把那边的进度条从「撑满容器」压成 72px 的一小截，而那一页谁也没动过。
    三档颜色，门槛 75% 和 90%。**颜色不是唯一信息**：条子旁边永远跟着一个百分数，
    跟通联灯那条规矩一样——只靠颜色的话，色觉障碍的人看到的是三根一模一样的条。
 
    门槛定在 75/90 而不是 90/95：这一页的用处是在机器出事**之前**看见它，而一块盘
    从 90% 到写满往往只要几个小时，那时 bot 起不来、连日志都写不进去。 */
-.satu-meter {
+.satu-gauge {
   flex: none;
   display: inline-block;
   width: 72px;
@@ -270,18 +273,18 @@ aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; ov
   overflow: hidden;
   vertical-align: middle;
 }
-.satu-meter > span {
+.satu-gauge > span {
   display: block;
   height: 100%;
   border-radius: 999px;
   background: var(--color-ok-500);
 }
-.satu-meter[data-level="warn"] > span { background: var(--color-warn-500); }
-.satu-meter[data-level="hot"] > span { background: var(--destructive); }
+.satu-gauge[data-level="warn"] > span { background: var(--color-warn-500); }
+.satu-gauge[data-level="hot"] > span { background: var(--destructive); }
 /* 算不出百分比（还没采到、或者压根没有上限可比）：空心虚线槽。**不能画成实心的
    0%**——那是「量到了，就是 0」，和「没量到」是完全相反的两个结论，跟通联灯里
    「失联是空心、没配对是虚线」同一条规矩。 */
-.satu-meter[data-level="none"] {
+.satu-gauge[data-level="none"] {
   background: transparent;
   border: 1px dashed var(--border);
   opacity: 0.6;

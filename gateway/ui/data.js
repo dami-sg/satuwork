@@ -368,6 +368,10 @@ async function loadMachineDetail(id) {
     state.machineDetail = data
     state.botLatest = data.botLatest || null
     state.managerLatest = data.managerLatest || null
+    // 负载停在「日」那一档时，把那天的归档也带上。**这一份是另一条接口**：上面那条
+    // 只有「现在怎么样」。不在这儿拉的话，直接打开地址、或者按一下刷新，那一档会挂在
+    // 「载入中」上不动——因为没有任何人去拉。
+    if (state.machineLoadTab !== 'live') await loadMachineMetrics(id)
   } catch (err) {
     flash('err', err.message)
     if (err.status === 404) {

@@ -755,6 +755,163 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       }
     })
 
+    await test('负载归档：心跳累进分钟格，出网记增量，重启不算负流量', async () => {
+      // 日视图吃的是这张表。要盯三件事：累加是不是真的在累（而不是每轮覆盖）、
+      // 峰值有没有单独留住（均值会把冲顶那五分钟抹平）、以及出网记的是**增量**——
+      // 机器自报的是开机以来的累计值，直接存快照的话，一天的曲线会是一条只涨不跌的
+      // 斜线，而不是「每小时走了多少」。
+      const { createRequire } = await import('node:module')
+      const require = createRequire(new URL('../gateway/package.json', import.meta.url))
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      const fake = '00000000-0000-4000-8000-0000000000fd'
+      const fakeTok = 'smt_e2e-rollup-probe'
+      const beat = (over) => ({
+        managerVersion: 'e2e-1',
+        protocol: 2,
+        node: process.versions.node,
+        seats: [],
+        metrics: {
+          uptime: 3600,
+          cpu: { cores: 8, usage: 0.1, load1: 1 },
+          memory: { total: 16e9, used: 4e9, usage: 0.25, swapTotal: 0, swapUsed: 0 },
+          disks: [
+            { mount: '/', total: 1e9, used: 3e8, free: 7e8, usage: 0.3 },
+            // 两块盘时取**最吃紧的那一块**：曲线上要看的是先满的那一个。
+            { mount: '/home', total: 1e9, used: 8e8, free: 2e8, usage: 0.8 },
+          ],
+          net: { txBytes: 1000, rxBytes: 2000, txRate: 10, rxRate: 20, interfaces: ['eth0'] },
+          ...(over || {}),
+        },
+      })
+      const minutesOf = async () =>
+        (await client.query('select * from machine_metric_minutes where "machineId" = $1', [fake])).rows
+      try {
+        await client.query('set search_path to e2e_manager')
+        await client.query(
+          `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token)
+           values ($1, 'http://10.0.0.97:8443', $2, $3, $3, $3, 2, 10, $4)`,
+          [fake, orgId, Date.now(), fakeTok],
+        )
+
+        // 第一轮：没有上一份可比，出网增量只能是 0——不能把「开机以来的 1000 字节」
+        // 一次性记到这一小时头上。
+        await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, { token: fakeTok, body: beat() })
+        let rows = await minutesOf()
+        assert(rows.length === 1, `该有一格，实际 ${rows.length}`)
+        assert(Number(rows[0].samples) === 1, `samples=${rows[0].samples}`)
+        assert(Number(rows[0].txBytes) === 0, `第一轮没有上一份可比，出网该是 0，实际 ${rows[0].txBytes}`)
+        assert(Math.abs(Number(rows[0].diskMax) - 0.8) < 1e-9, `盘该取最吃紧那块 0.8，实际 ${rows[0].diskMax}`)
+
+        // 第二轮：CPU 冲顶，出网计数器往前走。累加要落在**同一行**上。
+        await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, {
+          token: fakeTok,
+          body: beat({
+            cpu: { cores: 8, usage: 0.9, load1: 7 },
+            net: { txBytes: 5000, rxBytes: 6000, txRate: 10, rxRate: 20, interfaces: ['eth0'] },
+          }),
+        })
+        rows = await minutesOf()
+        // 同一分钟里的两轮心跳要落在同一行上（心跳 30 秒一轮，一分钟正好两笔）。
+        assert(rows.length === 1, `还是同一分钟，不该多出一行：${rows.length}`)
+        assert(Number(rows[0].samples) === 2, `samples 该累加到 2，实际 ${rows[0].samples}`)
+        // 均值靠 sum/samples 算，所以库里存的是和：0.1 + 0.9。
+        assert(Math.abs(Number(rows[0].cpuSum) - 1.0) < 1e-9, `cpuSum=${rows[0].cpuSum}`)
+        // **峰值单独留住**：均值是 50%，而这一小时真冲到过 90%，人要找的是后者。
+        assert(Math.abs(Number(rows[0].cpuMax) - 0.9) < 1e-9, `cpuMax 该是 0.9，实际 ${rows[0].cpuMax}`)
+        assert(Number(rows[0].txBytes) === 4000, `出网该记增量 4000，实际 ${rows[0].txBytes}`)
+
+        // 第三轮：机器重启，计数器归零。**那不是负流量**，这一笔当 0——把 now 整个
+        // 算进去更糟，等于把开机以来的总量记到这一小时头上。
+        await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, {
+          token: fakeTok,
+          body: beat({ net: { txBytes: 12, rxBytes: 20, txRate: 1, rxRate: 1, interfaces: ['eth0'] } }),
+        })
+        rows = await minutesOf()
+        assert(Number(rows[0].txBytes) === 4000, `计数器倒退不该改动累计，实际 ${rows[0].txBytes}`)
+
+        // CPU 报不出来的那一轮整笔不算：管家重启后的第一次采样只存基准，把它当 0
+        // 记进去会在曲线上砸出一个假的谷。
+        await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, {
+          token: fakeTok,
+          body: beat({ cpu: { cores: 8, usage: null, load1: 0 } }),
+        })
+        rows = await minutesOf()
+        assert(Number(rows[0].samples) === 3, `没有 CPU 的那轮不该计入，samples=${rows[0].samples}`)
+
+        // 读接口：范围按调用方给的算，平均值在这一层除出来。
+        const now = Date.now()
+        const r = await req(gwBase, 'GET', `/platform/machines/${fake}/metrics?from=${now - 3600_000}&to=${now + 60_000}`, {
+          token: ownerTok,
+        })
+        assert(r.status === 200, `metrics ${r.status} ${r.text}`)
+        assert(r.json.minutes.length === 1, `该有一格：${r.text.slice(0, 200)}`)
+        assert(r.json.retentionMs === 30 * 24 * 3600_000, `保留期该一起给出去：${r.json.retentionMs}`)
+        const h = r.json.minutes[0]
+        // 三笔算进来的 CPU 是 0.1、0.9、0.1（计数器归零那轮的 CPU 照样算，归零只影响
+        // 出网那一格），没有 CPU 的那轮整笔不算。
+        assert(h.samples === 3, `samples=${h.samples}`)
+        assert(Math.abs(h.cpuAvg - 1.1 / 3) < 1e-9, `cpuAvg 该是 (0.1+0.9+0.1)/3，实际 ${h.cpuAvg}`)
+        assert(h.cpuMax === 0.9 && h.txBytes === 4000, `峰值/出网没带出来：${JSON.stringify(h)}`)
+
+        const bad = await req(gwBase, 'GET', `/platform/machines/${fake}/metrics?from=${now}&to=${now}`, { token: ownerTok })
+        assert(bad.status === 400, `空范围该 400，实际 ${bad.status}`)
+        // 一天 1440 行，上限卡在两天：一个月就是四万多行，这张表不该一次吐出来。
+        const huge = await req(gwBase, 'GET', `/platform/machines/${fake}/metrics?from=${now - 3 * 86400_000}&to=${now}`, { token: ownerTok })
+        assert(huge.status === 400, `超过两天该 400，实际 ${huge.status}`)
+        const anon = await req(gwBase, 'GET', `/platform/machines/${fake}/metrics?from=${now - 1000}&to=${now}`)
+        assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+
+        // **归档写失败不该拖垮心跳。** 心跳是对这台机器唯一的下行通道（升级、时区、
+        // 日志上限都搭在响应里），一个「少记一笔曲线」的毛病不该把它们一起停掉。
+        // 把表改名模拟写失败——比造盘满容易，而对那条 insert 来说是同一种失败。
+        await client.query('alter table machine_metric_minutes rename to machine_metric_minutes_hidden')
+        try {
+          const hb = await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, { token: fakeTok, body: beat() })
+          assert(hb.status === 200, `归档写不进去时心跳仍该是 200，实际 ${hb.status} ${hb.text}`)
+          assert('desiredManagerVersion' in hb.json, `控制面那几格还得在：${hb.text.slice(0, 200)}`)
+        } finally {
+          await client.query('alter table machine_metric_minutes_hidden rename to machine_metric_minutes')
+        }
+
+        // 机器真被删掉时，归档要跟着走：那张表按 machineId 裸存，没有外键级联。
+        //
+        // **删机器有两条路**，两条都得清干净：在线的先立墓碑、等管家回执才真删；一直
+        // 没回来的由墓碑清扫硬删。这里走前一条，后一条在下面那段单独验——那才是「机器
+        // 再也没回来」的常态，也是最容易被漏掉的一条。
+        assert((await minutesOf()).length > 0, '前面攒的行呢')
+        const del = await req(gwBase, 'DELETE', `/platform/machines/${fake}`, { token: ownerTok })
+        assert(del.status === 200 && del.json.pending === true, `在线的机器该先立墓碑：${del.text}`)
+        assert((await minutesOf()).length > 0, '墓碑阶段机器还在册，归档不该先没')
+        const receipt = await req(gwBase, 'POST', `/internal/machines/${fake}/removed`, { token: fakeTok, body: {} })
+        assert(receipt.status === 200, `回执 ${receipt.status} ${receipt.text}`)
+        assert((await minutesOf()).length === 0, '机器真删了，归档还留在库里')
+
+        // 另一条：机器一直没来收信，墓碑到期被硬删——归档同样要跟着走。
+        const ghost = '00000000-0000-4000-8000-0000000000fc'
+        await client.query(
+          `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token, "removedAt")
+           values ($1, 'http://10.0.0.96:8443', $2, $3, $3, $3, 2, 10, 'smt_e2e-ghost', $4)`,
+          [ghost, orgId, Date.now(), Date.now() - 30 * 24 * 3600_000],
+        )
+        await client.query(
+          'insert into machine_metric_minutes ("machineId", "minuteStart", samples) values ($1, $2, 1)',
+          [ghost, Math.floor(Date.now() / 60_000) * 60_000],
+        )
+        // 列表那条路会顺手扫墓碑（sweepRemovedMachines）。
+        await req(gwBase, 'GET', '/platform/machines', { token: ownerTok })
+        const left = await client.query('select 1 from machine_metric_minutes where "machineId" = $1', [ghost])
+        assert(left.rowCount === 0, `墓碑清掉了，归档还剩 ${left.rowCount} 行`)
+      } finally {
+        for (const id of [fake, '00000000-0000-4000-8000-0000000000fc']) {
+          await client.query('delete from machine_metric_minutes where "machineId" = $1', [id]).catch(() => {})
+          await client.query('delete from machines where id = $1', [id]).catch(() => {})
+        }
+        await client.end().catch(() => {})
+      }
+    })
+
     await test('日志上限：平台钉一个数，心跳带下去，管家真的认了', async () => {
       // 和时区、管家版本同一条路：Gateway 没有登录这台机器的凭据，只能把期望值放进
       // 心跳响应，机器自己去收敛。所以要盯的是整条链，而不只是「存住了没有」。

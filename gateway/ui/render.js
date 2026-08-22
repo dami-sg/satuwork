@@ -1121,6 +1121,55 @@ async function saveTimezone(e) {
 }
 
 /**
+ * 换机器负载那两档，或者换日期。
+ *
+ * 换完**立刻去拉**：这一页别的块都是一次性拉回来的快照，只有这两档是按范围现取的。
+ * 不在这里拉的话，画的时候才发现手上没有数据，那时已经在渲染中间了。
+ */
+async function switchMachineLoadTab(machineId, tab, value) {
+  if (tab) state.machineLoadTab = tab === 'day' ? 'day' : 'live'
+  if (value) state.machineLoadDate = value
+  state.machineLoadError = ''
+  render()
+  if (state.machineLoadTab === 'live') return
+  await loadMachineMetrics(machineId)
+}
+
+/**
+ * 拉一段时间的归档。
+ *
+ * 范围**在前端按浏览器本地日历算好**再传（见 loadRangeOf）：格子在库里是 UTC 整分，
+ * 「今天」是哪 24 小时只有看的人那本日历说得清，服务端不猜。
+ *
+ * 拉回来的东西带着 key 存：换机器、换日期之后旧的那份还在内存里，不比对就会拿上一
+ * 天的曲线顶着画一整屏。
+ */
+async function loadMachineMetrics(machineId) {
+  if (!machineId) return
+  const key = loadKeyOf(machineId)
+  const { from, to } = loadRangeOf()
+  state.machineLoadBusy = true
+  render()
+  try {
+    const data = await api('GET', `/platform/machines/${encodeURIComponent(machineId)}/metrics?from=${from}&to=${to}`)
+    // 拉的过程中人又换了一档：这一份已经不是要看的那个了，丢掉，别盖住后到的那份。
+    if (loadKeyOf(machineId) !== key) return
+    state.machineLoadMinutes = {
+      key,
+      minutes: Array.isArray(data.minutes) ? data.minutes : [],
+      // 保留期由服务端说了算：界面上「这一天太久了，已经清掉」那句话要拿它判。
+      retentionMs: Number(data.retentionMs) || 0,
+    }
+    state.machineLoadError = ''
+  } catch (err) {
+    state.machineLoadError = err.message
+  } finally {
+    state.machineLoadBusy = false
+    render()
+  }
+}
+
+/**
  * 设这台机器的 journal 上限。
  *
  * 和改时区一条路——填进去只是**下指令**，真正清 journal 的是机器上的管家，下一轮
