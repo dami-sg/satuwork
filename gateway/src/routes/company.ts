@@ -11,9 +11,9 @@ import { bodyOf, deployOptsOf, strField, usd, usdMicros } from '../lib/validate.
 import { companyMachineOf, deploySeat, listSeatRuntime, publicMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
 import { companyStatusOf, emailOf, groupRoleOf, membersInCompany, patchAccount, phoneOf, publicAccount, publicCompany, publicGroup, publicPlan, publicSettings, roleOf, slugOf, stringIds, websiteOf } from '../lib/org.ts'
 import { desktopTicketFor, machineHostOf, machineHostResolver } from '../lib/machines.ts'
-import { inviteLinkOf, issueInvite, losingAdmin, rangeQuery, requireOrg, requireOwner, requireUser, statusOf, usagePayload } from '../lib/guards.ts'
+import { inviteLinkOf, issueInvite, rangeQuery, requireOrg, requireOwner, requireUser, usagePayload } from '../lib/guards.ts'
 import { randomUUID } from 'node:crypto'
-import { type AccountStatus, type CompanyStatus, type Group, type Role } from '../db.ts'
+import { type CompanyStatus, type Group } from '../db.ts'
 
 export function attachCompany(router: Router, ctx: RouteCtx) {
   const { db, keys, llm, meter } = ctx

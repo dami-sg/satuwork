@@ -102,10 +102,18 @@ function globalBotsPage() {
  * 变了吗」。
  *
  * 数字按**席位自己报的版本**算，不是按 Gateway 发了什么算（见 0013 那条迁移）。
+ *
+ * **基准版本一律取 `sync.version`，不取这一页上那份 `state.template.version`。** 两者会
+ * 分家：别人在你开着这一页的时候保存了新的一版，轮询拿回来的 `synced` 是服务端按新版本
+ * 数的，而页面上那份还停在你打开时的旧版本。混着用的话，「落后的有谁」按旧版本筛、
+ * 「几台跟上了」按新版本数——最难看的一种是筛出来空集，于是这一格画成绿色写着「每台都在
+ * 跑这一版」，而同一行的标签是「0/4」。一个数字只能有一个基准。
  */
-function templateSyncPanel(version) {
+function templateSyncPanel() {
   const sync = state.templateSync
   if (!sync) return ''
+  // 老响应里没有 version 时退回页面上那份，总比拿 undefined 去比对强。
+  const version = sync.version ?? state.template?.version
   const seats = Array.isArray(sync.seats) ? sync.seats : []
   const behind = seats.filter((s) => s.version !== version)
   const done = seats.length > 0 && behind.length === 0
@@ -138,6 +146,10 @@ function templateSyncPanel(version) {
             ? t('公司里每台已部署的席位都在跑这一版。', 'Every deployed seat in the company is running this version.')
             : t('席位每分钟探一次，换上新版本后立刻报回来。要是有一台一直落后、或者「还没报到过」停了很久，多半是它上面的 bot 进程不在了或者出不了网——去机器那一页看日志。', 'Seats check once a minute and report back as soon as they switch. A seat that stays behind — or has never reported for a long time — usually means its bot process is gone or offline; check the logs on the machines page.')
         }
+        ${/* 自动刷新会在数字不动之后停下来（见 tplSyncWant）。停了之后**必须留一条手动
+             的路**：一台永远跟不上的席位正是最需要反复确认的那种，而那时候页面已经不
+             自己问了。这颗按钮同时把那个静默计数清零，等于「再盯一会儿」。 */ ''}
+        ${done ? '' : ` <button type="button" class="satu-linkbtn" data-act="tpl-sync-refresh">${t('刷新')}</button>`}
       </p>
     </div>`
 }
@@ -149,17 +161,45 @@ function templateSyncPanel(version) {
  * 「0/4」。不自己刷新的话，人得手动重开这一页才看得到「4/4」，于是这一格答的其实是
  * 「刚才那一刻怎么样」，不是「现在怎么样」。
  *
- * 全跟上了就停。开着一个标签页永远每 15 秒一个请求，换不来任何新消息。
+ * ## 什么时候停
+ *
+ * 全跟上了就停——这是常态，几十秒的事。
+ *
+ * 但**「还有人落后」不是一个会自己了结的状态**：一台 bot 进程已经死掉的席位永远跟不上，
+ * 而那恰恰是这一格最该报出来的那种故障。只按「还有人落后」接着问的话，一个开着不管的
+ * 标签页会整夜每 15 秒打一次接口（八小时两千次，每次都要跑一遍席位表和账号表、并回整份
+ * 模版正文），换不来任何新消息。
+ *
+ * 所以再加一条：**连着 TPL_SYNC_QUIET_MAX 轮数字一个都没变就停**（8 轮 = 2 分钟）。数字
+ * 一变就清零、继续盯——真正在换版的那段时间里它每一轮都在变，停不下来。停了之后面板上
+ * 留一颗「刷新」，按一下再盯两分钟。
  */
 const TPL_SYNC_POLL_MS = 15000
+const TPL_SYNC_QUIET_MAX = 8
 let tplSyncTimer = 0
+let tplSyncQuiet = 0
+let tplSyncMark = ''
+
+/** 这一份同步状态的指纹。只用来判断「和上一轮比动没动」，不给人看。 */
+function tplSyncMarkOf(sync) {
+  const seats = sync && Array.isArray(sync.seats) ? sync.seats : []
+  return `${sync?.version ?? ''}|${sync?.synced ?? ''}|${seats.map((s) => `${s.seatId}:${s.version ?? ''}`).join(',')}`
+}
 
 function tplSyncWant() {
   // 人走开去别的页面了就别再问。
   if (state.path !== '/bots') return false
+  if (tplSyncQuiet >= TPL_SYNC_QUIET_MAX) return false
   const sync = state.templateSync
   const seats = sync && Array.isArray(sync.seats) ? sync.seats : []
   return seats.some((s) => s.version !== sync.version)
+}
+
+/** 重新开始盯：保存之后、以及人按了「刷新」之后。 */
+function tplSyncWake() {
+  tplSyncQuiet = 0
+  tplSyncMark = tplSyncMarkOf(state.templateSync)
+  syncTemplatePoll()
 }
 
 function syncTemplatePoll() {
@@ -191,6 +231,13 @@ async function refreshTemplateSync() {
     return
   }
   state.templateSync = data.sync || null
+  // 和上一轮比：动了就清零接着盯，没动就往静默计数上加一。
+  const mark = tplSyncMarkOf(state.templateSync)
+  if (mark === tplSyncMark) tplSyncQuiet++
+  else {
+    tplSyncQuiet = 0
+    tplSyncMark = mark
+  }
   /**
    * **只换这一格，不整页重绘。**
    *
@@ -199,7 +246,7 @@ async function refreshTemplateSync() {
    * 状态而打断人打字，不值。
    */
   const node = document.querySelector('[data-tpl-sync]')
-  if (node) node.outerHTML = templateSyncPanel(state.template?.version)
+  if (node) node.outerHTML = templateSyncPanel()
   syncTemplatePoll()
 }
 
@@ -225,7 +272,7 @@ function botTemplatePage() {
           </p>
         </div>
         ${flashes()}
-        ${templateSyncPanel(tpl.version)}
+        ${templateSyncPanel()}
 
         <div class="satu-panel">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);">
