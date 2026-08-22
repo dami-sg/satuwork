@@ -1992,6 +1992,96 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       sse.close()
     })
 
+    await test('席位刚上线：会话没拿到要自己再来一次，别等人去刷新', async () => {
+      // 「刚部署完点发送没反应，刷新一下就好了」——刷新之所以管用，是因为它重跑
+      // loadChatPage、重新拿了一次会话。席位报 ready 之后还有几十秒接不了话，而拿
+      // 会话那一跳原先只试一次：chatSessionId 留空，sendChat 开头那道闸就把每一次
+      // 发送都无声吞掉。
+      let calls = 0
+      const sse = fakeSse()
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/events')) return sse.response
+          if (path.includes('/bots/bot-a/session')) {
+            calls += 1
+            // 头一跳撞上还没热起来的席位，第二跳它就好了。
+            if (calls === 1) return { ok: false, status: 503, text: async () => '实例还没上线' }
+            return { ok: true, status: 200, text: async () => JSON.stringify({ sessionId: 's-a' }) }
+          }
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+
+      await ui.ensureChatSession('bot-a')
+      assert(ui.state.chatSessionId === '', '前置没成立：503 那一跳不该拿到会话')
+
+      for (let i = 0; i < 200 && !ui.state.chatSessionId; i++) await new Promise((r) => setTimeout(r, 10))
+      assert(ui.state.chatSessionId === 's-a', `503 之后没有自己再拿一次会话（试了 ${calls} 次）`)
+      assert(!ui.state.runtimeError, `接上了还留着一句已经不成立的话：${ui.state.runtimeError}`)
+      ui.stopChatStream()
+      sse.close()
+    })
+
+    await test('这颗 Bot 不是你的：404 当场说清楚，不做十几次白等的重试', async () => {
+      // 席位那种「我还不认识它」的 404 由 Gateway 折成 503（见 routes/runtime.ts），
+      // 所以走到前端的 404 只剩「这颗 Bot 不是你的／已经删了」这一种——重试只会白敲
+      // 接口，再拿「实例还没接上」把真正的原因盖掉。
+      let calls = 0
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/bots/bot-gone/session')) {
+            calls += 1
+            return { ok: false, status: 404, text: async () => JSON.stringify({ error: '没有这个 Bot' }) }
+          }
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      let threw = ''
+      try {
+        await ui.ensureChatSession('bot-gone')
+      } catch (e) {
+        threw = e.message
+      }
+      assert(threw.includes('没有这个 Bot'), `404 该照旧抛出来，实际：${JSON.stringify(threw)}`)
+      await new Promise((r) => setTimeout(r, 700))
+      assert(calls === 1, `404 不该重试，实际敲了 ${calls} 次`)
+      ui.stopChatStream()
+    })
+
+    await test('没有会话时点发送：要说一句，不能一声不吭', async () => {
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          // 这一条要是发出去了，就说明那道闸放行了——会话都没有，它只会 404。
+          if (path.includes('/messages')) throw new Error('会话是空的，不该发出这条消息')
+          if (path.includes('/bots/bot-a/session')) return { ok: false, status: 503, text: async () => '实例还没上线' }
+          return fetch(gwBase + path)
+        },
+      })
+      await ui.boot()
+      ui.state.chatBotId = 'bot-a'
+      ui.state.chatSessionId = ''
+      ui.state.chatDraft = '在吗'
+      await ui.sendChat()
+      assert(ui.state.error, '点了发送什么都没说——这正是那个「点了没反应」的 bug')
+      // 草稿要留着：这条根本没发出去，凭什么把人打的字清掉。
+      assert(ui.state.chatDraft === '在吗', `草稿被吞了：${JSON.stringify(ui.state.chatDraft)}`)
+      // 那一下顺手催的「再拿一遍会话」这会儿刚排上（席位一直是 503）。等它排完再掐，
+      // 否则这条链会在测跑完之后自己接着敲十几次接口。
+      await new Promise((r) => setTimeout(r, 30))
+      ui.stopChatStream()
+    })
+
     await test('换 Bot：旧流还在跑，但它的事件绝不落进新会话', async () => {
       const sseA = fakeSse()
       const ui = loadApp({

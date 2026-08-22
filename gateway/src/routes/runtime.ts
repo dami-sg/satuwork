@@ -516,6 +516,23 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         })
       }
     }
+    /**
+     * **席位说「没有这个助理」不等于「没有这颗 Bot」，它说的是「我还不认识它」。**
+     *
+     * 进程刚起来那会儿目录还没拉回来（catalog 的首次 pull 是 fire-and-forget，见 bot 的
+     * catalog/index.ts），名册是空的，`/api/bots/:id/session` 于是 404。这和「进程还没
+     * 听上端口」是同一件事的两副面孔——一次全新部署必然把两个窗口都走一遍。
+     *
+     * 原样把 404 转出去的话，调用方只能在**两种含义完全相反的 404** 之间猜：这一条是
+     * 「再等等就好」，而上面 visibleBotOf 那条（这颗 Bot 不是你的 / 已经删了）是「等一
+     * 万年也一样」。折成 503 之后，「还没就绪」在这条接口上只有一个状态码，404 就单纯
+     * 是永久错误了。席位自己那句话留在 body 里，curl 排错时还看得见。
+     */
+    if (r.status === 404) {
+      const seatSaid = (parsed as { error?: unknown } | null)?.error
+      json(res, 503, { error: typeof seatSaid === 'string' && seatSaid ? `${INSTANCE_DOWN}（席位：${seatSaid}）` : INSTANCE_DOWN })
+      return
+    }
     json(res, r.status, parsed)
   })
 

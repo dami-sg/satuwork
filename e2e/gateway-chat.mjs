@@ -3,6 +3,7 @@
  * 独立 home / 端口，不碰 live 3080，不碰 run.mjs 那套 /tmp/satuwork-e2e-gw。
  */
 import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { createCompany } from './org.mjs'
@@ -70,7 +71,7 @@ async function readSse(url, { token, timeout = 8000, until } = {}) {
 export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHttp, assert, log, treeHas }) {
   const GW_HOME = '/tmp/satuwork-e2e-chat-gw'
   const BOT_HOME = '/tmp/satuwork-e2e-chat-bot'
-  const [GW_PORT, BOT_PORT] = await freePorts(2)
+  const [GW_PORT, BOT_PORT, STUB_PORT] = await freePorts(3)
   const MACHINE_TOK = 'e2e-chat-machine'
   const PLATFORM_TOK = 'e2e-chat-platform'
   const gwBase = `http://127.0.0.1:${GW_PORT}`
@@ -644,6 +645,56 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(stale.status === 404, `stale patch ${stale.status} ${stale.text}`)
       const list = await req(gwBase, 'GET', `/runtime/bots/${botId}/routines`, { token: adminTok })
       assert(!(list.json.routines || []).some((x) => x.id === routineId), '列表里还留着')
+    })
+
+    /**
+     * 席位说「没有这个助理」→ 转出去必须是 503，不能是 404。
+     *
+     * 席位进程起来了、端口也听上了，但公司目录还没拉回来（catalog 首次 pull 是
+     * fire-and-forget），名册里于是暂时没有这颗 Bot——一次全新部署必然有几秒到几十秒
+     * 落在这个窗口里。这跟「这颗 Bot 不是你的 / 已经删了」（visibleBotOf 的 404）在
+     * 界面上是两件相反的事：前者「再等等」，后者「等一万年也一样」。原样把席位的 404
+     * 转出去，调用方就只能在两种含义相反的 404 之间猜——猜错哪一边都有代价：当成永久
+     * 错误就是「刚部署完点发送没反应，只能刷新」，当成还在热身就是对着一颗已经删掉的
+     * Bot 白等一分钟。
+     *
+     * 这一条放在最后：它要把实例地址临时指到一个假席位上，跑完再指回去。
+     */
+    await test('席位还不认识这颗 Bot：/runtime/bots/:id/session 折成 503，不是 404', async () => {
+      const stub = createServer((r, res) => {
+        res
+          .writeHead(404, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ error: `没有这个助理：${botId}` }))
+      })
+      await new Promise((ok, bad) => {
+        stub.once('error', bad)
+        stub.listen(STUB_PORT, '127.0.0.1', ok)
+      })
+      const me = await req(gwBase, 'GET', '/me', { token: adminTok })
+      const accountId = me.json.account.id
+      try {
+        const point = await req(gwBase, 'POST', `/internal/instances/${accountId}/ready`, {
+          token: machineTok,
+          body: { host: `http://127.0.0.1:${STUB_PORT}`, botId },
+        })
+        assert(point.status === 200, `指向假席位 ${point.status} ${point.text}`)
+
+        const r = await req(gwBase, 'GET', `/runtime/bots/${botId}/session`, { token: adminTok })
+        assert(r.status === 503, `席位的 404 该折成 503，实际 ${r.status} ${r.text}`)
+        const msg = String(r.json?.error || r.text)
+        assert(msg.includes('实例还没上线'), `503 文案不对：${msg}`)
+        // 席位自己那句话要留在 body 里：curl 排错时「还没就绪」和「为什么还没就绪」
+        // 是两个问题，折了状态码不该把后一个也折掉。
+        assert(msg.includes('没有这个助理'), `席位原话没留下：${msg}`)
+      } finally {
+        // 指回真席位：后面还有 finally 里的收尾，别留一个指向已关端口的实例行。
+        await req(gwBase, 'POST', `/internal/instances/${accountId}/ready`, {
+          token: machineTok,
+          body: { host: botBase, botId },
+        })
+        stub.closeAllConnections?.()
+        await new Promise((r) => stub.close(() => r()))
+      }
     })
 
   } finally {

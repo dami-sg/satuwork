@@ -4,6 +4,17 @@
  */
 let chatAbort = null
 let chatStreamId = ''
+/**
+ * 排着的那次「再拿一遍会话」。同一时刻只允许一条链——见 retryChatSession。
+ * 声明摆在这里（而不是挨着那两个函数）：stopChatStream 也要清它，那一个在文件更上面。
+ */
+let sessionRetryTimer = null
+/**
+ * 那条重试链认输了没有。输入框底下那行小字要靠它区分「还在等」和「等不到了」——
+ * 只看「有没有会话」的话，认输之后那一行还在许愿「接上之后就能发消息」，而这会儿
+ * 已经没有任何人在试了。
+ */
+let sessionGaveUp = false
 
 /**
  * 每个 Bot 一条事件流。
@@ -539,6 +550,9 @@ function releaseChatStream(ac, owner) {
 }
 
 function stopChatStream() {
+  // 排着的那次「再拿一遍会话」也一起停。退出登录走的就是这条路（见 app.js 的
+  // logout），留着它的话，票都清了它还会照着上一个人的 Bot 再敲十几次接口。
+  cancelSessionRetry()
   if (chatAbort) {
     try {
       chatAbort.abort()
@@ -726,6 +740,73 @@ function approvalDead(a) {
 }
 
 /**
+ * 拿会话这一跳没成就退避重来。
+ *
+ * **「刚部署完，字打得进去、点发送没反应，刷新一下就好了」漏的就是这一环。** 席位
+ * 报 ready 之后还有几十秒接不了话，而且有**两副面孔**：
+ *
+ * · 进程还没听上端口 → Gateway 转不过去，503「实例还没上线」；
+ * · 端口听上了，但公司目录还没同步下来（名册里还没有这颗 Bot，见 bot 的
+ *   registry `ensureSession`）→ 404「没有这个助理」。
+ *
+ * 两种原先都是「记一笔就完」：chatSessionId 留空，而 sendChat 开头那道闸认的正是它，
+ * 于是每一次发送都被无声地吞掉——屏幕上一个字都没有，只有刷新（重跑 loadChatPage）
+ * 才会再拿一次会话。所以这里跟着流那边的做法退避重连：席位回来了，这一页自己接上，
+ * 不用人去刷新。
+ *
+ * 上限 12 次（约 48 秒）。真的一直不回来，才把话摆到界面上——那时候「稍等」是骗人的。
+ */
+const SESSION_RETRY_MAX = 12
+
+function cancelSessionRetry() {
+  if (sessionRetryTimer) clearTimeout(sessionRetryTimer)
+  sessionRetryTimer = null
+}
+
+/**
+ * 这个错值不值得再来一次。
+ *
+ * 认状态码，不认文案——文案是会被翻译的（见 api()）。503/502/504 是席位那一跳没通，
+ * 没有状态码是请求压根没发出去。
+ *
+ * **404 不在其列，而且必须不在。** 这条接口上的 404 只剩一个含义了：这颗 Bot 不是你的
+ * ／已经删了（visibleBotOf）——等一万年也是同一个答案，重试只会白敲十几次接口，然后
+ * 拿「实例还没接上」盖掉真正的原因。席位那种「我还不认识它」的 404 由 Gateway 折成了
+ * 503（见 routes/runtime.ts 里 `/runtime/bots/:id/session` 的那段），走上面那一路。
+ * 403 / 401 同理，不重试。
+ */
+function seatWarmingUp(err) {
+  const st = Number(err && err.status)
+  return !st || st === 502 || st === 503 || st === 504
+}
+
+function retryChatSession(botId, attempt) {
+  cancelSessionRetry()
+  if (attempt >= SESSION_RETRY_MAX) {
+    // **这一句要看得见。** '实例还没上线' 被 runtimeDownBanner 挡在界面外（它是常态，
+    // 不该每次重新部署都弹一条红字），可等了快一分钟还没接上就不是常态了。
+    sessionGaveUp = true
+    state.runtimeError = '实例还没接上，等一会儿再试，或者重新部署一次'
+    render()
+    return
+  }
+  const delay = Math.min(500 * 2 ** attempt, 5000)
+  sessionRetryTimer = setTimeout(() => {
+    sessionRetryTimer = null
+    // 人切走了、或者别的路子已经把会话拿到了——这次重排就此作废。
+    if (state.chatBotId !== botId || state.chatSessionId) return
+    void ensureChatSession(botId, attempt + 1).catch((err) => {
+      // 重试路上冒出来的「答案不会变」的错（权限变了、Bot 被删了）。这一路没有调用方
+      // 接得住它，只能自己摆出来——**而且要 render**：flash 只写 state，不重绘就要等
+      // 下一次别的什么触发重绘，那时候人已经又按了三次发送。
+      sessionGaveUp = true
+      flash('err', err.message)
+      render()
+    })
+  }, delay)
+}
+
+/**
  * 把当前会话换成这个 Bot 的。
  *
  * **换 Bot 的第一件事是清场，不是去拿新会话。** 原先是等新会话拿回来、比对出
@@ -737,8 +818,11 @@ function approvalDead(a) {
  * 所以顺序反过来：Bot 一变，立刻停掉旧流、把正文和状态清空。拿不到新会话就是一片空
  * 白加一句「实例还没上线」——空白是诚实的，别人的对话不是。
  */
-async function ensureChatSession(botId) {
+async function ensureChatSession(botId, attempt = 0) {
   if (!botId) return
+  // 这一跳现在就要发，排在后面那次重排作废（换 Bot 时同理：它盯的是上一个 Bot）。
+  cancelSessionRetry()
+  sessionGaveUp = false
   if (state.chatBotId === botId && state.chatSessionId && chatStreamId === state.chatSessionId) return
   // 这个 Bot 的流一直开着（切走时没掐）——把正文接回去就行，不用重新拉一遍会话。
   const warm = botStreams.get(botId)
@@ -789,6 +873,9 @@ async function ensureChatSession(botId) {
     state.chatEvents = row.events
     state.chatSessionId = sessionId
     state.chatStatus = ''
+    // 接上了。等席位那段时间挂的话要撤掉，否则界面上会一直留着一句已经不成立的
+    // 「还没接上」——流那边要是断了，它自己会再挂一次。
+    state.runtimeError = ''
     // **两条路一起发，谁先到算谁的。** 历史走 HTTP，实时走 SSE（只垫一轮）；两边都
     // 带 seq，hydrateChat 按「比头还小才收」归并，重叠的那一轮不会画两遍。
     //
@@ -797,8 +884,18 @@ async function ensureChatSession(botId) {
     void startChatStream(sessionId, 0, botId)
   } catch (err) {
     const msg = String(err.message || '')
-    if (msg.includes('实例还没上线')) state.runtimeError = '实例还没上线'
-    else throw err
+    // 席位还在热身（见 retryChatSession 上面那段）：排一次重来，**并且不往外抛**——
+    // 抛出去就是一条红字，而这会儿正确的说法是「还没好」，不是「坏了」。
+    if (seatWarmingUp(err)) {
+      if (state.chatBotId === botId) retryChatSession(botId, attempt)
+      if (msg.includes('实例还没上线')) state.runtimeError = '实例还没上线'
+      // 输入框底下那行小字要跟着改口（见 paintChatChrome）：人正对着它等。
+      paintChat()
+      return
+    }
+    // 剩下的是「答案不会变」的那些（没权限、这颗 Bot 不是你的）：照旧往外抛，由
+    // loadPage 摆成一条红字。
+    throw err
   }
 }
 
@@ -2153,7 +2250,17 @@ function paintChatChrome(folded) {
   const meta = document.getElementById('chat-meta')
   if (meta) meta.textContent = chatMetaText(folded)
   const tip = document.getElementById('chat-tip')
-  if (tip) tip.textContent = busy ? t('正在思考…（可以继续输入来打断）') : t('Enter 发送，Shift + Enter 换行')
+  // 会话还没拿到（席位刚起来那几十秒）就直说。这一行是人在按发送之前唯一会看的地
+  // 方，而那期间按下去是发不出去的——不说的话就是「点了没反应」。
+  if (tip) {
+    tip.textContent = !state.chatSessionId
+      ? sessionGaveUp
+        ? t('实例还没接上，这会儿发不出去')
+        : t('实例还在上线，接上之后就能发消息…')
+      : busy
+        ? t('正在思考…（可以继续输入来打断）')
+        : t('Enter 发送，Shift + Enter 换行')
+  }
   const send = document.getElementById('chat-send')
   if (send && send.getAttribute('data-state') !== (busy ? 'stop' : 'send')) {
     // 停止态改成 type=button 并挂上 chat-abort：留着 submit 的话，点它会走发送。
@@ -3284,7 +3391,9 @@ function logsModal() {
 function runtimeDownBanner() {
   const err = state.runtimeError
   if (!err || String(err).includes('实例还没上线')) return ''
-  return `<div class="gw-flash gw-flash-err">${esc(err)}</div>`
+  // 这一栏里的话是我们自己写进 state 的中文常量（见 startChatStream / retryChatSession），
+  // 过一遍译表才能跟着界面语言走；查不到的原样回来，不会变成空白。
+  return `<div class="gw-flash gw-flash-err">${esc(t(err))}</div>`
 }
 
 /**
@@ -3327,7 +3436,16 @@ function chatHeadInline() {
 function chatPage() {
   const bots = state.runtimeBots || []
   const selected = chatBotIdOf(state.path) || state.chatBotId
-  const banner = runtimeDownBanner()
+  /**
+   * **flashes() 这一页以前没有。**
+   *
+   * flash() 写的是 state.error / state.notice，而这一页从头到尾只画 runtimeDownBanner
+   * ——于是 chat.js 里那一串 flash 全是哑的：附件没传上去、这条消息没发出去、几个 `@`
+   * 已经失效、「已中止，正在跑的那个工具要等它自己收尾」，一句都到不了屏幕上。人看到
+   * 的就是「点了没反应」，而代码里明明写着话。别的页早就都拼了这一句（见各 pages-*.js）。
+   * 导航时 go() 会清掉这两格，不会把上一页的红字带过来。
+   */
+  const banner = flashes() + runtimeDownBanner()
   if (!selected) {
     return `<div class="gw-chat"><section class="gw-chat-main">${banner}
       <div class="gw-chat-empty-main"><p>${bots.length ? t('从左边选一个 Bot 开始对话。') : t('还没有 Bot。点左下角「新建 Bot」建一个，它会用公司的 Bot 模版当底座。', 'No bots yet. Use “New bot” at the bottom left — it will run on your company template.')}</p></div>
@@ -3602,7 +3720,24 @@ async function sendChat() {
   const files = state.chatFiles || []
   const mentions = state.chatMentions || []
   const sessionId = state.chatSessionId
-  if ((!text && !files.length && !mentions.length) || !sessionId || state.chatUploading) return
+  if ((!text && !files.length && !mentions.length) || state.chatUploading) return
+  /**
+   * **没有会话不能一声不吭地咽下去。** 席位刚部署完的那几十秒里 chatSessionId 就是空
+   * 的（见 ensureChatSession），而这里原先和「草稿是空的」共用一句 `return`：字打得
+   * 进去，点发送什么都不发生，一个字的解释也没有——刷新一下页面又好了，因为那会重
+   * 新拿一次会话。
+   *
+   * 现在说清楚，并且当场催一次（ensureChatSession 自己会退避重来）。**不 await**：
+   * 那一跳最长十几秒，等它回来再发的话，这期间人多半已经又按了一次回车——两次都停在
+   * 同一个 await 上，会话一到就把同一条话发两遍。
+   */
+  if (!sessionId) {
+    const botId = state.chatBotId || chatBotIdOf(state.path)
+    if (botId) void ensureChatSession(botId).catch(() => {})
+    flash('err', t('实例还在上线，这条还发不出去；等它接上再发'))
+    render()
+    return
+  }
 
   state.chatDraft = ''
   state.chatMentions = []

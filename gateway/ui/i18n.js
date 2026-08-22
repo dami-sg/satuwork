@@ -984,6 +984,12 @@ window.SATU_I18N = {
   '导出 Markdown': 'Export as Markdown',
   '回到底部': 'Jump to latest',
   'Enter 发送，Shift + Enter 换行': 'Enter to send, Shift + Enter for a new line',
+  // 席位刚部署完那几十秒：会话还没拿到，这三句是那段时间界面上说的话。
+  '实例还在上线，接上之后就能发消息…': 'The instance is still starting — you can send once it connects…',
+  '实例还在上线，这条还发不出去；等它接上再发': 'The instance is still starting, so this message cannot be sent yet — try again once it connects',
+  '实例还没接上，这会儿发不出去': 'The instance is not connected — messages cannot be sent right now',
+  '实例还没接上，等一会儿再试，或者重新部署一次': 'Still cannot reach the instance — try again in a moment, or redeploy',
+  '连接断开，刷新页面重试': 'Connection lost — refresh the page to retry',
   '已复制全文': 'Transcript copied',
   '复制失败，浏览器不允许': 'Copy failed — the browser blocked it',
   '上下文用量': 'Context usage',
