@@ -2105,8 +2105,7 @@ async function runGateway() {
             'https://App.Example.com/inbox?x=1',
             '*.foo.cn',
             'erp-*.corp.com',
-            // 至少两段钉死，所以这三条进不来：`*.com` 等于整个互联网，另两条压根不是站点。
-            '*.com',
+            // 后缀放开、全局放开：开多宽是管理员的决定，这一层不拦。
             'mycompany.*',
             '*',
             '127.0.0.1',
@@ -2133,9 +2132,12 @@ async function runGateway() {
      */
     assert(br.sites.includes('*.foo.cn'), `通配符被剥掉了 ${JSON.stringify(br.sites)}`)
     assert(br.sites.includes('erp-*.corp.com'), `段内通配没收下 ${JSON.stringify(br.sites)}`)
-    for (const wide of ['*.com', 'mycompany.*', '*']) {
-      assert(!br.sites.includes(wide), `${wide} 不该进白名单（至少要两段钉死）${JSON.stringify(br.sites)}`)
-    }
+    assert(br.sites.includes('mycompany.*'), `后缀放开没收下 ${JSON.stringify(br.sites)}`)
+    /**
+     * 单个 `*` 归一到 `*.*`：两种写法是同一个意思，存成一种，界面上和审计里才只有一个
+     * 样子——否则同一件事在不同公司的配置里长得不一样，翻记录的人得先认出它们是一回事。
+     */
+    assert(br.sites.includes('*.*') && !br.sites.includes('*'), `单个 * 没归一到 *.* ${JSON.stringify(br.sites)}`)
     // 重复的只留一条：同一个域名写两遍（一次带协议一次不带）是最常见的粘贴结果。
     assert(br.sites.filter((x) => x === 'app.example.com').length === 1, `没去重 ${JSON.stringify(br.sites)}`)
     for (const bad of ['127.0.0.1', 'localhost', 'nas.local', 'erp']) {

@@ -104,27 +104,46 @@ function wildcardRe(site: string): RegExp {
   return new RegExp(`^${body}$`)
 }
 
+/** 全部放开的两种写法。Gateway 那边把单个 `*` 归一到 `*.*`，这里两种都认。 */
+const ALL = new Set(['*', '*.*'])
+
 /**
- * 这个主机在公司白名单里吗。两种写法：
+ * 这个主机在公司白名单里吗。
  *
- * - **裸域名含子域**：`example.com` 覆盖它自己和 `app.example.com`。SaaS 在 `login.` /
- *   `app.` / `api.` 之间来回跳是常态，逐个子域列一定会漏，而漏掉的表现是任务跑到一半
- *   被拦在半路。反过来不成立：写 `app.example.com` 不会放行 `example.com`，更不会放行
- *   `evil-example.com`（`endsWith` 前面那个点就是为它加的）。
- * - **带 `*` 的按字面配**，不再额外含子域：`*.example.com` 就是「任意一段 +
- *   .example.com」，配得上 `app.example.com`，配不上 `a.b.example.com`，也配不上
- *   `example.com` 自己。写得越具体，覆盖面越窄——这条顺序不能反过来。
+ * 一条规则贯穿所有写法：**按标签配，配上了就连它的子域一起算。**
  *
- * 白名单本身在 Gateway 那边过 `botSiteOf`，`*.com` 这类进不来（要求至少两段钉死）。
- * 但这里**不假设**它一定过过那道关：名单是从目录同步下来的，而同步下来的东西不该被
- * 当成已经验过。`[a-z0-9-]+` 不跨点这一条，在这儿是独立成立的。
+ * | 写的 | 配得上 | 配不上 |
+ * | --- | --- | --- |
+ * | `example.com` | 它自己、`app.example.com`、`a.b.example.com` | `evil-example.com` |
+ * | `*.example.com` | `app.example.com`、`a.b.example.com` | `example.com` 自己 |
+ * | `erp-*.corp.com` | `erp-hz.corp.com` | `erp.corp.com` |
+ * | `example.*` | `example.cn`、`app.example.com` | `notexample.cn` |
+ * | `*.*` | 什么都行 | — |
+ *
+ * `*` 顶的是**一段标签之内**的字符（`[a-z0-9-]+`），不跨点；跨点的活由「配上了含子域」
+ * 那一半去干。两件事分开之后，`*.example.com` 是「至少一层子域」，而 `example.com` 是
+ * 「它自己和所有子域」——差别在要不要主站，而不是层数。
+ *
+ * **这份名单只管「能去哪些外部站点」。** 回环、内网、非 http 由 `blockedHost` 单独拦，
+ * 那一层跑在这之前、谁都关不掉——所以哪怕这儿写着 `*.*`，放开的也是整个公网，不是这台
+ * 机器自己。两件事分层的意义就在这儿：宽窄归管理员定，「打不打得到自己」不归。
+ *
+ * 名单是从目录同步下来的，**不假设它一定过过 Gateway 的 `botSiteOf`**——同步下来的东西
+ * 不该被当成已经验过。`*` 不跨点这一条在这儿是独立成立的。
  */
 export function siteAllowed(host: string, sites: readonly string[]): boolean {
   for (const raw of sites) {
     const site = String(raw || '').trim().toLowerCase()
     if (!site) continue
+    if (ALL.has(site)) return true
     if (site.includes('*')) {
-      if (wildcardRe(site).test(host)) return true
+      const re = wildcardRe(site)
+      // 配上本身，或者它的子域——和裸域名那条是同一个口径。
+      if (re.test(host)) return true
+      const dot = host.indexOf('.')
+      for (let i = dot; i > 0; i = host.indexOf('.', i + 1)) {
+        if (re.test(host.slice(i + 1))) return true
+      }
       continue
     }
     if (host === site) return true

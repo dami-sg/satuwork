@@ -110,15 +110,17 @@ export interface BotBrowser {
    * 装完就能用和默认最严之间选后者：这把工具握着的是员工本人在那些网站上的登录态，
    * 一次误开的代价是以他的名义做了一件事，而不是读到一点不该读的东西。
    *
-   * 两种写法（匹配逻辑在 bot/src/policy/browser.ts 的 siteAllowed）：
+   * 写法（匹配逻辑在 bot/src/policy/browser.ts 的 siteAllowed，那边是唯一一份判据）：
    *
    * - **裸域名**：`example.com` 覆盖它自己和全部子域。SaaS 在 `login.` / `app.` /
    *   `api.` 之间来回跳是常态，逐个子域列一定会漏，而漏掉的表现是任务跑到一半被拦。
-   * - **带 `*` 的**：`*` 只在**一段标签之内**顶字符，不跨点。`*.example.com` 是「任意
-   *   一段 + .example.com」，`erp-*.corp.com` 能配上 `erp-hz.corp.com`。
+   * - **`*` 顶一段标签里的字符**，不跨点：`erp-*.corp.com` 配得上 `erp-hz.corp.com`。
+   * - **后缀放开**：`example.*` 覆盖 `example.cn`、`example.com` 以及它们的子域。
+   * - **全局放开**：`*.*`（`*` 也归一到它）——除了下面那条硬黑名单，什么都能开。
    *
-   * `*` 不跨点是这条设计的全部安全性所在：跨点的话 `*.com` 就等于整个互联网，而它
-   * 看起来只是一条普通的白名单。
+   * **这份名单管的是「能去哪些外部站点」，不管「能不能回头打自己」。** 回环、内网、
+   * 非 http 那一层在席位上单独拦（bot/src/policy/browser.ts 的 blockedHost），它跑在
+   * 这份名单**之前**，任何配置都关不掉它。所以 `*.*` 放开的是整个公网，不是这台机器。
    */
   sites: string[]
 }
@@ -155,23 +157,27 @@ export function botSiteOf(v: unknown): string | null {
   // **只收域名，不收 IP。** 公网 IP 直连的业务系统极少，而放开 IP 字面量正好是
   // 「把 10.0.0.5 混进白名单」最省事的写法。
   if (IPV4.test(s) || s.includes(':')) return null
+  /**
+   * 单个 `*` 归一到 `*.*`。
+   *
+   * 两种写法是同一个意思（全部放开），存成一种，界面上和审计里才只有一个样子——
+   * 否则同一件事在不同公司的配置里长得不一样，翻记录的人得先认出它们是一回事。
+   */
+  if (s === '*') s = '*.*'
   const labels = s.split('.')
   if (labels.length < 2) return null
   // 每段只收字母数字、连字符和 `*`；空段（`a..b`）不收。
   if (!labels.every((l) => /^[a-z0-9*-]+$/.test(l))) return null
   /**
-   * **至少要有两段是钉死的。**
+   * 顶级域那一段：字母，或者一个 `*`（后缀放开）。
    *
-   * 这条是通配符唯一的闸。`*.com`、`*.co`、`*.*` 这些看起来只是一条普通白名单，实际
-   * 等于整个互联网——而管理员填的时候不会觉得自己开了那么大的口子。要求两段钉死之后，
-   * 能写出来的最宽的东西是 `*.example.com`，那就是它字面上的意思。
-   *
-   * 代价是 `mycompany.*`（同一家公司的 .cn 和 .com）不收，得写两行。这个取舍是有意的：
-   * 顶级域通配是最容易失手的一种，而写两行的成本是两行。
+   * 挡掉的是 `foo.123` 和写漏了的 IP，不是通配——**这份名单不负责拦住「开得太宽」**。
+   * 早先这里要求「至少两段钉死」，把 `*.*` 和 `example.*` 一起挡在外面；那条闸拿掉了：
+   * 真正不能被配置放开的东西（回环、内网、非 http）在席位那侧单独拦，跑在这份名单
+   * 之前，谁都关不掉。所以「开多宽」是管理员的决定，而「能不能打到这台机器自己」不是。
    */
-  if (labels.filter((l) => !l.includes('*')).length < 2) return null
-  // 顶级域得是字母，而且不能带通配：挡掉 `foo.123`、`foo.*`，也顺手挡掉写漏了的 IP。
-  if (!/^[a-z]{2,}$/.test(labels[labels.length - 1])) return null
+  const tld = labels[labels.length - 1]
+  if (!/^[a-z]{2,}$/.test(tld) && tld !== '*') return null
   if (LOCAL_SUFFIX.some((suffix) => s.endsWith(suffix))) return null
   return s
 }

@@ -255,8 +255,8 @@ function browserBlock(a, ro) {
       ${list}
     </div>
     <span style="font-size: 12px; color: var(--muted-foreground);">${t(
-      '一行一个域名。写 example.com 覆盖它和全部子域；要更窄就用 *，它只在一段里顶字符、不跨点（*.example.com 只配一层子域，erp-*.corp.com 配得上 erp-hz.corp.com）。至少要有两段钉死，所以 *.com 这种填不进来。没列出来的站点一律拦下——这把工具用的是你本人的登录态，一次误开就等于以你的名义做了一件事。本机地址和内网地址无论怎么填都不放行。',
-      'One domain per line. A bare domain covers it and all subdomains (example.com covers app.example.com). Use * to narrow it down — * matches within one label and never crosses a dot (*.example.com matches one level of subdomain, erp-*.corp.com matches erp-hz.corp.com). At least two labels must be literal, so *.com will not be accepted. Anything not listed is blocked — this tool acts with your own signed-in session, so one wrong site means something done in your name. Loopback and private addresses are never allowed, no matter what you type.',
+      '一行一个。写 example.com 覆盖它和全部子域；* 顶一段标签里的字符、不跨点（erp-*.corp.com 配 erp-hz.corp.com）；example.* 放开后缀（.cn 和 .com 都算）；*.* 是全部放开。配上了就连子域一起算。没列出来的站点一律拦下——这把工具用的是你本人的登录态，一次误开就等于以你的名义做了一件事。填多宽由你定，但本机地址和内网地址是另一层管的，怎么填都不放行。',
+      'One entry per line. A bare domain covers it and all subdomains (example.com covers app.example.com); * matches within one label and never crosses a dot (erp-*.corp.com matches erp-hz.corp.com); example.* opens the suffix (.cn and .com both count); *.* opens everything. Whatever matches, its subdomains match too. Anything not listed is blocked — this tool acts with your own signed-in session, so one wrong site means something done in your name. How wide you go is your call, but loopback and private addresses are handled by a separate layer and are never allowed, no matter what you type.',
     )}</span>`
 }
 
