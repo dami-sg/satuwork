@@ -342,6 +342,22 @@ export async function runGuards({ root, test, assert, log }) {
     assert(!note.length, `事后补记这几条不对：${note.join('、')}`)
   })
 
+  await test('判地址和判主机名是两件事：公网 IPv6 不能被当成内网', () => {
+    /**
+     * **线上撞过一次，代价是所有 https 站点全打不开。**
+     *
+     * 响应回来那一步拿到的是已经解析好的 IP，早先直接喂给了 `blockedHost`——而那个函数
+     * 是给 URL 里的**主机名**写的，带着「不带点的一律拒」这类只对主机名成立的启发式
+     * （内网机器多半就叫 `gitlab`、`nas` 这样一个词）。一个公网 IPv6 里恰好没有点，于是
+     * 被当成内网机器名拦下，页面被弹回空白页，而报出来的是一句和原因毫无关系的
+     * 「只能打开 http / https 的地址」——照着它去查协议、查网址，怎么查都查不出来。
+     *
+     * 所以这条既钉「公网地址别拦」，也钉「主机名那套启发式别跟着松」。
+     */
+    const bad = all(r.addressVsHost)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
+  })
+
   await test('浏览器：像提交的才弹卡片，点一下看看的不弹', () => {
     /**
      * `browser_click` 正好是 `external + write`，照通用规则判就是每一次点击都弹一张

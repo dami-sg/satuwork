@@ -24,6 +24,7 @@ const policy = await import('./src/policy/index.ts')
 const handoff = await import('./src/policy/handoff.ts')
 const { StorageService } = await import('./src/storage/index.ts')
 const { destructiveCommand, networkCommand } = await import('./src/policy/shell.ts')
+const { blockedHost, privateAddress } = await import('./src/policy/browser.ts')
 const { mcpToolRisk } = await import('./src/catalog/mcp.ts')
 const { scanPii } = await import('./src/policy/pii.ts')
 
@@ -657,6 +658,31 @@ out.record = {
   await call('s8b', 'browser_snapshot')
   out.noteWrites.没把上一次的写算到下一次头上 =
     sessions.appended.filter((e) => e.type === 'tool/policy' && e.data.outcome === 'noted').length === n3
+}
+
+// ── 9.8 判地址和判主机名是两件事 ───────────────────────────────────────
+//
+// **线上撞过一次，代价是所有 https 站点全打不开。** 响应回来那一步拿到的是已经解析好的
+// IP，早先直接喂给了 `blockedHost`——而那个函数是给 URL 里的**主机名**写的，带着
+// 「不带点的一律拒」这类只对主机名成立的启发式（内网机器多半就叫 `gitlab`、`nas`）。
+// 一个公网 IPv6 里恰好没有点，于是被当成内网机器名拦下，页面被弹回空白页，报出来的还是
+// 一句和原因毫无关系的「只能打开 http / https 的地址」。
+out.addressVsHost = {
+  公网v4放行: privateAddress('104.16.132.229') === null,
+  // 这一条就是那次事故本身。
+  公网v6放行: privateAddress('2606:4700::6810:84e5') === null,
+  另一段公网v6也放行: privateAddress('2001:4860:4802:32::15') === null,
+  回环v4拦: privateAddress('127.0.0.1') !== null,
+  回环v6拦: privateAddress('::1') !== null,
+  私有段拦: privateAddress('10.0.0.5') !== null,
+  唯一本地地址拦: privateAddress('fd00::1') !== null,
+  链路本地拦: privateAddress('fe80::1') !== null,
+  metadata拦: privateAddress('169.254.169.254') !== null,
+  // ::ffff:127.0.0.1 这种映射写法要认出来，不然回环换个写法就绕过去了。
+  映射写法的回环拦: privateAddress('::ffff:127.0.0.1') !== null,
+  // 反过来：主机名那套启发式**不能**跟着一起松，「不带点的」仍旧要拒。
+  主机名里不带点的仍旧拒: blockedHost('erp') !== null,
+  主机名判回环仍旧拒: blockedHost('127.0.0.1') !== null,
 }
 
 // ── 10. 策略够得着目录的那个接缝 ───────────────────────────────────────

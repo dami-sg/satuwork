@@ -54,6 +54,8 @@ if (!bin) {
  * 于是 URL 看着是个正常站点，实际连的是本机。
  */
 const HOST = 'e2e.satuwork.test'
+/** 名单外的那个域名。策略里 sites 只写了 satuwork.test，所以它不在。 */
+const OFFSITE = 'other.example.test'
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>测试页</title></head><body>
 <main>
   <h1>订单</h1>
@@ -74,6 +76,12 @@ const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>测试页<
 </main></body></html>`
 
 const server = createServer((req, res) => {
+  // 一条真的 302，跳到名单外的域名——「跳出去之后内容还拿不拿得回来」只能这么试。
+  if (req.url === '/gooff') {
+    res.writeHead(302, { location: `http://${OFFSITE}/` })
+    res.end()
+    return
+  }
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
   res.end(PAGE)
 })
@@ -92,7 +100,7 @@ const chrome = spawn(
     `--user-data-dir=${profile}`,
     `--remote-debugging-port=${cdpPort}`,
     '--remote-debugging-address=127.0.0.1',
-    `--host-resolver-rules=MAP ${HOST} 127.0.0.1:${httpPort}`,
+    `--host-resolver-rules=MAP ${HOST} 127.0.0.1:${httpPort},MAP ${OFFSITE} 127.0.0.1:${httpPort}`,
     'about:blank',
   ],
   { stdio: ['ignore', 'ignore', 'ignore'] },
@@ -124,15 +132,64 @@ if (!up) {
 const browserMod = await import('./src/browser/index.ts')
 const toolsMod = await import('./src/browser/tools.ts')
 
+/**
+ * **策略也挂上，用真的那一份。**
+ *
+ * 这一段是补一次覆盖盲区补出来的。三个套件原本各缺一角：mounted 没有 Chrome、
+ * browser 没有策略、guards 给浏览器塞的是替身——于是「策略 + 工具 + 真 Chrome 三者
+ * 同时在场」这条路一次都没跑过，而最近两个线上 bug 恰恰都住在那条缝里：
+ * 策略把名单推给服务、服务拿上一次快照的名字回答策略「点的是什么」。
+ *
+ * 会话和名册用最小替身（和 e2e-guards 同一套做法），浏览器和策略都是真的。
+ */
+const appended = []
+const bots = {
+  b1: {
+    id: 'b1',
+    name: '真跑一遍的 Bot',
+    origin: 'company',
+    mcps: [],
+    browser: { on: true, sites: ['satuwork.test'] },
+    guards: { 'high-risk': true, pii: false, 'no-external': true },
+  },
+}
 const ctx = new Context()
 ctx.provide('logger', { warn() {}, info() {}, error() {} })
+ctx.provide('sessions', {
+  async events(sessionId) {
+    if (sessionId !== 's1') throw new Error('没有这条会话')
+    return [{ seq: 1, time: Date.now(), type: 'session', data: { botId: 'b1' } }]
+  },
+  async append(sessionId, type, data) {
+    appended.push({ sessionId, type, data })
+    return { seq: appended.length, time: Date.now(), type, data }
+  },
+})
+ctx.provide('roster', { get: (id) => bots[id] })
 ctx.plugin(ToolService)
 await new Promise((r) => setTimeout(r, 30))
 // trustPrivateAddresses：测试页只能在 127.0.0.1 上，见 Config 上的说明。
 ctx.plugin(browserMod, { port: cdpPort, trustPrivateAddresses: true })
 ctx.plugin(toolsMod)
-await new Promise((r) => setTimeout(r, 50))
+process.env.SATUWORK_APPROVAL_TIMEOUT_MS = process.env.SATUWORK_APPROVAL_TIMEOUT_MS || '600'
+const policyMod = await import('./src/policy/index.ts')
+ctx.plugin(policyMod)
+await new Promise((r) => setTimeout(r, 80))
 const svc = ctx.browser
+
+/**
+ * 有卡片就批。相当于一个一直坐在对面、每次都点「批准」的人。
+ *
+ * 记下**批的是什么**——「卡片上那句话来自真实快照里的按钮名」正是这一段要验的东西。
+ */
+const asked = []
+const approver = setInterval(() => {
+  for (const p of ctx.policy.approvals.list('s1')) {
+    asked.push({ tool: p.name, reason: p.reason })
+    ctx.policy.approvals.decide('s1', p.callId, 'approve', 'once')
+  }
+}, 30)
+approver.unref?.()
 
 let seq = 0
 const run = (name, args = {}) =>
@@ -312,6 +369,19 @@ try {
   const homeIndex = back2.text.split('\n').findIndex((l) => l.includes(`${HOST}/ `) || l.endsWith(`${HOST}/`))
   if (homeIndex >= 0) await run('browser_tabs', { action: 'select', index: homeIndex })
 
+  /**
+   * **卡片上那句话来自真实快照里的按钮名。**
+   *
+   * 这条是整段挂策略的理由所在：guards 那边是把名字当参数喂进去的（`__label`），
+   * 而真实链路是「服务拍快照 → 记下 ref→名字 → 策略同步问它 → submitAction 判」。
+   * 中间任何一环断了，表现都是「该弹的卡不弹」——一次不可逆的点击悄悄过去。
+   */
+  out.approval = {
+    点提交弹了卡: asked.some((a) => a.tool === 'browser_click' && a.reason.includes('提交订单')),
+    // 「慢一点」「开新标签页」这些不该弹——否则就是每次点击都要人点头，绕回它要避开的事。
+    点别的没弹卡: !asked.some((a) => a.reason.includes('慢一点') || a.reason.includes('开新标签页')),
+  }
+
   const tabs = await run('browser_tabs')
   out.tabs = {
     列得出自己的: tabs.failed !== true && tabs.text.includes(HOST),
@@ -329,18 +399,23 @@ try {
   }
 
   /**
-   * 作用域：策略推下来的名单，在**读回内容之前**还要再判一次。
+   * **名单这件事走真实那条路。**
    *
-   * 策略只判「动手之前停在哪一页」，而一次调用当中页面还会跳（302、点开新标签页、
-   * 页内脚本自己走）。
+   * 早先这里是手动 `svc.setScope(...)` 再拍一张快照——而真实链路里名单是**策略在放行
+   * 时推下来的**，手动塞的那一份下一次调用就被覆盖了。更要紧的是，这样测不到真正难的
+   * 那一半：策略只判「动手之前停在哪一页」，跳转发生在那之后。
+   *
+   * 所以这里两条都走真的：直接导航到名单外的域名（策略这一关就该拦），以及导航到一个
+   * **302 跳出名单**的地址（策略放行了，得靠服务那两道拦）。
    */
-  svc.setScope(['nowhere.example'], true)
-  const offScope = await run('browser_snapshot')
+  const offDirect = await run('browser_navigate', { url: `http://${OFFSITE}/` })
+  const offRedirect = await run('browser_navigate', { url: `http://${HOST}/gooff` })
   out.scope = {
-    名单外的页面读不回来: offScope.failed === true && offScope.text.includes('行为边界'),
-    没把内容带出来: !offScope.text.includes('提交订单'),
+    策略拦住名单外的域名: offDirect.failed === true,
+    跳出名单之后内容拿不回来: offRedirect.failed === true,
+    没把名单外的内容带出来: !offRedirect.text.includes('提交订单'),
   }
-  svc.setScope([], false)
+  await run('browser_navigate', { url: `http://${HOST}/` })
 
   /**
    * 中毒之后**还得走得出去**。
@@ -349,11 +424,35 @@ try {
    * 这颗 Bot 的浏览器从此再也去不了任何地方，直到进程重启。一条把唯一出路也堵上的
    * 边界不是边界，是死局。
    */
+  /**
+   * **导航失败时话要说在点子上——而且要走真实那条路。**
+   *
+   * 早先这条测的是「直接导航到 about:blank」，它当然停在 about:blank，于是断言全绿；
+   * 而真正出事的场景是「导航一个真实 https 地址、它没成功」——那条路停在
+   * `chrome-error://chromewebdata/`，一步都没被走到。这里用一个**没映射过**的域名走
+   * 真的解析失败（探针本来就用 --host-resolver-rules 只映射了 HOST 那一个）。
+   */
+  const failed = await run('browser_navigate', { url: 'https://nowhere.satuwork.test/' })
+  out.navFail = {
+    // 拿的是 Page.navigate 回执里的 errorText，不是从地址反推出来的。
+    说得出真实原因: failed.failed === true && /ERR_|没有成功/.test(failed.text),
+    没有胡说协议不对: !failed.text.includes('只能打开 http'),
+    // 这一步失败可以换个地址再试，不是一道过不去的边界——措辞不能让模型直接放弃。
+    没说成是边界拦截: !failed.text.includes('行为边界'),
+  }
+  // 换一把工具再试一次，不该撞回同一句错话（read 早先没跟上 snapshot 的判断）。
+  const readAfterFail = await run('browser_read')
+  out.navFail.换把工具也说得对 =
+    readAfterFail.failed === true && !readAfterFail.text.includes('只能打开 http')
+  await run('browser_navigate', { url: `http://${HOST}/` })
+
   svc.poisoned = '（探针造的）解析到了 127.0.0.1'
   const stuck = await run('browser_snapshot')
   const wayOut = await run('browser_navigate', { url: `http://${HOST}/` })
   out.poison = {
     中毒时读不了页面: stuck.failed === true && stuck.text.includes('拦下'),
+    // 报的必须是中毒那句话，不是拿 about:blank 现判出来的「只能打开 http/https」。
+    说的是中毒的原因: stuck.text.includes('127.0.0.1'),
     // navigate 走得通，而且走完这个标记就清了。
     还能导航出去: wayOut.failed !== true && wayOut.text.includes('提交订单'),
     出去之后标记清了: !svc.blockedNow(),

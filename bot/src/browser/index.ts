@@ -2,7 +2,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { satuworkHome } from '../home.ts'
-import { blockedHost, hostOf, siteAllowed, type ActionContext } from '../policy/browser.ts'
+import { blockedHost, hostOf, privateAddress, siteAllowed, type ActionContext } from '../policy/browser.ts'
 import type { ToolCall, ToolResult, WorkspaceFile } from '../tools/index.ts'
 import { Cdp, CdpError } from './cdp.ts'
 import { callExpr } from './page.ts'
@@ -76,6 +76,15 @@ const REF_ERRORS: Record<string, string> = {
 /** 越界：读到的这一页不在允许的范围里。**业务失败**，不是管道故障。 */
 export class ScopeError extends Error {}
 
+/**
+ * 这一页现在用不了：导航失败了、停在浏览器的错误页、或者还没打开过任何页面。
+ *
+ * **和 ScopeError 分开**，因为对模型的含义正相反：越界是「换条路」，这个是「这一步没
+ * 成功，可以换个地址再试」。合成一种的话，一次 DNS 失败会被讲成一次边界拦截，而模型
+ * 面对边界的正确反应恰恰是**不要重试**。
+ */
+export class PageError extends Error {}
+
 export class BrowserService extends Service {
   /**
    * **不要 `static inject = ['logger']`。**
@@ -145,6 +154,14 @@ export class BrowserService extends Service {
   private dialogWaiters = new Set<() => void>()
   /** 这一页是不是落在了不该落的地方（响应回来才发现解析到内网）。 */
   private poisoned = ''
+  /**
+   * 上一次导航自己报的失败原因（`net::ERR_NAME_NOT_RESOLVED` 这类）。
+   *
+   * **`Page.navigate` 的回执里就带着它。** 早先丢掉了，然后在下游靠「页面停在哪个
+   * 地址」去猜刚才发生了什么——手上有确切原因却去猜，还猜错了：真实的失败页是
+   * `chrome-error://chromewebdata/`，不是 `about:blank`，于是报出一句关于协议的错话。
+   */
+  private navError = ''
   /**
    * 下载：guid → 建议文件名。**两个事件才凑齐一次下载**——`downloadWillBegin` 知道
    * 叫什么名字但还没落盘，`downloadProgress` 知道落完了但只带 guid。
@@ -334,7 +351,7 @@ export class BrowserService extends Service {
         on,
       )
       this.mainFrame = tree.frameTree.frame.id
-      this.url = tree.frameTree.frame.url
+      this.url = httpUrl(tree.frameTree.frame.url)
     } catch {
       this.mainFrame = ''
     }
@@ -444,7 +461,16 @@ export class BrowserService extends Service {
         const frame = p.frame as { id?: string; url?: string; parentId?: string } | undefined
         // 只认主框架：iframe 里的地址不是「当前停在哪一页」。
         if (frame && !frame.parentId && typeof frame.url === 'string') {
-          this.url = frame.url
+          /**
+           * **只认 http(s) 的地址。**
+           *
+           * 导航失败之后这里收到的是 `chrome-error://chromewebdata/`，刚建好的标签页是
+           * `about:blank`。把它们记成「当前停在哪一页」的话，策略下一次调用会拿它去过
+           * 站点判据，报出「只能打开 http / https 的地址」——一句关于协议的话，而地址
+           * 本来就是 https。留空反而准确：那时候确实没有一页可用，checkBrowser 会说
+           * 「还没有打开任何页面」。
+           */
+          this.url = httpUrl(frame.url)
           if (frame.id) this.mainFrame = frame.id
           /**
            * **这里不清 poisoned。**
@@ -508,7 +534,13 @@ export class BrowserService extends Service {
          * 发现已经晚了一步，所以这里的处理是把页面弹回 about:blank 并记一笔——
          * 下一次工具调用会看到这一笔，直接拒。
          */
-        const bad = blockedHost(res.remoteIPAddress.replace(/^\[|\]$/g, ''))
+        /**
+         * **判地址用 `privateAddress`，不是 `blockedHost`。**
+         *
+         * 后者是给 URL 里的主机名写的，带着「不带点的一律拒」这类只对主机名成立的
+         * 启发式——而一个公网 IPv6 里没有点。线上撞过：所有 https 站点全打不开。
+         */
+        const bad = privateAddress(res.remoteIPAddress)
         if (!bad) return
         this.poisoned = `${res.url ?? '这一页'} 解析到了 ${res.remoteIPAddress}：${bad}`
         void this.cdp?.send('Page.navigate', { url: 'about:blank' }, { sessionId: this.sessionId }).catch(() => {})
@@ -621,9 +653,40 @@ export class BrowserService extends Service {
     return null
   }
 
+  /**
+   * 这一页现在能不能读。能读返回 null，不能读返回一句**说得出原因**的话。
+   *
+   * **只写一份，snapshot 和 read 共用。** 早先只加在 snapshot 上，于是模型换一把工具
+   * 再试一次就又撞回那句错话——两把工具对同一个状态给出一致的错话，反而更像「环境
+   * 就是这样」。
+   *
+   * 顺序是按「谁更接近真正的原因」排的：中毒 > 导航自己报的错 > 从地址反推。
+   */
+  private unusable(url: string): string | null {
+    if (this.poisoned) return `这一页已经被拦下了（${this.poisoned}），页面已退回空白页。换一个能公开访问的地址。`
+    if (this.navError) {
+      return `刚才那次导航没有成功：${this.navError}。检查一下网址，或者换一个地址再试——这不是权限问题。`
+    }
+    // 浏览器的错误页。地址长这样就说明上一次导航失败了，只是没拿到 errorText。
+    if (url.startsWith('chrome-error://')) {
+      return '上一次导航没有成功，页面停在浏览器的错误页上。检查一下网址，或者换一个地址再试。'
+    }
+    if (!url || url === 'about:blank') {
+      return '页面停在空白页：还没有成功打开任何页面。先用 browser_navigate 打开一个地址。'
+    }
+    return null
+  }
+
   async snapshot(full: boolean, signal?: AbortSignal): Promise<Snapshot> {
     const snap = await this.call<Snapshot>('snapshot', [full, this.refBase], signal)
     // **读回来的这一页要再判一次。** 策略判的是动手之前停在哪，中间可能跳过了。
+    // 先看这一页能不能用（导航失败 / 错误页 / 中毒），再看它在不在允许的范围里。
+    // 反过来的话，一次 DNS 失败会被讲成一次边界拦截。
+    const unusable = this.unusable(snap.url)
+    if (unusable) {
+      this.labels.clear()
+      throw new PageError(unusable)
+    }
     const bad = this.guardUrl(snap.url)
     if (bad) {
       // 这张 ref 表描述的是**上一页**。留着它，策略下一次问「@e5 是什么按钮」时，
@@ -688,6 +751,9 @@ export class BrowserService extends Service {
 
   async read(ref: string | undefined, signal?: AbortSignal): Promise<{ url?: string; title?: string; body?: string; total?: number; err?: string }> {
     const got = await this.call<{ url?: string; title?: string; body?: string; total?: number; err?: string }>('read', [ref ?? null], signal)
+    // 和 snapshot 同一份判据、同一个顺序（见 unusable 上的说明）。
+    const unusable = this.unusable(String(got.url ?? ''))
+    if (unusable) throw new PageError(unusable)
     if (got.url) {
       const bad = this.guardUrl(got.url)
       if (bad) throw new ScopeError(`这一页是 ${got.url}，${bad}。内容没有取回来。`)
@@ -772,9 +838,16 @@ export class BrowserService extends Service {
     // 显式换一页才清这个标记（见 frameNavigated 那段）。
     this.poisoned = ''
     this.writes = []
-    await cdp.send('Page.navigate', { url }, { sessionId, signal, timeout: 30_000 })
+    this.navError = ''
+    /**
+     * **回执里就带着失败原因**（`errorText`），收下来。下游不必再靠「页面停在哪儿」
+     * 去猜——那条路走过，猜错了。
+     */
+    const res = await cdp.send<{ errorText?: string }>('Page.navigate', { url }, { sessionId, signal, timeout: 30_000 })
+    if (typeof res?.errorText === 'string' && res.errorText) this.navError = res.errorText
     await settle(signal)
-    this.url = url
+    // 成功才记；失败时留给 frameNavigated 去处置（它只认 http(s)）。
+    if (!this.navError) this.url = httpUrl(url)
   }
 
   async back(signal?: AbortSignal): Promise<boolean> {
@@ -864,6 +937,15 @@ const KEYS: Record<string, { key: string; code: string; windowsVirtualKeyCode: n
   arrowright: { key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 },
   pagedown: { key: 'PageDown', code: 'PageDown', windowsVirtualKeyCode: 34 },
   pageup: { key: 'PageUp', code: 'PageUp', windowsVirtualKeyCode: 33 },
+}
+
+/**
+ * 只留 http(s) 的地址，别的（`chrome-error://`、`about:blank`、`devtools://`）当作
+ * 「现在没有一页可用」。见 frameNavigated 里那段说明。
+ */
+function httpUrl(url: unknown): string {
+  const s = typeof url === 'string' ? url.trim() : ''
+  return /^https?:\/\//i.test(s) ? s : ''
 }
 
 async function settle(signal?: AbortSignal): Promise<void> {

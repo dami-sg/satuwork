@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolCall, ToolResult } from '../tools/index.ts'
 import { CdpError } from './cdp.ts'
-import { MAX_WAIT_MS, REF_ERRORS, ScopeError, type Located } from './index.ts'
+import { MAX_WAIT_MS, PageError, REF_ERRORS, ScopeError, type Located } from './index.ts'
 
 /**
  * 浏览器那几把工具。
@@ -85,6 +85,14 @@ export function apply(ctx: Context) {
         if (err instanceof ScopeError) {
           // 越界是**业务**失败：说清是哪一页、哪条边界，让模型换条路，而不是重试。
           return fail(`${err.message}\n这是公司的行为边界，重试同一步不会有别的结果。`)
+        }
+        if (err instanceof PageError) {
+          /**
+           * 这一页用不了和越界**对模型的含义正相反**：越界要换条路（重试没用），
+           * 这个可以换个地址再试。所以不能跟着上面那句「重试同一步不会有别的结果」走
+           * ——那会让模型把一次 DNS 失败当成一道过不去的边界，直接转人工。
+           */
+          return fail(err.message)
         }
         if (err instanceof CdpError && err.message === '已中止') {
           /**
