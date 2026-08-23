@@ -76,6 +76,41 @@ function save(reg: Registry): void {
   renameSync(tmp, path)
 }
 
+/**
+ * 就地改名册：**读、改、写之间一个 `await` 都不许有**。
+ *
+ * 名册是整份读进来、整份写回去的。以前 `doDeploy` 在函数开头 `load()` 一次，然后跨过
+ * 排空（最多 2 分钟）、拉发布包、以及 15 分钟的 `deploy-seat.sh`，最后拿那份快照
+ * `save()`——中间这段时间里别人对名册做的任何改动都会被这一下**整份覆盖回去**。而并发
+ * 是这里明写的设计（`inFlight` 是计数器不是布尔），所以它不是理论问题：
+ *
+ *  - 部署 A 的过程中 `DELETE /seats/B` 把 B 删了 → A 收尾时把 B 又写了回去，名册上于是
+ *    挂着一个机器上早就不存在的席位；
+ *  - 并发部署 A 和 B，两边各自快照了一份「没有对方」的名册 → 后收尾的那个把先收尾的
+ *    那条抹掉。
+ *
+ * 抹掉一条不只是少一行：`seats()` 不再报它（心跳和 `/health` 里看不见）、`removeSeat`
+ * 对它成了空操作，而 `reclaimSeatPorts` 是拿 `Object.values(reg)` 判「这个口上蹲着的是
+ * 谁」的——名册里没有它，它那套还在跑的 display / VNC / bot 口就会被下一次部署当成孤儿
+ * 杀掉。
+ *
+ * Node 是单线程的，所以只要这三步之间不让出事件循环，它就是原子的。`mutate` 返回
+ * `false` 表示什么都没改，不必白写一次盘。
+ */
+function update(mutate: (reg: Registry) => boolean | void): void {
+  const reg = load()
+  if (mutate(reg) === false) return
+  save(reg)
+}
+
+/** 把一行落进名册并返回它。`doDeploy` 的每一个出口都走这条。 */
+function commit(seatId: string, row: SeatRecord): SeatRecord {
+  update((reg) => {
+    reg[seatId] = row
+  })
+  return row
+}
+
 export function seats(): SeatRecord[] {
   return Object.values(load()).sort((a, b) => a.seatId.localeCompare(b.seatId))
 }
@@ -310,7 +345,6 @@ export function pruneRetired(reg: Record<string, SeatRecord>, retired: string[])
 }
 
 async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
-  const reg = load()
   /**
    * 先等这个席位手上的活跑完，再动它。
    *
@@ -321,8 +355,12 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
    * 端口、rsync 一份 app——都已经在动这个席位的东西了，等到那时候再来问「你忙不忙」，
    * 该问的时刻早就过去了。dryRun 下同样跑：它是这条逻辑唯一验得到的地方（e2e 里
    * 没有 systemd，见 e2e/manager.mjs）。
+   *
+   * 这里读的是**这一刻**的名册，读完就丢——整个函数不再持有任何跨 await 的快照，
+   * 每一处要改名册的地方都现读现写（见 update 的注释）。
    */
-  if (reg[spec.seatId] && !spec.interrupt) await drainSeat(spec, reg[spec.seatId])
+  const current = load()[spec.seatId]
+  if (current && !spec.interrupt) await drainSeat(spec, current)
   const base: SeatRecord = {
     seatId: spec.seatId,
     linuxUser: spec.linuxUser,
@@ -336,18 +374,10 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
     lastError: null,
   }
 
-  if (bootConfig().dryRun) {
-    reg[spec.seatId] = base
-    save(reg)
-    return base
-  }
+  if (bootConfig().dryRun) return commit(spec.seatId, base)
 
-  const fail = (message: string): SeatRecord => {
-    const row: SeatRecord = { ...base, status: 'error', lastError: message.slice(0, 500) }
-    reg[spec.seatId] = row
-    save(reg)
-    return row
-  }
+  const fail = (message: string): SeatRecord =>
+    commit(spec.seatId, { ...base, status: 'error', lastError: message.slice(0, 500) })
 
   try {
     await ensureRelease(spec.botVersion, { gatewayUrl: spec.gatewayUrl, token })
@@ -370,10 +400,12 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
       novncPort: spec.ports.novncPort,
       botPort: spec.ports.botPort,
     },
-    Object.values(reg),
+    // 现读：判「这个口上蹲着的是不是一个还活着的席位」要用**此刻**的名册，
+    // 而这一行之前已经隔着排空和拉包两段等待了。
+    Object.values(load()),
   )
   for (const line of reclaimed.freed) console.log(`satuwork-manager: 席位 ${spec.seatId} 部署前回收端口：${line}`)
-  if (pruneRetired(reg, reclaimed.retired)) save(reg)
+  update((reg) => pruneRetired(reg, reclaimed.retired))
   if (reclaimed.blocked.length) return fail(reclaimed.blocked.join('；'))
 
   const r = await run('bash', [join(seatAssets(), 'deploy-seat.sh')], {
@@ -404,9 +436,7 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
   })
   if (r.code !== 0) return fail(tailError(r, `deploy script exited ${r.code}`))
 
-  reg[spec.seatId] = base
-  save(reg)
-  return base
+  return commit(spec.seatId, base)
 }
 
 /**
@@ -420,8 +450,7 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
  * 机器上留了什么垃圾，事后只有这里答得上。
  */
 export async function removeSeat(seatId: string): Promise<void> {
-  const reg = load()
-  const row = reg[seatId]
+  const row = seat(seatId)
   if (!row) return
   if (!bootConfig().dryRun) {
     const r = await run('bash', [join(seatAssets(), 'remove-seat.sh')], {
@@ -432,8 +461,12 @@ export async function removeSeat(seatId: string): Promise<void> {
     const warnings = r.stderr.trim()
     if (warnings) console.warn(`satuwork-manager: 席位 ${seatId} 拆掉了，但有告警：${warnings.slice(-400)}`)
   }
-  delete reg[seatId]
-  save(reg)
+  // 销号在**脚本跑完之后**现读现写。拿函数开头那份快照删，会把这 120 秒里别的部署
+  // 刚写下的行一起抹掉（同 doDeploy，见 update 的注释）。
+  update((reg) => {
+    if (!(seatId in reg)) return false
+    delete reg[seatId]
+  })
 }
 
 /** systemd 眼里这个席位活着吗。心跳带上它，Gateway 才知道「部署过」之外还「在跑」。 */
