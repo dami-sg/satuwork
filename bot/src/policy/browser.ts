@@ -49,15 +49,76 @@ function ipv4Private(host: string): boolean {
   return false
 }
 
+/**
+ * IPv6 → 8 组 16 位整数。展不开返回 null。
+ *
+ * 只为 `ipv6Private` 服务，不追求通用：`::` 补零、末尾的点分四段折成两组、`%eth0`
+ * 这类 zone id 丢掉。
+ *
+ * **和 Gateway 那份 `ipv6Groups` 是同一套**（gateway/src/web-tools.ts），改一边就要改
+ * 另一边——两个包各自打包，中间没有共享类型，同 LOCAL_SUFFIX。
+ */
+function ipv6Groups(ip: string): number[] | null {
+  let s = ip.toLowerCase().replace(/%.*$/, '')
+  const dotted = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(s)
+  if (dotted) {
+    const p = dotted[1]!.split('.').map(Number)
+    if (p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null
+    s = s.slice(0, dotted.index) + (((p[0]! << 8) | p[1]!).toString(16) + ':' + ((p[2]! << 8) | p[3]!).toString(16))
+  }
+  const halves = s.split('::')
+  if (halves.length > 2) return null
+  const head = halves[0] ? halves[0]!.split(':') : []
+  const tail = halves.length === 2 && halves[1] ? halves[1]!.split(':') : []
+  if (halves.length === 1 && head.length !== 8) return null
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0
+  if (fill < 0) return null
+  const parts = [...head, ...Array<string>(fill).fill('0'), ...tail]
+  if (parts.length !== 8) return null
+  const out = parts.map((h) => (/^[0-9a-f]{1,4}$/.test(h) ? Number.parseInt(h, 16) : NaN))
+  return out.some((n) => !Number.isInteger(n)) ? null : out
+}
+
+/**
+ * 这个 IPv6 地址是不是本机 / 内网。**按 8 组数值判，不按字符串前缀判。**
+ *
+ * 原先是三条正则：`^f[cd][0-9a-f]{2}:`、`^fe[89ab][0-9a-f]:`，以及一条只认**点分**写法
+ * 的映射地址 `:(\d+\.\d+\.\d+\.\d+)$`。问题出在最后那条——同一个地址有两种写法，而这
+ * 一层拿到的是什么写法**不由我们决定**：
+ *
+ * · `blockedHost` 那条路上，主机名来自 `new URL().hostname`，而 WHATWG 的 IPv6 序列化
+ *   只做十六进制压缩——`http://[::ffff:127.0.0.1]/` 到这儿就是 `::ffff:7f00:1`，点分那
+ *   条正则一次都配不上。
+ * · `privateAddress` 那条路上，地址是 Chrome 经 CDP 报上来的 `remoteIPAddress`，形态
+ *   随平台和版本走。
+ *
+ * **今天它被两层意外挡着，两层都不该指望：** `blockedHost` 末尾那条「不带点的一律拒」
+ * 顺手把 `::ffff:7f00:1` 拦了（但回的是一句「认不出这是哪个站点」，和真正的原因毫无
+ * 关系——正是这个文件反复在防的那种误导）；而 `privateAddress` **压根没有那条兜底**，
+ * 它不能有：一个公网 IPv6 里本来就没有点，那正是把这两个函数拆开的全部理由。也就是说
+ * DNS rebinding 那道最后的闸，挡不挡得住取决于 Chrome 打印地址时用了哪种写法。
+ *
+ * 展开成 8 组之后，「写法」这个变量就从判据上拿掉了：点分和十六进制是同一串数。
+ */
 function ipv6Private(host: string): boolean {
   if (!host.includes(':')) return false
-  if (host === '::1' || host === '::') return true
-  // fc00::/7 唯一本地地址、fe80::/10 链路本地。
-  if (/^f[cd][0-9a-f]{2}:/.test(host)) return true
-  if (/^fe[89ab][0-9a-f]:/.test(host)) return true
-  // ::ffff:127.0.0.1 这类映射写法：把后面那截 IPv4 拿出来再判一次。
-  const mapped = /:((?:\d{1,3}\.){3}\d{1,3})$/.exec(host)
-  if (mapped && ipv4Private(mapped[1])) return true
+  const g = ipv6Groups(host)
+  // 展不开的一律当内网拒：这一层宁可多拦，见 policy/index.ts 里 checkBrowser 的取向。
+  if (!g) return true
+  const [a, b, c, d, e, f] = g as [number, number, number, number, number, number, number, number]
+  const zeroPrefix = a === 0 && b === 0 && c === 0 && d === 0 && e === 0
+  // ::/128 与 ::1/128
+  if (zeroPrefix && f === 0 && g[6] === 0 && (g[7] === 0 || g[7] === 1)) return true
+  if ((a & 0xffc0) === 0xfe80) return true // fe80::/10 链路本地
+  if ((a & 0xfe00) === 0xfc00) return true // fc00::/7 唯一本地
+  /**
+   * 末 32 位是一个 v4 地址的那几种前缀，按它内嵌的 v4 再判一遍：`::ffff:0:0/96`
+   * （IPv4 映射）、`::/96`（已废弃的 IPv4 兼容写法）、`64:ff9b::/96`（NAT64）。
+   * 三者都会让内核把包发到那个 v4 地址上。
+   */
+  const embedsV4 =
+    (zeroPrefix && f === 0xffff) || (zeroPrefix && f === 0) || (a === 0x64 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0)
+  if (embedsV4) return ipv4Private(`${g[6]! >> 8}.${g[6]! & 0xff}.${g[7]! >> 8}.${g[7]! & 0xff}`)
   return false
 }
 
