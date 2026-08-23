@@ -349,11 +349,27 @@ try {
    * 这颗 Bot 的浏览器从此再也去不了任何地方，直到进程重启。一条把唯一出路也堵上的
    * 边界不是边界，是死局。
    */
+  /**
+   * 停在空白页时，话要说在点子上。
+   *
+   * 导航没成功（解析不了、连不上、被拦了）之后页面停在 about:blank，而早先那句是拿
+   * about:blank 去过站点判据得出的「只能打开 http / https 的地址」——地址本来就是
+   * https，那句话只会把人往协议上带。
+   */
+  const blank = await run('browser_navigate', { url: 'about:blank' })
+  out.blank = {
+    说的是导航没成功: blank.failed === true && blank.text.includes('停在空白页'),
+    没有胡说协议不对: !blank.text.includes('只能打开 http'),
+  }
+  await run('browser_navigate', { url: `http://${HOST}/` })
+
   svc.poisoned = '（探针造的）解析到了 127.0.0.1'
   const stuck = await run('browser_snapshot')
   const wayOut = await run('browser_navigate', { url: `http://${HOST}/` })
   out.poison = {
     中毒时读不了页面: stuck.failed === true && stuck.text.includes('拦下'),
+    // 报的必须是中毒那句话，不是拿 about:blank 现判出来的「只能打开 http/https」。
+    说的是中毒的原因: stuck.text.includes('127.0.0.1'),
     // navigate 走得通，而且走完这个标记就清了。
     还能导航出去: wayOut.failed !== true && wayOut.text.includes('提交订单'),
     出去之后标记清了: !svc.blockedNow(),

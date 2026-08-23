@@ -146,6 +146,16 @@ export async function runBrowser({ root, test, assert, log }) {
     assert(!bad.length, `这几条不对：${bad.join('、')}`)
   })
 
+  await test('停在空白页时，话要说在点子上', () => {
+    /**
+     * 导航没成功（解析不了、连不上、被拦了）之后页面停在 about:blank。早先那句是拿
+     * about:blank 去过站点判据得出的「只能打开 http / https 的地址」——而地址本来就是
+     * https，那句话只会把人往协议上带。线上那次排查就是被它带走了一圈。
+     */
+    const bad = all(r.blank)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
+  })
+
   await test('中毒之后还走得出去：navigate 不能被这条封锁自己挡住', () => {
     /**
      * 「解析到了内网」那个标记只在**显式导航**时才清，而 browser_navigate 恰恰是那次

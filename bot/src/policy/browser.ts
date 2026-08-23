@@ -62,6 +62,27 @@ function ipv6Private(host: string): boolean {
 }
 
 /**
+ * 这个**地址**（已经解析出来的 IP）是不是内网 / 回环。
+ *
+ * **和 `blockedHost` 分开，是因为它们判的不是一种东西。** 那一个收的是 URL 里写着的
+ * 主机名，所以带着一堆只对主机名成立的启发式——尤其是「不带点的一律拒」（内网机器
+ * 多半就叫 `gitlab`、`nas` 这样一个词）。
+ *
+ * 拿它去判一个 IP 就会出事，而且是往最坏的方向出：**一个公网 IPv6 里没有点**
+ * （`2606:4700::6810:84e5`，Cloudflare 那段），照那条规则会被当成内网机器名拦下来。
+ * 线上撞过——所有 https 站点全部打不开，报的还是一句和原因毫无关系的
+ * 「只能打开 http / https 的地址」。
+ *
+ * 所以这里只判地址本身：回环、私有段、链路本地、CGNAT、云厂商的 metadata。
+ */
+export function privateAddress(ip: string): string | null {
+  const host = String(ip || '').trim().toLowerCase().replace(/^\[|\]$/g, '')
+  if (!host) return null
+  if (ipv4Private(host) || ipv6Private(host)) return '本机或内网地址'
+  return null
+}
+
+/**
  * 这个主机**永远**不许打开，不受任何开关控制。
  *
  * 拦的不是「越权访问外部系统」——那是 no-external 那条开关的事，它可以被管理员关掉。

@@ -2,7 +2,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { satuworkHome } from '../home.ts'
-import { blockedHost, hostOf, siteAllowed, type ActionContext } from '../policy/browser.ts'
+import { blockedHost, hostOf, privateAddress, siteAllowed, type ActionContext } from '../policy/browser.ts'
 import type { ToolCall, ToolResult, WorkspaceFile } from '../tools/index.ts'
 import { Cdp, CdpError } from './cdp.ts'
 import { callExpr } from './page.ts'
@@ -508,7 +508,13 @@ export class BrowserService extends Service {
          * 发现已经晚了一步，所以这里的处理是把页面弹回 about:blank 并记一笔——
          * 下一次工具调用会看到这一笔，直接拒。
          */
-        const bad = blockedHost(res.remoteIPAddress.replace(/^\[|\]$/g, ''))
+        /**
+         * **判地址用 `privateAddress`，不是 `blockedHost`。**
+         *
+         * 后者是给 URL 里的主机名写的，带着「不带点的一律拒」这类只对主机名成立的
+         * 启发式——而一个公网 IPv6 里没有点。线上撞过：所有 https 站点全打不开。
+         */
+        const bad = privateAddress(res.remoteIPAddress)
         if (!bad) return
         this.poisoned = `${res.url ?? '这一页'} 解析到了 ${res.remoteIPAddress}：${bad}`
         void this.cdp?.send('Page.navigate', { url: 'about:blank' }, { sessionId: this.sessionId }).catch(() => {})
@@ -624,6 +630,26 @@ export class BrowserService extends Service {
   async snapshot(full: boolean, signal?: AbortSignal): Promise<Snapshot> {
     const snap = await this.call<Snapshot>('snapshot', [full, this.refBase], signal)
     // **读回来的这一页要再判一次。** 策略判的是动手之前停在哪，中间可能跳过了。
+    /**
+     * **中毒要报中毒的那句话。**
+     *
+     * 这个标记是在响应回来那一刻置上的，而页面随后被弹回 about:blank——不先看它，
+     * 下面那句会拿 `about:blank` 去判，报出「只能打开 http / https 的地址」：一句和
+     * 真实原因毫无关系的话，人照着它去查协议、查网址，怎么查都查不出来。
+     */
+    if (this.poisoned) {
+      this.labels.clear()
+      throw new ScopeError(`这一页已经被拦下了（${this.poisoned}），页面已退回空白页。换一个能公开访问的地址。`)
+    }
+    /**
+     * 停在空白页 = 刚才那次导航**没有成功**（域名解析不了、连不上、被拦了）。
+     * 照 guardUrl 去判的话，报的是「只能打开 http / https 的地址」——而地址本来就是
+     * https，那句话只会把人带偏。
+     */
+    if (!snap.url || snap.url === 'about:blank') {
+      this.labels.clear()
+      throw new ScopeError('页面停在空白页：刚才那次导航没有成功（域名解析不了、连不上、或者被拦了）。换一个地址再试。')
+    }
     const bad = this.guardUrl(snap.url)
     if (bad) {
       // 这张 ref 表描述的是**上一页**。留着它，策略下一次问「@e5 是什么按钮」时，
