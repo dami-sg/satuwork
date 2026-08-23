@@ -61,6 +61,22 @@ export async function runMounted({ root, test, assert, log }) {
     assert(!down.length, `这几个服务没起来（多半是它们的 inject 满足不了，等了 ${r.waited} ms）：${down.join('、')}`)
   })
 
+  await test('reflect 那几条接缝，在真实组合里够得着而且对面有方法', () => {
+    /**
+     * 策略要在工具执行的关键路径上够到 catalog / agents / browser，浏览器服务要够到
+     * workspace——四处都是 `reflect.get('名字') as 某个形状`，**类型检查一个字都看不见**。
+     * 写错名字、对面删了方法、或者那个服务压根没起来，`tsc` 全都不响。
+     *
+     * 运行时的样子还特别难认：够不到 browser 的话，每一次 click 都会因为拿不到当前页
+     * 地址而被判成「还没有打开任何页面」——和真的没打开页面一模一样。
+     *
+     * guards 那个套件够不到这一层：它给 browser / catalog 塞的是替身，接缝那一步被
+     * 绕过去了。（catalog 那条早先就单独钉过一次，理由一样。）
+     */
+    const bad = Object.entries(r.seams).filter(([, ok]) => !ok).map(([k]) => k)
+    assert(!bad.length, `这几条接缝断了：${bad.join('、')}`)
+  })
+
   await test('工具表和 cordis.yml 对得上：一把不少，也没有多出来的', () => {
     // 少一把的代价是模型说「我没有这个功能」，而所有别的信号都是绿的——那正是这条
     // 断言存在的全部理由。多出来的也要管：一把没进过名单的工具是没被审视过的工具。

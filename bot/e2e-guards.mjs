@@ -467,6 +467,9 @@ out.record = {
   const before = ran.browser_navigate
   out.browser = {
     没开这项能力就调不通: (await nav('s10', 'https://example.com')).failed === true,
+    // 本机自建那种要单独说一句：它压根没有模版，回「模版里没有开」等于让人去一个
+    // 不存在的地方找开关，而这类 Bot 只在本地开发时出现——最需要话说清楚的场合。
+    本机自建的说得清为什么: (await nav('s4', 'https://example.com')).text.includes('没有公司模版'),
     白名单内放行: (await nav('s8b', 'https://example.com/x')).failed !== true,
     子域一起放行: (await nav('s8b', 'https://app.example.com/x')).failed !== true,
     // endsWith 前面那个点就是为它加的：evil-example.com 不是 example.com 的子域。

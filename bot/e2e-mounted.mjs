@@ -113,11 +113,48 @@ for (;;) {
 }
 const waited = Date.now() - started
 
+/**
+ * **`reflect.get` 那几条接缝，类型检查一个字都看不见。**
+ *
+ * 策略要在工具执行的关键路径上够到 catalog / agents / browser，浏览器服务要够到
+ * workspace——四处都是 `reflect.get('名字') as 某个形状`，写错名字、对面把方法删了、
+ * 或者压根没起来，`tsc` 全都不响，运行时表现是各式各样的「莫名其妙拦住了」：
+ * 够不到 browser 的话，每一次 click 都会因为拿不到当前页地址而被判成「还没有打开任何
+ * 页面」——那和真的没打开页面一模一样。
+ *
+ * 已有的两个套件够不到这一层：它们给 browser / catalog 塞的是替身，接缝那一步被绕过了。
+ * 这里是真实组合，顺手就能钉住——**而且要从服务自己的上下文去够**，不是从根上下文，
+ * 因为真实调用发生在那里。
+ */
+const seamOf = (holder, target) => {
+  try {
+    return holder?.ctx?.reflect?.get?.(target) !== undefined
+  } catch {
+    return false
+  }
+}
+const policySvc = ctx.reflect?.get?.('policy')
+const browserSvc = ctx.reflect?.get?.('browser')
+const catalogSvc = ctx.reflect?.get?.('catalog')
+const agentsSvc = ctx.reflect?.get?.('agents')
+const seams = {
+  '策略够得着 browser': seamOf(policySvc, 'browser'),
+  '策略够得着 catalog': seamOf(policySvc, 'catalog'),
+  '策略够得着 agents': seamOf(policySvc, 'agents'),
+  '浏览器够得着 workspace': seamOf(browserSvc, 'workspace'),
+  // 够得着还不够：对面得真有那个方法。删掉一个方法同样是 tsc 看不见的。
+  'browser.actionContext': typeof browserSvc?.actionContext === 'function',
+  'browser.setScope': typeof browserSvc?.setScope === 'function',
+  'browser.takeWrites': typeof browserSvc?.takeWrites === 'function',
+  'catalog.serverOf': typeof catalogSvc?.serverOf === 'function',
+  'agents.mentionedIn': typeof agentsSvc?.mentionedIn === 'function',
+}
+
 const names = toolNames()
 const provided = Object.fromEntries(SERVICES.map((n) => [n, has(n)]))
 const missing = TOOLS.filter((t) => !names.includes(t))
 const extra = names.filter((n) => !TOOLS.includes(n) && !n.startsWith('mcp_'))
 
-console.log('__RESULT__' + JSON.stringify({ provided, missing, extra, count: names.length, waited }))
+console.log('__RESULT__' + JSON.stringify({ provided, seams, missing, extra, count: names.length, waited }))
 cleanup()
 process.exit(0)
