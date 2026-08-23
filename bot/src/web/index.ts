@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionEvent } from '../session/types.ts'
 import { historySlice } from '../session/replay.ts'
+import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
@@ -91,7 +92,15 @@ export function apply(ctx: Context, _config: Config = {}) {
     const load = ctx.agents.busy()
     // `quiesced` 让管家核对「那道闸真的落下来了」——它自己刚发的指令，不该只靠 200
     // 就当成生效了（老版本席位没有这条路，200 也可能是别的东西答的）。
-    res.json({ ok: true, busy: load.running > 0, quiesced: ctx.agents.quiesced(), ...load })
+    res.json({
+      ok: true,
+      busy: load.running > 0,
+      quiesced: ctx.agents.quiesced(),
+      // 和 SSE 第一帧同一份身份：排错时「它是不是换过进程」在这条路上也答得出来。
+      instanceId: INSTANCE_ID,
+      startedAt: STARTED_AT,
+      ...load,
+    })
   })
 
   /**
@@ -684,6 +693,21 @@ function dispositionName(name: string): string {
   return `filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`
 }
 
+/**
+ * 这个 bot 进程的身份。**每次起来都是新的一份。**
+ *
+ * 换版就是 `systemctl restart`：席位换了一个进程，而浏览器那头毫不知情——它手上那条
+ * SSE 只是「断了」，和网络抖一下长得一模一样。于是它按老样子退避重连、拿着换版前的
+ * 游标续传，界面上那些从旧进程攒下来的状态（正在跑的那一轮、排队的 dock、目录里的
+ * 工具）就都成了旧闻，而没有任何东西会来纠正它。
+ *
+ * 所以每条流一开口就先自报家门：`instanceId` 变了 = 这不是你上次连的那个进程，客户端
+ * 据此整条会话重来（见 gateway/ui/chat.js 的 runtime/hello）。**这是「重启信号」唯一
+ * 送得出去的时刻**——进程死掉的那一刻它已经没法说话了，只能在重新连上的第一帧补说。
+ */
+const INSTANCE_ID = randomUUID()
+const STARTED_AT = Date.now()
+
 function sse(
   ctx: Context,
   sessionId: string,
@@ -697,6 +721,19 @@ function sse(
       async start(controller) {
         const send = (event: SessionEvent) =>
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+
+        /**
+         * **第一帧：我是谁、从什么时候开始的。**
+         *
+         * 排在重放之前，不是之后：重放可能很长，而客户端要先知道「这是不是上次那个
+         * 进程」才好决定这一批事件是接着看还是全部作废。它不是会话事件，不进事件桶
+         * （和 replay/done、queue/change 一样按 type 分流）。
+         */
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({ type: 'runtime/hello', instanceId: INSTANCE_ID, startedAt: STARTED_AT, version: process.env.SATUWORK_VERSION || '' })}\n\n`,
+          ),
+        )
 
         let queue: SessionEvent[] | null = []
         const off = ctx.on('session/event', (id: string, event: SessionEvent) => {

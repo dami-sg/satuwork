@@ -41,7 +41,8 @@ const BOT_STREAM_MAX = 8
 function botStreamOf(botId) {
   let row = botStreams.get(botId)
   if (!row) {
-    row = { sessionId: '', ac: null, events: [], sum: { state: 'idle', lastAt: 0, lastText: '' }, hydrated: false, hydrating: null }
+    // instanceId = 上次连上时席位自报的那个进程身份（见 runtime/hello）。空 = 还没连过。
+    row = { sessionId: '', instanceId: '', ac: null, events: [], sum: { state: 'idle', lastAt: 0, lastText: '' }, hydrated: false, hydrating: null }
     botStreams.set(botId, row)
   }
   return row
@@ -679,6 +680,8 @@ function stopChatStream() {
   // 排着的那次「再拿一遍会话」也一起停。退出登录走的就是这条路（见 app.js 的
   // logout），留着它的话，票都清了它还会照着上一个人的 Bot 再敲十几次接口。
   cancelSessionRetry()
+  // 慢速长跑同理：它比退避链活得久得多，退出登录之后还在敲就更难看了。
+  cancelIdleRetries()
   if (chatAbort) {
     try {
       chatAbort.abort()
@@ -1121,15 +1124,27 @@ async function warmBotStreams() {
     if (b.id === state.chatBotId && botStreams.get(b.id)?.ac) continue
     const row = botStreams.get(b.id)
     if (row && row.ac) continue
-    try {
-      const data = await api('GET', '/runtime/bots/' + encodeURIComponent(b.id) + '/session')
-      if (!data.sessionId) continue
-      const r = botStreamOf(b.id)
-      if (r.sessionId && r.sessionId !== data.sessionId) resetBotStream(r)
-      void startChatStream(data.sessionId, 0, b.id)
-    } catch {
-      // 席位没上线之类——名单上这一行就没有时间和摘要，不该让整页跟着出错。
-    }
+    await warmOneBotStream(b.id)
+  }
+}
+
+/**
+ * 悄悄给某个 Bot 挂一条后台流：拿会话、必要时清场、开流。
+ *
+ * **不碰当前这一屏**——名单上那几个 Bot 的流只为侧栏那一行字（在不在跑、最近说了
+ * 什么），走 ensureChatSession 的话会把「当前 Bot」直接改成它，人正看着的对话会被
+ * 拽到别处去。
+ */
+async function warmOneBotStream(botId) {
+  try {
+    const data = await api('GET', '/runtime/bots/' + encodeURIComponent(botId) + '/session')
+    if (!data.sessionId) return
+    const r = botStreamOf(botId)
+    if (r.sessionId && r.sessionId !== data.sessionId) resetBotStream(r)
+    r.sessionId = data.sessionId
+    void startChatStream(data.sessionId, 0, botId)
+  } catch {
+    // 席位没上线之类——名单上这一行就没有时间和摘要，不该让整页跟着出错。
   }
 }
 
@@ -1357,6 +1372,32 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
           }
           if (!ev || typeof ev !== 'object') continue
           /**
+           * 席位自报家门：**这是不是上次那个进程**。
+           *
+           * 换版就是把 bot 换一个进程，而浏览器这头只看得见「流断了」——和网络抖一下
+           * 长得一模一样。于是它会拿着换版前的游标续传、接着用手上那些从旧进程攒下来
+           * 的状态（正在跑的那一轮、排队的 dock、目录里的工具），而没有任何东西会来
+           * 纠正它。席位每条流的第一帧都会说一句自己是谁（见 bot/src/web/index.ts 的
+           * runtime/hello），认出换了进程就整条会话重来。
+           *
+           * **头一次见到不算重启**：那是页面刚开、或者这个 Bot 第一次连上，什么都不用做。
+           */
+          if (ev.type === 'runtime/hello') {
+            const seat = String(ev.instanceId || '')
+            const row = owner ? botStreamOf(owner) : null
+            const known = row ? row.instanceId : ''
+            if (row) row.instanceId = seat
+            if (seat && known && known !== seat) {
+              // 席位换过进程了。这条流上后面那些事件按新会话处理：先把旧的一律作废
+              // （事件桶、摘要、「历史补过了」），再回去重新拿一次会话——会话 id 多半
+              // 没变（它在席位的盘上），但**目录、队列、在不在跑全得重新问一遍**，
+              // 而且那条 hydrate 也要重跑，否则界面停在换版前那一刻。
+              seatRestarted(owner, sessionId)
+              break
+            }
+            continue
+          }
+          /**
            * 排队的消息有变。**不是会话事件**，不进事件桶——它还没发生，进了桶就会被
            * 当成历史画成气泡。它只画在输入框顶上那一行 dock 里。
            */
@@ -1441,9 +1482,21 @@ function retryChatStream(sessionId, ac, attempt) {
   // 后台流也要重连——名单上的「跑完没有」全指望它。
   if (row ? row.ac !== ac : chatAbort !== ac || chatStreamId !== sessionId) return
   if (attempt >= CHAT_RETRY_MAX) {
-    // 认输了就把 ac 清掉。留着它，切回这个 Bot 时热路径会以为流还开着，直接接一个
-    // 空事件桶上去，再也不会重连。
+    /**
+     * 退避到头了。**但不能就此撒手。**
+     *
+     * 线上抓到的那一次：席位 22:23:25 重启、22:23:26 就在听了，而浏览器直到 5 分钟后
+     * 才连上——中间那几百秒里席位一条连接都没收到。原因是标签页在后台：浏览器把
+     * setTimeout 节流到分钟级、久了干脆冻住，退避链要么走得极慢、要么根本不走，等它
+     * 醒过来时档位早就到头，于是「认输」，从此再没有任何东西去碰它。人回到这一页，
+     * 看到的就是一条死掉的对话——而席位好端端地在那儿。
+     *
+     * 所以认输之后转成**慢速长跑**：每 CHAT_IDLE_RETRY_MS 试一次，只要这一页还开着就
+     * 一直试。代价是每半分钟一个请求（而且只在这条流真的断着时才有），换来的是「席位
+     * 回来了，界面自己就接上了」——不必等人想起来刷新。
+     */
     releaseChatStream(ac, owner)
+    idleRetry(sessionId, owner)
     /**
      * **必须 render()，paintChat() 是不够的。**
      *
@@ -1510,6 +1563,96 @@ function noteStreamWarming(sessionId) {
   // 同上：不在对话页上就没有可画的（paintChat 找不到 chat-thread 会直接返回，但在那
   // 之前它已经把整份事件 fold 了一遍——长会话上这不便宜，而且每一档退避都来一次）。
   if (isChatPath(state.path)) paintChat()
+}
+
+/**
+ * 认输之后的慢速长跑。每 30 秒试一次，只要这一页还开着就不停。
+ *
+ * **和退避重连不是一回事**：那一段是「刚断，赶紧接回来」，节奏以秒计；这一段是「已经
+ * 断了很久」，节奏以半分钟计，为的是不放弃。标签页在后台时浏览器会把它节流甚至冻住
+ * ——那没关系，回到前台时 visibilitychange 那一路会立刻补一次（见文件末尾）。
+ *
+ * 同一个 Bot 只留一根：重复排会让请求成倍增长，而它们全都在等同一件事。
+ */
+const CHAT_IDLE_RETRY_MS = 30_000
+const idleTimers = new Map()
+
+function idleRetry(sessionId, botId) {
+  const key = botId || sessionId
+  if (idleTimers.has(key)) return
+  const timer = setTimeout(() => {
+    idleTimers.delete(key)
+    // 这期间已经接上了（发消息、切回前台、点了「重新连接」）就不用再排。
+    if (chatStreamAlive(sessionId, botId)) return
+    // 会话都没了（换了 Bot、退了登录）也不再追。
+    const row = botId ? botStreams.get(botId) : null
+    if (botId && (!row || row.sessionId !== sessionId)) return
+    /**
+     * **从最后一档进去**，不是从头。
+     *
+     * 从 0 开始的话，每次长跑都会带出一整轮退避（40 次、五分钟、越到后面越密），而这
+     * 会儿的处境明明是「已经断很久了」——那是在拿请求去撞一扇多半还关着的门。停在最后
+     * 一档：连上就照常跑（活够 10 秒退避档位自己归零，见 nextAttempt），连不上就立刻
+     * 再落回这条长跑，节奏稳定在半分钟一次。
+     */
+    void startChatStream(sessionId, CHAT_RETRY_MAX, botId)
+  }, CHAT_IDLE_RETRY_MS)
+  idleTimers.set(key, timer)
+}
+
+/** 退出登录 / 换 Bot 时把这些长跑一并停掉。 */
+function cancelIdleRetries() {
+  for (const t of idleTimers.values()) clearTimeout(t)
+  idleTimers.clear()
+}
+
+/**
+ * 席位换了一个进程：这一路的东西全部作废，从头再问一遍。
+ *
+ * **不是「重连一下」就完了。** 换版之后那些还留在手上的东西，每一样都会骗人：
+ *
+ * · 事件桶和摘要——旧进程攒下的，界面停在换版前那一刻；
+ * · 「正在跑」——旧进程那一轮已经随它一起没了，日志里连 turn/end 都没写成，
+ *   而界面会一直挂着「正在思考」（这正是上一轮修过的那个症状的成因）；
+ * · 排队的 dock、目录里的工具——都在席位那边，新进程重新拉过一遍，可能已经不一样了。
+ *
+ * 所以走 ensureChatSession 那条整路：重新拿会话（id 多半没变，它在席位的盘上，但那
+ * 一跳同时会把「实例还没上线」那类状态清干净）、重新 hydrate、重新开流。resetBotStream
+ * 把上面那三样一起清掉。
+ */
+function seatRestarted(botId, sessionId) {
+  const row = botId ? botStreams.get(botId) : null
+  const seat = row ? row.instanceId : ''
+  if (row) {
+    resetBotStream(row)
+    // resetBotStream 会把 sessionId 之外的都清掉；身份要留着，否则下一条流又会把
+    // 「头一次见到」当成重启，白重来一轮。
+    row.instanceId = seat
+    row.sessionId = ''
+  }
+  chatLive.delete(sessionId)
+  chatQueues.delete(sessionId)
+  chatPages.delete(sessionId)
+  if (state.chatSessionId === sessionId) {
+    state.chatSessionId = ''
+    state.chatStatus = ''
+    state.chatReplaying = false
+  }
+  if (!botId) return
+  /**
+   * **人正看着的那一个才走整路**（ensureChatSession：拿会话 + 补历史 + 开流 + 把
+   * 「实例还没上线」那类话清掉）。名单上别的 Bot 换版了只悄悄挂回后台流——走
+   * ensureChatSession 的话，它会把「当前 Bot」改成那一个，人正在看的对话会被拽走。
+   */
+  if (state.chatBotId === botId) {
+    void ensureChatSession(botId).catch((err) => {
+      // 这一路没有别的调用方接得住它（换版撞上「这颗 Bot 已经被删了」是真会发生的）。
+      flash('err', err.message)
+      render()
+    })
+    return
+  }
+  void warmOneBotStream(botId)
 }
 
 /** 这条会话此刻有没有人在听。判据和 startChatStream 那道「已经在跑」的闸一致。 */
@@ -4147,9 +4290,25 @@ async function sendChat() {
    * 同一个 await 上，会话一到就把同一条话发两遍。
    */
   if (!sessionId) {
+    /**
+     * **催那一下必须能把已经认输的链子重新拉起来。**
+     *
+     * ensureChatSession 开头就 `cancelSessionRetry()` + `sessionGaveUp = false`，所以
+     * 这一句本身就是「重新开始试」——关键是它以前只在**这一次点击**时催一下，人要是
+     * 不再点，就再没有人管了。线上抓到的那次正是这个形状：换版期间标签页在后台，退避
+     * 链被浏览器冻着走完了、认了输，人回来一按发送，看到一句「等它接上再发」，然后
+     * 干等——而席位早就好了。
+     *
+     * 现在按下去就是一次**真的重来**：会话那条链重排（最长 5 分钟），流那条也从慢速
+     * 长跑里叫醒（idleRetry）。话也跟着改口：说的是「正在接回来」，不是让人干等。
+     */
     const botId = state.chatBotId || chatBotIdOf(state.path)
-    if (botId) void ensureChatSession(botId).catch(() => {})
-    flash('err', t('实例还在上线，这条还发不出去；等它接上再发'))
+    if (botId) {
+      void ensureChatSession(botId).catch(() => {})
+      const row = botStreams.get(botId)
+      if (row && row.sessionId) reviveChatStream(row.sessionId, botId)
+    }
+    flash('err', t('还没接上席位，这条先没发出去——正在接回来，接上再按一次'))
     render()
     return
   }

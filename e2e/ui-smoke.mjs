@@ -1675,6 +1675,14 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
          * 恰恰是「再没有别的东西会触发重绘」：流死了、事件不会再来。于是屏幕上什么都
          * 没有：认输了、没人再重连、也没有那颗能救回来的按钮。
          */
+        /**
+         * **认输之后不许撒手。**
+         *
+         * 线上抓到的那次：席位 22:23:25 重启、22:23:26 就在听了，浏览器却过了 5 分钟才
+         * 连上——标签页在后台，浏览器把定时器节流甚至冻住，退避链醒来时档位早就到头，
+         * 于是「认输」，从此再没有任何东西去碰它。所以认输的同时要排一根慢速长跑。
+         */
+        assert(ui.idleTimers.size > 0, '认输之后一根重试都没排——席位回来了也没人去接')
         const html = ui.html()
         assert(html.includes('连接断开'), '认输了却没画到屏幕上——只写了 state，横幅没重绘')
         assert(
@@ -1685,6 +1693,61 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         // 清零的那个版本会留下一串 setTimeout 自我续命，套件就不退出了。
         ui.stopChatStream()
       }
+    })
+
+    await test('席位换了一个进程：认出来，整条会话重来，而不是拿旧游标接着看', async () => {
+      /**
+       * 换版就是把 bot 换一个进程，而浏览器这头只看得见「流断了」。不认这件事的话，它
+       * 会拿换版前的游标续传，并接着用旧进程攒下来的状态：那一轮「正在跑」早就随进程
+       * 一起没了（日志里连 turn/end 都没写成），排队的 dock、目录里的工具也都可能变了。
+       *
+       * 席位每条流的第一帧会说一句自己是谁（runtime/hello）——身份变了就整条重来。
+       */
+      let sessions = 0
+      const streams = []
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/events')) {
+            const sse = fakeSse()
+            streams.push(sse)
+            return sse.response
+          }
+          if (path.includes('/bots/bot-r/session')) {
+            sessions += 1
+            return { ok: true, status: 200, text: async () => JSON.stringify({ sessionId: 's-r' }) }
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.path = '/chat'
+      ui.state.chatBotId = 'bot-r'
+      await ui.ensureChatSession('bot-r')
+      for (let i = 0; i < 100 && !streams.length; i++) await new Promise((r) => setTimeout(r, 10))
+      assert(streams.length === 1, `前置没成立：该有一条流，实际 ${streams.length}`)
+
+      // 头一次自报家门：认识一下，什么都不该发生。
+      streams[0].push({ type: 'runtime/hello', instanceId: 'seat-1', startedAt: 1 })
+      streams[0].push({ seq: 7, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '换版前' }] } } })
+      for (let i = 0; i < 100 && ui.botStreamOf('bot-r').events.length < 1; i++) await new Promise((r) => setTimeout(r, 10))
+      assert(ui.botStreamOf('bot-r').instanceId === 'seat-1', '第一帧的身份没记下来')
+      assert(sessions === 1, `头一次连上不该重新拿会话（拿了 ${sessions} 次）`)
+
+      // 席位换版了：新进程，新身份。
+      const before = sessions
+      streams[0].push({ type: 'runtime/hello', instanceId: 'seat-2', startedAt: 2 })
+      for (let i = 0; i < 200 && sessions === before; i++) await new Promise((r) => setTimeout(r, 10))
+      assert(sessions > before, '席位换了进程却没重新拿一次会话——界面会停在换版前那一刻')
+      assert(
+        ui.botStreamOf('bot-r').events.length === 0,
+        `换版前那些事件没作废（还剩 ${ui.botStreamOf('bot-r').events.length} 条），界面会拿旧游标接着看`,
+      )
+      assert(ui.botStreamOf('bot-r').instanceId === 'seat-2', '新身份没记下来，下一条流会被当成又一次重启')
+      for (const s of streams) s.close()
+      ui.stopChatStream()
     })
 
     await test('后台那几条流断了，不许占用正在看的那条对话的横幅', async () => {

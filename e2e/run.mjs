@@ -2879,6 +2879,59 @@ async function runBot() {
     skips.push('模型回复：bot 不持有上游 key，只断言接口收了、进程还在、JSONL 根字段在')
   })
 
+  await test('每条流的第一帧自报进程身份：换过版的席位认得出来', async () => {
+    /**
+     * 换版就是把 bot 换一个进程，而浏览器那头只看得见「流断了」——和网络抖一下长得
+     * 一模一样。于是它拿着换版前的游标续传、接着用旧进程攒下来的状态（正在跑的那一
+     * 轮、排队的 dock、目录里的工具），没有任何东西会来纠正它。
+     *
+     * **重启信号只有一个时刻送得出去**：进程死掉那一刻它已经说不了话了，只能在重新
+     * 连上的第一帧补说一句「我是谁」。所以这一帧必须排在重放之前——重放可能很长，而
+     * 客户端要先知道这批事件是接着看还是全部作废。
+     */
+    // SSE 不会自己结束（心跳一直在），所以读到第一批帧就掐断——`req` 那个助手会一直
+    // 等 text() 收完，在这条路上等于挂死。
+    const ac = new AbortController()
+    const res = await fetch(`${base}/api/sessions/${sessionId}/events?tail=1`, {
+      headers: { authorization: 'Bearer ' + SEAT_TOK, accept: 'text/event-stream' },
+      signal: ac.signal,
+    })
+    assert(res.ok, `开流 ${res.status}`)
+    const reader = res.body.getReader()
+    const dec = new TextDecoder()
+    let raw = ''
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline && !raw.includes('replay/done')) {
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise((ok) => setTimeout(() => ok({ done: true, value: undefined }), 1200)),
+      ])
+      if (done) break
+      raw += dec.decode(value, { stream: true })
+    }
+    ac.abort()
+    const frames = raw
+      .split('\n\n')
+      .map((f) => f.replace(/^data: /, '').trim())
+      .filter(Boolean)
+      .map((f) => {
+        try {
+          return JSON.parse(f)
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+    assert(frames.length > 0, `一帧都没收到：${raw.slice(0, 200)}`)
+    const hello = frames[0]
+    assert(hello.type === 'runtime/hello', `第一帧不是自报家门，是 ${hello.type}——排在重放后面就晚了`)
+    assert(typeof hello.instanceId === 'string' && hello.instanceId.length >= 8, `没给进程身份：${JSON.stringify(hello)}`)
+    assert(typeof hello.startedAt === 'number' && hello.startedAt > 0, `没给起来的时刻：${JSON.stringify(hello)}`)
+    // health 上那一份必须是同一个：管家排错时两条路对得上才有用。
+    const h = await req(base, 'GET', '/api/health')
+    assert(h.json.instanceId === hello.instanceId, `两条路报的身份不一样：${h.json.instanceId} vs ${hello.instanceId}`)
+  })
+
   await test('换版静默：落闸之后不接新一轮，放开之后立刻恢复；无票调不动', async () => {
     /**
      * 管家在重启这个进程之前先落这道闸（见 manager/src/seats.ts 的排空）：等到「此刻
