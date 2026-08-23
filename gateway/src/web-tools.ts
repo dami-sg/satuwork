@@ -122,15 +122,69 @@ export function isPrivateIp(ip: string): boolean {
     return false
   }
   if (v === 6) {
-    const s = ip.toLowerCase()
-    if (s === '::1' || s === '::') return true
-    if (s.startsWith('fe80') || s.startsWith('fc') || s.startsWith('fd')) return true
-    // IPv4 映射地址（::ffff:10.0.0.1）按它映射的那个 v4 判。
-    const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(s)
-    if (m) return isPrivateIp(m[1]!)
+    /**
+     * **按 8 组十六进制判，不按字符串前缀判。**
+     *
+     * 这里原来是 `startsWith('fe80'|'fc'|'fd')` 加一条只认点分写法的映射正则
+     * （`/^::ffff:(\d+\.\d+\.\d+\.\d+)$/`）。那条正则**在这条路上永远配不上**：地址是
+     * 从 `new URL()` 的 hostname 来的，而 WHATWG 的 IPv6 序列化只做十六进制压缩——
+     * `http://[::ffff:127.0.0.1]/` 的 hostname 就是 `[::ffff:7f00:1]`。于是
+     * `isPrivateIp('::ffff:7f00:1')` 返回 false、guardUrl 放行，而
+     * `fetch('http://[::ffff:7f00:1]:3080/')` 在双栈上真的连到 127.0.0.1——整道 SSRF
+     * 闸绕过去了（`::ffff:a00:1` = 10.0.0.1，`::ffff:a9fe:a9fe` = 云厂商 metadata，
+     * 同理）。
+     *
+     * 展开成 8 组之后，「写法」这个变量就没了：点分和十六进制是同一串数，前缀判断也
+     * 换成掩码（`fe80::/10` 是 fe80–febf，`startsWith('fe80')` 只盖住其中一小段）。
+     */
+    const g = ipv6Groups(ip)
+    // 展不开的地址一律当私网拒——和函数末尾那条「判不了就拒」是同一个方向。
+    if (!g) return true
+    const [a, b, c, d, e, f] = g as [number, number, number, number, number, number, number, number]
+    const zeroPrefix = a === 0 && b === 0 && c === 0 && d === 0 && e === 0
+    // ::/128 与 ::1/128
+    if (zeroPrefix && f === 0 && g[6] === 0 && (g[7] === 0 || g[7] === 1)) return true
+    if ((a & 0xffc0) === 0xfe80) return true // fe80::/10 链路本地
+    if ((a & 0xfe00) === 0xfc00) return true // fc00::/7 唯一本地
+    /**
+     * 末 32 位是一个 v4 地址的那几种前缀，按它内嵌的 v4 再判一遍：
+     * `::ffff:0:0/96`（IPv4 映射）、`::/96`（已废弃的 IPv4 兼容写法）、
+     * `64:ff9b::/96`（NAT64）。三者都会让内核把包发到那个 v4 地址上。
+     */
+    const embedsV4 =
+      (zeroPrefix && f === 0xffff) || (zeroPrefix && f === 0) || (a === 0x64 && b === 0xff9b && c === 0 && d === 0 && e === 0 && f === 0)
+    if (embedsV4) return isPrivateIp(`${g[6]! >> 8}.${g[6]! & 0xff}.${g[7]! >> 8}.${g[7]! & 0xff}`)
     return false
   }
   return true
+}
+
+/**
+ * IPv6 → 8 组 16 位整数。展不开返回 null。
+ *
+ * 只为 `isPrivateIp` 服务，所以不追求通用：`::` 补零、末尾的点分四段折成两组、
+ * `%eth0` 这类 zone id 直接丢掉。判据一旦按数值走，「同一个地址有几种写法」这件事
+ * 就不再是安全边界上的变量。
+ */
+function ipv6Groups(ip: string): number[] | null {
+  let s = ip.toLowerCase().replace(/%.*$/, '')
+  const dotted = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(s)
+  if (dotted) {
+    const p = dotted[1]!.split('.').map(Number)
+    if (p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null
+    s = s.slice(0, dotted.index) + (((p[0]! << 8) | p[1]!).toString(16) + ':' + ((p[2]! << 8) | p[3]!).toString(16))
+  }
+  const halves = s.split('::')
+  if (halves.length > 2) return null
+  const head = halves[0] ? halves[0]!.split(':') : []
+  const tail = halves.length === 2 && halves[1] ? halves[1]!.split(':') : []
+  if (halves.length === 1 && head.length !== 8) return null
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0
+  if (fill < 0) return null
+  const parts = [...head, ...Array<string>(fill).fill('0'), ...tail]
+  if (parts.length !== 8) return null
+  const out = parts.map((h) => (/^[0-9a-f]{1,4}$/.test(h) ? Number.parseInt(h, 16) : NaN))
+  return out.some((n) => !Number.isInteger(n)) ? null : out
 }
 
 /** 带凭据的请求头。跨主机跳转时必须摘掉——见 safeFetch。 */
