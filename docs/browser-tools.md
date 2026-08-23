@@ -466,7 +466,7 @@ BotTemplate.browser = { on: boolean, sites: string[] }
   `logger` 根本不是服务（`satu-logger` 只给 cordis 自带的 logger 挂 exporter，从没
   `provide` 过）。那条 inject 永远满足不了，服务不启动，依赖它的十二把工具跟着一直挂着
   ——**一声不响**：进程起来了、健康检查通过、类型检查干净、日志一个字都没有，只有模型
-  在对话里说「我没有这个功能」。下面那两个套件都测不到它，因为它们各自 `ctx.plugin()`
+  在对话里说「我没有这个功能」。另外两个套件都测不到它，因为它们各自 `ctx.plugin()`
   手动挂，**绕过了 inject**；真正的组合只发生在 Loader 读 `cordis.yml` 那一刻。
 - **`e2e/browser.mjs`**（探针 `bot/e2e-browser.mjs`）——**对着一台真的 Chrome 跑**。
   除了那几把工具本身，还钉住四条只有真浏览器才试得出来的：点中带 `confirm` 的按钮时

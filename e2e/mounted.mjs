@@ -10,13 +10,23 @@
  * 真正的组合只发生在 Loader 读 cordis.yml 那一刻。
  */
 import { spawn } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 
+const HOME = '/tmp/satuwork-e2e-mounted'
+
 function runProbe(root) {
+  /**
+   * **每次从干净的目录起。**
+   *
+   * 一个专门回答「组合对不对」的套件，带着上一次跑剩的库和名册跑，本身就拆了自己的
+   * 前提。ui-smoke 那边也是先删再起。
+   */
+  rmSync(HOME, { recursive: true, force: true })
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-mounted.mjs')], {
       cwd: join(root, 'bot'),
-      env: { ...process.env, SATUWORK_HOME: '/tmp/satuwork-e2e-mounted', SATUWORK_PORT: '18124' },
+      env: { ...process.env, SATUWORK_HOME: HOME, SATUWORK_PORT: '18124' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let out = ''
@@ -47,13 +57,14 @@ export async function runMounted({ root, test, assert, log }) {
      * 所以这条断言看的是「起来了没有」，不是「有没有出错」——后者永远是没有。
      */
     const down = Object.entries(r.provided).filter(([, ok]) => !ok).map(([k]) => k)
-    assert(!down.length, `这几个服务没起来（多半是它们的 inject 满足不了）：${down.join('、')}`)
+    // 带上等了多久：探针轮询到 25 秒才放弃，报出来才分得清「真挂不上」和「机器太慢」。
+    assert(!down.length, `这几个服务没起来（多半是它们的 inject 满足不了，等了 ${r.waited} ms）：${down.join('、')}`)
   })
 
   await test('工具表和 cordis.yml 对得上：一把不少，也没有多出来的', () => {
     // 少一把的代价是模型说「我没有这个功能」，而所有别的信号都是绿的——那正是这条
     // 断言存在的全部理由。多出来的也要管：一把没进过名单的工具是没被审视过的工具。
-    assert(!r.missing.length, `少了这几把工具：${r.missing.join('、')}`)
+    assert(!r.missing.length, `少了这几把工具（等了 ${r.waited} ms）：${r.missing.join('、')}`)
     assert(!r.extra.length, `多了这几把没在名单里的工具：${r.extra.join('、')}`)
   })
 }
