@@ -317,6 +317,19 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     if (bodyCompany && bodyCompany !== companyId) throw new HttpError(403, '机器不属于这家公司')
     const account = await db.account(accountId)
     if (!account || account.companyId !== companyId) throw new HttpError(403, '账号不属于这家公司')
+    /**
+     * 这条会话已经在册、而且不是这个人的：拒。
+     *
+     * `sessionId` 是上报方给的，可以是任何字符串。少了这一句，一台被拿下的席位报一个
+     * 别人的 sessionId 就能把那一行改到自己名下——原主人从此打不开自己的会话
+     * （seatTargetForSession 判的是 `idx.accountId !== account.id`），而他公司的会话
+     * 列表和审计里那条也跟着改姓。db.upsertSessionIndex 的 where 是同一条判据的第二层
+     * （竞态兜底）；这一句在这儿，是为了让正常情况回一句说得清的 403 而不是 500。
+     */
+    const known = await db.sessionIndex(sessionId)
+    if (known && (known.accountId !== accountId || known.companyId !== companyId)) {
+      throw new HttpError(403, '这条会话不属于这个账号')
+    }
     const botIdRaw = body.botId == null ? undefined : strField(body, 'botId', false)
     const titleRaw = body.title == null ? undefined : strField(body, 'title', false)
     const originRaw = body.origin == null ? undefined : strField(body, 'origin', false)
