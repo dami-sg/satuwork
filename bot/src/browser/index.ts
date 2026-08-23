@@ -77,7 +77,17 @@ const REF_ERRORS: Record<string, string> = {
 export class ScopeError extends Error {}
 
 export class BrowserService extends Service {
-  static inject = ['logger']
+  /**
+   * **不要 `static inject = ['logger']`。**
+   *
+   * `logger` 不是一个服务：`satu-logger` 只是给 cordis 自带的 `ctx.logger` 挂了个
+   * exporter，从没 `provide` 过。写了这条 inject 的后果是它**永远满足不了**——服务不
+   * 启动、`ctx.browser` 不存在、`browser/tools.ts` 的 `inject: ['browser']` 跟着一直挂
+   * 着，于是十二把工具一把都没注册，**而且一声不响**：进程正常起来、健康检查通过、
+   * 日志干干净净，只有模型说「我没有这些工具」。真栽过一次。
+   *
+   * 仓库里别处一律用 `ctx.logger?.warn?.()` 可选链，就是因为它可能没有。
+   */
 
   readonly port: number
   private readonly trustPrivate: boolean

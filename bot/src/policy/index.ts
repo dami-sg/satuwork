@@ -267,6 +267,23 @@ export class PolicyService extends Service {
     if (!bot) return { ok: false, guard: 'browser', reason: '认不出这条会话属于哪个 Bot，不能确认浏览器是否被授权' }
     const browser = browserOf(bot)
     if (!browser.on) {
+      /**
+       * **本机自建的那种要单独说一句。**
+       *
+       * 它压根没有公司模版（`mcps` 那条分支为同一件事明写过例外），照通用措辞回一句
+       * 「模版里没有开」，等于让人去一个不存在的地方找一个开关——而这类 Bot 只在本地
+       * 开发时出现，也就是最需要话说清楚的场合。
+       *
+       * 注意这里**只改措辞，不放行**：浏览器是模版授予的能力，没有模版就没有它。
+       * 要在本地试这几把工具，得接上 Gateway 用一颗公司 Bot。
+       */
+      if (bot.origin === 'local') {
+        return {
+          ok: false,
+          guard: 'browser',
+          reason: '本机自建的 Bot 没有公司模版，也就拿不到浏览器这项能力（这几把工具要接上 Gateway、用一颗公司 Bot 才有）',
+        }
+      }
       return { ok: false, guard: 'browser', reason: '这个 Bot 的模版里没有开浏览器这项能力' }
     }
 

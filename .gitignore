@@ -16,6 +16,7 @@ dist/
 
 # e2e 启动器临时改写的组合
 bot/cordis.e2e.yml
+bot/cordis.mounted.yml
 
 # 本机运行时（Gateway/Bot 数据与密钥）
 .data/

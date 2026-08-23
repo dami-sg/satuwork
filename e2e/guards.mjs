@@ -260,6 +260,8 @@ export async function runGuards({ root, test, assert, log }) {
   })
 
   await test('浏览器：没开这项能力就调不通，白名单外的站点拦下', () => {
+    // 「本机自建的说得清为什么」那条：那种 Bot 压根没有公司模版，回一句「模版里没有开」
+    // 等于让人去一个不存在的地方找开关——而它只在本地开发时出现，正是最需要话说清楚的场合。
     const bad = all(r.browser)
     assert(!bad.length, `这几条不对：${bad.join('、')}`)
     assert(r.browserBlockedRuns === 9, `被拦的导航还是跑了（放行的应当只有 9 次）：${r.browserBlockedRuns}`)
