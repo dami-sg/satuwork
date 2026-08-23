@@ -51,6 +51,7 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
       website?: string
       machineId?: string | null
       accessUrl?: string | null
+      handoffWebhook?: string | null
     } = {}
     if (body.name != null) patch.name = strField(body, 'name')
     if (body.status != null) {
@@ -64,6 +65,18 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     // 地址和网站可以清空，空串就是清空。
     if (body.address !== undefined) patch.address = strField(body, 'address', false)
     if (body.website !== undefined) patch.website = websiteOf(strField(body, 'website', false))
+    /**
+     * 转人工的通知地址。空串 = 关掉。
+     *
+     * **只收 https**：这条 URL 是一把凭据（拿到就能往那个群里发东西），走明文等于
+     * 把它交给路上的每一跳。认不出的形状一律 400，不静静地存下一个永远发不出去的值。
+     */
+    if (body.handoffWebhook !== undefined) {
+      const raw = strField(body, 'handoffWebhook', false)
+      if (!raw) patch.handoffWebhook = null
+      else if (!/^https:\/\/\S+$/i.test(raw)) throw new HttpError(400, '通知地址要是一条 https 链接')
+      else patch.handoffWebhook = raw
+    }
     if (body.accessUrl !== undefined) {
       if (body.accessUrl === null || body.accessUrl === '') patch.accessUrl = null
       else patch.accessUrl = strField(body, 'accessUrl')

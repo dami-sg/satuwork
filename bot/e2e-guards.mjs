@@ -6,12 +6,23 @@
  * 一封已经发出去的邮件面前差得很远。
  */
 import { Context } from '@deepseek-ai/cordis'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ToolService } from './src/tools/index.ts'
 
 // **必须在 import policy 之前设。** 确认的等待时长是模块加载那一刻读的环境变量，
 // 静态 import 会被提升到文件最前面，那时候这一行还没跑，测超时就要真等五分钟。
 process.env.SATUWORK_APPROVAL_TIMEOUT_MS = process.env.SATUWORK_APPROVAL_TIMEOUT_MS || '400'
 const policy = await import('./src/policy/index.ts')
+/**
+ * 交接单那个服务。**转人工那把工具现在要它**（见 docs/handoff.md）——没有它，
+ * `escalate_to_human` 压根不注册，而下面那一组断言正是冲着它去的。
+ *
+ * 它要一个真的 storage（单子活过重启是它和高风险确认最大的差别），所以给一个临时库。
+ */
+const handoff = await import('./src/policy/handoff.ts')
+const { StorageService } = await import('./src/storage/index.ts')
 const { destructiveCommand, networkCommand } = await import('./src/policy/shell.ts')
 const { mcpToolRisk } = await import('./src/catalog/mcp.ts')
 const { scanPii } = await import('./src/policy/pii.ts')
@@ -135,8 +146,11 @@ tool('browser_type', ['external', 'write'])
 tool('browser_press', ['external', 'write'])
 tool('browser_dialog', ['external', 'write'])
 
-ctx.plugin(policy)
+ctx.plugin(StorageService, { path: join(mkdtempSync(join(tmpdir(), 'satuwork-guards-')), 'probe.db') })
 await new Promise((r) => setTimeout(r, 50))
+ctx.plugin(handoff)
+ctx.plugin(policy)
+await new Promise((r) => setTimeout(r, 80))
 
 let seq = 0
 const call = (sessionId, name, args = {}) =>
@@ -467,6 +481,9 @@ out.record = {
   const before = ran.browser_navigate
   out.browser = {
     没开这项能力就调不通: (await nav('s10', 'https://example.com')).failed === true,
+    // 本机自建那种要单独说一句：它压根没有模版，回「模版里没有开」等于让人去一个
+    // 不存在的地方找开关，而这类 Bot 只在本地开发时出现——最需要话说清楚的场合。
+    本机自建的说得清为什么: (await nav('s4', 'https://example.com')).text.includes('没有公司模版'),
     白名单内放行: (await nav('s8b', 'https://example.com/x')).failed !== true,
     子域一起放行: (await nav('s8b', 'https://app.example.com/x')).failed !== true,
     // endsWith 前面那个点就是为它加的：evil-example.com 不是 example.com 的子域。

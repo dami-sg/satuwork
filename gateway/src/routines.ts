@@ -23,6 +23,7 @@
 import type { Db, Routine, RoutineRun, RoutineRunTrigger } from './db.ts'
 import { nextRunAtOf } from './lib/schedule.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
+import { sweepHandoffs } from './handoff-sweep.ts'
 
 /** 调度器多久看一眼。设成 0 就不起调度器（e2e 里有几条不需要它自己跑）。 */
 const TICK_MS = Math.max(0, Math.trunc(Number(process.env.GATEWAY_ROUTINE_TICK_MS ?? 30_000)))
@@ -226,6 +227,27 @@ export async function runRoutine(db: Db, routine: Routine, trigger: RoutineRunTr
     try {
       const link = await seatLinkOf(db, routine.accountId, routine.botId)
       const sessionId = await sessionIdOf(link, routine.botId)
+      /**
+       * 这条会话上有一张**挡着路**的交接单还没闭合：这一次不跑。
+       *
+       * 不拦的话，一件卡住的事会每小时重跑一遍、每小时开一张新单、每小时推一次通知
+       * ——而人还没来得及处理第一张（见 docs/handoff.md §8）。流水上要如实写明是为什么
+       * 跳过的：静静地不跑，和「跑了但什么都没做」在界面上长得一模一样。
+       *
+       * **判据取自 Gateway 这张表，不去问席位**：这一跳发生在 tick 里，机器可能正关着，
+       * 而"关着"本身就是没人接手的一半原因。
+       */
+      const blocking = (await db.handoffsOfSession(sessionId)).find(
+        (h) => h.blocking && (h.state === 'open' || h.state === 'claimed'),
+      )
+      if (blocking) {
+        await db.finishRoutineRun(run.id, {
+          status: 'error',
+          error: `这一次没跑：还有一件转人工的事等着人处理（${blocking.ask.slice(0, 60) || '没写要做什么'}）`,
+          sessionId,
+        })
+        return
+      }
       await db.finishRoutineRun(run.id, { status: 'running', sessionId })
       const afterSeq = await lastSeqOf(link, sessionId)
       // 流先挂上，消息后发。顺序反了就会漏掉跑得快的那一轮，见文件头。
@@ -351,6 +373,13 @@ export function startRoutineScheduler(db: Db): () => void {
       // 收尾跟着每一轮跑，不只在启动时跑一次：按年龄划线之后，启动那一次收不到
       // 「刚起来时还不够老、后来也没人管」的那些（比如另一个进程半路被 kill）。
       .then(() => sweepStaleRuns(db))
+      /**
+       * 转人工的催办跟着同一个节拍走（见 handoff-sweep.ts）。
+       *
+       * **不新起一个定时器**：两件事的周期一样（半分钟量级的粗节拍），而多一个
+       * 定时器就多一处要在关停时记得清的东西——忘了清的表现是进程不退出。
+       */
+      .then(() => sweepHandoffs(db))
       .catch((e: Error) => console.error(`satuwork-gateway: 日常任务扫描失败：${e.message}`))
       .finally(() => {
         running = false

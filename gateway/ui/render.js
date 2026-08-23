@@ -28,6 +28,8 @@ function pageView() {
       return companyPage()
     case '/accounts':
       return accountsPage()
+    case '/handoffs':
+      return handoffsPage()
     case '/audit':
       return auditPage()
     case '/machines':
@@ -204,6 +206,7 @@ function appView() {
         </button>
         <div style="width: 1px; height: 18px; background: var(--color-divider);"></div>
         ${head}
+        ${handoffBell()}
         ${asideToggle()}
       </div>
       <div class="gw-body">${pageView()}</div>
@@ -739,6 +742,7 @@ async function saveCompany(e) {
       contactEmail: String(fd.get('contactEmail') || '').trim(),
       address: String(fd.get('address') || '').trim(),
       website: String(fd.get('website') || '').trim(),
+      handoffWebhook: String(fd.get('handoffWebhook') || '').trim(),
     })
     await loadOrg()
     await loadMe()

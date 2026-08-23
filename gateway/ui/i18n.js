@@ -579,6 +579,7 @@ window.SATU_I18N = {
   '删除这个分组？': 'Delete this group?',
   '删除这名成员？': 'Delete this member?',
   升级人工的条件: 'When to escalate',
+  转人工待办: 'Handoffs',
   生成并复制链接: 'Generate and copy link',
   '停用这名成员？': 'Disable this member?',
   需要管理员权限: 'Requires admin',

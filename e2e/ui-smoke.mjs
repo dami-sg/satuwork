@@ -138,6 +138,150 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(ui.approvalState(apps[0]) === 'approved', '状态认错了')
     })
 
+    await test('交接卡：状态一路变，交还那句话画成人说的', async () => {
+      /**
+       * 转人工的闭环在界面这一侧有三处会**静默**坏掉（见 docs/handoff.md §11）：
+       * 单子折不出来、状态变了卡片不重画、交还那条消息被当成非人类消息滤掉。
+       * 三处都不报错，看到的只是「Bot 自己开口接着干活」或者「点了接手没反应」。
+       */
+      const ui = await boot()
+      const ev = (seq, type, data) => ({ seq, time: 1, type, data })
+      const ho = (seq, state, extra = {}) =>
+        ev(seq, 'human/handoff', {
+          id: 'h1',
+          callId: 'c1',
+          state,
+          reason: '这笔付款超出我的权限',
+          ask: '去财务系统里把这笔付了',
+          blocking: true,
+          ...extra,
+        })
+      const folded = ui.fold([
+        ev(1, 'user/message', { message: { content: [{ type: 'text', text: '把这笔付了' }] }, source: { kind: 'user' } }),
+        ev(2, 'turn/start', { turn: 1 }),
+        ev(3, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: '我付不了，交给人' }] } }),
+        ho(4, 'open'),
+        ev(5, 'turn/end', { turn: 1, reason: 'completed' }),
+        ho(6, 'claimed', { claimedBy: { accountId: 'u1', name: '张三' } }),
+        ev(7, 'user/message', {
+          message: { content: [{ type: 'text', text: '【转人工交还】张三 已经处理完…' }] },
+          source: { kind: 'plugin', plugin: 'handoff' },
+        }),
+      ])
+      const block = folded.blocks.find((b) => (b.handoffs || []).length)
+      assert(block, '交接单没折出来')
+      const hs = block.handoffs
+      // 同一张单来两条，取最后一条——和确认卡是同一套读法。
+      assert(hs.length === 1 && hs[0].state === 'claimed', `状态没跟上：${JSON.stringify(hs.map((h) => h.state))}`)
+      assert(hs[0].claimedBy && hs[0].claimedBy.name === '张三', '接手人没带出来')
+
+      const card = ui.handoffHtml(hs[0])
+      // 卡上最大的那行字是「要人做什么」：接手的人先要知道自己该干嘛。
+      assert(card.includes('去财务系统里把这笔付了'), `卡上没有要人做什么：${card}`)
+      assert(card.includes('data-act="chat-handoff-return"'), '交还的按钮不在')
+      assert(card.includes('sw-handoff-note'), '写结论的框不在——那句话是 Bot 接着做的全部依据')
+      // 已经接手了就不该再有「我来接手」。
+      assert(!card.includes('chat-handoff-claim'), '已经有人接了还画着「我来接手」')
+      assert(ui.handoffDoneHtml({ state: 'expired' }).includes('没人接手'), '闭合那一行没说清是怎么结束的')
+
+      /**
+       * **交还那条消息要画出来。** 它的 source 是 plugin/handoff，而 fold 默认滤掉
+       * 非人类消息——滤掉的话，界面上就是 Bot 突然自己开口接着干活，而上一句是几小时前
+       * 它说「等人接手」。
+       */
+      const said = folded.blocks.filter((b) => b.kind === 'user').map((b) => b.text)
+      assert(said.some((t) => t.includes('转人工交还')), `交还那条被滤掉了：${JSON.stringify(said)}`)
+    })
+
+    await test('交接卡：中间隔了几轮对话，也还是同一张卡', async () => {
+      /**
+       * 一张单的后续状态常常隔几小时才来，那时人多半又跟 Bot 说过话——「当前这一块」
+       * 早就不是开单那一块了。只在当前块里按 id 找的话，claimed 会被当成一张新单推进
+       * 新块：**同一张单画出两张卡**，上面那张还写着「等人接手」、按钮还能点（点下去
+       * 换回 409），而人在下面那张卡里写的结论也读不到（取的是第一个匹配的输入框）。
+       */
+      const ui = await boot()
+      const ev = (seq, type, data) => ({ seq, time: 1, type, data })
+      const ho = (seq, state, extra = {}) =>
+        ev(seq, 'human/handoff', { id: 'h1', callId: 'c1', state, reason: 'r', ask: '去把这笔付了', blocking: true, ...extra })
+      const folded = ui.fold([
+        ev(1, 'user/message', { message: { content: [{ type: 'text', text: '把这笔付了' }] }, source: { kind: 'user' } }),
+        ev(2, 'turn/start', { turn: 1 }),
+        ev(3, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: '我付不了' }] } }),
+        ho(4, 'open'),
+        ev(5, 'turn/end', { turn: 1, reason: 'completed' }),
+        // 人在等的时候又跟 Bot 聊了两句——真实得很
+        ev(6, 'user/message', { message: { content: [{ type: 'text', text: '那先放着' }] }, source: { kind: 'user' } }),
+        ev(7, 'turn/start', { turn: 2 }),
+        ev(8, 'assistant/message', { turn: 2, step: 1, message: { content: [{ type: 'text', text: '好' }] } }),
+        ev(9, 'turn/end', { turn: 2, reason: 'completed' }),
+        ho(10, 'claimed', { claimedBy: { accountId: 'u1', name: '张三' } }),
+      ])
+      const cards = folded.blocks.flatMap((b) => b.handoffs || [])
+      assert(cards.length === 1, `同一张单画了 ${cards.length} 次：${JSON.stringify(cards.map((h) => h.state))}`)
+      assert(cards[0].state === 'claimed', `状态没跟上：${cards[0].state}`)
+      // 认回的是**开单那一块**，人往上翻会在那儿找到它。
+      const owner = folded.blocks.findIndex((b) => (b.handoffs || []).length)
+      assert(owner === 1, `卡片挂错了块：${owner}`)
+    })
+
+    await test('待办页：别人名下的 Bot 打不开对话，就地给一张能处理的卡', async () => {
+      /**
+       * `/runtime/bots/:id` 按「这颗 Bot 是不是你的」判（visibleBotOf），管理员点别人的
+       * 单子会落在一句「没有这个 Bot」上——而管理员恰恰是这套东西里最该处理别人单子的人。
+       */
+      const ui = await boot()
+      ui.state.me = { account: { id: 'me', companyId: 'c1', role: 'admin' } }
+      const row = (extra) => ({
+        id: 'h1', botId: 'b1', sessionId: 's1', state: 'open',
+        ask: '去财务系统里把这笔付了', reason: '超出我的权限', createdAt: 1,
+        ownerName: '张三', assignee: null, claimedBy: null, ...extra,
+      })
+
+      // 自己的 Bot：给「去对话里处理」，那条路走得通。
+      const own = ui.handoffRow(row({ accountId: 'me' }))
+      assert(own.includes('data-act="handoff-open"'), '自己的 Bot 该给去对话的入口')
+
+      // 别人的 Bot：不许给那颗按钮，否则点过去是一句「没有这个 Bot」。
+      const other = ui.handoffRow(row({ accountId: 'someone-else' }))
+      assert(!other.includes('data-act="handoff-open"'), '别人的 Bot 还给了打不开的入口')
+      assert(other.includes('data-act="handoff-detail"'), '别人的 Bot 没有就地处理的入口')
+
+      // 展开之后要有能写结论的框和交还按钮，而且正文没拉到时说清楚是席位没应答。
+      ui.state.handoffOpenId = 'h1'
+      ui.state.handoffDetail = { h1: null }
+      const open = ui.handoffRow(row({ accountId: 'someone-else' }))
+      assert(open.includes('sw-handoff-note'), '就地处理却没有写结论的框')
+      assert(open.includes('data-act="chat-handoff-return"'), '就地处理却交还不了')
+      assert(open.includes('席位没应答'), `正文拉不到时没说清是怎么回事：${open.slice(-400)}`)
+      // 拉到了就把 Bot 做到哪一步摆出来——接手的人靠它不用从头问一遍。
+      ui.state.handoffDetail = { h1: { id: 'h1', summary: '已经查到发票号 A-991' } }
+      assert(ui.handoffRow(row({ accountId: 'x' })).includes('A-991'), '拉到了正文却没画出来')
+    })
+
+    await test('席位上已经没有的那张单：画成一行字，不留按钮', async () => {
+      /**
+       * 交接单是落盘的，但席位重装 / 换机器 / 手工清过库之后，日志里那条 open 还在而
+       * 单子已经没了。照着日志画出来的卡片带着一整排按钮，点下去只换回一句 409。
+       */
+      const ui = await boot()
+      const ev = (seq, type, data) => ({ seq, time: 1, type, data })
+      const folded = ui.fold([
+        ev(1, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: '交给人' }] } }),
+        ev(2, 'human/handoff', { id: 'h9', callId: 'c9', state: 'open', reason: 'r', ask: '去把这笔付了', blocking: true }),
+      ])
+      const card = (folded.blocks.find((b) => (b.handoffs || []).length) || {}).handoffs[0]
+      ui.state.chatSessionId = 's-x'
+      // 核对回来的清单里没有它，而它落盘的行号（seq=2）比水位早。
+      ui.state.chatHandoffs = { sessionId: 's-x', ids: new Set(['别的单']), upto: 5 }
+      assert(ui.handoffDead(card), '席位说没有这张单了，界面还当它活着')
+      assert(!ui.handoffDoneHtml(card).includes('chat-handoff-return'), '失效的还留着按钮')
+      assert(ui.handoffDoneHtml(card).includes('席位'), `失效那行没说清是怎么回事：${ui.handoffDoneHtml(card)}`)
+      // 席位还没答话（没有快照）时**不许**判失效：那会让人以为不用管它。
+      ui.state.chatHandoffs = null
+      assert(!ui.handoffDead(card), '没拿到现况就把一件真在等人的事画成了失效')
+    })
+
     await test('发信的确认走定制卡：能读、能改，别的参数也露着', async () => {
       /**
        * 通用卡把整份 JSON 摊出来，而人在批一封信时要看的是「发给谁、写了什么」。更要紧

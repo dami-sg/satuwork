@@ -461,6 +461,13 @@ BotTemplate.browser = { on: boolean, sites: string[] }
 - **`e2e/guards.mjs`**（探针 `bot/e2e-guards.mjs`）——边界那一层。四条断言：没开能力调不通、
   白名单内外、**硬黑名单关掉 `no-external` 也拦**、像提交的才弹卡。最要紧的是第三条：
   管理员为了让 Bot 去个名单外的站点顺手把开关一关，不该把「Bot 能给自己发指令」一起放开。
+- **`e2e/mounted.mjs`**（探针 `bot/e2e-mounted.mjs`）——**照真实组合起一遍**，看服务和工具
+  在不在。补一次事故补出来的：`BrowserService` 上写过 `static inject = ['logger']`，而
+  `logger` 根本不是服务（`satu-logger` 只给 cordis 自带的 logger 挂 exporter，从没
+  `provide` 过）。那条 inject 永远满足不了，服务不启动，依赖它的十二把工具跟着一直挂着
+  ——**一声不响**：进程起来了、健康检查通过、类型检查干净、日志一个字都没有，只有模型
+  在对话里说「我没有这个功能」。另外两个套件都测不到它，因为它们各自 `ctx.plugin()`
+  手动挂，**绕过了 inject**；真正的组合只发生在 Loader 读 `cordis.yml` 那一刻。
 - **`e2e/browser.mjs`**（探针 `bot/e2e-browser.mjs`）——**对着一台真的 Chrome 跑**。
   除了那几把工具本身，还钉住四条只有真浏览器才试得出来的：点中带 `confirm` 的按钮时
   当场就说得出有对话框（不是卡到超时）、页面内容包进了 `<page_content>`、`browser_tabs`

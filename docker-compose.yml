@@ -59,6 +59,42 @@ services:
       # JWT 密钥对和 Bot 发布包在磁盘上，不在库里——重启不能让已发出的票全失效。
       - gwdata:/var/lib/satuwork-gateway
 
+  # ── 可选：自托管 SearXNG ────────────────────────────────────────────────
+  #
+  # **默认不起**。`docker compose up -d` 还是只有 PG 和 Gateway——搜索后端是
+  # 平台按需选的一家（tavily / firecrawl / duckduckgo / searxng），不选它的部署
+  # 不该被迫多跑两个容器、多占一个端口。要它的时候显式点名：
+  #
+  #   docker compose --profile searxng up -d      # 连 PG、Gateway 一起
+  #   docker compose --profile searxng up -d searxng   # 只起它
+  #   docker compose --profile searxng down       # 停（不带 profile 停不掉它）
+  #
+  # 配置在 ./searxng/core-config/settings.yml，那里开了 json 输出——不开就没有
+  # API，web-tools.ts 打 format=json 会拿回一坨 HTML。
+  #
+  # 密钥从根目录 .env 的 SEARXNG_SECRET 来（.env 不进 git）：
+  #   echo "SEARXNG_SECRET=$(openssl rand -hex 32)" >> .env
+  # 没填的话容器会自己拒绝启动（说 secret_key is not changed），不会带着默认密钥跑。
+  #
+  # 没有 valkey：它只在开限流器时才用得上，而这台是自己人的 API 后端，限流器是关的
+  # （官方 compose 里那个 valkey 其实也没接上，镜像默认 valkey.url = false）。
+  searxng:
+    profiles: ['searxng']
+    image: docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-ultrasecretkey}
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://localhost:8888/}
+    ports:
+      # 和 PG 那条不一样，这个要对外：管理员在控制台里填的实例地址得打得进来。
+      # 只给本机用就把左边写成 127.0.0.1:8888。
+      - '${SEARXNG_PORT:-8888}:8080'
+    volumes:
+      - ./searxng/core-config/:/etc/searxng/:Z
+      - searxng-data:/var/cache/searxng/
+
 volumes:
   pgdata:
   gwdata:
+  # 只有 favicon 缓存，删了自己会重建。
+  searxng-data:

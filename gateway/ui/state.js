@@ -247,6 +247,26 @@ const state = {
    */
   routines: [],
   routinesBotId: '',
+  /**
+   * 转人工待办（见 docs/handoff.md）。`handoffs` 是清单，`handoffCount` 是顶栏那个数
+   * ——**两者不是一回事**：清单里还有别人接走的、已经交还等 Bot 消化的，而那个数只算
+   * 「要我处理、还没处理完」的。让界面自己去数的话，两处口径迟早会漂。
+   */
+  handoffs: [],
+  handoffCount: 0,
+  /** 近 30 天的概览（开了几张、还欠着几张、多久有人接）。空 = 还没拉到。 */
+  handoffStats: null,
+  /** 待办页上那两颗筛选：全部 / 要我处理的。 */
+  handoffScope: 'all',
+  /** 待办页上展开的是哪一条（别人名下的 Bot 打不开对话，就地处理，见 pages-handoffs.js）。 */
+  handoffOpenId: '',
+  /** 单号 → 席位那边的正文。`null` = 拉过但席位没应答；`undefined` = 还没拉。 */
+  handoffDetail: {},
+  /**
+   * 席位那边「这几张单还在不在」的一次快照：`{ sessionId, ids, upto }`。
+   * 比它早、又不在 ids 里的卡片画成失效（见 chat.js 的 handoffDead）。
+   */
+  chatHandoffs: null,
   /** 打开的那条的 id。空 = 右栏是列表形态。 */
   routineOpen: '',
   routineRuns: [],
@@ -416,6 +436,9 @@ function allowedHrefs() {
   // 员工菜单里没有连接器了（入口是名单底下那颗「插件」，见 MEMBER_NAV），但那两个页面
   // 必须还进得去：OAuth 授权完，供应商把浏览器送回 /connectors/:id，落地就在这儿。
   if (!isOwner()) set.add('/connectors')
+  // 转人工待办的入口在**顶栏**那颗按钮上，不在侧栏菜单里（员工那份菜单是空的，
+  // 见 MEMBER_NAV）。所以这里单独放行，否则点那颗按钮会被 pathAllowed 踢回首页。
+  if (!isOwner()) set.add('/handoffs')
   return set
 }
 

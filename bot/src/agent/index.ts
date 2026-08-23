@@ -1,7 +1,7 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { Agent, type AgentEvent, type AgentMessage } from '@earendil-works/pi-agent-core'
 import { randomUUID } from 'node:crypto'
-import type { ContentBlock, Message, SessionEventMap, StreamChunk, Usage } from '../session/types.ts'
+import type { ContentBlock, Message, MessageSource, SessionEventMap, StreamChunk, Usage } from '../session/types.ts'
 import { browserOf, type BotRecord } from '../registry/index.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -325,11 +325,17 @@ export class AgentService extends Service {
    * 那几个 await 期间 agent 还没建出来，`live` 里没有它。少了这一层，同一条会话会被
    * 开出两个并发 agent——事件交错写进同一份 JSONL，用量也记两遍。
    */
-  private async runGuarded(sessionId: string, text: string, images: ImageRef[], mentions: Mention[]): Promise<void> {
+  private async runGuarded(
+    sessionId: string,
+    text: string,
+    images: ImageRef[],
+    mentions: Mention[],
+    source: MessageSource = { kind: 'user' },
+  ): Promise<void> {
     this.starting.add(sessionId)
     this.turnMentions.set(sessionId, new Set(mentions.filter((m) => m.kind === 'connector').map((m) => m.id)))
     try {
-      await this.runTurn(sessionId, text, images, mentions)
+      await this.runTurn(sessionId, text, images, mentions, source)
     } finally {
       this.starting.delete(sessionId)
       this.turnMentions.delete(sessionId)
@@ -375,12 +381,26 @@ export class AgentService extends Service {
     return true
   }
 
-  async send(sessionId: string, text: string, images: ImageRef[] = [], mentions: Mention[] = []): Promise<void> {
+  /**
+   * 开新的一轮。
+   *
+   * `source` 说的是**这条消息是谁发的**：人自己打的是 `user`，转人工交还那一条是
+   * `plugin: 'handoff'`（见 policy/handoff.ts）。它进日志、进链路视图，让「人做完交回来」
+   * 和「人自己又说了一句」在事后分得开——两者对模型的意思完全不同。
+   */
+  async send(
+    sessionId: string,
+    text: string,
+    images: ImageRef[] = [],
+    mentions: Mention[] = [],
+    source: MessageSource = { kind: 'user' },
+  ): Promise<void> {
     /**
      * 静默期里不开新的一轮（见上面那段）。
      *
-     * **这一道要在这里，而不是只在 HTTP 那一层**：日常任务（routines）也是从这里进来
-     * 的，只挡路由的话，一条正好踩在换版上的定时任务照样会开出一轮，然后被重启砍断。
+     * **这一道要在这里，而不是只在 HTTP 那一层**：日常任务（routines）、转人工交还回来
+     * 的那一条，都是从这里进来的；只挡路由的话，一条正好踩在换版上的定时任务照样会开出
+     * 一轮，然后被重启砍断。
      */
     if (this.quiesced()) {
       throw new Error(QUIET_MESSAGE)
@@ -392,7 +412,7 @@ export class AgentService extends Service {
       throw new Error('agents: 该会话正在运行中')
     }
     // 同步占位（runGuarded 的第一行），之后才允许出现 await。
-    await this.runGuarded(sessionId, text, images, mentions)
+    await this.runGuarded(sessionId, text, images, mentions, source)
     // 这一轮收口了，接上排在后面的。
     await this.drainQueue(sessionId)
   }
@@ -431,18 +451,25 @@ export class AgentService extends Service {
     images: ImageRef[],
     e: Error,
     mentions: Mention[] = [],
+    source: MessageSource = { kind: 'user' },
   ): Promise<void> {
     const { sessions } = this.ctx
     const turn = history.filter((ev) => ev.type === 'turn/start').length + 1
     await sessions.append(sessionId, 'user/message', {
       message: { id: randomUUID(), role: 'user', content: userBlocks(text, images, mentions) },
-      source: { kind: 'user' },
+      source,
     })
     await sessions.append(sessionId, 'turn/start', { turn })
     await this.failAfterTurnStart(sessionId, turn, e)
   }
 
-  private async runTurn(sessionId: string, text: string, images: ImageRef[] = [], mentions: Mention[] = []): Promise<void> {
+  private async runTurn(
+    sessionId: string,
+    text: string,
+    images: ImageRef[] = [],
+    mentions: Mention[] = [],
+    source: MessageSource = { kind: 'user' },
+  ): Promise<void> {
     const { sessions, llm } = this.ctx
     let history = await sessions.events(sessionId)
     let system: { text: string; base: string; skills: string }
@@ -482,7 +509,7 @@ export class AgentService extends Service {
         system = { ...system, text: `${system.text}\n\n${mentionGapBlock(gaps)}` }
       }
     } catch (e) {
-      await this.failBeforeTurn(sessionId, history, text, images, e as Error, mentions)
+      await this.failBeforeTurn(sessionId, history, text, images, e as Error, mentions, source)
       throw e
     }
 
@@ -515,7 +542,7 @@ export class AgentService extends Service {
 
     await sessions.append(sessionId, 'user/message', {
       message: { id: randomUUID(), role: 'user', content: userBlocks(text, images, mentions) },
-      source: { kind: 'user' },
+      source,
     })
     await sessions.append(sessionId, 'turn/start', { turn })
 
@@ -1684,6 +1711,10 @@ function escalateBlock(rule: string): string {
     rule,
     '',
     '满足上面任何一条时，调用 escalate_to_human 说明原因，然后停下来等人接手：把已经做完的部分和卡住的地方讲清楚，不要自己想办法绕过去。',
+    '',
+    '调用时 `ask` 要写清楚**要人做什么**（一句祈使句）——接手的人打开就看这一行，写不清楚他就得回来问你，而那时你已经停了。',
+    '这不是一句话说完就完的动作：它会开出一张交接单，人处理完会带着结果交回来，你到时候在他做完的基础上接着往下做，不要重做。',
+    '同一件事只交一次。已经交出去还没回音的，不要换个措辞再调一遍。',
   ].join('\n')
 }
 

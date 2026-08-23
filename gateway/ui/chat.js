@@ -83,14 +83,85 @@ function resetBotStream(row) {
   row.hydrated = false
 }
 
+/**
+ * 那颗点现在算哪一态。三样东西合成一个：**在等人 > 正在跑 > 空闲**。
+ *
+ * 分成三个计数而不是直接写 `sum.state`，是因为它们会交错：点了停止那一下，
+ * `agent.abort()` 不等已经开跑的工具（见 bot 的 bridgeTools），`turn/end` 完全可能排在
+ * 确认的终态**前面**到达——照着「最后一条事件」写的话，那颗点会从「空闲」被翻回
+ * 「正在执行」然后一直停在那儿。各自记数、每次重算，就没有这个先后问题。
+ */
+function settleDot(sum) {
+  const waiting = (sum.openIds ? sum.openIds.size : 0) + (sum.snapIds ? sum.snapIds.size : 0)
+  sum.state = sum.asking || waiting ? 'review' : sum.busy ? 'busy' : 'idle'
+}
+
+/**
+ * 拿 Gateway 那份待办清单把名单上的点对一遍。
+ *
+ * **只靠事件是不够的**：流上只垫最近一轮（STREAM_TAIL_TURNS），昨天半夜开出来的那张单
+ * 根本不在里面——而那正是最需要被看见的一张。Gateway 那张表是跨 Bot、跨机器的，
+ * 30 秒轮一次（loadHandoffs），把每颗 Bot 该亮的点补上。
+ */
+function applyHandoffSnapshot(list) {
+  const byBot = new Map()
+  for (const h of list || []) {
+    if (h.state !== 'open' && h.state !== 'claimed') continue
+    const set = byBot.get(h.botId) || byBot.set(h.botId, new Set()).get(h.botId)
+    set.add(h.id)
+  }
+  let changed = false
+  for (const [id, row] of botStreams.entries()) {
+    const sum = row.sum
+    const before = sum.state
+    /**
+     * 快照单独一份，**不和事件那一份合并**。
+     *
+     * 合并成一个集合的话，别人在另一台机器上关掉的那张单就再也销不掉了：这条流上
+     * 没有它的事件，而每一轮快照又会被并回去。两份各管各的：快照整份换掉（远端的
+     * 变化 30 秒内跟上），事件那份负责当场生效。
+     */
+    sum.snapIds = byBot.get(id) || new Set()
+    settleDot(sum)
+    if (sum.state !== before) changed = true
+  }
+  if (changed) scheduleRosterPaint()
+}
+
 /** 事件到了就地更新摘要。O(1)，不 fold。 */
 function noteBotEvent(botId, ev) {
   const row = botStreams.get(botId)
   if (!row) return
   const sum = row.sum
   const before = sum.state + '|' + sum.lastAt + '|' + sum.lastText
-  if (ev.type === 'turn/start') sum.state = 'busy'
-  else if (ev.type === 'turn/end') sum.state = 'idle'
+  if (ev.type === 'turn/start') {
+    sum.busy = true
+    settleDot(sum)
+  } else if (ev.type === 'turn/end') {
+    sum.busy = false
+    settleDot(sum)
+  } else if (ev.type === 'human/handoff') {
+    /**
+     * **「待人工处理」的第二个数据源。**
+     *
+     * 确认那一路（下面那条）只在一轮**正在跑**的时候出现，人多半就坐在这一屏。转人工
+     * 不是：单子开出来之后那一轮就收口了，会话回到空闲，而这件事可能是半夜的日常任务
+     * 开出来的。少了这一条，名单上那颗点会安安静静地写着「空闲」，而那台 Bot 其实卡着
+     * 一件等人的事。
+     */
+    const d = ev.data || {}
+    // **按单号记，不是计数。** 同一张单会来好几条（open → claimed → …），加加减减
+    // 迟早会漂成一个永远归不了零的数，而那颗点就永远亮着「待人工处理」。
+    const set = sum.openIds || (sum.openIds = new Set())
+    if (d.state === 'open' || d.state === 'claimed') set.add(d.id)
+    else {
+      set.delete(d.id)
+      // 快照那一份也要销掉，否则这颗点会亮到下一次轮询才灭——而人刚点完交还，
+      // 正盯着它看。
+      if (sum.snapIds) sum.snapIds.delete(d.id)
+    }
+    settleDot(sum)
+  }
   // **「待人工处理」现在有数据源了。** 高风险确认会让那次工具调用真的停在席位上等人
   // 拍板（policy/approvals.ts），席位为此发一条 `tool/approval`。名单上那颗点因此有了
   // 第三态：不是在跑，也不是跑完了，而是**在等你**——而人多半正在别的 Bot 那一屏，
@@ -100,8 +171,9 @@ function noteBotEvent(botId, ev) {
     // 下，`agent.abort()` 不等已经开跑的工具（见 bot 的 bridgeTools），于是 turn/end
     // 完全可能排在这条终态前面到达——那样这颗点会从「空闲」被翻回「正在执行」，然后
     // 一直停在那儿，直到下一轮开始。
-    if ((ev.data || {}).state === 'pending') sum.state = 'review'
-    else if (sum.state === 'review') sum.state = 'busy'
+    if ((ev.data || {}).state === 'pending') sum.asking = (sum.asking || 0) + 1
+    else if (sum.asking) sum.asking--
+    settleDot(sum)
   } else if (ev.type === 'user/message' || ev.type === 'assistant/message') {
     const text = messageText((ev.data || {}).message) || (ev.data || {}).text || ''
     if (text) {
@@ -382,6 +454,9 @@ function fold(events, live) {
   let status = ''
   // 空壳工具调用的 callId（见下面 tool/call）。它们的结果也要一起跳过。
   const phantoms = new Set()
+  /** 单号 → 已经画在某一块上的那张交接卡。跨块认，见下面 human/handoff。 */
+  const handoffSeen = new Map()
+  const handoffOf = (id) => (id ? handoffSeen.get(id) : undefined)
   for (const ev of events || []) {
     const type = ev.type
     const data = ev.data || {}
@@ -390,7 +465,15 @@ function fold(events, live) {
     // chunk 不该让一条消息的时间一直往后跳。
     const at = Number(ev.time) || 0
     if (type === 'user/message') {
-      if (data.source && data.source.kind && data.source.kind !== 'user') continue
+      /**
+       * 不是人打进来的那些一律不画——除了**转人工的交还**。
+       *
+       * 那一条 `source` 是 `plugin: 'handoff'`（席位替接手的人发的，见 policy/handoff.ts），
+       * 但它就是一个人做完事之后说的话，是这一轮的起因。滤掉的话，界面上会看到 Bot
+       * 突然自己开口接着干活，而上一句是几小时前它说"等人接手"。
+       */
+      const src = data.source || {}
+      if (src.kind && src.kind !== 'user' && !(src.kind === 'plugin' && src.plugin === 'handoff')) continue
       assistant = null
       tools = []
       const raw = messageText(data.message) || data.text || ''
@@ -513,6 +596,49 @@ function fold(events, live) {
           seq: ev.seq,
         })
       }
+      assistant.endTime = at
+    } else if (type === 'human/handoff') {
+      /**
+       * 转人工的交接单（见 docs/handoff.md）。挂在开单那一块上，和确认卡同一个理由。
+       *
+       * **同一张单会来好几条**（open → claimed → returned → closed），而且后面那几条
+       * 常常隔了几小时——中间人多半又跟 Bot 说过话，于是「当前这一块」早就不是开单
+       * 那一块了。所以按单号在**整条会话**里认（handoffOf），认回开单时那一条就地改。
+       *
+       * 只在当前块里找的话，claimed 会被当成一张新单推进新块：同一张单画出两张卡，
+       * 上面那张还写着「等人接手」、按钮还能点——点下去换回一句 409，而人在下面那张
+       * 卡里写的结论也读不到（取的是第一个匹配的输入框）。
+       */
+      const seen = handoffOf(data.id)
+      if (seen) {
+        seen.state = data.state || seen.state
+        if (data.claimedBy) seen.claimedBy = data.claimedBy
+        if (data.result) seen.result = data.result
+        if (data.repeats) seen.repeats = data.repeats
+        // **不动任何一块的 endTime**：这条事件属于开单那一块，而它早就收口了；
+        // 拿它去推当前块的时间，气泡下面那行会跳到几小时之后。
+        continue
+      }
+      if (!assistant) {
+        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        blocks.push(assistant)
+      }
+      const hs = assistant.handoffs || (assistant.handoffs = [])
+      const fresh = {
+        id: data.id,
+        callId: data.callId || '',
+        state: data.state || 'open',
+        reason: data.reason || '',
+        ask: data.ask || '',
+        summary: data.summary || '',
+        blocking: data.blocking !== false,
+        claimedBy: data.claimedBy || null,
+        result: data.result || null,
+        repeats: Number(data.repeats) || 0,
+        seq: ev.seq,
+      }
+      hs.push(fresh)
+      handoffSeen.set(data.id, fresh)
       assistant.endTime = at
     } else if (type === 'turn/start') {
       status = 'running'
@@ -683,6 +809,7 @@ async function hydrateChat(botId, sessionId) {
     noteChatPage(sessionId, { firstSeq: data.firstSeq, hasMore: data.hasMore })
     if (state.chatSessionId === sessionId) paintChat()
     void syncApprovals(botId, sessionId)
+    void syncHandoffs(botId, sessionId)
   })()
   row.hydrating = job
   return job
@@ -710,6 +837,42 @@ function maxSeqOf(events) {
     if (Number.isFinite(seq) && seq > max) max = seq
   }
   return max
+}
+
+/**
+ * 核对一遍「这几张交接单在席位上还认不认」。
+ *
+ * 和确认那一套（syncApprovals）同一个道理，只是失效的原因不同：交接单是**落盘**的，
+ * 正常情况下重启也还在；但席位重装、换机器、手工清过库之后，会话日志里那条 open
+ * 还在，而单子已经没了——照着日志画出来的卡片带着一整排按钮，点下去只换回一句 409。
+ *
+ * 水位（`upto`）取在发请求之前，判据按**日志行号**比，不按时间比：那是两台机器各自
+ * 的钟（见 approvalDead 那段说明）。
+ */
+async function syncHandoffs(botId, sessionId) {
+  const upto = maxSeqOf(botStreamOf(botId).events)
+  try {
+    const data = await api('GET', `/runtime/sessions/${encodeURIComponent(sessionId)}/handoffs`)
+    const ids = new Set(((data && data.handoffs) || []).map((h) => h.id))
+    state.chatHandoffs = { sessionId, ids, upto }
+    if (state.chatSessionId === sessionId) paintChat()
+  } catch {
+    // 席位没上线、或者老版本没有这条路由。**什么都不做**：宁可留一张可能点不动的卡片，
+    // 也不要把一件真的等着人的事画成失效——那会让人以为不用管它。
+  }
+}
+
+/**
+ * 这张卡还点得动吗。
+ *
+ * 判据必须是「确定不在了」：这张单在核对那一刻之前就落了盘，而席位报回来的清单里
+ * 没有它。终态的那些本来就不画按钮，不参与这个判断。
+ */
+function handoffDead(h) {
+  if (h.state !== 'open' && h.state !== 'claimed' && h.state !== 'returned') return false
+  const snap = state.chatHandoffs
+  if (!snap || snap.sessionId !== state.chatSessionId || !snap.upto) return false
+  return Boolean(h.seq && h.seq <= snap.upto && !snap.ids.has(h.id))
 }
 
 async function syncApprovals(botId, sessionId) {
@@ -1518,6 +1681,10 @@ const ICON_TOOL =
 const ICON_MAIL =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>'
 
+/** 交接卡的抬头。举手：这是**一个人被叫来了**，不是一道边界拦下了什么。 */
+const ICON_HAND =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 11V6a1.5 1.5 0 0 0-3 0"/><path d="M15 10V4a1.5 1.5 0 0 0-3 0v6"/><path d="M12 10V5a1.5 1.5 0 0 0-3 0v7"/><path d="M9 12V8a1.5 1.5 0 0 0-3 0v6a7 7 0 0 0 7 7h1a7 7 0 0 0 7-7v-3"/></svg>'
+
 /** 确认卡上那面盾。用盾不用感叹号：这是一道**边界**，不是一次故障。 */
 const ICON_SHIELD =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>'
@@ -1888,6 +2055,69 @@ function approvalHtml(a) {
   )
 }
 
+/** 一张交接单现在算哪一态，说给人听。 */
+function handoffLabel(h) {
+  if (h.state === 'claimed') return t('转人工 · 处理中', 'Handoff · in progress')
+  if (h.state === 'returned') return t('转人工 · 已交还', 'Handoff · handed back')
+  return t('转人工 · 等人接手', 'Handoff · waiting for someone')
+}
+
+/**
+ * 一张交接卡（见 docs/handoff.md）。
+ *
+ * **只画还没闭合的那些。** 已经关掉的收成一行灰字（handoffDoneHtml）——一件已经办完
+ * 的事再占着半屏输入框，往上翻这一轮对话会被几张作废的卡挡住。
+ *
+ * 卡上最大的那行字是 `ask`（要人做什么），不是 `reason`（为什么卡住）。接手的人先要
+ * 知道自己该干嘛；为什么卡住是接下来才关心的事。
+ */
+function handoffHtml(h) {
+  const acts =
+    h.state === 'returned'
+      ? `<div class="sw-handoff-note-done">${esc(t('已经交还，Bot 正在接着做。', 'Handed back — the bot is picking it up.'))}</div>`
+      : `<textarea class="input sw-handoff-note" data-handoff="${esc(h.id)}" rows="2" ` +
+        `placeholder="${esc(t('你做了什么、结论是什么？Bot 要靠它接着做', 'What did you do, and what came of it? The bot continues from this'))}"></textarea>` +
+        `<div class="sw-approval-acts">` +
+        `<button type="button" class="btn btn-primary" data-act="chat-handoff-return" data-id="${esc(h.id)}" data-disp="done">` +
+        `${esc(t('处理完了，交还', 'Done — hand back'))}</button>` +
+        (h.state === 'open'
+          ? `<button type="button" class="btn btn-secondary" data-act="chat-handoff-claim" data-id="${esc(h.id)}">${esc(t('我来接手', 'I will take it'))}</button>`
+          : '') +
+        `<button type="button" class="btn btn-ghost" data-act="chat-handoff-return" data-id="${esc(h.id)}" data-disp="instructions">` +
+        `${esc(t('换个做法', 'Do it differently'))}</button>` +
+        `<button type="button" class="btn btn-ghost" data-act="chat-handoff-cancel" data-id="${esc(h.id)}">${esc(t('不用处理了', 'Never mind'))}</button>` +
+        `</div>`
+  const who = h.claimedBy && h.claimedBy.name
+  return (
+    `<div class="sw-approval sw-handoff" data-state="${esc(h.state)}" data-handoff="${esc(h.id)}">` +
+    `<div class="sw-approval-head">${ICON_HAND}<span>${esc(handoffLabel(h))}</span></div>` +
+    `<div class="sw-handoff-ask">${esc(h.ask || t('接手处理这件事', 'Take this over'))}</div>` +
+    (h.reason ? `<div class="sw-approval-why">${esc(h.reason)}</div>` : '') +
+    (h.summary ? `<pre class="sw-approval-args">${esc(clip(h.summary))}</pre>` : '') +
+    (who ? `<div class="sw-handoff-who">${esc(t('接手人', 'Taken by'))}：${esc(who)}</div>` : '') +
+    (h.repeats ? `<div class="sw-handoff-who">${esc(t('它又撞上了同一件事', 'It hit the same wall again'))} × ${h.repeats}</div>` : '') +
+    acts +
+    `</div>`
+  )
+}
+
+/** 已经闭合的那几张，收成一行。留着是因为「这件事上次是怎么处理的」要看得见。 */
+function handoffDoneHtml(h) {
+  const map = {
+    closed: () => t('转人工 · 已完成', 'Handoff · done'),
+    expired: () => t('转人工 · 没人接手，已关闭', 'Handoff · nobody took it'),
+    cancelled: () => t('转人工 · 已撤销', 'Handoff · cancelled'),
+  }
+  // 席位上已经没有这张单了（重装、换机器、清过库）。**说出来**，别画成「已完成」——
+  // 那件事到底办没办，这边并不知道。
+  if (handoffDead(h)) {
+    return `<div class="sw-handoff-done">${ICON_HAND}<span>${esc(t('转人工 · 席位上已经没有这张单了', 'Handoff · the seat no longer has this ticket'))}</span></div>`
+  }
+  const label = (map[h.state] || (() => t('转人工', 'Handoff')))()
+  const by = h.result && h.result.by && h.result.by.name ? ` · ${h.result.by.name}` : ''
+  return `<div class="sw-handoff-done">${ICON_HAND}<span>${esc(label + by)}</span></div>`
+}
+
 /** 一条消息的外壳。正文和工具条留空，交给 updateRow 填——它俩每帧都可能变。 */
 function rowShell(b, key) {
   const account = (state.me && state.me.account) || {}
@@ -2059,6 +2289,40 @@ function updateRow(el, b, streaming) {
       apbox.setAttribute('data-sig', apSig)
       apbox.innerHTML = waiting.map(approvalHtml).join('')
       apbox.hidden = !waiting.length
+    }
+  }
+
+  /**
+   * 交接卡。和确认卡同一套写法，但**签名里要带状态**：一张单从"等人接手"变成
+   * "处理中"是同一个 id，只按 id 比的话卡片不会重画，人点完接手看不到任何变化。
+   *
+   * 还没写完的那句话要留住：重画会把 textarea 换掉，而人可能正打到一半（另一个
+   * 标签页的一次状态流转就足以触发重画）。所以先把草稿存起来，画完再填回去。
+   */
+  const hs = b.handoffs || []
+  // 席位上已经没有的那些跟终态一样收成一行——**别再摆按钮**，点下去只有一句 409。
+  const live = hs.filter((h) => !handoffDead(h) && (h.state === 'open' || h.state === 'claimed' || h.state === 'returned'))
+  const done = hs.filter((h) => !live.includes(h))
+  let hobox = bubble.querySelector('.sw-handoffs')
+  if (hs.length && !hobox) {
+    hobox = document.createElement('div')
+    hobox.className = 'sw-handoffs'
+    bubble.appendChild(hobox)
+  }
+  if (hobox) {
+    const hSig = hs.map((h) => h.id + ':' + h.state + ':' + (h.repeats || 0) + (handoffDead(h) ? ':x' : '')).join('|')
+    if (hobox.getAttribute('data-sig') !== hSig) {
+      for (const ta of hobox.querySelectorAll('.sw-handoff-note')) {
+        const id = ta.getAttribute('data-handoff')
+        if (id && ta.value) handoffDrafts.set(id, ta.value)
+      }
+      hobox.setAttribute('data-sig', hSig)
+      hobox.innerHTML = live.map(handoffHtml).join('') + done.map(handoffDoneHtml).join('')
+      hobox.hidden = !hs.length
+      for (const ta of hobox.querySelectorAll('.sw-handoff-note')) {
+        const draft = handoffDrafts.get(ta.getAttribute('data-handoff'))
+        if (draft) ta.value = draft
+      }
     }
   }
   paintRowTime(el, b, streaming)
@@ -4070,6 +4334,112 @@ async function decideApproval(callId, decision, scope) {
     // 但必须说出来：人点了一下什么都没发生才是最糟的。
     flash('err', err && err.message ? err.message : t('没能提交这次确认', 'Could not submit that decision'))
   }
+}
+
+/** 交接卡上还没提交的那句话。key 是单号。重画时先存后填，见 updateRow。 */
+const handoffDrafts = new Map()
+
+/**
+ * 接手 / 交还 / 撤销。
+ *
+ * **走 `/runtime/handoffs/:id/*`，不走会话那条路。** 接手的人可能是管理员，这条会话
+ * 根本不是他的——按会话鉴权的那几条路由在那时会把他挡在外面，而他恰恰是该来处理这件
+ * 事的人（见 gateway/src/routes/handoffs.ts）。
+ */
+async function actOnHandoff(id, act, body) {
+  if (!id) return
+  const box = [...document.querySelectorAll('.sw-handoff')].find((el) => el.getAttribute('data-handoff') === id)
+  if (box) {
+    if (box.getAttribute('data-busy') === '1') return
+    box.setAttribute('data-busy', '1')
+  }
+  try {
+    await api('POST', '/runtime/handoffs/' + encodeURIComponent(id) + '/' + act, body || {})
+    handoffDrafts.delete(id)
+    // 状态变化会顺着 SSE 回来（席位落了一条 human/handoff），卡片跟着重画。
+    // 待办计数是 Gateway 那张表上的，单独刷一次。
+    void loadHandoffs()
+  } catch (err) {
+    if (box) box.removeAttribute('data-busy')
+    // 409「已经被别人接走了 / 这张单不在了」不是错误，但必须说出来：点了一下什么都
+    // 没发生才是最糟的。
+    flash('err', (err && err.message) || t('这一下没成', 'That did not go through'))
+  }
+}
+
+function handoffNote(id) {
+  const ta = [...document.querySelectorAll('.sw-handoff-note')].find((x) => x.getAttribute('data-handoff') === id)
+  return ta ? ta.value.trim() : ''
+}
+
+async function returnHandoff(id, disposition) {
+  const text = handoffNote(id)
+  if (!text) {
+    // 空的交还等于把「我处理完了」五个字扔给模型——它接着要做什么全靠猜。
+    flash('err', t('写一句你做了什么，Bot 要靠它接着做', 'Say what you did — the bot continues from it'))
+    return
+  }
+  await actOnHandoff(id, 'return', { disposition: disposition || 'done', text })
+}
+
+/**
+ * 待办清单 + 顶栏那个计数。
+ *
+ * **轮询，不是长连接。** 现在的 SSE 是按会话挂的（每颗 Bot 一条），而管理员对别人
+ * 名下 Bot 的单子没有任何一条流。为这一个页面先造一条账号级的流不划算——30 秒一次
+ * 的 GET 换来的东西一样多。
+ */
+async function loadHandoffs() {
+  if (!state.me || !state.me.account || !state.me.account.companyId) return
+  try {
+    const data = await api('GET', '/runtime/handoffs')
+    state.handoffs = Array.isArray(data.handoffs) ? data.handoffs : []
+    state.handoffCount = Number(data.count) || 0
+    state.handoffStats = data.stats || null
+    applyHandoffSnapshot(state.handoffs)
+    paintHandoffBadge()
+    // 待办页正开着就重画：这个数刚变过，而那一页整屏都是它。
+    if (state.path === '/handoffs') render()
+  } catch {
+    // 拉不到就保持上一份。**不清零**：一个突然消失的待办数会让人以为事情办完了。
+  }
+}
+
+/**
+ * 拉一张单的正文（Bot 做到哪一步）。**只有展开那一条才拉**：这一跳会打到席位上。
+ *
+ * 拉不到就记 `null`，界面上说明白是「席位没应答」——写成「这张单没有内容」的话，
+ * 接手的人会以为 Bot 什么都没做，然后从头再来一遍。
+ */
+async function loadHandoffDetail(id) {
+  if (!id) return
+  try {
+    const data = await api('GET', '/runtime/handoffs/' + encodeURIComponent(id))
+    state.handoffDetail = { ...(state.handoffDetail || {}), [id]: data.detail ?? null }
+  } catch {
+    state.handoffDetail = { ...(state.handoffDetail || {}), [id]: null }
+  }
+  if (state.path === '/handoffs') render()
+}
+
+/**
+ * 待办的轮询。
+ *
+ * 30 秒一次，而且**只在页面可见时**转：一个丢在后台的标签页每半分钟打一个请求，
+ * 一天下来是两千多个，换来的是没有人在看的一个数。切回前台时立刻补一次，
+ * 那一下才是人真正会看的时刻。
+ */
+let handoffTimer = null
+
+function startHandoffPoll() {
+  if (handoffTimer) return
+  handoffTimer = setInterval(() => {
+    if (document.hidden) return
+    void loadHandoffs()
+  }, 30_000)
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void loadHandoffs()
+  })
 }
 
 async function updateOrgRuntime() {

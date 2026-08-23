@@ -295,6 +295,43 @@ document.getElementById('app').addEventListener('click', async (e) => {
     await decideApproval(btn.getAttribute('data-call'), 'deny', btn.getAttribute('data-scope') || 'once')
     return
   }
+  if (act === 'chat-handoff-claim') {
+    await actOnHandoff(btn.getAttribute('data-id'), 'claim')
+    return
+  }
+  if (act === 'chat-handoff-return') {
+    // `done` 是「照你说的做完了」，`instructions` 是「我换了个做法，你按这个来」。
+    // 两句话对模型的意思完全不同（见 policy/handoff.ts 的 returnMessage）。
+    await returnHandoff(btn.getAttribute('data-id'), btn.getAttribute('data-disp') || 'done')
+    return
+  }
+  if (act === 'chat-handoff-cancel') {
+    await actOnHandoff(btn.getAttribute('data-id'), 'cancel')
+    return
+  }
+  if (act === 'handoff-claim') {
+    await actOnHandoff(btn.getAttribute('data-id'), 'claim')
+    return
+  }
+  if (act === 'handoff-detail') {
+    const id = btn.getAttribute('data-id') || ''
+    // 再点一次收起。展开时才去拉正文——那是一跳打到席位的请求，不该在列表里挨个拉。
+    state.handoffOpenId = state.handoffOpenId === id ? '' : id
+    render()
+    if (state.handoffOpenId) await loadHandoffDetail(id)
+    return
+  }
+  if (act === 'handoff-open') {
+    // 交还要写一句话，而那句话该在对话里写——接手的人得先看见 Bot 已经做到哪一步。
+    const bot = btn.getAttribute('data-bot')
+    if (bot) go('/a/' + encodeURIComponent(bot))
+    return
+  }
+  if (act === 'handoff-scope') {
+    state.handoffScope = btn.getAttribute('data-scope') === 'mine' ? 'mine' : 'all'
+    render()
+    return
+  }
   if (act === 'chat-queue-cancel') {
     await cancelQueued(btn.getAttribute('data-id'))
     return
@@ -653,6 +690,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
         version: state.template?.version,
         prompt: a.prompt,
         escalate: a.escalate,
+        escalateTo: a.escalateTo,
         skills: a.skills,
         mcps: a.mcps,
         guards: Object.fromEntries((a.guards || []).map((g) => [g.id, !!g.on])),
@@ -905,6 +943,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
         prompt: a.prompt,
         greeting: a.greeting,
         escalate: a.escalate,
+        escalateTo: a.escalateTo,
         enabled: a.enabled,
         icon: a.icon,
         skills: a.skills,

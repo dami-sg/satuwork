@@ -5,6 +5,7 @@ import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
 import { QUIET_MESSAGE, type ImageRef, type Mention } from '../agent/index.ts'
+import { expiredMessage, returnMessage, type Disposition, type HandoffActor } from '../policy/handoff.ts'
 
 /**
  * Satuwork 的 HTTP API。无头运行时：不发 SPA，未知路径 JSON 404。
@@ -13,7 +14,7 @@ import { QUIET_MESSAGE, type ImageRef, type Mention } from '../agent/index.ts'
  * 所以下面不需要任何「服务还在吗」的防御判断。
  */
 export const name = 'satu-web'
-export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace', 'policy']
+export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace', 'policy', 'handoffs']
 
 export interface Config {
 }
@@ -22,6 +23,42 @@ export function apply(ctx: Context, _config: Config = {}) {
 
   /** 运行时地址。真正听在哪个端口由 server 服务说了算。 */
   console.log(`satuwork: runtime ${ctx.server.baseUrl}`)
+
+  /**
+   * 谁在操作。**由 Gateway 填**：席位只认得自己那一个账号，而接手的人可能是公司管理员。
+   * 认不出就不写——日志上宁可少一个名字，也不要写一个编出来的。
+   */
+  function actorOf(body: unknown): HandoffActor | undefined {
+    const a = (body as { actor?: { accountId?: unknown; name?: unknown } } | null)?.actor
+    if (!a || typeof a !== 'object') return undefined
+    const accountId = String(a.accountId ?? '').trim()
+    const name = String(a.name ?? '').trim()
+    if (!accountId && !name) return undefined
+    return { accountId, name: name || accountId }
+  }
+
+  /**
+   * 把交还的那段话送进会话。
+   *
+   * 正在跑就插话，没在跑就开新一轮——和界面发消息那条路是同一套三岔（少了 `@` 那一岔，
+   * 交还不点名工具）。插话那一岔是要紧的：人交还的同一刻这颗 Bot 完全可能正被别人问着话，
+   * 直接 send 会撞上「该会话正在运行中」，那句交还就丢了。
+   */
+  async function deliver(sessionId: string, hid: string, text: string): Promise<void> {
+    if (ctx.agents.isRunning(sessionId) && (await ctx.agents.steer(sessionId, text))) {
+      // 插进了正在跑的那一轮：等它收口，单子就完了。
+      ctx.handoffs.waitFor(hid, true)
+      return
+    }
+    /**
+     * 另起一轮。**先说清楚要等一次 turn/start 再收口**——这一句必须在 send 之前，
+     * 否则上一轮那条紧随其后的 `turn/end` 会把单子提前收掉（见 handoff.ts 的 awaitStart）。
+     */
+    ctx.handoffs.waitFor(hid, false)
+    void ctx.agents
+      .send(sessionId, text, [], [], { kind: 'plugin', plugin: 'handoff' })
+      .catch((e: Error) => ctx.logger?.warn?.(`handoff: 交还没能进会话 ${e.message}`))
+  }
 
   /**
    * 探活。**不要票**（见 guard/index.ts 的 PUBLIC），因为它是管家判断「这个席位起来
@@ -34,6 +71,22 @@ export function apply(ctx: Context, _config: Config = {}) {
    * **`busy` 只看 running**（理由见 agents.busy）：排着的那几条没有 turn 在跑时根本
    * 不会动，拦下重启保护不了它们，却会被一条孤儿排队行永久钉住。`queued` 只作诊断。
    */
+  /**
+   * 换版静默期里，凡是「要叫醒 Bot」的路都先问一句它。
+   *
+   * **判据是「会不会因此开新的一轮」**：这一轮还在跑的话，交还/超时那段话是插进去的
+   * （deliver 里的 steer），静默不拦；没在跑就得开新一轮，而这几秒之后进程就被换掉了。
+   *
+   * 拦要拦在**动状态之前**：`handoffs.finish()` 一旦落下去，那张单就成了「已交还」，
+   * 而 deliver 这时才发现开不了新一轮——单子从此卡在「已交还、Bot 正在接着做」上，
+   * 可根本没人在做。回绝掉，单子留着，人几秒后再点一次就是。
+   */
+  const quietBlocks = (sessionId: string) => ctx.agents.quiesced() && !ctx.agents.isRunning(sessionId)
+  const refuseQuiet = (res: { status: number; json: (v: unknown) => void }) => {
+    res.status = 409
+    res.json({ error: QUIET_MESSAGE, quiesced: true })
+  }
+
   ctx.server.get('/api/health', async (req, res) => {
     const load = ctx.agents.busy()
     // `quiesced` 让管家核对「那道闸真的落下来了」——它自己刚发的指令，不该只靠 200
@@ -184,12 +237,8 @@ export function apply(ctx: Context, _config: Config = {}) {
      * drainQueue 停手、紧接着进程就被换掉了——收下它等于开一张不会兑现的空头支票，
      * 那条消息会一直躺在队列里，直到某天另一轮跑完才被想起来。
      */
-    const refuseQuiet = () => {
-      res.status = 409
-      res.json({ error: QUIET_MESSAGE, quiesced: true })
-    }
     if (ctx.agents.quiesced() && mentions.length) {
-      refuseQuiet()
+      refuseQuiet(res)
       return
     }
     if (ctx.agents.isRunning(req.params.id)) {
@@ -221,7 +270,7 @@ export function apply(ctx: Context, _config: Config = {}) {
      * 挪到真正要开新一轮的这一刻判，那个缝就没了。
      */
     if (ctx.agents.quiesced()) {
-      refuseQuiet()
+      refuseQuiet(res)
       return
     }
     // 不等 turn 跑完就返回：结果通过 SSE 推，HTTP 只负责「收到了」。
@@ -308,6 +357,125 @@ export function apply(ctx: Context, _config: Config = {}) {
     }
     res.status = 409
     res.json({ error: '这条确认已经结束了' })
+  })
+
+  /**
+   * 这条会话上还没闭合的交接单（见 docs/handoff.md）。
+   *
+   * 和确认那条路的区别：**这里的真相在磁盘上，不在内存里**。确认要拿这条路核对
+   * 「它现在还等不等」，因为等待方是个内存里的 Promise；交接单活过重启，所以刷新之后
+   * 直接照着它画就行。
+   *
+   * `blocking` 那一格给 Gateway 的调度器看：有一张挡着路的单没闭合时，这颗 Bot 的
+   * 日常任务这一次跳过——不拦的话，一件卡住的事会每小时重跑一遍、每小时开一张新单。
+   */
+  ctx.server.get('/api/sessions/:id/handoffs', async (req, res) => {
+    const open = ctx.handoffs.of(req.params.id)
+    res.json({ handoffs: open, blocking: open.some((h) => h.blocking && h.state !== 'returned') })
+  })
+
+  /**
+   * 我来接手。
+   *
+   * 抢不到回 **409**，并且**说清楚被谁接走了**：两个人同时点是必然会撞上的竞态，
+   * 回 200 的话后点的那个会以为这件事归他了，然后两个人各做一遍。
+   */
+  ctx.server.post('/api/sessions/:id/handoffs/:hid/claim', async (req, res) => {
+    const actor = actorOf(await req.json().catch(() => ({})))
+    // 接手必须有名字。没有的话待办页上「谁接的」是一片空白，而那一栏正是这颗按钮的全部意义。
+    if (!actor) {
+      res.status = 400
+      res.json({ error: '缺少 actor：接手的人是谁必须写下来' })
+      return
+    }
+    const r = await ctx.handoffs.claim(req.params.hid, actor)
+    if (r.result === 'ok') {
+      res.json({ ok: true, handoff: r.handoff })
+      return
+    }
+    res.status = 409
+    res.json({
+      error: r.result === 'taken' ? `已经由 ${r.handoff?.claimedBy?.name || '别人'} 接手` : '这张交接单已经不在了',
+      handoff: r.handoff ?? null,
+    })
+  })
+
+  /**
+   * 交还。
+   *
+   * **这一下会真的把话喂给模型**，不是改一个状态位。`closed` 那一档除外——人说这件事
+   * 到此为止，就不该再叫醒 Bot 说一遍。
+   *
+   * 送进去的是一条带 `source: plugin/handoff` 的消息，正文是拼好的结构（谁、做了什么、
+   * 结论、接下来做什么）。含糊成一句「已处理」的话，模型下一步多半是把人刚做完的事
+   * 再做一遍。
+   */
+  ctx.server.post('/api/sessions/:id/handoffs/:hid/return', async (req, res) => {
+    const body = (await req.json().catch(() => ({}))) as { disposition?: unknown; text?: unknown; actor?: unknown }
+    const disposition: Disposition =
+      body.disposition === 'instructions' ? 'instructions' : body.disposition === 'closed' ? 'closed' : 'done'
+    const text = String(body.text ?? '').trim()
+    if (!text && disposition !== 'closed') {
+      // 空的交还等于把「我处理完了」四个字扔给模型——它接着要做什么全靠猜。
+      res.status = 400
+      res.json({ error: '写一句你做了什么、结论是什么，Bot 要靠它接着做' })
+      return
+    }
+    // 静默期里开不了新的一轮（见 quietBlocks）。`closed` 不叫醒 Bot，不受影响。
+    if (disposition !== 'closed' && quietBlocks(req.params.id)) {
+      refuseQuiet(res)
+      return
+    }
+    const actor = actorOf(body)
+    const r = await ctx.handoffs.finish(req.params.hid, disposition, text, actor)
+    if (r.result !== 'ok' || !r.handoff) {
+      res.status = 409
+      res.json({ error: '这张交接单已经不在了' })
+      return
+    }
+    if (disposition !== 'closed') {
+      await deliver(req.params.id, r.handoff.id, returnMessage(r.handoff, disposition, text, actor))
+    }
+    res.json({ ok: true, handoff: r.handoff, resumed: disposition !== 'closed' })
+  })
+
+  /** 撤销。人自己说这件事不用管了——不叫醒 Bot。 */
+  ctx.server.post('/api/sessions/:id/handoffs/:hid/cancel', async (req, res) => {
+    const actor = actorOf(await req.json().catch(() => ({})))
+    const r = await ctx.handoffs.cancel(req.params.hid, actor)
+    if (r.result === 'ok') {
+      // 把最终那张单带回去：Gateway 那一行要跟着改，而它只认这一条响应（见 routes/handoffs.ts）。
+      res.json({ ok: true, handoff: r.handoff })
+      return
+    }
+    res.status = 409
+    res.json({ error: '这张交接单已经不在了' })
+  })
+
+  /**
+   * 超时没人接。**由 Gateway 调**，席位自己不看表——机器可能整夜关着，而那正是没人
+   * 接手的一半原因。
+   *
+   * 它按一次交还处理：告诉模型没人接、别再等了。少了这半句，这张单就和转人工原来那条
+   * 日志一样悬着。
+   */
+  ctx.server.post('/api/sessions/:id/handoffs/:hid/expire', async (req, res) => {
+    const body = (await req.json().catch(() => ({}))) as { hours?: unknown }
+    const hours = Math.max(1, Math.round(Number(body.hours) || 24))
+    // 同交还：静默期里叫不醒 Bot，就别先把单子改成「已过期」。Gateway 那边的清扫是
+    // 周期性的（见 handoff-sweep.ts），下一轮再来时席位早就换完了。
+    if (quietBlocks(req.params.id)) {
+      refuseQuiet(res)
+      return
+    }
+    const r = await ctx.handoffs.expire(req.params.hid)
+    if (r.result !== 'ok' || !r.handoff) {
+      res.status = 409
+      res.json({ error: '这张交接单已经不在了' })
+      return
+    }
+    await deliver(req.params.id, r.handoff.id, expiredMessage(r.handoff, hours))
+    res.json({ ok: true, handoff: r.handoff })
   })
 
   /** 中止当前这一轮。 */

@@ -12,6 +12,7 @@ import { attachPlatformOrgs } from './routes/platform-orgs.ts'
 import { attachMachines } from './routes/machines.ts'
 import { attachCompany } from './routes/company.ts'
 import { attachRuntime } from './routes/runtime.ts'
+import { attachHandoffs } from './routes/handoffs.ts'
 import { attachRoutines } from './routes/routines.ts'
 import { attachCatalog } from './routes/catalog.ts'
 import { attachConnectors } from './routes/connectors.ts'
@@ -50,6 +51,7 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   attachMachines(router, ctx)
   attachCompany(router, ctx)
   attachRuntime(router, ctx)
+  attachHandoffs(router, ctx)
   attachRoutines(router, ctx)
   attachCatalog(router, ctx)
   attachConnectors(router, ctx)
