@@ -124,6 +124,7 @@ const PATHS = {
   '/bots': { title: 'Bot 模版', ownerTitle: '全局 Bot' },
   '/skills': { title: 'Skill 与 MCP', ownerTitle: '全局 Skill 与 MCP' },
   '/chat': { title: '对话' },
+  '/handoffs': { title: '转人工待办' },
 }
 
 const ICONS = {

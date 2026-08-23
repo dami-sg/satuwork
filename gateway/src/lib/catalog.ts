@@ -320,6 +320,16 @@ export interface BotTemplate {
   version: number
   prompt: string
   escalate: string
+  /**
+   * 转人工**交给谁**（见 docs/handoff.md §5）。
+   *
+   * `owner`（默认）= 这颗 Bot 的归属员工；`admin` = 本公司管理员，谁先接算谁的；
+   * `member:<accountId>` = 指定的某个人。
+   *
+   * **解算在 Gateway，不在席位**：席位只认得自己那一个账号，角色表和成员表在这边。
+   * 所以这个字段不下发到席位——交接单报上来的时候，由 Gateway 现读一次模版翻成 assignee。
+   */
+  escalateTo: string
   guards: Record<string, boolean>
   browser: BotBrowser
   memory: BotMemory
@@ -332,11 +342,26 @@ export const BOT_TEMPLATE_NAME = 'Bot 模版'
 /** 追加提示词的上限。够写一段岗位说明，又不至于让谁把整本手册塞进去。 */
 export const MAX_EXTRA_PROMPT = 4000
 
+/**
+ * 归一化「转人工交给谁」。认不出的一律退回 `owner`。
+ *
+ * **不校验那个 accountId 存不存在**：人会离职、会被停用，而模版是一张长期的配置。
+ * 真正解算 assignee 的时候（报单那一刻）再查一次，查不到就落回全体管理员——那时候
+ * 落地的是一张"没人接"的单，而不是一次保存失败。
+ */
+export function escalateToOf(v: unknown): string {
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (s === 'admin' || s === 'owner') return s
+  const m = /^member:([A-Za-z0-9_-]{1,64})$/.exec(s)
+  return m ? `member:${m[1]}` : 'owner'
+}
+
 export function defaultBotTemplate(now = Date.now()): BotTemplate {
   return {
     version: 1,
     prompt: DEFAULT_BOT_PROMPT,
     escalate: '',
+    escalateTo: 'owner',
     guards: { ...DEFAULT_BOT_GUARDS },
     browser: { ...DEFAULT_BOT_BROWSER, sites: [] },
     memory: { ...DEFAULT_BOT_MEMORY, kinds: [...DEFAULT_BOT_MEMORY.kinds] },
@@ -356,6 +381,7 @@ export function botTemplateOf(item: CatalogItem | undefined): BotTemplate {
     version: Number.isFinite(version) && version >= 1 ? Math.trunc(version) : 1,
     prompt: typeof def.prompt === 'string' && def.prompt.trim() ? def.prompt : base.prompt,
     escalate: typeof def.escalate === 'string' ? def.escalate : '',
+    escalateTo: escalateToOf(def.escalateTo),
     guards: botGuardsOf(def.guards),
     browser: botBrowserOf(def.browser),
     memory: botMemoryOf(def.memory),
@@ -422,6 +448,7 @@ export async function applyTemplatePatch(db: Db, companyId: string, cur: BotTemp
     version: cur.version + 1,
     prompt: prompt || cur.prompt,
     escalate: body.escalate !== undefined ? String(body.escalate).trim() : cur.escalate,
+    escalateTo: body.escalateTo !== undefined ? escalateToOf(body.escalateTo) : cur.escalateTo,
     guards: body.guards !== undefined ? botGuardsOf(body.guards, cur.guards) : cur.guards,
     browser: body.browser !== undefined ? botBrowserOf(body.browser, cur.browser) : cur.browser,
     memory: body.memory !== undefined ? botMemoryOf(body.memory, cur.memory) : cur.memory,
@@ -467,6 +494,7 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
       prompt: [template.prompt, extraPrompt].filter(Boolean).join('\n\n'),
       greeting: typeof def.greeting === 'string' ? def.greeting : '',
       escalate: template.escalate,
+      escalateTo: template.escalateTo,
       guards: template.guards,
       browser: template.browser,
       memory: template.memory,
@@ -501,6 +529,7 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
     prompt: typeof def.prompt === 'string' ? def.prompt : '',
     greeting: typeof def.greeting === 'string' ? def.greeting : '',
     escalate: typeof def.escalate === 'string' ? def.escalate : '',
+    escalateTo: escalateToOf(def.escalateTo),
     guards: botGuardsOf(def.guards),
     browser: botBrowserOf(def.browser),
     memory: botMemoryOf(def.memory),

@@ -734,6 +734,29 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     )
   })
 
+  /**
+   * 这条会话上还没闭合的交接单。
+   *
+   * **真相在席位那边**（那是落盘的单子），这一跳只转发；Gateway 库里那一份是索引，
+   * 给跨 Bot 的待办页用，不给这里用——两处读法不一样的话，会话里那张卡片和待办页上
+   * 那一行迟早会各说各的。
+   *
+   * 接手 / 交还走的是 `/runtime/handoffs/:id/*`（按单号，不按会话）：接手的人可能是
+   * 管理员，这条会话根本不是他的，`seatTargetForSession` 那条判据在那儿不成立。
+   */
+  router.get('/runtime/sessions/:id/handoffs', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/handoffs`,
+      undefined,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
   router.post('/runtime/sessions/:id/abort', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const target = await seatTargetForSession(db, account, req.params.id)

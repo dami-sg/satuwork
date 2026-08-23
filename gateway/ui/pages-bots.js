@@ -288,6 +288,35 @@ function legacyBotRow(b) {
 // 行为边界、记忆、能力这三块在两页上长得一模一样，改的只是哪一份草稿（见 state.js
 // 的 editingDraft）。抄成两份的话，下次给记忆加一个选项就会只加在其中一页上。
 
+/**
+ * 「转人工交给谁」的选项。
+ *
+ * 指名到人那一档从**员工名册**里出（`state.accounts`，管理员那一页本来就在拉它）。
+ * 名册还没拉到时只出前两档——列一个空的选单，比少一档更让人以为是坏了。
+ */
+function escalateToOptions(cur) {
+  const opts = [
+    { v: 'owner', label: t('这颗 Bot 的主人', "The bot's owner") },
+    { v: 'admin', label: t('公司管理员（谁先接算谁的）', 'Company admins (first to take it)') },
+  ]
+  for (const m of state.accounts || []) {
+    if (m.role === 'owner' || m.status === 'disabled') continue
+    opts.push({ v: 'member:' + m.id, label: t('指定：', 'Specific: ') + (m.name || m.email || m.id) })
+  }
+  /**
+   * 当前值不在名单里（员工那一侧拉不到名册，或者那个人已经停用）：**补一个占位项**。
+   *
+   * 不补的话选单会显示第一项，而库里存的是另一个人——界面上写着「这颗 Bot 的主人」，
+   * 实际指给的是张三，谁也看不出这里不对。
+   */
+  if (cur && !opts.some((o) => o.v === cur)) {
+    opts.push({ v: cur, label: t('指定：某位同事', 'Specific: a colleague') })
+  }
+  return opts
+    .map((o) => `<option value="${esc(o.v)}" ${o.v === cur ? 'selected' : ''}>${esc(o.label)}</option>`)
+    .join('')
+}
+
 function guardsPanel(a, ro) {
   const guards = (a.guards || []).map((g) => botToggle(g.title, g.desc, g.on, ro ? '' : 'bot-guard', `data-id="${esc(g.id)}"`)).join('')
   return `<div class="satu-panel">
@@ -297,7 +326,14 @@ function guardsPanel(a, ro) {
       <label for="bot-escalate">${t('升级人工的条件')}</label>
       <input class="input" id="bot-escalate" type="text" data-bot="escalate" value="${esc(a.escalate || '')}" ${ro ? 'disabled' : ''}>
     </div>
-    <span style="font-size: 12px; color: var(--muted-foreground);">${t('这几条落在席位上工具执行前的拦截里，不是提示词里的一句话：拦下来的调用没跑过。「升级人工的条件」原样进提示词，配一把 escalate_to_human 工具，调用会留痕。', 'These are enforced on the seat before a tool runs — a blocked call never executed. The escalation rule goes into the prompt verbatim, paired with an escalate_to_human tool whose calls are recorded.')}</span>
+    ${/* 「交给谁」和「什么时候交」摆在一起：写了条件却没人接，是这个功能最常见的坏法。 */ ''}
+    <div class="field">
+      <label for="bot-escalate-to">${t('转人工交给谁', 'Hand off to')}</label>
+      <select class="input" id="bot-escalate-to" data-bot="escalateTo" ${ro ? 'disabled' : ''}>
+        ${escalateToOptions(a.escalateTo || 'owner')}
+      </select>
+    </div>
+    <span style="font-size: 12px; color: var(--muted-foreground);">${t('这几条落在席位上工具执行前的拦截里，不是提示词里的一句话：拦下来的调用没跑过。「升级人工的条件」原样进提示词，配一把 escalate_to_human 工具；它开出来的交接单在「转人工待办」里，人处理完交还，Bot 接着做。', 'These are enforced on the seat before a tool runs — a blocked call never executed. The escalation rule goes into the prompt verbatim, paired with an escalate_to_human tool; the tickets it opens show up under Handoffs, and the bot resumes once a person hands it back.')}</span>
   </div>`
 }
 

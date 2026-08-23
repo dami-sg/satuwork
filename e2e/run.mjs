@@ -36,6 +36,7 @@ import { runMaxSteps } from './max-steps.mjs'
 import { runToolCalls } from './toolcalls.mjs'
 import { runShutdown } from './shutdown.mjs'
 import { runGuards } from './guards.mjs'
+import { runHandoff } from './handoff.mjs'
 import { runBrowser } from './browser.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
@@ -3044,6 +3045,7 @@ async function main() {
     await runMaxSteps({ root, test, assert, log })
     await runToolCalls({ root, test, assert, log })
     await runGuards({ root, test, assert, log })
+    await runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runBrowser({ root, test, assert, log })
     // 关进程那条放在最后：它把 Gateway 起起来又掐掉，后面再挂用例只会跟它抢端口。
     await runShutdown({ gwRoot, test, start, waitHttp, assert, log })

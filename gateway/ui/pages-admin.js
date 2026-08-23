@@ -1002,6 +1002,16 @@ function companyPage() {
             <label for="co-website">${t('网站')}<span style="color: var(--muted-foreground); font-weight: 400;"> · ${t('选填')}</span></label>
             <input class="input" id="co-website" name="website" value="${esc(c.website || '')}" placeholder="https://acme.com">
           </div>
+          ${/* 转人工的对外通知（见 docs/handoff.md §6 第 3 层）。摆在公司资料里而不是
+                Bot 模版里：它是一家公司往哪儿发消息，跟某一颗 Bot 怎么干活无关。 */ ''}
+          <div class="field">
+            <label for="co-handoff-hook">${t('转人工通知地址', 'Handoff webhook')}<span style="color: var(--muted-foreground); font-weight: 400;"> · ${t('选填')}</span></label>
+            <input class="input" id="co-handoff-hook" name="handoffWebhook" value="${esc(c.handoffWebhook || '')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…">
+            <span style="font-size: 12px; color: var(--muted-foreground);">${t(
+              '飞书 / 企业微信 / Slack 群机器人的 webhook。Bot 卡住、需要人处理时往这里发一条——浏览器关着的时候（比如半夜的日常任务），这是唯一叫得醒人的路。留空就只在站内提醒。',
+              'A Feishu / WeCom / Slack bot webhook. When a bot hands something over, a message goes here — with no browser open (a routine at 3am, say) this is the only way anyone finds out. Leave empty for in-app only.',
+            )}</span>
+          </div>
           <div class="field">
             <label>${t('席位')}</label>
             <p style="margin: 0; font-size: 14px;">${t(`已用 ${esc(plan.used || 0)} / ${esc(plan.seats || 0)}`, `${esc(plan.used || 0)} / ${esc(plan.seats || 0)} used`)}</p>

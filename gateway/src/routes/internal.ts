@@ -10,7 +10,9 @@ import { bodyOf, intField, strField } from '../lib/validate.ts'
 import { callerAccountId, requireBootstrapMachine, requireInternalCaller, requireMachine } from '../lib/guards.ts'
 import { instanceHostOf, sourceIpOf } from '../lib/runtime.ts'
 import { METRIC_RETENTION_MS, MINUTE_MS, egressDelta, telemetryOf } from '../lib/telemetry.ts'
-import { type Machine } from '../db.ts'
+import { HANDOFF_STATES, type HandoffState, type Machine } from '../db.ts'
+import { resolveAssignee } from '../lib/handoff.ts'
+import { notify } from '../handoff-sweep.ts'
 
 /**
  * 席位报上来的 guard / outcome 只认这两张表里的值。
@@ -390,6 +392,93 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       },
     })
     json(res, 200, { event })
+  })
+
+  /**
+   * 席位报一张交接单，或者它的一次状态流转（见 docs/handoff.md）。
+   *
+   * **id 由席位给。** 单号在会话日志里已经写下了，Gateway 再发一个自己的号，两边就
+   * 再也对不上——而"点开这张单看正文"正是拿这个号去席位要的。
+   *
+   * **assignee 和 machineId 这边算，不收 body。** 前者要读公司模版和成员表（席位只
+   * 认得自己那一个账号），后者决定之后敲哪台机器——采信 body 等于让调用方指定这张单
+   * 属于哪台机器。和会话索引那条是同一套口径。
+   *
+   * 落**新表**而不是审计：审计答的是"上个月转了几次人工"，这张表答的是"现在还有几张
+   * 没人接"。混在一起的话，待办页要在一堆历史记录里筛出当前状态，而那正是它每次打开
+   * 都要做的事。留档那一条（`bot.guard.escalated`）照旧由 `/internal/guard-events` 写。
+   */
+  router.post('/internal/handoffs', async (req, res) => {
+    const caller = await requireInternalCaller(req, db)
+    const body = bodyOf(req)
+    const accountId = callerAccountId(caller, () => strField(body, 'accountId'))
+    const account = await db.account(accountId)
+    if (!account || account.companyId !== caller.companyId) throw new HttpError(403, '账号不属于这家公司')
+
+    const state = strField(body, 'state') as HandoffState
+    if (!HANDOFF_STATES.includes(state)) throw new HttpError(400, 'state 不认识')
+
+    const id = strField(body, 'id')
+    const known = await db.handoff(id)
+    // 已经在册的不重算指派：人都接手了，模版这时候改了也不该把这张单从他手上挪走。
+    const assignee = known ? known.assignee : await resolveAssignee(db, caller.companyId, accountId)
+    const machineId =
+      known?.machineId ??
+      (caller.kind === 'machine'
+        ? caller.machine.id
+        : ((await db.seatRuntimesOfAccount(accountId))[0]?.machineId ?? null))
+
+    const handoff = await db.upsertHandoff({
+      id,
+      sessionId: strField(body, 'sessionId'),
+      botId: strField(body, 'botId', false),
+      accountId,
+      companyId: caller.companyId,
+      machineId,
+      state,
+      assignee,
+      claimedBy: strField(body, 'claimedBy', false) || null,
+      blocking: body.blocking !== false,
+      repeats: intField(body, 'repeats') ?? 0,
+      reason: strField(body, 'reason', false),
+      ask: strField(body, 'ask', false),
+      createdAt: intField(body, 'createdAt') ?? Date.now(),
+      updatedAt: intField(body, 'updatedAt') ?? Date.now(),
+    })
+    /**
+     * 头一次见到这张单就往外推一条。
+     *
+     * **不 await**：席位那边在等这一跳的回执，而回执晚一秒，人点「接手」就晚一秒
+     * 得到反馈。通知发失败也不该让上报失败——那张单已经落库了，站内照样看得见，
+     * 而 outbox 那头会因为一个 500 把同一张单反复重报。
+     */
+    if (!known && handoff.state === 'open') void notify(db, handoff, 'new')
+    /**
+     * 状态流转进审计。
+     *
+     * 和 `bot.guard.escalated` 那条**并存，不合并**：那一条答的是「上个月转了几次
+     * 人工」，这几条答的是「谁接的、什么时候接的、最后怎么收的场」。合成一条的话，
+     * 一次转人工在审计里会变成一串长得差不多的行，而真正要问的那两个问题都答不了。
+     *
+     * `closed` 不记：那只是 Bot 把交还消化完了，不是人做的事。审计这一栏被机器动作
+     * 刷满，人做的那几行就淹了。
+     */
+    if (handoff.state !== 'closed' && known?.state !== handoff.state) {
+      await db.audit({
+        companyId: caller.companyId,
+        accountId: strField(body, 'claimedBy', false) || accountId,
+        action: `handoff.${handoff.state}`,
+        detail: {
+          handoffId: handoff.id,
+          botId: handoff.botId,
+          sessionId: handoff.sessionId,
+          ownerId: handoff.accountId,
+          ask: handoff.ask.slice(0, 200),
+          reason: handoff.reason.slice(0, 200),
+        },
+      })
+    }
+    json(res, 200, { handoff })
   })
 
   /**

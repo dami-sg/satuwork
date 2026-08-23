@@ -2,6 +2,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { gatewayToken, gatewayUrl } from '../llm/gateway.ts'
 import type { SessionEvent, SessionOrigin } from './types.ts'
+import type { Handoff } from '../policy/handoff.ts'
 
 export const name = 'satu-session-gateway'
 export const inject = ['server', 'sessions', 'catalog', 'storage']
@@ -57,6 +58,21 @@ type OutboxItem =
       attempts: number
       lastError?: string
       decision: GuardDecision
+    }
+  /**
+   * 一张交接单的状态（见 docs/handoff.md）。
+   *
+   * **必须能重试**，这是它和 guard 上报最不一样的地方：一张没报上去的单子，在待办页上
+   * 就是不存在——人不会去翻会话日志找活干。而报单最常见的失败时刻恰恰是 Gateway 正在
+   * 升级换版，那几十秒里开出来的单子不能就这么丢了。
+   */
+  | {
+      kind: 'handoff'
+      sessionId: string
+      createdAt: number
+      attempts: number
+      lastError?: string
+      handoff: Handoff
     }
 
 /** 与 bot/src/policy/index.ts 的 PolicyDecision 同形。这里只搬运，不解释。 */
@@ -180,12 +196,13 @@ export function apply(ctx: Context) {
       for (const row of outbox.list()) {
         // 升级前压在队列里的 usage 项：丢掉，别发。留着只会重复计费，
         // 而且 Gateway 那条 /internal/usage 已经拆掉了，发出去只会 404。
-        if (row.value.kind !== 'index' && row.value.kind !== 'guard') {
+        if (row.value.kind !== 'index' && row.value.kind !== 'guard' && row.value.kind !== 'handoff') {
           outbox.delete(row.id)
           continue
         }
         try {
           if (row.value.kind === 'guard') await sendGuard(row.value.decision)
+          else if (row.value.kind === 'handoff') await sendHandoff(row.value.handoff)
           else await sendIndex(row.value.sessionId)
           outbox.delete(row.id)
         } catch (e) {
@@ -245,6 +262,58 @@ export function apply(ctx: Context) {
       ...decision,
     })
   }
+
+  /**
+   * 报一张单。
+   *
+   * **`assignee` 不在这里算**：席位只认得自己那一个账号，"这件事该谁处理"要读公司模版
+   * 和成员表，那两样都在 Gateway。这边只报事实（哪张单、什么状态、谁接的）。
+   */
+  async function sendHandoff(h: Handoff) {
+    const who = await cachedMe()
+    if (!who) throw new Error('/me 未就绪')
+    await postInternal('/internal/handoffs', {
+      companyId: who.companyId,
+      accountId: who.accountId,
+      id: h.id,
+      sessionId: h.sessionId,
+      botId: h.botId,
+      state: h.state,
+      // 这边的 claimedBy 是个带名字的对象，Gateway 那张表只认 accountId。
+      claimedBy: h.claimedBy?.accountId ?? '',
+      blocking: h.blocking,
+      repeats: h.repeats ?? 0,
+      reason: h.reason,
+      ask: h.ask,
+      createdAt: h.createdAt,
+      updatedAt: h.updatedAt,
+    })
+  }
+
+  /**
+   * 每一次状态流转都往控制面报一条。
+   *
+   * 同 `policy/decision`：**不 await、不挡路**，失败落队列自己重试。人点「接手」那一下
+   * 等的是席位的响应，不该再等一次 Gateway 的往返。
+   */
+  ctx.on('handoff/change', (h: Handoff) => {
+    if (!configured()) return
+    /**
+     * 认不出这条会话属于哪颗 Bot 时**不报**（`botOf` 读不到会话、名册里没有）。
+     *
+     * 报上去的话，Gateway 那张表里会多出一行 botId 为空的单子：待办页上「去处理」
+     * 点不开，接手 / 交还也够不着席位（按 accountId + botId 取地址），而它长得和正常
+     * 的一模一样。会话里那张卡不受影响，本来就在席位自己这边。
+     */
+    if (!h.botId) {
+      ctx.logger?.warn?.(`交接单 ${h.id} 认不出所属 Bot，不上报（会话里那张卡照常）`)
+      return
+    }
+    void sendHandoff(h).catch((e: Error) => {
+      ctx.logger?.warn?.(`交接单上报失败，转入队列：${e.message}`)
+      enqueue({ kind: 'handoff', sessionId: h.sessionId, createdAt: Date.now(), attempts: 0, handoff: h })
+    })
+  })
 
   async function report(sessionId: string) {
     if (!configured()) return
