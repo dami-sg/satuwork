@@ -1,5 +1,5 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { createReadStream, createWriteStream } from 'node:fs'
+import { createReadStream, createWriteStream, type WriteStream } from 'node:fs'
 import { mkdir, rm, stat } from 'node:fs/promises'
 import { basename, extname, relative, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
@@ -86,13 +86,23 @@ export class WorkspaceService extends Service {
     await mkdir(dir, { recursive: true })
     const target = await freshPath(dir, safeName(filename))
     const out = createWriteStream(target)
+    /**
+     * 写失败（盘满、目录被人删掉）之后 `drain` 永远不会来，只等它这条上传就挂在一个
+     * 不会再有任何事件的流上，请求永远不返回。所以把第一个错记下来，背压那一等也认它。
+     */
+    let failed: Error | undefined
+    out.on('error', (e: Error) => {
+      failed ??= e
+    })
     let size = 0
     try {
       for await (const chunk of Readable.fromWeb(body as any)) {
+        if (failed) throw failed
         size += (chunk as Buffer).length
         if (size > this.uploadMax) throw new WorkspaceError(`文件超过上限 ${humanSize(this.uploadMax)}`)
-        if (!out.write(chunk)) await new Promise((r) => out.once('drain', r))
+        if (!out.write(chunk)) await drained(out)
       }
+      if (failed) throw failed
       await new Promise<void>((ok, no) => out.end((e?: Error) => (e ? no(e) : ok())))
     } catch (e) {
       out.destroy()
@@ -114,6 +124,28 @@ export class WorkspaceService extends Service {
       stream: Readable.toWeb(createReadStream(target)) as ReadableStream<Uint8Array>,
     }
   }
+}
+
+/**
+ * 背压：等这个可写流把缓冲吃掉。**close 和 error 也要收，不能只等 drain。**
+ *
+ * 毁掉或者出错的可写流只发 `close` / `error`，`drain` 一辈子不会再来——只等它的话，
+ * 一次「盘满」就会让这条上传永远挂在那儿，请求不返回、临时文件也不删。三个事件哪个
+ * 先到都算「不必再等了」，错由外面那个 `failed` 接着抛。
+ */
+function drained(out: WriteStream): Promise<void> {
+  if (out.destroyed || out.writableEnded) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      out.off('drain', done)
+      out.off('close', done)
+      out.off('error', done)
+      resolve()
+    }
+    out.once('drain', done)
+    out.once('close', done)
+    out.once('error', done)
+  })
 }
 
 /**

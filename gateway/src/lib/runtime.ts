@@ -362,9 +362,9 @@ export async function proxySse(req: Req, res: ServerResponse, url: string, token
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      if (!res.write(Buffer.from(value))) {
-        await new Promise<void>((resolve) => res.once('drain', resolve))
-      }
+      // 对面已经走了就别再写：写进一个毁掉的流只会换回一次 error 事件。
+      if (res.writableEnded || res.destroyed) break
+      if (!res.write(Buffer.from(value))) await drained(res)
     }
   } catch {
     /* 客户端断开或上游中断 */
@@ -374,4 +374,31 @@ export async function proxySse(req: Req, res: ServerResponse, url: string, token
       res.end()
     } catch {}
   }
+}
+
+/**
+ * 背压：等对面把缓冲吃掉。**close 和 error 也要收，不能只等 drain。**
+ *
+ * 这里原来是 `new Promise((resolve) => res.once('drain', resolve))`。客户端在背压里
+ * 关掉标签页（慢网上看 SSE，socket 缓冲满了，人这时候关掉页面）时，那个 socket 已经
+ * 毁了——毁掉的可写流只发 `close` / `error`，**`drain` 永远不会来**。于是这个 promise
+ * 永远不落地：上面那个 while 再也不往下走，`finally` 不跑，`req` 上那个监听摘不掉，
+ * ReadableStream 的读锁也不放。每断一次就在这个所有公司共用的进程里留一帧永远挂着的
+ * 栈，而外面看不出任何异常。
+ *
+ * 三个事件哪个先到都算「不必再等了」，然后由调用方自己判断还该不该写。
+ */
+function drained(res: ServerResponse): Promise<void> {
+  if (res.writableEnded || res.destroyed) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      res.off('drain', done)
+      res.off('close', done)
+      res.off('error', done)
+      resolve()
+    }
+    res.once('drain', done)
+    res.once('close', done)
+    res.once('error', done)
+  })
 }

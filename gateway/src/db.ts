@@ -2658,6 +2658,20 @@ export class Db {
 
   // ── 会话索引。只存指针，不存 user/message 或 assistant/message 正文。──
 
+  /**
+   * 一行会话索引。**id 由席位给**，这边只 upsert——同 upsertHandoff。
+   *
+   * **更新那一支要认账号和公司。** `sessionId` 是上报方给的，可以是任何字符串，而一把
+   * 席位票只代表一个账号；不带这两条判据的话，一台被拿下的席位报一个别人的 sessionId
+   * 就能把那一行改到自己名下：原主人从此 `/runtime/sessions/:id/*` 一律 503
+   * （seatTargetForSession 判的是 `idx.accountId !== account.id`），那条会话从他公司的
+   * 列表里消失，审计上还记成了别人的。UUID 猜不出来不是理由——那是「难以利用」，
+   * 不是「拦住了」（handoffs 那张表为同一件事写过同一段话）。
+   *
+   * 被判据挡下时**不返回库里那一行**：那是另一家公司的数据，原样回给上报方就是把
+   * 刚拦住的东西从窗户递出去。直接抛，路由那边已经先回过一句 403 了，走到这里的只
+   * 剩「两个请求撞在一起」这种极窄的竞态。
+   */
   async upsertSessionIndex(input: {
     sessionId: string
     companyId: string
@@ -2699,7 +2713,9 @@ export class Db {
          "messageCount"=excluded."messageCount",
          title=excluded.title,
          "createdAt"=excluded."createdAt",
-         "updatedAt"=excluded."updatedAt"`,
+         "updatedAt"=excluded."updatedAt"
+       where session_index."accountId" = excluded."accountId"
+         and session_index."companyId" = excluded."companyId"`,
       [
         row.sessionId,
         row.companyId,
@@ -2714,7 +2730,12 @@ export class Db {
         row.updatedAt,
       ],
     )
-    return row
+    // 读回真正落下去的那一行：判据挡下时它还是原来的主人，那时候要抛，不能把它回出去。
+    const saved = await this.sessionIndex(input.sessionId)
+    if (!saved || saved.accountId !== input.accountId || saved.companyId !== input.companyId) {
+      throw new Error(`会话 ${input.sessionId} 属于别的账号，拒绝改写`)
+    }
+    return saved
   }
 
   async sessionIndex(sessionId: string): Promise<SessionIndex | undefined> {
