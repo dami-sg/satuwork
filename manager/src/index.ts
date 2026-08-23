@@ -7,8 +7,8 @@ import { diagnose } from './diag.ts'
 import { botUnit, clampLines, followLogs, MANAGER_UNIT, recentLogs } from './logs.ts'
 import { checkLogs, defaultKeepMb, logUsage, setDesiredCapMb, startLogWatch, vacuum } from './logdisk.ts'
 import { metrics, startMetrics } from './metrics.ts'
-import { deploySeat, removeSeat, seat, seatsWithLiveness, type SeatSpec } from './seats.ts'
-import { confirmVersion, maybeUpgrade, refreshConfirmScript, upgradeError } from './upgrade.ts'
+import { SeatBusy, deploySeat, removeSeat, seat, seatsWithLiveness, type SeatSpec } from './seats.ts'
+import { confirmVersion, maybeUpgrade, refreshConfirmScript, upgradeDeferred, upgradeError } from './upgrade.ts'
 import { currentTimezone, maybeSetTimezone, timezoneError } from './timezone.ts'
 import { standDown } from './standdown.ts'
 
@@ -130,6 +130,11 @@ function specOf(rawSeatId: string, body: unknown): SeatSpec {
       botPort: port('botPort'),
       cdpPort: port('cdpPort'),
     },
+    // 人手工按的「重新部署」。只有它能跳过换版前的排空——自动跟版、模版下发都跳不过去。
+    interrupt: b.interrupt === true,
+    // 调用方给的排空预算（毫秒）。**不校验形状**，drainWindowMs 收到非数就回落到本机
+    // 上限，而且两者取小——这个字段只能让排空更短，越不了机器自己的界。
+    ...(b.drainMs == null ? {} : { drainMs: Number(b.drainMs) }),
   }
 }
 
@@ -149,6 +154,10 @@ router.get('/health', async (req, res) => {
     paired: Boolean(state),
     dryRun: boot.dryRun,
     upgradeError: upgradeError() || null,
+    // 换版在等席位把会话跑完（见 upgrade.ts 的 seatsIdleEnough）。**和 upgradeError
+    // 分开报**：等不是错，混进 lastError 会在界面上变成一行红字，而这台机器好好的。
+    // 没在等就是 null——「界面上说 pending，机器上什么也没发生」得有个地方答得上。
+    upgradeDeferred: upgradeDeferred(),
     // 时区分两件事报：机器现在是什么时区、上一次改时区为什么没改上。合成一个字段
     // 的话，「没指定过」和「指定了但改失败」在外面看着一样。
     timezone: currentTimezone() || null,
@@ -236,8 +245,21 @@ router.get('/logs', async (req, res) => {
 
 router.put('/seats/:seatId', async (req, res) => {
   requireMachine(req)
-  const row = await deploySeat(specOf(req.params.seatId, req.body), token())
-  json(res, row.status === 'ready' ? 200 : 502, { seat: row })
+  try {
+    const row = await deploySeat(specOf(req.params.seatId, req.body), token())
+    json(res, row.status === 'ready' ? 200 : 502, { seat: row })
+  } catch (e) {
+    /**
+     * 席位上还有会话在跑，等过了也没等到它结束。**这不是失败**：机器上一个字节都没
+     * 动，席位还是原来那个版本、还在好好地跑。所以回 409（不是 502），并且带一个
+     * `busy: true` 让 Gateway 认得出来——它据此保留原来的状态，而不是把这一行标红。
+     */
+    if (e instanceof SeatBusy) {
+      json(res, 409, { error: e.message, busy: true, seat: seat(req.params.seatId) ?? null })
+      return
+    }
+    throw e
+  }
 })
 
 router.delete('/seats/:seatId', async (req, res) => {

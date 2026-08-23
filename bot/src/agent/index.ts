@@ -62,6 +62,14 @@ const EMPTY_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0
 const DEFAULT_MAX_STEPS = 120
 
 /**
+ * 静默期里回绝新一轮时说的那句话。
+ *
+ * **是给人看的**：它会经 Gateway 原样回到浏览器上（见 web/index.ts 那条 409）。所以
+ * 说清楚两件事——现在为什么不行，以及要等多久（几秒，不是「稍后再试」这种废话）。
+ */
+export const QUIET_MESSAGE = '席位正在换新版本，这几秒不接新消息；等它起来再发一次'
+
+/**
  * Agent 循环。
  *
  * 循环本身是 `@earendil-works/pi-agent-core`——它带 steering（**工具跑到一半也能
@@ -124,6 +132,70 @@ export class AgentService extends Service {
 
   isRunning(sessionId: string) {
     return this.live.has(sessionId) || this.starting.has(sessionId)
+  }
+
+  // ── 换版前的静默期 ────────────────────────────────────────────────
+  //
+  // 管家要重启这个进程之前，先让它**不再开新的一轮**，然后等手上这一轮跑完（见
+  // manager/src/seats.ts 的 drainSeat）。没有这一道，「等到空闲」和「真的重启」之间还
+  // 隔着拉包、解包、rsync 那几秒——人在那几秒里发一句，照样被拦腰砍断，而排空看上去
+  // 明明成功了。
+  //
+  // **只挡新的一轮，不挡 steering。** 正在跑的那一轮由用户自己管，插一句话不会多开
+  // 一轮；真要一直插下去，排空就等不到空闲、超时之后这次换版被拒——那个方向是安全的
+  // （宁可不换版，也不打断人）。
+  //
+  // **只在内存里，而且带 TTL。** 进程马上就要被换掉，落盘没有意义；而管家要是在中途
+  // 挂了、或者部署失败没来得及放开，这台席位不能就此变成一块永远不接活的砖。
+
+  /** 静默到什么时候（epoch ms）。0 = 正常接活。 */
+  private quietUntil = 0
+
+  /** 上限：够一次「等空闲 + 重铺」，又不至于让一次失联把席位冻住太久。 */
+  static readonly QUIET_MAX_MS = 5 * 60_000
+
+  quiesced(): boolean {
+    return this.quietUntil > Date.now()
+  }
+
+  /** 进入静默。返回实际生效到什么时候，调用方好核对自己那一头的预算。 */
+  quiesce(ttlMs: number): number {
+    const ttl = Math.min(AgentService.QUIET_MAX_MS, Math.max(0, Math.trunc(Number(ttlMs) || 0)))
+    this.quietUntil = ttl ? Date.now() + ttl : 0
+    this.ctx.logger?.info?.(ttl ? `agents: 进入换版静默 ${Math.round(ttl / 1000)} 秒，期间不开新的一轮` : 'agents: 静默已放开')
+    return this.quietUntil
+  }
+
+  /** 放开。部署失败、或者根本没走到重启那一步时，管家要负责调它。 */
+  resume(): void {
+    if (!this.quietUntil) return
+    this.quietUntil = 0
+    this.ctx.logger?.info?.('agents: 静默已放开，恢复接活')
+  }
+
+  /**
+   * 这个席位此刻在忙吗——**不问是哪条会话**。
+   *
+   * 管家要在重启这个进程之前知道这件事：换版就是 `systemctl restart`，跑到一半的那
+   * 一轮会当场没命（日志里那条 turn/end 根本没写成，要等下一次读盘才由
+   * healDanglingTurn 补上），而人正对着屏幕等回答。见 manager/src/seats.ts 的排空。
+   *
+   * **只认「在跑」，不认「排着」**，尽管排着的那几条确实也是人在等的活。理由是队列
+   * 落在盘上（storage 的 message-queue），而**消费它的唯一时机是某一轮跑完**（见
+   * drainQueue）：没有 turn 在跑时，队列就是不动的，这时拦下重启一件东西也保护不了。
+   * 反过来，认它的代价很实在——一条在 turn 跑到一半时被杀掉（机器重启、崩溃、一次
+   * 强制重铺）留下的孤儿排队行，会让这个席位从此永远自报忙，自动跟版一路 409，再也
+   * 升不上去。真有活在跑时 running 一定 > 0，队列本来就顺带被盖住了。
+   *
+   * `queued` 照旧报出来：管家的日志里要说得出「等的是什么」，而且它是查上面那种孤儿
+   * 行的唯一线索。
+   *
+   * 队列一条接一条跑的间隙不必担心：drainQueue 出队之后走的是 runGuarded，而它的第一
+   * 句就是同步的 `starting.add`——中间只隔微任务，探活那个 HTTP 请求（宏任务）插不进去。
+   */
+  busy(): { running: number; queued: number } {
+    const running = new Set([...this.live.keys(), ...this.starting]).size
+    return { running, queued: this.queueCol().list().length }
   }
 
   // ── 排队 ──────────────────────────────────────────────────────────
@@ -223,6 +295,9 @@ export class AgentService extends Service {
    */
   private async drainQueue(sessionId: string): Promise<void> {
     for (;;) {
+      // 静默期里不接着跑：那会开出新的一轮，排空就永远等不到空闲。**留在队列里**，
+      // 和「进程在这一刻被杀掉」是同一个结局（队列本来就是落盘的）。
+      if (this.quiesced()) return
       const next = this.queued(sessionId)[0]
       if (!next) return
       // **先出队再跑。** 反过来的话，这一条要是每次都在同一处抛，队列就成了死循环。
@@ -301,6 +376,15 @@ export class AgentService extends Service {
   }
 
   async send(sessionId: string, text: string, images: ImageRef[] = [], mentions: Mention[] = []): Promise<void> {
+    /**
+     * 静默期里不开新的一轮（见上面那段）。
+     *
+     * **这一道要在这里，而不是只在 HTTP 那一层**：日常任务（routines）也是从这里进来
+     * 的，只挡路由的话，一条正好踩在换版上的定时任务照样会开出一轮，然后被重启砍断。
+     */
+    if (this.quiesced()) {
+      throw new Error(QUIET_MESSAGE)
+    }
     if (this.isRunning(sessionId)) {
       // 这条以前是静默的，而它意味着**用户那句话被丢掉了**——steer 没接住、send 又
       // 拒收。界面上什么都看不出来，日志里也没有。

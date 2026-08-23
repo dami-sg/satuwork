@@ -642,7 +642,13 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
       version = latest.version
     }
     const seats = (await db.seatRuntimesOfMachine(machine.id)).filter((r) => r.status !== 'none')
-    const results: { accountId: string; botId: string; status: string; botVersion: string | null; error?: string }[] = []
+    /**
+     * `busy` 是**第三种结局**，不是一种失败：席位上有人正在说话，管家等过了也没等到
+     * 这一轮结束，于是什么都没动（见 manager/src/seats.ts 的排空）。界面上要分开数——
+     * 混进「失败」里，一次「今天中午大家都在用」会被报成一片红，人会去查根本不存在
+     * 的部署故障。
+     */
+    const results: { accountId: string; botId: string; status: string; botVersion: string | null; error?: string; busy?: boolean }[] = []
     for (const seat of seats) {
       const row = await db.account(seat.accountId)
       if (!row) {
@@ -670,6 +676,9 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
               status: out.runtime?.status ?? 'error',
               botVersion: out.runtime?.botVersion ?? null,
               error: out.error,
+              // 席位有会话在跑，这次没换（见上面 results 的注释）。**认 out.busy，不认
+              // 状态码**：deploySeat 有六处 409，含义各不相同。
+              ...(out.busy ? { busy: true } : {}),
             },
       )
     }
@@ -1005,7 +1014,13 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
       version = latest.version
     }
     const seats = (await db.seatRuntimesOf(company.id)).filter((r) => r.status !== 'none')
-    const results: { accountId: string; botId: string; status: string; botVersion: string | null; error?: string }[] = []
+    /**
+     * `busy` 是**第三种结局**，不是一种失败：席位上有人正在说话，管家等过了也没等到
+     * 这一轮结束，于是什么都没动（见 manager/src/seats.ts 的排空）。界面上要分开数——
+     * 混进「失败」里，一次「今天中午大家都在用」会被报成一片红，人会去查根本不存在
+     * 的部署故障。
+     */
+    const results: { accountId: string; botId: string; status: string; botVersion: string | null; error?: string; busy?: boolean }[] = []
     for (const seat of seats) {
       const row = await db.account(seat.accountId)
       if (!row) {
@@ -1033,6 +1048,8 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
           status: out.runtime?.status ?? 'error',
           botVersion: out.runtime?.botVersion ?? null,
           error: out.error,
+          // 认 out.busy，不认状态码：deploySeat 有六处 409（见它的返回类型）。
+          ...(out.busy ? { busy: true } : {}),
         })
       }
     }

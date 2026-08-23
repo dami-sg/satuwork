@@ -182,6 +182,59 @@ await ctx.agents
   const blocks = lastUser()
   out.queue.排队那条真的跑了 = blocks.some((c) => c.type === 'text' && c.text.includes('排队的这句'))
   out.queue.排队那条带着点名 = toolNames().includes('mcp_gmail_person_send_email')
+
+  /**
+   * 「这个席位忙不忙」的判据：**只认在跑的轮次，不认排着的消息**。
+   *
+   * 管家换 bot 版本之前拿它决定要不要等（见 manager/src/seats.ts 的排空）。队列是落盘
+   * 的，而消费它的唯一时机是「某一轮跑完」（drainQueue）——一条在 turn 跑到一半时被杀掉
+   * 留下的孤儿排队行，会在重启之后一直躺在盘上没人碰。认它的话，这个席位从此永远自报
+   * 忙，自动跟版一路 409，再也升不上去；而拦下这次重启一件东西也保护不了：根本没有
+   * turn 在跑，队列本来就不会动。
+   */
+  const orphan = 's-orphan'
+  const left = ctx.agents.enqueue(orphan, '上一次被杀掉时留下的那条', [], [])
+  const gate = ctx.agents.busy()
+  out.busyGate = {
+    盘上确实还排着一条: ctx.agents.queued(orphan).length === 1,
+    没有轮次在跑: gate.running === 0,
+    queued照旧报得出来: gate.queued >= 1,
+  }
+  ctx.agents.cancelQueued(orphan, left.id)
+
+  /**
+   * 换版静默：**不开新的一轮，但不动正在跑的那一轮。**
+   *
+   * 管家等到「此刻没人在跑」之后，到真的 `systemctl restart` 之间还隔着拉包、解包、
+   * rsync 那几秒。没有这道闸，人在那几秒里发一句照样被拦腰砍断，而排空看上去明明成功
+   * 了——这一条钉的就是那个窗口真的关上了。
+   */
+  const quiet = 's-quiet'
+  ctx.agents.quiesce(60_000)
+  let refused = ''
+  try {
+    await ctx.agents.send(quiet, '换版期间发的这一句', [], [])
+  } catch (e) {
+    refused = e.message
+  }
+  const stillIdle = !ctx.agents.isRunning(quiet)
+  ctx.agents.resume()
+  let after = ''
+  try {
+    // 放开之后必须立刻恢复接活：这道闸只该管那几秒。llm 那头在这份探针里是假的，
+    // 跑得起来就说明闸开了（跑不跑得完不在这一条的范围内）。
+    await ctx.agents.send(quiet, '放开之后这一句该跑得起来', [], [])
+  } catch (e) {
+    after = e.message
+  }
+  out.quiet = {
+    静默期回绝了新一轮: refused.includes('席位正在换新版本'),
+    回绝之后没留下半个轮次: stillIdle,
+    放开之后又接活了: !after.includes('席位正在换新版本'),
+    // TTL 是硬上限：管家半路挂了也不能把席位冻成一块砖。
+    上限夹得住: ctx.agents.quiesce(999 * 60_000) - Date.now() <= 5 * 60_000 + 1000,
+  }
+  ctx.agents.resume()
 }
 
 // ── 5. 出队之后、agent 建出来之前，isRunning 必须一直是 true ─────────

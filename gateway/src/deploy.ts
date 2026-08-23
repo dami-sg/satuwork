@@ -465,10 +465,30 @@ export async function deploySeat(
   db: Db,
   keys: JwtKeys,
   account: Account,
-  opts: { botId: string; version?: string; update?: boolean; force?: boolean; timeoutMs?: number },
+  opts: {
+    botId: string
+    version?: string
+    update?: boolean
+    force?: boolean
+    /**
+     * 打断正在跑的那一轮。默认跟着 `force` 走——人手工按「重新部署」时要的就是「现在
+     * 就重铺」。模版下发那条路带着 force（为了穿过「版本没变就跳过」那道门）却**不**
+     * 想打断谁，它显式传 false。
+     */
+    interrupt?: boolean
+    timeoutMs?: number
+  },
 ): Promise<
   | { ok: true; result: DeployResult }
-  | { ok: false; status: number; error: string; runtime: SeatRuntime | undefined }
+  /**
+   * `busy` 是**第三种结局**：席位上有人正在说话，管家等过了也没等到，于是什么都没动。
+   *
+   * **必须是一个字段，不能让调用方拿 409 反推**——这个函数有六处 409（管家版本过旧、
+   * 架构不匹配、槽位用尽、没有发布版本、公司没配对机器，以及这一条），含义天差地别。
+   * 反推的代价是真的：批量更新会把「这台机器的管家太旧」整片报成「大家在忙，晚点再
+   * 来」，而且因为一个失败都没有，那句提示还是绿的——真正的原因从此浮不出来。
+   */
+  | { ok: false; status: number; error: string; runtime: SeatRuntime | undefined; busy?: boolean }
 > {
   const companyId = account.companyId
   if (!companyId) return { ok: false, status: 403, error: '没有公司席位', runtime: undefined }
@@ -485,6 +505,26 @@ export async function deploySeat(
   if (machine.protocol < MIN_MANAGER_PROTOCOL) {
     return { ok: false, status: 409, error: '这台机器的管家版本过旧，等它自己升级或重跑安装脚本', runtime: undefined }
   }
+
+  /**
+   * 要不要打断席位上正在跑的那一轮。默认跟着 force 走——人按「重新部署」时要的就是
+   * 「现在就重铺」；模版下发也带 force（为了穿过下面那道「版本没变就跳过」的门），
+   * 但它显式传 interrupt:false，因为它没有理由把所有人的会话一起掐掉。
+   */
+  const interrupt = opts.interrupt ?? opts.force === true
+  /**
+   * 允许管家花在「等这一轮跑完」上的时间。
+   *
+   * **从这次请求自己的超时里切一半**，剩下一半留给真正的重铺。这样「排空到一半被自己
+   * 的超时掐断」在结构上就不可能发生——而它真的发生过：模版「立即下发」给单席位 90 秒，
+   * 管家那边默认等 120 秒，于是每一个忙着的席位都会在 90 秒时被 Gateway abort，库里记
+   * 下一条「联系不上机器管家」并标红，而管家根本不知道调用方走了，照样等满 120 秒再把
+   * 席位重铺重启。机器好好的，状态却是假的。
+   *
+   * 管家那头还会和本机上限取小（见 manager/src/seats.ts 的 drainWindowMs），所以这个数
+   * 只会让排空更短，不会越过机器自己的界。
+   */
+  const drainMs = Math.floor((opts.timeoutMs ?? DEPLOY_TIMEOUT_MS) / 2)
 
   const requested = (opts.version || '').trim()
   let release: BotRelease
@@ -626,10 +666,37 @@ export async function deploySeat(
     gatewayToken: secrets.accessToken,
     gatewayApiKey: secrets.apiKey,
     ports: portsOf(row.slot),
+    // 人手工按的「重新部署」才打断正在跑的那一轮，别的（自动跟版、模版下发）都要等
+    // 席位把手上的活干完，见 manager/src/seats.ts 的 drainSeat。
+    ...(interrupt ? { interrupt: true } : { drainMs }),
   }
   try {
     await managerDeploy(machine, spec, opts.timeoutMs)
   } catch (e) {
+    /**
+     * 席位上有会话在跑，管家等过了也没等到它结束。**这不是失败**：机器上一个字节都
+     * 没动，席位还是原来那个版本、还在好好地跑。
+     *
+     * 所以状态要**放回去**，不能留在上面那一步写下的 `deploying`——那一行会让界面
+     * 一直显示「部署中」，而机器上根本没有任何事情在进行；也不能标成 `error`，那是
+     * 一行红字加一个「重新部署」的暗示，而正确的动作是「等会儿再来，或者按强制」。
+     */
+    if (e instanceof SeatBusyError) {
+      const kept = await db.upsertSeatRuntime({
+        ...row,
+        status: existing?.status ?? 'ready',
+        // **这一句不写进 lastError。** 席位卡里那一格出错时画的是 lastError、平时画的是
+        // 版本号（见 ui/pages-machines.js），把一句「等会儿再来」摆进去，会在之后的每
+        // 一天里都盖着「这台跑的是哪一版」——而它恰恰是查这类问题时要看的。这次的结局
+        // 不会因此丢掉：批量那条路逐个席位报 `busy`（界面上单独数一格），单个那条路
+        // 当场就是一句 409，管家的 journal 里还有一整行。
+        lastError: existing?.lastError ?? null,
+        deployedAt: existing?.deployedAt ?? null,
+        updatedAt: Date.now(),
+        botVersion: existing?.botVersion ?? null,
+      })
+      return { ok: false, status: 409, error: e.message, runtime: kept, busy: true }
+    }
     const message = sanitizeError(e, [machine.token, secrets.accessToken, secrets.apiKey, vncPassword])
     const failed = await db.upsertSeatRuntime({
       ...row,
@@ -672,6 +739,28 @@ export interface SeatSpec {
   gatewayToken: string
   gatewayApiKey: string
   ports: SeatPorts
+  /**
+   * 现在就重铺，别等席位把这一轮跑完（见 manager/src/seats.ts 的 drainSeat）。
+   *
+   * **不等于本地那个 `force`**：force 是「已经是这个版本也照铺」，模版下发也带着它，
+   * 而那条路恰恰是该等的。只有人手工按的「重新部署」才把这个字段发下去。
+   */
+  interrupt?: boolean
+  /** 允许管家花在排空上的毫秒数。由这次请求的超时算出来，见 deploySeat 里的 drainMs。 */
+  drainMs?: number
+}
+
+/**
+ * 管家说「席位正忙，这次没换版」。
+ *
+ * 单独一个类型，因为它和「部署失败」的处置完全相反：那边要把席位标红、留一行错误等人
+ * 来看；这边什么都没发生，席位照旧在跑，人该做的只是晚点再来（或者按「重新部署」）。
+ */
+export class SeatBusyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SeatBusyError'
+  }
 }
 
 /**
@@ -716,10 +805,15 @@ async function managerDeploy(machine: Machine, spec: SeatSpec, timeoutMs = DEPLO
    */
   const text = (await res.text()).slice(0, 16_000)
   let message = text
+  let busy = false
   try {
-    const body = JSON.parse(text) as { error?: string; seat?: { lastError?: string } }
-    message = body.seat?.lastError || body.error || text
+    const body = JSON.parse(text) as { error?: string; busy?: boolean; seat?: { lastError?: string } }
+    busy = body.busy === true
+    // 忙的那一条里 seat 是**没动过的**那一行（lastError 多半是上一次部署留下的），
+    // 会把「有会话在跑」盖掉。这种时候只认 error。
+    message = busy ? body.error || text : body.seat?.lastError || body.error || text
   } catch {}
+  if (busy && res.status === 409) throw new SeatBusyError(tailOf(message, 900))
   throw new Error(`管家部署失败 ${res.status}: ${tailOf(message, 900)}`)
 }
 

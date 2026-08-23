@@ -168,6 +168,14 @@ export function attachBotTemplate(router: Router, ctx: RouteCtx) {
       const out = await deploySeat(db, keys, account, {
         botId: seat.botId,
         force: true,
+        // force 在这里只是为了穿过「版本没变就跳过」那道门，**不是**「现在就掐掉他们
+        // 正在说的话」。改一次模版把全公司跑着的那一轮一起打断，没有任何道理——等席位
+        // 把手上的活干完（见 manager/src/seats.ts 的排空），等不到的这一轮就先跳过，
+        // 它们照样会在下一轮探针里自己跟上（这条路本来就是这么设计的）。
+        //
+        // 排空能等多久不用在这里定：deploySeat 从下面这个超时里切一半发给管家，两边
+        // 于是不可能各定各的（那正是「等到一半被自己的超时掐断」的来源）。
+        interrupt: false,
         timeoutMs: REDEPLOY_SEAT_TIMEOUT_MS,
       })
       if (out.ok) ok++

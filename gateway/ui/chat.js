@@ -754,9 +754,15 @@ function approvalDead(a) {
  * 才会再拿一次会话。所以这里跟着流那边的做法退避重连：席位回来了，这一页自己接上，
  * 不用人去刷新。
  *
- * 上限 12 次（约 48 秒）。真的一直不回来，才把话摆到界面上——那时候「稍等」是骗人的。
+ * 上限 60 次（约 5 分钟，前 4 次退避到 5 秒，之后每次 5 秒）。真的一直不回来，才把话摆
+ * 到界面上——那时候「稍等」是骗人的。
+ *
+ * **48 秒是不够的**，和流那边（CHAT_RETRY_MAX）同一个理由：重铺一个席位要拉发布包、
+ * 解包、rsync、重启两个单元、再各自自证端口，几分钟是常态；换版之前管家还会先等席位
+ * 把手上那一轮跑完（见 manager/src/seats.ts 的排空），那一段最长又是两分钟。等不够就
+ * 认输的话，人在换版期间刷了一次页面，这一页就再也接不上了。
  */
-const SESSION_RETRY_MAX = 12
+const SESSION_RETRY_MAX = 60
 
 function cancelSessionRetry() {
   if (sessionRetryTimer) clearTimeout(sessionRetryTimer)
@@ -989,10 +995,21 @@ function botIdOfSession(sessionId) {
  * 断了自己接回来。
  *
  * 以前是「流断了就停，下次打开会话才重连」——网络抖一下、或者机器管家换版重启一
- * 次，正在看的对话就无声地卡住了，人还以为 bot 在想。退避重试到第 6 次为止，
+ * 次，正在看的对话就无声地卡住了，人还以为 bot 在想。退避重试到这个档位为止，
  * 之后才把「连接断开」摆到界面上。
+ *
+ * **6 档（约 24 秒）不够。** 它挡得住网络抖一下，挡不住一次换版：重铺一个席位要拉
+ * 发布包、解包、rsync 一份 app、重启两个单元，两个端口还各自自证 30 秒——几分钟是
+ * 常态。24 秒之后这条流就认输了，而认输之后消息照发照跑：POST 走的是另一条请求，
+ * 回答经 SSE 送出来时没人在听，屏幕上那句「正在思考」于是一直挂着，bot 日志里那一轮
+ * 明明写着 completed。刷新一下就好，因为那会重开一条流——「更新完运行时，回复卡在
+ * 界面上不动，刷新才看得见」说的就是这件事。
+ *
+ * 40 档 ≈ 5 分钟（前 5 档退避到 8 秒，之后每档 8 秒），够一次换版走完。真的一直不
+ * 回来才认输，而认输也不再是死局：见 reviveChatStream——发消息、切回这个标签页、
+ * 点那句话里的「重新连接」，任意一样都会当场再开一条。
  */
-const CHAT_RETRY_MAX = 6
+const CHAT_RETRY_MAX = 40
 /** 连接活够这么久，就算「真的连上过」，退避档位归零。 */
 const CHAT_ALIVE_MS = 10_000
 
@@ -1057,8 +1074,7 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
       return
     }
     // **连不上要接着退避重试，不能就此认输。** 见下面 503 那条的说明。
-    state.runtimeError = '实例还没上线'
-    paintChat()
+    noteStreamWarming(sessionId)
     return retryChatStream(sessionId, ac, attempt + 1)
   }
   /**
@@ -1072,21 +1088,38 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
    * mergePending 手上那条 pending 只能靠 SSE 回来的 user/message 销账（见 mergePending）。
    * bot 日志里那一轮明明写着 completed，这是那个「日志跑完了、网页还转着」的成因。
    *
-   * 退避重试到第 6 次为止（约 24 秒），比重新部署那几秒宽裕得多；真的一直不回来，
+   * 退避重试到 CHAT_RETRY_MAX 为止（约 5 分钟，够一次换版走完）；真的一直不回来，
    * retryChatStream 会把「连接断开」摆到界面上。
    */
   if (res.status === 503) {
     endReplay()
-    state.runtimeError = '实例还没上线'
-    paintChat()
+    noteStreamWarming(sessionId)
     return retryChatStream(sessionId, ac, attempt + 1)
   }
-  if (!res.ok || !res.body) {
+  /**
+   * 剩下的非 2xx 分两类，处置相反，所以必须分开。
+   *
+   * · **401 / 403 / 404 是「答案不会变」**：票过期了、这颗 Bot 不是你的、席位在那台
+   *   机器上已经没了。重试只会白敲接口，再拿一句「实例还没上线」把真正的原因盖掉。
+   *   当场认输，把席位那句原话摆出来。
+   *
+   * · **其余（500、502、504、以及 ok 但没有 body 的那种）跟 503 一路**：那是中间这
+   *   几跳的临时故障——管家反代不到席位时回的正是 502（见 manager/src/proxy.ts），
+   *   而换版那几分钟里它就是这个样子。以前这里一律认输，于是一次 502 和「席位永远
+   *   没了」在界面上是同一件事。
+   */
+  if (res.status === 401 || res.status === 403 || res.status === 404) {
     releaseChatStream(ac, owner)
     endReplay()
-    state.runtimeError = (await res.text().catch(() => '')) || '实例还没上线'
-    paintChat()
+    // **render，不是 paintChat**（见 noteStreamDown 与 retryChatStream 认输那一处的
+    // 长注释）：那句话摆在顶上那条横幅里，而横幅只由 chatPage() 拼。
+    noteStreamDown(sessionId, (await res.text().catch(() => '')) || '实例还没上线')
     return
+  }
+  if (!res.ok || !res.body) {
+    endReplay()
+    noteStreamWarming(sessionId)
+    return retryChatStream(sessionId, ac, attempt + 1)
   }
   const reader = res.body.getReader()
   // 重放卡在半路的看门狗。收到 replay/done 就撤——那之后长时间没动静是正常的。
@@ -1248,8 +1281,24 @@ function retryChatStream(sessionId, ac, attempt) {
     // 认输了就把 ac 清掉。留着它，切回这个 Bot 时热路径会以为流还开着，直接接一个
     // 空事件桶上去，再也不会重连。
     releaseChatStream(ac, owner)
-    state.runtimeError = '连接断开，刷新页面重试'
-    paintChat()
+    /**
+     * **必须 render()，paintChat() 是不够的。**
+     *
+     * 这句话和旁边那颗「重新连接」按钮画在顶上那条横幅里，而横幅只在 chatPage() 里
+     * 拼一次（见 runtimeDownBanner 的调用处）；paintChat 只重画消息流和输入区那几个
+     * 已有节点，横幅一个字都不会变。
+     *
+     * 而这一刻的处境恰恰是「再也不会有别的东西来触发重绘」——流已经死了，事件不会
+     * 再来，tickClocks 只改 .sw-time 的文本。于是屏幕上什么都没有：认输了、没人再
+     * 重连、也没有那颗能救回来的按钮，界面就那么静静挂着——正是这次要修的那个症状。
+     * retryChatSession 认输那一处走的就是 render()。
+     *
+     * 整页重绘的代价（输入框被换掉、正打着字的人丢焦点和光标位置，见 paintChatCtx 上
+     * 的注释）在这里认了：它一整条流只发生**一次**，而且是在连着五分钟接不上之后；
+     * 草稿本身跟着 state.chatDraft 回来，不会丢。而后台那几条流断了不走这一下——
+     * 见 noteStreamDown。
+     */
+    noteStreamDown(sessionId, '连接断开')
     return
   }
   const delay = Math.min(500 * 2 ** attempt, 8000)
@@ -1260,6 +1309,85 @@ function retryChatStream(sessionId, ac, attempt) {
     if (r ? r.ac !== ac : chatAbort !== ac || chatStreamId !== sessionId) return
     void startChatStream(sessionId, attempt + 1, owner)
   }, delay)
+}
+
+/**
+ * 「这条流断了」摆到界面上。
+ *
+ * **只有人正看着的那一条有资格占用那条横幅。** 名单上每个 Bot 都挂着一条流（见
+ * warmBotStreams），其中任何一条断掉都会走到这里——而它说的是另一个 Bot 的事：屏幕上
+ * 那条对话好好的，却被扣上一句「连接断开」，人会去点那颗「重新连接」，重连的也是另一
+ * 条流。更实在的代价是**那一下是整页重绘**：正在打字的人当场丢焦点和光标位置，而起因
+ * 是他根本没在看的一个 Bot。
+ *
+ * 后台流断了就安静地放手：名单上那一行停在最后一次摘要上，人点进去时 ensureChatSession
+ * 会重新拿会话、重新开流。
+ */
+function noteStreamDown(sessionId, message) {
+  if (state.chatSessionId !== sessionId) return
+  state.runtimeError = message
+  // **人不在对话页上就只记下来，不重绘。** 横幅只由 chatPage() 拼，在别的页上重绘一
+  // 次谁也看不到那句话，代价却是把人正在填的表单换掉（切走不掐流，所以这条流完全
+  // 可能在人已经翻到「机器」页之后才认输）。他回到对话页时 loadPage 自己会重绘。
+  if (isChatPath(state.path)) render()
+}
+
+/**
+ * 「这条流还在热身，正在退避重连」。同样只对人正看着的那一条说。
+ *
+ * runtimeDownBanner 把「实例还没上线」挡在界面外（它是常态，不该每次重新部署都弹红
+ * 字），所以这一句本身不上屏——但它**会盖掉正摆着的那一句**。名单上那几个 Bot 的流
+ * 各自在退避重连，谁都会往这一格里写：当前这条会话刚拿到一句「这颗 Bot 不是你的」，
+ * 半秒后就被另一个 Bot 的 503 抹成「实例还没上线」，然后横幅连带着消失，人什么都
+ * 看不到了。scope 一道，这一格就只由人正看着的那条会话写。
+ */
+function noteStreamWarming(sessionId) {
+  if (state.chatSessionId !== sessionId) return
+  state.runtimeError = '实例还没上线'
+  // 同上：不在对话页上就没有可画的（paintChat 找不到 chat-thread 会直接返回，但在那
+  // 之前它已经把整份事件 fold 了一遍——长会话上这不便宜，而且每一档退避都来一次）。
+  if (isChatPath(state.path)) paintChat()
+}
+
+/** 这条会话此刻有没有人在听。判据和 startChatStream 那道「已经在跑」的闸一致。 */
+function chatStreamAlive(sessionId, botId) {
+  if (!sessionId) return false
+  const row = botId ? botStreams.get(botId) : null
+  if (row && row.sessionId === sessionId && row.ac) return true
+  return chatStreamId === sessionId && Boolean(chatAbort)
+}
+
+/**
+ * 没人在听就当场再开一条。
+ *
+ * **认输不该是死局。** retryChatStream 退避到头会把 ac 清掉、摆一句「连接断开」——
+ * 那之后没有任何东西会再去重连，而这一屏还好端端地开着：消息照发照跑，回答经 SSE
+ * 送出来时没人接，屏幕上一直挂着「正在思考」。原先唯一的出路是刷新整页。
+ *
+ * 三个入口都走这里：发消息之前（人正要用它，这是最该确认的一刻）、标签页回到前台
+ * （合盖一小时回来，中间那一跳早把流掐了）、以及那句话里的「重新连接」。
+ *
+ * 重连带 after 游标（见 chatCursor），断线期间错过的那几条会一起补回来——所以这不是
+ * 「从现在开始听」，是真的把断掉的那一段接上。
+ */
+function reviveChatStream(sessionId, botId) {
+  const owner = botId || botIdOfSession(sessionId)
+  if (!sessionId || chatStreamAlive(sessionId, owner)) return false
+  /**
+   * 这句话是上一次认输留下的，现在正要重来，先撤掉。
+   *
+   * **撤掉要连着 render()。** 它和那颗「重新连接」按钮画在顶上那条横幅里，而横幅只由
+   * chatPage() 拼——只清 state 不重绘的话，屏幕上那句「连接断开」会一直挂着，人一边看
+   * 着「断了」一边收到新回复。这一下只在「上次认输过、现在正接回来」时发生，罕见到
+   * 值得为它付一次整页重绘（正打着字的人会丢焦点，见 paintChatCtx 上的注释）。
+   */
+  if (state.runtimeError === '连接断开') {
+    state.runtimeError = ''
+    // 同 noteStreamDown：人不在对话页上就没有可撤的横幅，别为它把这一页整块换掉。
+    if (isChatPath(state.path)) render()
+  }
+  void startChatStream(sessionId, 0, owner)
+  return true
 }
 
 /**
@@ -2903,6 +3031,21 @@ document.addEventListener('visibilitychange', () => {
   const away = deskHiddenAt ? Date.now() - deskHiddenAt : 0
   deskHiddenAt = 0
   if (deskMounted && away > DESK_TICKET_FRESH_MS) void remountDesktop(true)
+  /**
+   * 那条聊天流也要认一遍。
+   *
+   * 后台标签页里 setTimeout 会被节流到分钟级，退避重试因此更容易走到头；而合盖一小时
+   * 回来，中间那一跳早把连接掐了。回到前台是「人马上要看这一屏」的时刻，没人在听就
+   * 当场接回来——带 after 游标，睡着那段时间的回复会一起补上。
+   */
+  if (state.chatSessionId) reviveChatStream(state.chatSessionId, state.chatBotId)
+  // 会话本身都还没拿到（那条重试链在后台被节流着走完了、认输了）：也在这儿再试一次。
+  // 不然人回到这一页看到的是一句「实例还没接上」，而没有任何人在替他重试。
+  //
+  // **只在对话页上做。** state.chatBotId 在人走开之后仍然留着（切走不掐流，见
+  // ensureChatSession），拿它在别的页上重试的话：白敲一串接口不说，那条链认输时会
+  // render() 整页——正在填的表单当场被换掉，而起因是一个他此刻根本没在看的 Bot。
+  else if (state.chatBotId && isChatPath(state.path)) void ensureChatSession(state.chatBotId).catch(() => {})
 })
 window.addEventListener('keydown', (e) => {
   // 焦点在 iframe 里时这一条收不到（noVNC 把键盘抓走了），所以标题栏那颗收起按钮
@@ -3393,7 +3536,15 @@ function runtimeDownBanner() {
   if (!err || String(err).includes('实例还没上线')) return ''
   // 这一栏里的话是我们自己写进 state 的中文常量（见 startChatStream / retryChatSession），
   // 过一遍译表才能跟着界面语言走；查不到的原样回来，不会变成空白。
-  return `<div class="gw-flash gw-flash-err">${esc(t(err))}</div>`
+  //
+  // 「连接断开」那一句要**能点**：它是退避认输留下的，而认输之后没有任何东西会再去
+  // 重连。原话让人去刷新整页——那会连草稿和还没发出去的附件一起丢掉，而真正要做的
+  // 只是重开一条流。
+  const retry =
+    err === '连接断开'
+      ? ` <button type="button" class="btn btn-ghost" style="margin-left: var(--space-2); height: 24px; padding: 0 8px; font-size: 12px;" data-act="chat-reconnect">${t('重新连接')}</button>`
+      : ''
+  return `<div class="gw-flash gw-flash-err">${esc(t(err))}${retry}</div>`
 }
 
 /**
@@ -3738,6 +3889,17 @@ async function sendChat() {
     render()
     return
   }
+  /**
+   * **发之前先确认还有人在听。**
+   *
+   * 回答是经 SSE 回来的，而这条消息走的是另一条请求——两者互不相干，流断着照样发得
+   * 出去、bot 照样跑完。屏幕上于是挂着一句「正在思考」，日志里那一轮明明已经
+   * completed，只能刷新（刷新管用，正是因为它重开了一条流）。换版那几分钟里退避真
+   * 认过一次输，那之后每一条消息都会落进这个坑。
+   *
+   * 不 await：重连带 after 游标，错过的会补回来，没必要让人多等一个 RTT。
+   */
+  reviveChatStream(sessionId, state.chatBotId)
 
   state.chatDraft = ''
   state.chatMentions = []
@@ -3925,9 +4087,22 @@ async function updateOrgRuntime() {
     const data = await api('POST', `/platform/orgs/${encodeURIComponent(org)}/runtime/update`, { version })
     const results = Array.isArray(data.results) ? data.results : []
     const ok = results.filter((r) => r.status === 'ready' && !r.error).length
-    const bad = results.filter((r) => r.error || r.status === 'error').length
+    /**
+     * 「有会话在跑，这次没换」**单独数**，不进「失败」。
+     *
+     * 那是管家等到超时也没等到席位空下来（见 manager/src/seats.ts 的排空）：机器上
+     * 一个字节都没动，席位还是原来的版本、还在好好地跑，晚点再来一次就是了。混进
+     * 失败里的话，一次「中午大家都在用」会被报成一片红，人会去查根本不存在的故障。
+     */
+    const held = results.filter((r) => r.busy).length
+    const bad = results.filter((r) => !r.busy && (r.error || r.status === 'error')).length
+    const tail = held ? t(`，${held} 个有会话在跑没换`, `, ${held} skipped (busy)`) : ''
     if (!results.length) flash('ok', t('没有需要更新的席位', 'No seats needed updating'))
-    else flash(bad && !ok ? 'err' : 'ok', t(`更新 ${data.version}：成功 ${ok}，失败 ${bad}`, `Updated ${data.version}: ${ok} ok, ${bad} failed`))
+    else
+      flash(
+        bad && !ok ? 'err' : 'ok',
+        t(`更新 ${data.version}：成功 ${ok}，失败 ${bad}`, `Updated ${data.version}: ${ok} ok, ${bad} failed`) + tail,
+      )
     await loadCompanyDetail(org)
   } catch (err) {
     flash('err', err.message)

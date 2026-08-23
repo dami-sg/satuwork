@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, 
 import { join } from 'node:path'
 import { installRoot, managerVersion, readState, seatAssets, writeState } from './config.ts'
 import { run } from './run.ts'
-import { busy } from './seats.ts'
+import { busy, busySeats } from './seats.ts'
 
 /**
  * 自升级。
@@ -30,6 +30,63 @@ let lastError = ''
 let upgrading = false
 
 export const upgradeError = () => lastError
+
+/**
+ * 有席位在跑会话时，换版最多推迟多久。默认 30 分钟，`SATUWORK_UPGRADE_DEFER_MS` 可调，
+ * 0 = 不等。
+ *
+ * **必须有个头。** 管家换版会重启自己，而 Gateway 到席位的每一跳都从它身上过——正在
+ * 说的那句话会断（浏览器那头会自己接回来，见 gateway/ui/chat.js 的退避重连，但那一
+ * 下人是看得见的）。所以能等就等。可是一台天天有人用的机器上，「所有席位都空着」的
+ * 时刻可能整天都不出现，无限等下去就等于这台机器再也不升级了——而升级里往往正躺着
+ * 修这类问题的补丁。到点就换，并且把「等过、没等到」写进 journal。
+ */
+function deferWindowMs(): number {
+  const raw = Number(process.env.SATUWORK_UPGRADE_DEFER_MS)
+  return Number.isFinite(raw) && raw >= 0 ? Math.trunc(raw) : 30 * 60_000
+}
+
+/** 正在为哪个版本等、从什么时候开始等。换了目标版本要重新计时。 */
+let deferring: { version: string; since: number; seats: string[] } | null = null
+
+/** 界面/curl 看得见的那份「在等什么」。**不进 lastError**：等不是错。 */
+export const upgradeDeferred = () =>
+  deferring ? { version: deferring.version, sinceMs: Date.now() - deferring.since, seats: deferring.seats } : null
+
+/**
+ * 现在能不能换版：席位上有活就先不换。
+ *
+ * 等到 deferWindowMs 为止。**探不出来不算忙**（见 seatBusyNow）——一次超时不该把这台
+ * 机器永远钉在旧版本上。
+ */
+async function seatsIdleEnough(want: string): Promise<boolean> {
+  const hold = deferWindowMs()
+  if (hold === 0) return true
+  const hits = await busySeats()
+  if (!hits.length) {
+    if (deferring) {
+      console.log(`satuwork-manager: 席位都空下来了，接着换到 ${deferring.version}（等了 ${Math.round((Date.now() - deferring.since) / 1000)} 秒）`)
+      deferring = null
+    }
+    return true
+  }
+  // 换了目标版本就重新计时：新的那个包可能正是来修眼下这件事的。
+  if (!deferring || deferring.version !== want) deferring = { version: want, since: Date.now(), seats: [] }
+  deferring.seats = hits.map((h) => h.seatId)
+  const waited = Date.now() - deferring.since
+  if (waited >= hold) {
+    console.warn(
+      `satuwork-manager: 等了 ${Math.round(waited / 1000)} 秒，席位 ${deferring.seats.join('、')} 还在跑会话；不再等了，现在换到 ${want}`,
+    )
+    deferring = null
+    return true
+  }
+  // 每一轮心跳都打一行会把 journal 灌满（30 秒一轮）。只在开始等的那一轮说一次。
+  if (waited < 1000) {
+    console.log(`satuwork-manager: 席位 ${deferring.seats.join('、')} 有会话在跑，等它们跑完再换到 ${want}`)
+  }
+  return false
+}
 
 function nodeMajor(): number {
   return Number((process.versions.node || '0').split('.')[0]) || 0
@@ -125,6 +182,13 @@ export async function maybeUpgrade(offer: UpgradeOffer, token: string): Promise<
     return
   }
   if (!offer.url) return
+  /**
+   * 席位上有人正在说话就先不换。
+   *
+   * **排在最后一道闸**：上面那几条（熔断、Node 太老、没有包）压根不会换版，为一个
+   * 换不了的版本去等半小时，只会让 journal 里多出一串看不懂的「在等」。
+   */
+  if (!(await seatsIdleEnough(want))) return
 
   upgrading = true
   try {
