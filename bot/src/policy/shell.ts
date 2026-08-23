@@ -201,6 +201,23 @@ const DESTRUCTIVE_COMMANDS = new Set([
   'userdel', 'groupdel', 'dropdb', 'killall',
 ])
 
+/**
+ * `mkfs.ext4` / `mkfs.xfs` / `mke2fs` 这一族。
+ *
+ * 上面那张表是**按命令名精确匹配**的，而 `base()` 保留后缀——于是 `mkfs` 拦得住、
+ * `mkfs.ext4` 拦不住，**而后者才是真实写法**：裸 `mkfs` 还要另给一个 `-t`，日常和
+ * 脚本里几乎都直接写 `mkfs.<fstype>`。也就是说这条边界上唯一被拦住的，是那个几乎
+ * 没人用的写法。`mke2fs` 是 `mkfs.ext[234]` 指过去的真身，同一件事的另一个名字，
+ * 一起收。
+ *
+ * 后缀**不枚举文件系统类型**：那张表会跟着内核长，漏一个就是漏一次真的格式化。
+ * 代价是一个恰好叫 `mkfs.sh` 的自用脚本也会弹一次确认——这个方向的错宁可犯。
+ *
+ * 单独一条而不是把变体塞进上面那张表：表里别的命令没有带后缀的变体，塞进去等于
+ * 让下一个人以为那张表是「前缀匹配」的。
+ */
+const MKFS_FAMILY = /^(mkfs\.[a-z0-9]+|mke2fs)$/
+
 /** 只有带上这些参数才算毁东西的那几个。 */
 const DESTRUCTIVE_WITH_FLAGS: Record<string, RegExp> = {
   rm: /(^|\s)-{1,2}[a-z]*(r|f)/i,
@@ -213,6 +230,31 @@ const DESTRUCTIVE_WITH_FLAGS: Record<string, RegExp> = {
   truncate: /-s\s*0/,
 }
 
+/**
+ * 去掉**前置**的标志和它们的值：`git -C /repo reset --hard` → `reset --hard`。
+ *
+ * 上面 `git` / `docker` / `systemctl` 那几条模式是 `^` 锚在子命令上的，而参数串开头
+ * 完全可以垫着一个带值的标志——`git -C /srv/app reset --hard`、
+ * `docker -H tcp://… rm -f web`、`git --git-dir=/srv/.git clean -xfd`。照原样匹配，
+ * 这几条全都判不出来：**裸写的那一条会弹确认卡，加个前缀的同一条直接就跑了**，而这两种
+ * 写法在日常脚本里都常见（VALUE_FLAGS 上那段注释说的就是同一件事，只是当时只接进了
+ * networkCommand）。
+ *
+ * 停在第一个不以 `-` 开头的词：跳过的只是「前置」的标志，`rm -rf` 那种把判据写在标志
+ * 本身里的模式不受影响——那条走的是下面没剥壳的那次匹配。
+ */
+function afterLeadingFlags(head: string, args: string[]): string[] {
+  const valued = VALUE_FLAGS[head] ?? []
+  let i = 0
+  while (i < args.length && args[i]!.startsWith('-')) {
+    const arg = args[i]!
+    i++
+    // `--prefix=./app` 自带值，不吃下一个词；`--prefix ./app` 要跳一个（同 subcommandOf）。
+    if (!arg.includes('=') && valued.includes(arg)) i++
+  }
+  return args.slice(i)
+}
+
 export function destructiveCommand(rawArguments: string): string | null {
   let command = ''
   try {
@@ -223,9 +265,14 @@ export function destructiveCommand(rawArguments: string): string | null {
   }
   if (!command.trim()) return null
   for (const { head, args } of commandWords(command)) {
-    if (DESTRUCTIVE_COMMANDS.has(head)) return head
+    if (DESTRUCTIVE_COMMANDS.has(head) || MKFS_FAMILY.test(head)) return head
     const pattern = DESTRUCTIVE_WITH_FLAGS[head]
-    if (pattern && pattern.test(args.join(' '))) return `${head} ${args[0] ?? ''}`.trim()
+    if (!pattern) continue
+    // 先按原样匹配：`rm -rf`、`chmod -R`、`dd of=` 的判据就写在标志里，剥掉就没了。
+    if (pattern.test(args.join(' '))) return `${head} ${args[0] ?? ''}`.trim()
+    // 再剥掉前置标志匹配一次，专治 `^` 锚在子命令上的那几条。剥过才试，省一次无谓的正则。
+    const rest = afterLeadingFlags(head, args)
+    if (rest.length !== args.length && pattern.test(rest.join(' '))) return `${head} ${rest[0] ?? ''}`.trim()
   }
   // 直接往块设备上写：`… > /dev/sda`。上面按命令名是看不到的，意图写在重定向里。
   if (/>\s*\/dev\/(sd|nvme|disk|hd)/.test(command)) return '写入块设备'
