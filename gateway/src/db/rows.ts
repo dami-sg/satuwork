@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineTriggers, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineTriggers, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -50,6 +50,7 @@ export function companyOf(r: Row): Company {
     website: str(r.website),
     machineId: strOrNull(r.machineId),
     accessUrl: strOrNull(r.accessUrl),
+    handoffWebhook: strOrNull(r.handoffWebhook),
     createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt),
   }
@@ -504,6 +505,30 @@ export function routineRunOf(r: Row): RoutineRun {
     error: strOrNull(r.error),
     startedAt: num(r.startedAt),
     endedAt: numOrNull(r.endedAt),
+  }
+}
+
+export function handoffOf(r: Row): Handoff {
+  return {
+    id: str(r.id),
+    sessionId: str(r.sessionId),
+    botId: str(r.botId),
+    accountId: str(r.accountId),
+    companyId: str(r.companyId),
+    machineId: strOrNull(r.machineId),
+    state: str(r.state) as HandoffState,
+    assignee: strOrNull(r.assignee),
+    claimedBy: strOrNull(r.claimedBy),
+    blocking: Boolean(r.blocking),
+    repeats: num(r.repeats),
+    reason: str(r.reason),
+    ask: str(r.ask),
+    notifyStep: num(r.notifyStep),
+    createdAt: num(r.createdAt),
+    claimedAt: numOrNull(r.claimedAt),
+    returnedAt: numOrNull(r.returnedAt),
+    closedAt: numOrNull(r.closedAt),
+    updatedAt: num(r.updatedAt),
   }
 }
 

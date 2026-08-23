@@ -474,7 +474,17 @@ export const inject = ['tools', 'sessions', 'roster']
 export function apply(ctx: Context) {
   ctx.plugin(PolicyService)
 
-  ctx.inject(['policy'], (ctx: Context) => {
+  /**
+   * 转人工那把工具**单独一个 inject**，不和下面的拦截共用一个。
+   *
+   * 它要 `handoffs`（交接单那个服务），而拦截只要 `policy`。写在同一个 `ctx.inject`
+   * 里的话，交接单没起来 = **整条 `tools/pre-execute` 不注册**，三条行为边界一起静默
+   * 消失：工具照跑、日志干净、类型检查也过——正是这一层最怕的那种坏法。
+   *
+   * 反过来的降级是安全的：没有交接单时这把工具压根不注册，而提示词里那段「什么时候
+   * 转人工」本来就看 `tools.has('escalate_to_human')`（见 agent/index.ts），两边一致。
+   */
+  ctx.inject(['policy', 'handoffs'], (ctx: Context) => {
     /**
      * 转人工。
      *
@@ -484,25 +494,41 @@ export function apply(ctx: Context) {
      *
      * 它自己 `risk: ['read']`——转人工这个动作本身不该被任何一条边界挡住，否则模型
      * 撞墙之后连唯一的出口也没有了。
+     *
+     * **它开的是一张有状态的单，不是一条日志**（见 docs/handoff.md）：单子有归属、有
+     * 通知、有交还。光记一笔的话，"等待人工接手"这句话是对的，只是没有任何人被等着。
      */
     ctx.tools.register({
       name: 'escalate_to_human',
       risk: ['read'],
       description:
         '把这件事转给人处理。满足公司规定的转人工条件、或者你连着被行为边界挡下、没法在权限内推进时调用它。' +
-        '调用之后就停下来，在回复里把情况和已经做到哪一步说清楚，不要再想办法绕过去。',
+        '调用之后就停下来，在回复里把情况和已经做到哪一步说清楚，不要再想办法绕过去。' +
+        '人处理完会把结果交回来，你到时候接着做。',
       parameters: {
         type: 'object',
         properties: {
           reason: { type: 'string', description: '为什么需要人接手，一句话。' },
+          /**
+           * **必填。** 没有它，一张单就是一句抱怨——人打开之后第一件事是回来问
+           * 「所以你要我干嘛」，而那时你已经停了。
+           */
+          ask: { type: 'string', description: '要人做什么，一句祈使句。接手的人打开就看这一行。' },
           summary: { type: 'string', description: '已经做到哪一步、卡在什么地方。接手的人要靠它继续。' },
+          blocking: {
+            type: 'boolean',
+            description: '人不处理这件事是不是就停在这儿。默认 true；只是想让人知道一声就填 false。',
+          },
         },
-        required: ['reason'],
+        required: ['reason', 'ask'],
       },
       execute: async (args, call) => {
-        const a = (args ?? {}) as { reason?: unknown; summary?: unknown }
+        const a = (args ?? {}) as { reason?: unknown; ask?: unknown; summary?: unknown; blocking?: unknown }
         const reason = String(a.reason ?? '').trim() || '没有说明原因'
+        const ask = String(a.ask ?? '').trim() || '接手处理这件事'
+        const summary = String(a.summary ?? '').trim()
         const bot = await ctx.policy.botOf(call.sessionId)
+        // 留档那一条照旧写：审计那一屏在用它，两条回答的是不同的问题。
         await ctx.policy.record({
           sessionId: call.sessionId,
           botId: bot?.id ?? '',
@@ -513,14 +539,35 @@ export function apply(ctx: Context) {
           reason,
           at: Date.now(),
         })
+        const { handoff, deduped } = await ctx.handoffs.open({
+          sessionId: call.sessionId,
+          botId: bot?.id ?? '',
+          callId: call.callId,
+          reason,
+          ask,
+          ...(summary ? { summary } : {}),
+          blocking: a.blocking !== false,
+        })
+        /**
+         * 回给模型的话要**带上单号和现在的状态**。
+         *
+         * 它接下来那句总结是人在对话里唯一会读到的东西；只回一句「已记录」的话，
+         * 它写出来的也只能是「已记录」——而人想知道的是"这件事交给谁了、我要等什么"。
+         */
+        const who = handoff.claimedBy ? `已经由 ${handoff.claimedBy.name} 接手` : '还没有人接手'
         return {
           text:
-            '已经记下：这件事需要人接手。现在停下来，在回复里把原因、已经做完的部分和卡住的地方说清楚，' +
-            '让接手的人不用从头问一遍。不要再尝试绕过刚才那道边界。',
+            (deduped
+              ? `这件事之前已经交出去了（单号 ${handoff.id.slice(0, 8)}，${who}），这次并进同一张单，没有重复打扰人。`
+              : `已经开出一张交接单（单号 ${handoff.id.slice(0, 8)}），${who}。人处理完会把结果交回来。`) +
+            '现在停下来：在回复里把原因、已经做完的部分和卡住的地方说清楚，让接手的人不用从头问一遍。' +
+            '不要再尝试绕过刚才那道边界，也不要反复调这把工具。',
         }
       },
     })
+  })
 
+  ctx.inject(['policy'], (ctx: Context) => {
     /**
      * **prepend。** 这条要排在别的 pre-execute 监听者（以后的审批、限流、沙箱）前面：
      * 边界拦下来的调用，不该先被别的横切关注点跑一遍副作用。

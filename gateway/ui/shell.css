@@ -224,6 +224,37 @@ textarea.satu-code { background: var(--popover); color: var(--color-text); borde
 .satu-usagerow:last-child { border-bottom: 0; }
 .satu-usagerow:hover { background: var(--card); }
 .satu-usagerow > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 转人工待办那一页的行。列宽跟着「要人做什么」走——那一栏是人真正在扫的东西，
+   其余几栏只要能一眼分辨就够。 */
+.satu-handoffhead { display: grid; grid-template-columns: minmax(200px, 2.4fr) 88px 110px 130px 116px 150px; gap: var(--space-3); align-items: center; padding: 10px var(--space-4); background: var(--card); border-bottom: 1px solid var(--border); font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted-foreground); }
+.satu-handoffrow { display: grid; grid-template-columns: minmax(200px, 2.4fr) 88px 110px 130px 116px 150px; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
+.satu-handoffrow:last-child { border-bottom: 0; }
+.satu-handoffrow:hover { background: var(--card); }
+.satu-handoffrow > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.satu-handoffrow .btn { padding: 5px 12px; font-size: 12px; }
+/* 就地处理那张卡：整行宽，压在它那一行下面（那一行是 grid，卡片是它的兄弟节点）。 */
+.satu-handoffpanel { padding: 0 var(--space-4) var(--space-3); border-bottom: 1px solid var(--border); background: var(--card); }
+.satu-handoffpanel .sw-approval { background: var(--popover); }
+/* 顶栏那颗按钮上的计数。**数字压在图标右上角**，不排在它旁边：顶栏那一行寸土寸金，
+   而这个数为 0 时整个角标是不出现的（hidden），排在旁边会让按钮宽度跳一下。 */
+.satu-handoffbell { position: relative; }
+.satu-handoffcount {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+  font-weight: 600;
+}
+
 .satu-agentpair { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-4); align-items: start; }
 .satu-agenthead { display: grid; grid-template-columns: minmax(190px, 2.4fr) 80px 56px 56px 76px 112px; gap: var(--space-3); align-items: center; padding: 10px var(--space-4); background: var(--card); border-bottom: 1px solid var(--border); font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; color: var(--muted-foreground); }
 .satu-agentrow { display: grid; grid-template-columns: minmax(190px, 2.4fr) 80px 56px 56px 76px 112px; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }

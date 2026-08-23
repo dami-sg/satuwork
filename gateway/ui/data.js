@@ -512,6 +512,7 @@ function draftFromTemplate(tpl) {
   return {
     prompt: tpl.prompt || '',
     escalate: tpl.escalate || '',
+    escalateTo: tpl.escalateTo || 'owner',
     skills: Array.isArray(tpl.skills) ? tpl.skills.slice() : [],
     mcps: Array.isArray(tpl.mcps) ? tpl.mcps.slice() : [],
     guards: DEFAULT_BOT_GUARDS.map((g) => ({ ...g, on: typeof saved[g.id] === 'boolean' ? saved[g.id] : g.on })),
@@ -560,6 +561,7 @@ function draftFromBot(bot) {
     browserOn: br.on === true,
     browserSites: (Array.isArray(br.sites) ? br.sites : []).join('\n'),
     escalate: bot.escalate || '',
+    escalateTo: bot.escalateTo || 'owner',
     memories: [],
     memoryOn: mem.on !== false,
     scope: MEMORY_SCOPES.includes(mem.scope) ? mem.scope : '所属分组',
@@ -757,6 +759,13 @@ async function loadPage() {
     await loadRuntimeBots().catch(() => {})
     // 状态点和摘要也不该只在对话页才有：人切到账单页等 Bot 干完活，正是要看着它。
     void warmBotStreams()
+    /**
+     * 转人工待办同理，而且理由更硬：**它多半不是在你眼前发生的**——半夜的日常任务
+     * 卡住了，开出来的单子只有这一份清单说得出来（见 docs/handoff.md §6）。
+     * 每一页都拉，顶栏那个数才是随时可信的。
+     */
+    void loadHandoffs()
+    startHandoffPoll()
   }
   try {
     if (state.path === '/') {
@@ -840,7 +849,8 @@ async function loadPage() {
       // owner 管的是全局 Bot 名录；公司管理员这一页是模版，底下还列着全局那几个和
       // 停用掉的老公司 Bot，所以两份都要。
       if (isOwner()) await loadBots()
-      else await Promise.all([loadBotTemplate(), loadBots()])
+      // 员工名册也要拉：模版上「转人工交给谁」那一格里的「指定某个人」是从它出的。
+      else await Promise.all([loadBotTemplate(), loadBots(), loadAccounts().catch(() => {})])
     } else if (state.path.startsWith('/bots/')) {
       await loadBotDetail(botIdOfPath(state.path))
     } else if (state.path === '/skills') {

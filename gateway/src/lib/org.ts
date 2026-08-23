@@ -334,6 +334,14 @@ export function publicCompany(c: Company) {
     website: c.website,
     machineId: c.machineId,
     accessUrl: c.accessUrl,
+    /**
+     * 转人工的通知地址。**回显出去**：管理员要能看到自己配的是哪一条、也要能改。
+     *
+     * 它和模型密钥不是一回事——那种一律不回显，因为泄漏等于别人可以拿我们的额度花钱；
+     * 这一条泄漏的后果是「有人往那个群里发消息」，而能看到它的只有本公司管理员，
+     * 藏起来换来的是一个改不动、也看不出改没改成的输入框。
+     */
+    handoffWebhook: c.handoffWebhook,
     createdAt: c.createdAt,
   }
 }

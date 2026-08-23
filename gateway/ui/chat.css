@@ -444,6 +444,31 @@
    以为自己点空了。 */
 .sw-approval[data-busy='1'] .sw-approval-acts { pointer-events: none; opacity: 0.5; }
 
+/* 转人工的交接卡（见 docs/handoff.md）。骨架整套继承 .sw-approval——两张卡在同一条
+   气泡里，长得不一样只会让人以为它们是两种不同性质的东西；它们的性质是一样的：
+   **这里有一件事在等你**。区别只在左边那条竖线的颜色（交接是第二品牌色，说的是
+   "换个人来"而不是"要不要放行"）和多出来的那个输入框。 */
+.sw-handoffs { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.sw-handoff { border-left-color: var(--color-accent-2-600, var(--primary)); }
+.sw-handoff .sw-approval-head svg { color: var(--color-accent-2-600, var(--primary)); }
+/* 卡上最大的那行字是「要人做什么」，不是「为什么卡住」：接手的人先要知道自己该干嘛。 */
+.sw-handoff-ask { margin-top: 4px; font-size: 13.5px; line-height: 1.5; color: var(--foreground); }
+.sw-handoff-who { margin-top: 6px; font-size: 12px; color: var(--muted-foreground); }
+.sw-handoff-note { margin-top: 8px; width: 100%; box-sizing: border-box; font-size: 12.5px; resize: vertical; }
+.sw-handoff-note-done { margin-top: 8px; font-size: 12px; color: var(--muted-foreground); }
+.sw-handoff[data-busy='1'] .sw-approval-acts { pointer-events: none; opacity: 0.5; }
+/* 已经闭合的收成一行灰字。留着是因为「这件事上次是怎么处理的」要看得见，
+   但它不该再占着一张卡的位置。 */
+.sw-handoff-done {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.sw-handoff-done svg { flex: none; width: 12px; height: 12px; }
+
 /* 有结论的确认收成一颗药丸，和工具痕迹排在一起（.sw-toolchip 那套样式全都继承）。
    这里只把盾牌调到和工具图标一样大——它原本是给卡片抬头用的，14px 在药丸里偏大。 */
 .sw-approvalchip svg { width: 12px; height: 12px; }

@@ -39,6 +39,13 @@ export interface Company {
   website: string
   machineId: string | null
   accessUrl: string | null
+  /**
+   * 转人工的对外通知地址（飞书 / 企微 / Slack 机器人的 webhook）。空 = 不发。
+   *
+   * 它是「人不在场」那一层唯一的出路：站内的红点和侧栏那颗点都要有人开着浏览器
+   * 才看得见，而最需要被叫醒的恰恰是没人看着的时候（见 docs/handoff.md §6）。
+   */
+  handoffWebhook: string | null
   createdAt: number
   updatedAt: number
 }
@@ -990,6 +997,44 @@ export interface Routine {
   createdAt: number
   updatedAt: number
 }
+
+/**
+ * 一张转人工的交接单（见 docs/handoff.md）。
+ *
+ * **`accountId` 是这颗 Bot 归谁，`assignee` 是该谁处理，`claimedBy` 是谁真的接了。**
+ * 三个都存着，因为它们经常不是同一个人——而事后要问的恰恰是「这件事本该谁做、
+ * 实际谁做了」。
+ */
+export interface Handoff {
+  id: string
+  sessionId: string
+  botId: string
+  accountId: string
+  companyId: string
+  machineId: string | null
+  state: HandoffState
+  /** 指派解算之后的结果。**null = 全体管理员**。 */
+  assignee: string | null
+  claimedBy: string | null
+  blocking: boolean
+  repeats: number
+  reason: string
+  ask: string
+  /** 催办推到第几档：0 没推过，1 推过一次，2 已升级给管理员。 */
+  notifyStep: number
+  createdAt: number
+  claimedAt: number | null
+  returnedAt: number | null
+  closedAt: number | null
+  updatedAt: number
+}
+
+export type HandoffState = 'open' | 'claimed' | 'returned' | 'closed' | 'expired' | 'cancelled'
+
+/** 还没闭合的那几个状态。待办页、催办扫描、日常任务抑制看的都是这一组。 */
+export const HANDOFF_LIVE: HandoffState[] = ['open', 'claimed', 'returned']
+
+export const HANDOFF_STATES: HandoffState[] = [...HANDOFF_LIVE, 'closed', 'expired', 'cancelled']
 
 export type RoutineRunStatus = 'running' | 'ok' | 'error'
 export type RoutineRunTrigger = 'schedule' | 'manual'

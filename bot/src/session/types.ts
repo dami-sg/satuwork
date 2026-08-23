@@ -244,6 +244,46 @@ export interface SessionEventMap {
     expiresAt?: number
   }
 
+  /**
+   * 一次**转人工的交接**（见 docs/handoff.md）。
+   *
+   * 和 `tool/policy`（`guard: 'escalate'`）分开，因为它们回答的是两个问题：那一条是
+   * 留档「这次表态是什么」，这一条是待办「这件事现在到哪儿了」。审计那一屏在用前者，
+   * 合并的话「上个月转了几次人工」和「现在还有几张没人接」会挤成同一个数。
+   *
+   * 同一张单会来多条（open → claimed → returned → closed）。界面按 `id` 认，取最后
+   * 一条——和 `tool/approval` 是同一套读法。
+   *
+   * 加一种事件不是破坏性变更（老版本读到不认识的 type 会跳过），所以不动
+   * `SESSION_FORMAT_VERSION`。
+   */
+  'human/handoff': {
+    /** 单号。 */
+    id: string
+    /** 开这张单的那次工具调用。和 `tool/policy` 那条对得上。 */
+    callId: string
+    state: 'open' | 'claimed' | 'returned' | 'closed' | 'expired' | 'cancelled'
+    /** 为什么要人接。 */
+    reason: string
+    /** 要人**做什么**，一句祈使句。没有它，一张单就是一句抱怨。 */
+    ask: string
+    /** 已经做到哪一步、卡在什么地方。接手的人靠它不用从头问一遍。 */
+    summary?: string
+    /** 人不处理，这件事是不是就停在这儿。定时任务据此决定跳不跳过。 */
+    blocking: boolean
+    /** 谁接的。`open` 态没有。 */
+    claimedBy?: { accountId: string; name: string }
+    /** 人交还时给的结论。 */
+    result?: {
+      disposition: 'done' | 'instructions' | 'closed'
+      text: string
+      by?: { accountId: string; name: string }
+    }
+    /** 同一件事被合并进来几次（模型换个措辞又撞了一次）。 */
+    repeats?: number
+    at: number
+  }
+
   'tool/call': { turn: number; step: number; callId: string; name: string; arguments: string }
   'tool/result': {
     turn: number
