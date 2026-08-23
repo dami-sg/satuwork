@@ -1695,6 +1695,45 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       }
     })
 
+    await test('bot 停机超过五分钟：会话那条链认输之后也要接着慢慢试', async () => {
+      /**
+       * 「bot 停机」最常见的那一种，恰恰是页面**还没拿到会话**的时候：没有会话就开不出
+       * 流，流那根慢速长跑也就永远排不上。会话这条链原先认输之后是真的停手——于是页面
+       * 停在「实例还没接上」上，席位回来了也没人去接，只能等人按发送、切回标签页或者
+       * 刷新。这一条钉的是「认输的是那串急脾气的重试，不是这件事本身」。
+       */
+      let hits = 0
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/bots/bot-down/session')) {
+            hits += 1
+            return { ok: false, status: 503, text: async () => '实例还没上线' }
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.path = '/chat'
+      ui.state.chatBotId = 'bot-down'
+      ui.state.chatSessionId = ''
+      try {
+        // 直接从最后一档进去：这一条要验的是「认输那一刻做了什么」，不是等它退避五分钟。
+        ui.retryChatSession('bot-down', ui.SESSION_RETRY_MAX)
+        assert(
+          ui.idleTimers.has('session:bot-down'),
+          '会话拿不到、认输之后一根重试都没排——bot 回来了这一页也接不上，只能刷新',
+        )
+        assert(ui.state.runtimeError, '认输了总得把话摆出来')
+      } finally {
+        ui.stopChatStream()
+        ui.idleTimers.forEach((t) => clearTimeout(t))
+        ui.idleTimers.clear()
+      }
+    })
+
     await test('席位换了一个进程：认出来，整条会话重来，而不是拿旧游标接着看', async () => {
       /**
        * 换版就是把 bot 换一个进程，而浏览器这头只看得见「流断了」。不认这件事的话，它

@@ -680,8 +680,6 @@ function stopChatStream() {
   // 排着的那次「再拿一遍会话」也一起停。退出登录走的就是这条路（见 app.js 的
   // logout），留着它的话，票都清了它还会照着上一个人的 Bot 再敲十几次接口。
   cancelSessionRetry()
-  // 慢速长跑同理：它比退避链活得久得多，退出登录之后还在敲就更难看了。
-  cancelIdleRetries()
   if (chatAbort) {
     try {
       chatAbort.abort()
@@ -959,6 +957,18 @@ function retryChatSession(botId, attempt) {
     // 不该每次重新部署都弹一条红字），可等了快一分钟还没接上就不是常态了。
     sessionGaveUp = true
     state.runtimeError = '实例还没接上，等一会儿再试，或者重新部署一次'
+    /**
+     * **认输的是这一串急脾气的重试，不是这件事本身。**
+     *
+     * 流那边认输之后转慢速长跑（idleRetry），会话这边原先是真的停手——于是「bot 停机
+     * 超过五分钟」这一种，页面永远停在这句话上：没有会话就开不出流，也就没有任何东西
+     * 会再去试，只能等人按发送、切回标签页或者刷新。而这恰恰是最常见的一种停机。
+     *
+     * 所以这里也接上同一根长跑：半分钟一次，页面开着就一直试；席位回来了这一页自己
+     * 接上。`sessionGaveUp` 留着不动——输入框底下那行小字说的是「这会儿发不出去」，
+     * 那是实话。
+     */
+    idleSessionRetry(botId)
     render()
     return
   }
@@ -1600,10 +1610,43 @@ function idleRetry(sessionId, botId) {
   idleTimers.set(key, timer)
 }
 
-/** 退出登录 / 换 Bot 时把这些长跑一并停掉。 */
+/**
+ * 撤掉一根长跑。**只撤指名的那一根**——名单上每个 Bot 各有各的，开一条流不该把别人的
+ * 也一并撤了：那些流断着，撤掉就再没有人去接，侧栏那几行从此停在断线那一刻。
+ */
+function cancelIdleRetry(key) {
+  const t = idleTimers.get(key)
+  if (!t) return
+  clearTimeout(t)
+  idleTimers.delete(key)
+}
+
+/** 退出登录时全撤：票都清了还在敲上一个人的席位，那就不只是难看了。 */
 function cancelIdleRetries() {
   for (const t of idleTimers.values()) clearTimeout(t)
   idleTimers.clear()
+}
+
+/**
+ * 「会话一直拿不到」的慢速长跑。和 idleRetry 一个节奏、共用一张表（退出登录一并撤）。
+ *
+ * key 上带前缀：同一个 Bot 可能同时有一根流的长跑和一根会话的长跑，撞 key 会让后排上
+ * 的那根被当成「已经排过了」直接扔掉。
+ */
+function idleSessionRetry(botId) {
+  if (!botId) return
+  const key = 'session:' + botId
+  if (idleTimers.has(key)) return
+  const timer = setTimeout(() => {
+    idleTimers.delete(key)
+    // 期间已经接上了、或者人早切到别的 Bot 去了，就不用再排。
+    if (state.chatBotId !== botId || state.chatSessionId) return
+    void ensureChatSession(botId).catch(() => {
+      // 「答案不会变」的那些（Bot 被删了、没权限）由 ensureChatSession 自己摆到界面上，
+      // 这里不再重排：那种情况下长跑就是在白敲接口。
+    })
+  }, CHAT_IDLE_RETRY_MS)
+  idleTimers.set(key, timer)
 }
 
 /**
@@ -1687,6 +1730,9 @@ function reviveChatStream(sessionId, botId) {
    * 着「断了」一边收到新回复。这一下只在「上次认输过、现在正接回来」时发生，罕见到
    * 值得为它付一次整页重绘（正打着字的人会丢焦点，见 paintChatCtx 上的注释）。
    */
+  // 人主动把它叫醒了（发消息 / 切回前台 / 点按钮），排着的那根慢速长跑就没用了：
+  // 快的这一条接手。留着它只是多一个到点空转的定时器。
+  cancelIdleRetry(owner || sessionId)
   if (state.runtimeError === '连接断开') {
     state.runtimeError = ''
     // 同 noteStreamDown：人不在对话页上就没有可撤的横幅，别为它把这一页整块换掉。

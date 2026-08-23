@@ -985,6 +985,10 @@ document.getElementById('app').addEventListener('click', async (e) => {
     // state.chatEvents 里落，然后被画出来。聊天正文、草稿、名册都是上一个账号的东西，
     // 同一个标签页换人登录时一条都不能留。
     stopChatStream()
+    // 那几根慢速长跑（流的、会话的）比退避链活得久得多，**必须在这里全撤**：票都清了
+    // 还在照着上一个人的席位敲接口，就不只是难看了。开一条新流时只撤它自己那一根
+    // （cancelIdleRetry），别的 Bot 断着还得有人去接。
+    cancelIdleRetries()
     chatLive.clear()
     state.chatBotId = ''
     state.chatSessionId = ''
