@@ -15,12 +15,41 @@ import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { freePorts } from './ports.mjs'
+import { publishRelease } from './release.mjs'
 
-/** 起一个假 bot。记下每次请求的头和路径，供断言。 */
+/**
+ * 起一个假 bot。记下每次请求的头和路径，供断言。
+ *
+ * `health` 是可改的：换版前的排空要问 `/api/health` 忙不忙（见 manager/src/seats.ts），
+ * 测「等它跑完」就要能让这个席位说自己在忙，跑完再改回来。
+ */
 function fakeBot() {
   const seen = []
+  const health = { ok: true, busy: false, running: 0, queued: 0, quiesced: false }
+  /** 收到过的静默指令，按先后记账：`{ ttlMs, auth }`。 */
+  const quiesce = []
   const server = createServer((req, res) => {
     seen.push({ path: req.url, headers: { ...req.headers } })
+    if (req.url.startsWith('/api/health')) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(health))
+      return
+    }
+    if (req.url.startsWith('/api/quiesce')) {
+      let raw = ''
+      req.on('data', (c) => (raw += c))
+      req.on('end', () => {
+        let ttlMs = 0
+        try {
+          ttlMs = Number(JSON.parse(raw || '{}').ttlMs) || 0
+        } catch {}
+        quiesce.push({ ttlMs, auth: req.headers.authorization || '' })
+        health.quiesced = ttlMs > 0
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, quiesced: health.quiesced, ...health }))
+      })
+      return
+    }
     if (req.url.startsWith('/api/sse')) {
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.write('data: {"seq":1}\n\n')
@@ -38,7 +67,7 @@ function fakeBot() {
     socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n')
     socket.write('HELLO-WS')
   })
-  return { server, seen }
+  return { server, seen, health, quiesce }
 }
 
 function listenOn(server, port) {
@@ -160,6 +189,9 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         SATUWORK_MANAGER_HOST: '127.0.0.1',
         SATUWORK_MANAGER_PORT: String(MGR_PORT),
         SATUWORK_MANAGER_DRYRUN: '1',
+        // 排空窗口调小：默认 2 分钟是给真机上一轮真活留的，测里只需要证明「等过、
+        // 到点了就明说」。顺带也验了这个环境变量真的有人读。
+        SATUWORK_SEAT_DRAIN_MS: '4000',
         GATEWAY_URL: gwBase,
         SATUWORK_PAIRING_CODE: code,
       },
@@ -221,6 +253,255 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       assert(ok.json.seat.status === 'ready', `status ${ok.json.seat.status}`)
       const list = await req(mgrBase, 'GET', '/seats', { token: machineTok })
       assert(list.json.seats.length === 1, `名册 ${list.json.seats.length}`)
+    })
+
+    /**
+     * 换版前的排空。
+     *
+     * 部署一个已经在跑的席位 = `systemctl restart`：正跑着的那一轮当场没命，日志里那条
+     * turn/end 根本没写成，而人正对着屏幕等回答。这三条钉的是三种处置：等得到就等、
+     * 等不到就明说、按了强制就别拦着。
+     */
+    const seat1Spec = (extra = {}) => ({
+      linuxUser: 'sw-test',
+      homeDir: '/home/sw-test',
+      workDir: '/home/sw-test/work',
+      seatDir: '/home/sw-test/.satuwork/seat-1',
+      botId: 'bot-1',
+      botVersion: '0.0.0-e2e',
+      vncPassword: 'x'.repeat(16),
+      gatewayUrl: gwBase,
+      gatewayToken: 'sat_e2e',
+      gatewayApiKey: 'sk_sw_e2e',
+      ports: { display: 10, vncPort: 5910, novncPort: NOVNC_PORT, botPort: BOT_PORT, cdpPort: 9222 },
+      ...extra,
+    })
+
+    await test('席位在跑会话：换版先等它跑完，等不到就明说，不硬来', async () => {
+      bot.health.busy = true
+      bot.health.running = 1
+      try {
+        const at = Date.now()
+        const r = await req(mgrBase, 'PUT', '/seats/seat-1', {
+          token: machineTok,
+          body: seat1Spec({ botVersion: '0.0.1-e2e' }),
+        })
+        const waited = Date.now() - at
+        // 409 而不是 502：机器上一个字节都没动，席位还是原来那个版本、还在好好地跑。
+        assert(r.status === 409, `忙着的席位该回 409，实际 ${r.status} ${r.text}`)
+        assert(r.json.busy === true, `没带 busy 标记，Gateway 分不出「忙」和「失败」：${r.text}`)
+        assert(String(r.json.error).includes('有会话在跑'), `理由不对：${r.json.error}`)
+        // 真的等过：排空窗口 4 秒（见上面的 SATUWORK_SEAT_DRAIN_MS），当场拒是另一回事。
+        assert(waited >= 3500, `压根没等就拒了（${waited}ms）——那不叫排空`)
+        const list = await req(mgrBase, 'GET', '/seats', { token: machineTok })
+        const row = list.json.seats.find((x) => x.seatId === 'seat-1')
+        assert(row.botVersion === '0.0.0-e2e', `没换版却把版本号写成了新的：${row.botVersion}`)
+        assert(row.status === 'ready', `没换版不该把席位标成 ${row.status}`)
+      } finally {
+        bot.health.busy = false
+        bot.health.running = 0
+      }
+    })
+
+    await test('席位跑完了，换版自己接上，不用人再来一次', async () => {
+      bot.health.busy = true
+      bot.health.running = 1
+      // 1.2 秒后这一轮结束——排空要在窗口内自己认出来，接着往下走。
+      const done = setTimeout(() => {
+        bot.health.busy = false
+        bot.health.running = 0
+      }, 1200)
+      try {
+        const r = await req(mgrBase, 'PUT', '/seats/seat-1', {
+          token: machineTok,
+          body: seat1Spec({ botVersion: '0.0.1-e2e' }),
+        })
+        assert(r.status === 200, `席位空下来之后该换版，实际 ${r.status} ${r.text}`)
+        assert(r.json.seat.botVersion === '0.0.1-e2e', `版本没换：${r.json.seat.botVersion}`)
+      } finally {
+        clearTimeout(done)
+        bot.health.busy = false
+        bot.health.running = 0
+      }
+    })
+
+    await test('换版前先让席位不再接新活——不是等到空闲就撒手', async () => {
+      /**
+       * 排空只等「手上这一轮跑完」是不够的：等到空闲之后，到真正 `systemctl restart`
+       * 之间还隔着拉包、解包、rsync 那几秒，人在那几秒里发一句照样被拦腰砍断，而排空
+       * 看上去明明成功了。所以要先落闸（席位那头 `/api/quiesce`：不开新的一轮，但不动
+       * 正在跑的那一轮），再等。
+       *
+       * 顺序是关键：**先落闸再等**。反过来等于没落——放行那一刻新一轮就能开起来。
+       */
+      bot.quiesce.length = 0
+      const r = await req(mgrBase, 'PUT', '/seats/seat-1', {
+        token: machineTok,
+        body: seat1Spec({ botVersion: '0.1.0-e2e' }),
+      })
+      assert(r.status === 200, `部署 ${r.status} ${r.text}`)
+      assert(bot.quiesce.length >= 1, '换版前压根没落闸——「等到空闲」和「真的重启」之间那几秒是敞着的')
+      assert(bot.quiesce[0].ttlMs > 0, `第一条该是落闸，实际 ${JSON.stringify(bot.quiesce[0])}`)
+      // 席位票，不是机器票：/api/quiesce 在 bot 的 /api/* 守卫后面。
+      assert(bot.quiesce[0].auth === 'Bearer sat_e2e', `落闸没带席位票：${bot.quiesce[0].auth}`)
+      // 落闸**排在探活之前**：先问忙不忙再落闸的话，那一问的答案马上就过期了。
+      const paths = bot.seen.map((x) => x.path)
+      const firstQuiesce = paths.indexOf('/api/quiesce')
+      const firstHealth = paths.indexOf('/api/health')
+      assert(
+        firstQuiesce >= 0 && (firstHealth < 0 || firstQuiesce < firstHealth),
+        `先探活后落闸，等于没落：${JSON.stringify(paths.slice(0, 4))}`,
+      )
+    })
+
+    await test('部署没走到重启那一步，落下的闸要放开', async () => {
+      /**
+       * 席位一直不空、等到超时——这次没换版，机器上一个字节都没动。**闸必须放开**，
+       * 否则这台好端端的席位会白白几分钟不接活，而人只会看到「发消息没反应」。
+       *
+       * 席位那头还有 TTL 兜底，但那是兜底，不该当成常规路径。
+       */
+      bot.quiesce.length = 0
+      bot.health.busy = true
+      bot.health.running = 1
+      try {
+        const r = await req(mgrBase, 'PUT', '/seats/seat-1', {
+          token: machineTok,
+          body: seat1Spec({ botVersion: '0.1.0-e2e' }),
+        })
+        assert(r.status === 409, `该是忙着没换版，实际 ${r.status} ${r.text}`)
+        const last = bot.quiesce[bot.quiesce.length - 1]
+        assert(bot.quiesce.length >= 2, `落了闸却没放开：${JSON.stringify(bot.quiesce)}`)
+        assert(last && last.ttlMs === 0, `最后一条该是放开，实际 ${JSON.stringify(last)}`)
+      } finally {
+        bot.health.busy = false
+        bot.health.running = 0
+        bot.health.quiesced = false
+      }
+    })
+
+    await test('席位不认这条路（老版本）：照旧换版，不许被一道落不上的闸卡住', async () => {
+      // 老席位没有 /api/quiesce。为了一个增强把换版整个卡死是本末倒置——落不上就退回
+      // 到没有静默的老样子，该换还得换。
+      const saved = bot.quiesce.slice()
+      bot.quiesce.length = 0
+      const stub = createServer((rq, rs) => {
+        if (rq.url.startsWith('/api/health')) {
+          rs.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, busy: false, running: 0, queued: 0 }))
+          return
+        }
+        rs.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'no such route' }))
+      })
+      const [oldPort] = await freePorts(1)
+      await listenOn(stub, oldPort)
+      try {
+        // 先把名册上这个席位指到「老 bot」那个口上，再原样重铺一次。
+        const point = await req(mgrBase, 'PUT', '/seats/seat-old', {
+          token: machineTok,
+          body: seat1Spec({
+            seatDir: '/home/sw-test/.satuwork/seat-old',
+            ports: { display: 14, vncPort: 5914, novncPort: NOVNC_PORT, botPort: oldPort, cdpPort: 9226 },
+          }),
+        })
+        assert(point.status === 200, `建席位 ${point.status} ${point.text}`)
+        const again = await req(mgrBase, 'PUT', '/seats/seat-old', {
+          token: machineTok,
+          body: seat1Spec({
+            seatDir: '/home/sw-test/.satuwork/seat-old',
+            botVersion: '0.1.3-e2e',
+            ports: { display: 14, vncPort: 5914, novncPort: NOVNC_PORT, botPort: oldPort, cdpPort: 9226 },
+          }),
+        })
+        assert(again.status === 200, `老席位该照旧换版，实际 ${again.status} ${again.text}`)
+        assert(again.json.seat.botVersion === '0.1.3-e2e', `版本没换：${again.json.seat.botVersion}`)
+      } finally {
+        await req(mgrBase, 'DELETE', '/seats/seat-old', { token: machineTok })
+        stub.closeAllConnections?.()
+        await new Promise((ok) => stub.close(() => ok()))
+        bot.quiesce.length = 0
+        bot.quiesce.push(...saved)
+      }
+    })
+
+    await test('排空预算由调用方给：drainMs=0 就是一次都不等，当场说清楚', async () => {
+      /**
+       * 这一跳是同步的：调用方拿着自己的超时在等，而排空是在管家这头花时间。两个数各
+       * 定各的，就会出现「等到一半被对面的超时掐断」——模版「立即下发」给单席位 90 秒、
+       * 管家默认等 120 秒，撞的正是这个：Gateway 记下一条「联系不上机器管家」并标红，
+       * 而管家照样等满再把席位重铺了。所以预算跟着请求走，两边取小。
+       *
+       * `drainMs: 0` 是这条路的极端情况，也是模版下发想要的那一种：**不等，但也别打断
+       * ——忙就当场告诉我，我下一轮再来**。它和「别管忙不忙现在就重铺」（interrupt）是
+       * 两件事，不能合成一个数。
+       */
+      bot.health.busy = true
+      bot.health.running = 1
+      try {
+        const at = Date.now()
+        const r = await req(mgrBase, 'PUT', '/seats/seat-1', {
+          token: machineTok,
+          body: seat1Spec({ botVersion: '0.1.0-e2e', drainMs: 0 }),
+        })
+        const waited = Date.now() - at
+        assert(r.status === 409, `drainMs=0 撞上忙席位该当场 409，实际 ${r.status} ${r.text}`)
+        assert(r.json.busy === true, `没带 busy 标记：${r.text}`)
+        // 排空窗口是 4 秒（SATUWORK_SEAT_DRAIN_MS），drainMs=0 必须明显快过它。留到
+        // 2.5 秒是给探活那一跳的余量（机器忙时它自己就要几百毫秒），不是给「等了一轮」的。
+        assert(waited < 2500, `drainMs=0 还是等了 ${waited}ms——调用方的预算没被认`)
+      } finally {
+        bot.health.busy = false
+        bot.health.running = 0
+      }
+    })
+
+    await test('排空探的是席位现在听的那个口，不是这次 spec 要它听的口', async () => {
+      /**
+       * 两者通常相同（Gateway 的 allocateSlot 首选原槽位），但撞上 unique 冲突时会重扫
+       * 一个新槽位——那时 spec 里的 botPort 上蹲着的是**另一个席位**。拿它去问，答的是
+       * 别人忙不忙：那个闲，就正好在本席位跑到一半时把它重启，而这正是排空要拦的事。
+       */
+      const [emptyPort] = await freePorts(1)
+      bot.health.busy = true
+      bot.health.running = 1
+      try {
+        const r = await req(mgrBase, 'PUT', '/seats/seat-1', {
+          token: machineTok,
+          body: seat1Spec({
+            botVersion: '0.1.2-e2e',
+            // 换槽位之后的新口，上面什么都没有。
+            ports: { display: 13, vncPort: 5913, novncPort: NOVNC_PORT, botPort: emptyPort, cdpPort: 9225 },
+          }),
+        })
+        assert(
+          r.status === 409,
+          `探错了口：spec 的新端口上没人听，就当成「不忙」把正在跑的席位重启了（${r.status} ${r.text}）`,
+        )
+      } finally {
+        bot.health.busy = false
+        bot.health.running = 0
+      }
+      // 上面那次被拒了，什么都没写——名册里的端口还得是原来那个，后面反代还要用。
+      const list = await req(mgrBase, 'GET', '/seats', { token: machineTok })
+      const row = list.json.seats.find((x) => x.seatId === 'seat-1')
+      assert(row.botPort === BOT_PORT, `被拒的部署改动了名册：botPort=${row.botPort}`)
+    })
+
+    await test('手工「重新部署」不等：要修的往往正是一个卡住的席位', async () => {
+      bot.health.busy = true
+      bot.health.running = 1
+      try {
+        const at = Date.now()
+        const r = await req(mgrBase, 'PUT', '/seats/seat-1', {
+          token: machineTok,
+          body: seat1Spec({ botVersion: '0.0.0-e2e', interrupt: true }),
+        })
+        const waited = Date.now() - at
+        assert(r.status === 200, `手工重新部署被忙挡住了：${r.status} ${r.text}`)
+        assert(waited < 2000, `手工重新部署也去排空了（等了 ${waited}ms）——那就没有自助修复手段了`)
+      } finally {
+        bot.health.busy = false
+        bot.health.running = 0
+      }
     })
 
     await test('席位规格按形状校验：路径和标识符不收外部值', async () => {
@@ -433,6 +714,124 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         headers: { 'x-satuwork-machine': machineTok },
       })
       assert(gone.status === 404, `拆完还转 ${gone.status}`)
+    })
+
+    /**
+     * 整条走一遍：Gateway 下发 → 管家排空 → 席位在忙 → 409 一路回到 Gateway。
+     *
+     * 上面那三条钉的是管家自己的行为，这一条钉的是**两边接得上**：Gateway 必须把「忙」
+     * 和「失败」分开——忙的那一次机器上一个字节都没动，席位还是原来的版本、还在好好地
+     * 跑，把它标成 error 会让人去查一个根本不存在的部署故障，标成 deploying 更糟（界面
+     * 上永远转圈，而机器上什么都没在进行）。
+     *
+     * 假 bot 蹲在 3200：那是 slot 0 的席位 bot 口（见 gateway/src/deploy.ts 的 portsOf），
+     * 排空要问的就是它。这台机器上此刻一个席位都没有（上一条刚把 seat-1 拆了），所以
+     * Gateway 分给它的必然是 slot 0。
+     */
+    await test('席位有会话在跑：409 一路回到 Gateway，那一行保持原样不标红', async () => {
+      const seatBot = fakeBot()
+      // 3200 是 slot 0 的席位 bot 口，由 Gateway 的端口公式定死，这里没得选。占着了就
+      // 直说——否则报出来的是一句光秃秃的 EADDRINUSE，没人知道该去关什么。
+      await listenOn(seatBot.server, 3200).catch((e) => {
+        throw new Error(`3200 被占着，起不了假席位（本机上有别的席位 bot 在跑？）：${e.message}`)
+      })
+      const adminLogin = await req(gwBase, 'POST', '/auth/login', {
+        body: { email: 'admin@mgrtest.local', password: 'manager-admin-1234' },
+      })
+      assert(adminLogin.status === 200, `admin login ${adminLogin.status} ${adminLogin.text}`)
+      const adminTok = adminLogin.json.token
+      await publishRelease({ req, gwBase, token: ownerTok, version: '0.1.0' })
+      const made = await req(gwBase, 'POST', '/platform/bots', { token: ownerTok, body: { name: '排空验证 Bot' } })
+      assert(made.status === 201, `建 Bot ${made.status} ${made.text}`)
+      const botId = made.json.bot.id
+      try {
+
+        const first = await req(gwBase, 'POST', '/runtime/deploy', {
+          token: adminTok,
+          body: { botId, version: '0.1.0' },
+        })
+        assert(first.status === 200, `头一次部署 ${first.status} ${first.text}`)
+        assert(first.json.status === 'ready', `头一次部署之后 ${first.json.status}`)
+
+        // 这颗席位忙起来了：正在跑一轮。
+        seatBot.health.busy = true
+        seatBot.health.running = 1
+        const held = await req(gwBase, 'POST', '/runtime/deploy', {
+          token: adminTok,
+          body: { botId, version: '0.1.0', update: true },
+        })
+        assert(held.status === 409, `忙着的席位该回 409，实际 ${held.status} ${held.text}`)
+        assert(String(held.json.error).includes('有会话在跑'), `理由没传上来：${held.text}`)
+        // 席位那一行：还是 ready、还是原来的版本。deploying 会让界面永远转圈，
+        // error 会让人去查一个不存在的故障。
+        const rt = await req(gwBase, 'GET', `/runtime/bots/${encodeURIComponent(botId)}`, { token: adminTok })
+        assert(rt.status === 200, `取席位状态 ${rt.status} ${rt.text}`)
+        const mine = rt.json.bot?.runtime
+        assert(mine, `名下找不到这个席位：${rt.text.slice(0, 300)}`)
+        assert(mine.status === 'ready', `没换版却把席位标成了 ${mine.status}`)
+        assert(mine.botVersion === '0.1.0', `没换版却动了版本号：${mine.botVersion}`)
+        // 「等会儿再来」也不该写进 lastError：席位卡里那一格平时画的是版本号，出错时
+        // 才画 lastError（见 ui/pages-machines.js）。摆进去就等于从此盖住「这台跑的是
+        // 哪一版」——而它正是查这类问题时要看的。
+        assert(!String(mine.lastError || '').includes('有会话在跑'), `把「忙」写进了 lastError：${mine.lastError}`)
+
+        /**
+         * 批量那条路要把「忙」单独摆出来。
+         *
+         * **不能靠状态码反推**：deploySeat 有六处 409（管家版本过旧、架构不匹配、槽位
+         * 用尽、还没发布版本、公司没配对机器，以及这一条），含义天差地别。按 409 一律
+         * 记成「大家在忙」的话，一台管家太旧的机器会整片报成「晚点再来」，而且因为一个
+         * 失败都没有，界面上那句提示还是绿的——真正的原因从此浮不出来。
+         */
+        const machineId = await machineIdOf(req, gwBase, ownerTok, orgId)
+        const batch = await req(gwBase, 'POST', `/platform/machines/${machineId}/runtime/update`, {
+          token: ownerTok,
+          body: { version: '0.1.0' },
+        })
+        assert(batch.status === 200, `批量更新 ${batch.status} ${batch.text}`)
+        const line = (batch.json.results || []).find((x) => x.botId === botId)
+        assert(line, `批量结果里没有这个席位：${batch.text.slice(0, 300)}`)
+        assert(line.busy === true, `忙着的席位没被标成 busy，会被算进「失败」：${JSON.stringify(line)}`)
+
+        /**
+         * 换一种 409：显式指定一个**架构不匹配**的版本。它同样是 409，但它是永久错误，
+         * 绝不能被算成「有会话在跑」。
+         */
+        // 机器自报的 arch 就是跑着这套测试的这台机器（管家进程的 process.arch）。
+        const wrongArch = `0.1.1-${process.arch === 'arm64' ? 'x64' : 'arm64'}`
+        await publishRelease({ req, gwBase, token: ownerTok, version: wrongArch })
+        const mism = await req(gwBase, 'POST', '/runtime/deploy', {
+          token: adminTok,
+          body: { botId, version: wrongArch, update: true },
+        })
+        assert(mism.status === 409, `架构不匹配该是 409，实际 ${mism.status} ${mism.text}`)
+        const batch2 = await req(gwBase, 'POST', `/platform/machines/${machineId}/runtime/update`, {
+          token: ownerTok,
+          body: { version: wrongArch },
+        })
+        const line2 = (batch2.json.results || []).find((x) => x.botId === botId)
+        assert(line2, `批量结果里没有这个席位：${batch2.text.slice(0, 300)}`)
+        assert(!line2.busy, `架构不匹配被冒充成「有会话在跑」，真正的原因就此埋掉：${JSON.stringify(line2)}`)
+      } finally {
+        seatBot.health.busy = false
+        seatBot.health.running = 0
+        /**
+         * 席位收拾干净：后面「改机器归属」和「注销」两条都要求这台机器上一个席位都没有。
+         * 删 Bot 会连它名下的席位一起拆（见 gateway/src/routes/catalog.ts）。
+         *
+         * **收尾要断言。** 静静地清不干净的话，坏掉的是后面某一条毫不相干的用例，
+         * 而且一次成一次不成——查起来会一路查到那条用例自己身上去。
+         */
+        const cleaned = await req(gwBase, 'DELETE', `/platform/bots/${encodeURIComponent(botId)}`, { token: ownerTok })
+        assert(cleaned.status === 200, `没收拾干净：删 Bot ${cleaned.status} ${cleaned.text}`)
+        const left = await req(mgrBase, 'GET', '/seats', { token: machineTok })
+        assert(
+          (left.json.seats || []).length === 0,
+          `席位没从名册里拆掉，后面的用例会莫名其妙地坏：${JSON.stringify(left.json.seats)}`,
+        )
+        seatBot.server.closeAllConnections?.()
+        await new Promise((r) => seatBot.server.close(() => r()))
+      }
     })
 
     await test('心跳带回期望版本；没发过管家包时为 null', async () => {

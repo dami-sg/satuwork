@@ -19,6 +19,29 @@ export interface SeatSpec {
   gatewayToken: string
   gatewayApiKey: string
   ports: { display: number; vncPort: number; novncPort: number; botPort: number; cdpPort: number }
+  /**
+   * 现在就重铺，**跳过换版前的排空**（见 drainSeat）。
+   *
+   * 只有人手工按的「重新部署」带它：那条路上要修的往往正是一个卡住的席位，「它在忙」
+   * 恰恰是要清掉的病症，拿排空把唯一的自助修复手段挡在门外就本末倒置了。
+   *
+   * **和 Gateway 那个 `force` 不是一回事**，所以名字也不一样：那边的 force 是「已经
+   * 是这个版本也照铺」，用来穿过 deploy.ts 里那道跳过的门——模版下发也带着它，而那条
+   * 路是该等的。两件事共用一个字段，模版一改就会把所有人的会话打断。
+   */
+  interrupt?: boolean
+  /**
+   * 这次最多排空多久，毫秒。**调用方的请求预算，由它自己算**（见 gateway 的
+   * deploySeat）。
+   *
+   * 必须有这个字段，因为这一跳是同步的：调用方拿着自己的超时在等，而排空是在这一头
+   * 花时间。两个数各定各的，就会出现「等到一半被对面的超时掐断」——那时候机器上什么
+   * 都没坏，库里却记下一条「联系不上机器管家」，而这边照样把席位重铺了。模版「立即
+   * 下发」那条路（单席位 90 秒）撞的正是这个。
+   *
+   * 和本机的上限取**小**：预算是调用方的事，上限是这台机器的事，谁更紧听谁的。
+   */
+  drainMs?: number
 }
 
 export interface SeatRecord {
@@ -68,12 +91,201 @@ export function seat(seatId: string): SeatRecord | undefined {
 let inFlight = 0
 export const busy = () => inFlight > 0
 
+/**
+ * 席位正忙，这次没换版。
+ *
+ * **不是部署失败**，所以不写进名册、也不碰机器上的任何东西：席位还是原来那个版本，
+ * 好端端地在跑。调用方（PUT /seats/:id）把它翻成 409，Gateway 据此保留原来的状态，
+ * 界面上说的是「有会话在跑，这次没换」，不是一行红字。
+ */
+export class SeatBusy extends Error {
+  constructor(
+    readonly seatId: string,
+    readonly running: number,
+    readonly queued: number,
+    readonly waitedMs: number,
+  ) {
+    super(
+      `席位 ${seatId} 有会话在跑（${running} 轮在跑、${queued} 条排着），等了 ${Math.round(waitedMs / 1000)} 秒仍没结束，这次没有换版`,
+    )
+    this.name = 'SeatBusy'
+  }
+}
+
+/**
+ * 这台机器允许的排空上限。默认 2 分钟，`SATUWORK_SEAT_DRAIN_MS` 可调。
+ *
+ * 上限存在的理由是这一跳是**同步的**：Gateway 那条 PUT 一直挂着，批量重铺还要逐个
+ * 席位串下去。等不到就明说「这次没换」，让人晚点再来——比把一条请求吊上十分钟、
+ * 或者干脆把人的活打断都强。
+ *
+ * **`0` 的意思是「一次都不等」，不是「关掉排空」**：席位忙照样回 409（drainSeat 会
+ * 先问一次再决定）。想要「别管忙不忙，现在就重铺」，走的是另一条路——`interrupt`，
+ * 也就是界面上那颗「重新部署」。两件事分开是有意的：一个是「愿不愿意等」，一个是
+ * 「愿不愿意打断」，混成一个数就没法既不等又不打断（模版下发要的恰恰是这一种）。
+ */
+function machineDrainCapMs(): number {
+  const raw = Number(process.env.SATUWORK_SEAT_DRAIN_MS)
+  return Number.isFinite(raw) && raw >= 0 ? Math.trunc(raw) : 120_000
+}
+
+/** 这次排空的实际窗口：调用方的预算和本机的上限，谁小听谁的。 */
+function drainWindowMs(spec: SeatSpec): number {
+  const cap = machineDrainCapMs()
+  const asked = Number(spec.drainMs)
+  return Number.isFinite(asked) && asked >= 0 ? Math.min(cap, Math.trunc(asked)) : cap
+}
+
+const DRAIN_POLL_MS = 3000
+
+/**
+ * 这个席位此刻在忙吗。忙就给出计数，**不忙、答不上来、老版本不报，一律回 null**。
+ *
+ * 三者归一是有意的：它们对调用方是同一个决定（往下走）。分开的话，一次探活超时就能
+ * 把换版永远挡住——而「拦住换版」需要的是**确凿的忙**，不是「没问出来」。
+ */
+export async function seatBusyNow(botPort: number, timeoutMs = 2500): Promise<{ running: number; queued: number } | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${botPort}/api/health`, { signal: AbortSignal.timeout(timeoutMs) })
+    if (!res.ok) return null
+    const body = (await res.json()) as { busy?: unknown; running?: unknown; queued?: unknown }
+    // 老席位的 /api/health 只回 {ok:true}——没有这个字段就是「问不出来」。
+    if (typeof body?.busy !== 'boolean') return null
+    if (!body.busy) return null
+    return { running: Number(body.running) || 0, queued: Number(body.queued) || 0 }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 换版静默：让席位**这几秒不开新的一轮**（`ttlMs: 0` = 放开）。
+ *
+ * 排空只等「手上这一轮跑完」是不够的——等到空闲之后，到真正 `systemctl restart` 之间
+ * 还隔着拉包、解包、rsync 那几秒，人在那几秒里发一句照样被拦腰砍断，而排空看上去明明
+ * 成功了。先落这道闸，那个窗口才是真的关上的。
+ *
+ * 要票：`/api/quiesce` 在 `/api/*` 守卫后面（只有 `/api/health` 是公开的）。席位票就在
+ * 部署规格里（`spec.gatewayToken`，也就是写进 bot.env 的那一把）。
+ *
+ * **答不上来一律当「这版席位不认这条路」放行**：老席位没有这个接口（404），而为了一个
+ * 增强去把换版整个卡死是本末倒置——那样只是退回到没有静默的老样子。
+ */
+async function setQuiesce(botPort: number, token: string, ttlMs: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${botPort}/api/quiesce`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: token ? `Bearer ${token}` : '' },
+      body: JSON.stringify({ ttlMs }),
+      signal: AbortSignal.timeout(2500),
+    })
+    if (!res.ok) return false
+    const body = (await res.json()) as { quiesced?: unknown }
+    // 认它自报的状态，不认 200：落闸和放开走的是同一条路，只有「它说的和我要的一致」
+    // 才算数。老席位没有这条路（404），走不到这里。
+    const want = ttlMs > 0
+    return typeof body?.quiesced === 'boolean' && body.quiesced === want
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 静默期的长度。
+ *
+ * 要盖住「等这一轮跑完 + 真的把新版本铺上去」，又不能长到「管家半路挂了，这台席位
+ * 好几十分钟不接活」。席位那头还会再夹一次（AgentService.QUIET_MAX_MS，5 分钟）。
+ *
+ * 正常路径上它根本不会走到期：进程被 systemctl 换掉，这个标记随内存一起没了。
+ */
+const QUIET_TTL_MS = 4 * 60_000
+
+/** 已经落了闸、还没放开的席位。部署结束时兜底放开（见 deploySeat 的 finally）。 */
+const quieted = new Map<string, { botPort: number; token: string }>()
+
+/** 这台机器上还有哪些席位在跑会话。管家自升级要看它（见 upgrade.ts）。 */
+export async function busySeats(): Promise<{ seatId: string; running: number; queued: number }[]> {
+  const rows = seats()
+  const out = await Promise.all(
+    rows.map(async (r) => {
+      const b = await seatBusyNow(r.botPort)
+      return b ? { seatId: r.seatId, ...b } : null
+    }),
+  )
+  return out.filter((x): x is { seatId: string; running: number; queued: number } => Boolean(x))
+}
+
+/**
+ * 换版前排空：等这个席位手上的活跑完。
+ *
+ * 部署一个已经在跑的席位 = `systemctl restart satuwork-bot@<seat>`，正跑着的那一轮
+ * 当场没命：日志里那条 turn/end 根本没写成（要等下一次读盘由 healDanglingTurn 补），
+ * 用过的 token 照样计费，而人正对着屏幕等回答。换版本身没有任何理由非得踩在这一刻。
+ *
+ * 「忙」只认在跑的轮次，不认排着的消息——理由在 bot 那侧的 agents.busy 上写着。
+ */
+async function drainSeat(spec: SeatSpec, current: SeatRecord): Promise<void> {
+  /**
+   * **探的是它现在听在哪儿，不是这次 spec 要它听哪儿。**
+   *
+   * 两者通常相同（Gateway 的 allocateSlot 首选原槽位），但撞上 unique 冲突时会重扫一
+   * 个新槽位——那时 spec.ports.botPort 上蹲着的是**另一个席位**。拿它去问，答的是别人
+   * 忙不忙：那个忙就白等一场再把本可以做的换版拒掉，那个闲就正好在本席位跑到一半时
+   * 把它重启，而那正是这段代码要拦的事。
+   */
+  const port = current.botPort || spec.ports.botPort
+  const hold = drainWindowMs(spec)
+  const started = Date.now()
+  /**
+   * **先落闸，再等。** 顺序反过来就等于没落：等到空闲那一刻放行，紧接着人发一句、
+   * 新一轮开起来，而我们已经在往下走了。落了闸之后「空闲」才是个能保住的状态。
+   *
+   * 落不上（老席位没这条路、票不对、超时）就照旧往下走——那只是退回到没有静默的老
+   * 样子，不该因此把换版整个卡住。
+   */
+  if (await setQuiesce(port, spec.gatewayToken, QUIET_TTL_MS)) {
+    quieted.set(spec.seatId, { botPort: port, token: spec.gatewayToken })
+    console.log(`satuwork-manager: 席位 ${spec.seatId} 已进入换版静默，不再开新的一轮`)
+  }
+  let hit = await seatBusyNow(port)
+  if (!hit) return
+  // 窗口为 0 就是「一次都不等」：上面已经问过一次，忙就到此为止。
+  if (hold > 0) {
+    console.log(
+      `satuwork-manager: 席位 ${spec.seatId} 在跑 ${hit.running} 轮、排着 ${hit.queued} 条，等它跑完再换版（最多 ${Math.round(hold / 1000)} 秒）`,
+    )
+    const deadline = started + hold
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, Math.min(DRAIN_POLL_MS, Math.max(0, deadline - Date.now()))))
+      hit = await seatBusyNow(port)
+      if (!hit) {
+        console.log(`satuwork-manager: 席位 ${spec.seatId} 空下来了，开始换版（等了 ${Math.round((Date.now() - started) / 1000)} 秒）`)
+        return
+      }
+    }
+  }
+  throw new SeatBusy(spec.seatId, hit.running, hit.queued, Date.now() - started)
+}
+
 export async function deploySeat(spec: SeatSpec, token: string): Promise<SeatRecord> {
   inFlight += 1
   try {
     return await doDeploy(spec, token)
   } finally {
     inFlight -= 1
+    /**
+     * 把静默放开。**每一条出口都要走到这里**：拉包失败、端口收不回来、脚本非零退出、
+     * 排空等不到（SeatBusy 那一支是抛出去的），这些都停在了重启之前——闸还落着，而那台
+     * 席位这会儿好端端的，不该白白几分钟不接活。
+     *
+     * 成功那一条上进程已经被换掉了，这一下打在**新起来的**那个进程上，是个无害的
+     * no-op（它本来就没有落闸）；单元正在重启、连不上也不要紧，席位那头的 TTL 兜着。
+     */
+    const mark = quieted.get(spec.seatId)
+    if (mark) {
+      quieted.delete(spec.seatId)
+      await setQuiesce(mark.botPort, mark.token, 0)
+    }
   }
 }
 
@@ -99,6 +311,18 @@ export function pruneRetired(reg: Record<string, SeatRecord>, retired: string[])
 
 async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
   const reg = load()
+  /**
+   * 先等这个席位手上的活跑完，再动它。
+   *
+   * **只对已经在册的席位**：全新席位没什么可打断的，名册里没有它、端口上也没人。
+   * 手工「重新部署」那条路也不等（见 SeatSpec.interrupt）。
+   *
+   * 排在最前面，而不是紧挨着 `systemctl restart`：这之后的每一步——拉发布包、回收
+   * 端口、rsync 一份 app——都已经在动这个席位的东西了，等到那时候再来问「你忙不忙」，
+   * 该问的时刻早就过去了。dryRun 下同样跑：它是这条逻辑唯一验得到的地方（e2e 里
+   * 没有 systemd，见 e2e/manager.mjs）。
+   */
+  if (reg[spec.seatId] && !spec.interrupt) await drainSeat(spec, reg[spec.seatId])
   const base: SeatRecord = {
     seatId: spec.seatId,
     linuxUser: spec.linuxUser,

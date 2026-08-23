@@ -904,9 +904,22 @@ async function updateMachineRuntime(machineId) {
     const data = await api('POST', `/platform/machines/${encodeURIComponent(machineId)}/runtime/update`, { version })
     const results = Array.isArray(data.results) ? data.results : []
     const ok = results.filter((r) => r.status === 'ready' && !r.error).length
-    const bad = results.filter((r) => r.error || r.status === 'error').length
+    /**
+     * 「有会话在跑，这次没换」**单独数**，不进「失败」。
+     *
+     * 那是管家等到超时也没等到席位空下来（见 manager/src/seats.ts 的排空）：机器上
+     * 一个字节都没动，席位还是原来的版本、还在好好地跑，晚点再来一次就是了。混进
+     * 失败里的话，一次「中午大家都在用」会被报成一片红，人会去查根本不存在的故障。
+     */
+    const held = results.filter((r) => r.busy).length
+    const bad = results.filter((r) => !r.busy && (r.error || r.status === 'error')).length
+    const tail = held ? t(`，${held} 个有会话在跑没换`, `, ${held} skipped (busy)`) : ''
     if (!results.length) flash('ok', t('没有需要更新的席位', 'No seats needed updating'))
-    else flash(bad && !ok ? 'err' : 'ok', t(`更新 ${data.version}：成功 ${ok}，失败 ${bad}`, `Updated ${data.version}: ${ok} ok, ${bad} failed`))
+    else
+      flash(
+        bad && !ok ? 'err' : 'ok',
+        t(`更新 ${data.version}：成功 ${ok}，失败 ${bad}`, `Updated ${data.version}: ${ok} ok, ${bad} failed`) + tail,
+      )
     await loadMachineDetail(machineId)
   } catch (err) {
     flash('err', err.message)

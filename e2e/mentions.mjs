@@ -70,6 +70,25 @@ export async function runMentions({ root, test, assert, log }) {
     assert(r.jsonl.当前版本 === 5, `加了 mention 块就该升到 v5，实为 v${r.jsonl.当前版本}`)
   })
 
+  await test('席位忙不忙只认在跑的轮次——孤儿排队行不许把它永远钉住', () => {
+    // 一条在 turn 跑到一半被杀掉时留下的排队消息（队列落盘，重启后还在），必须不让
+    // 这个席位自报忙：管家的换版闸认的就是 running（见 manager/src/seats.ts 的排空），
+    // 认了 queued 的话这台席位从此永远 409，再也升不上去——而那时候拦下重启一件东西
+    // 也保护不了，根本没有 turn 在跑，队列本来就不会动。
+    assert(r.busyGate.盘上确实还排着一条, `前置没成立：${JSON.stringify(r.busyGate)}`)
+    assert(r.busyGate.没有轮次在跑, `只剩排队消息时还自报在跑：${JSON.stringify(r.busyGate)}`)
+    assert(r.busyGate.queued照旧报得出来, `queued 不报了，查孤儿行就没有线索了：${JSON.stringify(r.busyGate)}`)
+  })
+
+  await test('换版静默：不开新的一轮，放开之后立刻恢复，TTL 夹得住', () => {
+    // 排空等到「此刻没人在跑」之后，到真的 systemctl restart 之间还有几秒（拉包、
+    // 解包、rsync）。没有这道闸，人在那几秒里发一句照样被砍断，而排空看上去是成功的。
+    assert(r.quiet.静默期回绝了新一轮, `静默期还在开新一轮：${JSON.stringify(r.quiet)}`)
+    assert(r.quiet.回绝之后没留下半个轮次, `回绝了却留下了半个轮次：${JSON.stringify(r.quiet)}`)
+    assert(r.quiet.放开之后又接活了, `放开之后还不接活——这道闸只该管换版那几秒`)
+    assert(r.quiet.上限夹得住, `TTL 没夹住：管家半路挂了，这台席位就成了一块永远不接活的砖`)
+  })
+
   await test('上一轮在跑：带 @ 的排队，跑完自己接上', () => {
     assert(r.queue.在跑, '探针没能把一轮卡住，后面的断言不成立')
     assert(r.queue.排进去了 && r.queue.能排两条, `排队没生效：${JSON.stringify(r.queue)}`)

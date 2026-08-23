@@ -1643,27 +1643,199 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         appPath,
         base: gwBase,
         token: adminToken,
-        fetchImpl: async (path) => {
+        // **init 要原样带上**：不带的话 /me 少了 authorization，boot 会掉进登录页，
+        // 而这一条要验的恰恰是「对话页上那条横幅画出来没有」。
+        fetchImpl: async (path, init) => {
           if (path.includes('/events')) {
             const sse = fakeSse()
             sse.close() // 接受连接，立刻收流
             return sse.response
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      // 认输那句话要真的上屏，所以这一屏得是对话页（横幅只由 chatPage() 拼），
+      // 而且断掉的得**正是人在看的那条会话**——后台那几条流断了不该占用这条横幅
+      // （见下一条）。
+      ui.state.path = '/chat'
+      ui.state.chatSessionId = 's-backoff'
+      try {
+        // 从最后一档进去：连接活得太短就不该清零，所以这一次就该判定「断开」。
+        await ui.startChatStream('s-backoff', ui.CHAT_RETRY_MAX)
+        assert(
+          ui.state.runtimeError === '连接断开',
+          `短命连接把退避档位清零了，会一直 500ms 重连一次；runtimeError=${JSON.stringify(ui.state.runtimeError)}`,
+        )
+        /**
+         * **写进 state 不等于人看得见。**
+         *
+         * 那句话和旁边那颗「重新连接」按钮画在顶上那条横幅里，而横幅只在 chatPage()
+         * 里拼一次——paintChat 只重画消息流和输入区，横幅一个字都不会变。而认输这一刻
+         * 恰恰是「再没有别的东西会触发重绘」：流死了、事件不会再来。于是屏幕上什么都
+         * 没有：认输了、没人再重连、也没有那颗能救回来的按钮。
+         */
+        const html = ui.html()
+        assert(html.includes('连接断开'), '认输了却没画到屏幕上——只写了 state，横幅没重绘')
+        assert(
+          html.includes('data-act="chat-reconnect"'),
+          '没有「重新连接」按钮：认输之后没有任何东西会再去重连，人只能刷新整页',
+        )
+      } finally {
+        // 清零的那个版本会留下一串 setTimeout 自我续命，套件就不退出了。
+        ui.stopChatStream()
+      }
+    })
+
+    await test('后台那几条流断了，不许占用正在看的那条对话的横幅', async () => {
+      /**
+       * 名单上每个 Bot 都挂着一条流（warmBotStreams），任何一条断掉都会走到认输那一
+       * 支。它要是把「连接断开」摆到横幅上，说的却是另一个 Bot 的事：屏幕上这条对话
+       * 好好的，人却被告知断了，点「重新连接」重连的还是另一条流。更实在的是那一下
+       * 会**整页重绘**——正在打字的人当场丢焦点，起因却是他没在看的一个 Bot。
+       */
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/events')) {
+            const sse = fakeSse()
+            sse.close()
+            return sse.response
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.path = '/chat'
+      // 人正看着 s-front，断的是名单上另一个 Bot 的那条 s-bg。
+      ui.state.chatSessionId = 's-front'
+      ui.botStreamOf('bot-bg').sessionId = 's-bg'
+      try {
+        await ui.startChatStream('s-bg', ui.CHAT_RETRY_MAX, 'bot-bg')
+        assert(
+          !ui.state.runtimeError,
+          `后台流断了却给当前这条对话扣了一句话：${JSON.stringify(ui.state.runtimeError)}`,
+        )
+        assert(
+          !ui.html().includes('data-act="chat-reconnect"'),
+          '后台流断了却在当前对话上画了「重新连接」——点它重连的是另一条流',
+        )
+      } finally {
+        ui.stopChatStream()
+      }
+    })
+
+    await test('人已经翻到别的页上了：认输只记下来，不整页重绘', async () => {
+      /**
+       * 切走不掐流（名单上的「跑完没有」全指望它），所以这条流完全可能在人已经翻到
+       * 「机器」页之后才认输。那句话画在对话页的横幅里，在这儿重绘一次谁也看不到，
+       * 代价却是把人正在填的表单整块换掉。
+       */
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/events')) {
+            const sse = fakeSse()
+            sse.close()
+            return sse.response
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-away'
+      ui.state.path = '/machines'
+      // 把这一屏换成一个记号：重绘过就没了。
+      ui.app.innerHTML = 'SENTINEL-PAGE'
+      try {
+        await ui.startChatStream('s-away', ui.CHAT_RETRY_MAX)
+        assert(ui.state.runtimeError === '连接断开', '话还是要记下来，回到对话页时得看得见')
+        assert(
+          ui.html() === 'SENTINEL-PAGE',
+          '人在别的页上，认输却把整页重绘了——正在填的表单会当场被换掉',
+        )
+      } finally {
+        ui.stopChatStream()
+      }
+    })
+
+    await test('管家反代不到席位（502）也要重连，不能当成永久错误', async () => {
+      // 换版那几分钟里，管家转不到席位的 bot 口，回的是 502（见 manager/src/proxy.ts）。
+      // 这里原先和 401/404 走同一句 return：一次 502 就等于「这条流永远没了」，而屏幕
+      // 上那句「正在思考」会一直挂着——bot 早就答完了，只是没人在听。
+      let hits = 0
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path) => {
+          if (path.includes('/events')) {
+            hits += 1
+            return { ok: false, status: 502, text: async () => '席位没有响应' }
           }
           return fetch(gwBase + path)
         },
       })
       await ui.boot()
       try {
-        // 从最后一档进去：连接活得太短就不该清零，所以这一次就该判定「断开」。
-        await ui.startChatStream('s-backoff', ui.CHAT_RETRY_MAX)
-        assert(
-          ui.state.runtimeError === '连接断开，刷新页面重试',
-          `短命连接把退避档位清零了，会一直 500ms 重连一次；runtimeError=${JSON.stringify(ui.state.runtimeError)}`,
-        )
+        await ui.startChatStream('s-502')
+        // 第一档退避 500ms。等够两档，第二次重连必须真的发生。
+        for (let i = 0; i < 200 && hits < 2; i++) await new Promise((r) => setTimeout(r, 10))
+        assert(hits >= 2, `502 之后一次都没重连（只打了 ${hits} 次）`)
       } finally {
-        // 清零的那个版本会留下一串 setTimeout 自我续命，套件就不退出了。
         ui.stopChatStream()
       }
+    })
+
+    await test('发消息之前先确认还有人在听：流断了当场接回来', async () => {
+      // 这是「更新完运行时，回复卡在界面上不动，刷新才看得见」的最后一道闸。消息 POST
+      // 和事件流是两条独立的请求：流认输之后消息照发照跑，回答经 SSE 送出来时没人接。
+      const sse = fakeSse()
+      let events = 0
+      let posted = 0
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/events')) {
+            events += 1
+            return sse.response
+          }
+          if (path.includes('/messages') && init && init.method === 'POST') {
+            posted += 1
+            return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+          }
+          // init 原样带上，否则 /me 少了 authorization，boot 会掉进登录页。
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      // 会话在，流已经认输了（chatAbort 被 releaseChatStream 清掉的那个状态）。
+      ui.state.path = '/chat'
+      ui.state.chatBotId = 'bot-a'
+      ui.state.chatSessionId = 's-revive'
+      ui.botStreamOf('bot-a').sessionId = 's-revive'
+      ui.state.runtimeError = '连接断开'
+      ui.render()
+      assert(ui.html().includes('data-act="chat-reconnect"'), '前置没成立：这一屏上本该挂着那条横幅')
+      ui.state.chatDraft = '还在吗'
+      await ui.sendChat()
+      assert(posted === 1, `消息没发出去：posted=${posted}`)
+      assert(events === 1, `发送时没把断掉的流接回来（/events 打了 ${events} 次）——回复会一直卡在界面上`)
+      assert(ui.state.runtimeError !== '连接断开', '重连了却还挂着「连接断开」，人只会去刷新')
+      // 只清 state 是不够的：横幅只由 chatPage() 拼，不重绘的话人一边看着「断了」
+      // 一边收新回复。
+      assert(
+        !ui.html().includes('data-act="chat-reconnect"'),
+        '接回来了，屏幕上那条「连接断开」还挂着——只清了 state，没重绘',
+      )
+      sse.close()
+      ui.stopChatStream()
     })
 
     await test('流式渲染合并重绘：一帧一次，不是一个 token 一次', async () => {

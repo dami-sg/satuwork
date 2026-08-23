@@ -4,7 +4,7 @@ import { historySlice } from '../session/replay.ts'
 import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
-import type { ImageRef, Mention } from '../agent/index.ts'
+import { QUIET_MESSAGE, type ImageRef, type Mention } from '../agent/index.ts'
 import { expiredMessage, returnMessage, type Disposition, type HandoffActor } from '../policy/handoff.ts'
 
 /**
@@ -60,8 +60,54 @@ export function apply(ctx: Context, _config: Config = {}) {
       .catch((e: Error) => ctx.logger?.warn?.(`handoff: 交还没能进会话 ${e.message}`))
   }
 
+  /**
+   * 探活。**不要票**（见 guard/index.ts 的 PUBLIC），因为它是管家判断「这个席位起来
+   * 没有」的唯一依据，而管家手上只有机器票。
+   *
+   * 顺带报「在不在忙」：管家换 bot 版本就是 `systemctl restart`，跑到一半的那一轮会
+   * 当场没命——它必须先知道这个席位闲不闲（见 manager/src/seats.ts 的排空）。只给两
+   * 个计数，不给会话 id 和正文：这条路没有票，能少说一句是一句。
+   *
+   * **`busy` 只看 running**（理由见 agents.busy）：排着的那几条没有 turn 在跑时根本
+   * 不会动，拦下重启保护不了它们，却会被一条孤儿排队行永久钉住。`queued` 只作诊断。
+   */
+  /**
+   * 换版静默期里，凡是「要叫醒 Bot」的路都先问一句它。
+   *
+   * **判据是「会不会因此开新的一轮」**：这一轮还在跑的话，交还/超时那段话是插进去的
+   * （deliver 里的 steer），静默不拦；没在跑就得开新一轮，而这几秒之后进程就被换掉了。
+   *
+   * 拦要拦在**动状态之前**：`handoffs.finish()` 一旦落下去，那张单就成了「已交还」，
+   * 而 deliver 这时才发现开不了新一轮——单子从此卡在「已交还、Bot 正在接着做」上，
+   * 可根本没人在做。回绝掉，单子留着，人几秒后再点一次就是。
+   */
+  const quietBlocks = (sessionId: string) => ctx.agents.quiesced() && !ctx.agents.isRunning(sessionId)
+  const refuseQuiet = (res: { status: number; json: (v: unknown) => void }) => {
+    res.status = 409
+    res.json({ error: QUIET_MESSAGE, quiesced: true })
+  }
+
   ctx.server.get('/api/health', async (req, res) => {
-    res.json({ ok: true })
+    const load = ctx.agents.busy()
+    // `quiesced` 让管家核对「那道闸真的落下来了」——它自己刚发的指令，不该只靠 200
+    // 就当成生效了（老版本席位没有这条路，200 也可能是别的东西答的）。
+    res.json({ ok: true, busy: load.running > 0, quiesced: ctx.agents.quiesced(), ...load })
+  })
+
+  /**
+   * 换版前的静默：**这几秒不开新的一轮**，好让管家等手上这一轮干净地跑完再重启。
+   *
+   * 只有管家会调（它手上有席位票，见 deploy-seat.sh 写进 bot.env 的 GATEWAY_TOKEN）。
+   * 语义见 agent/index.ts 上那段：只挡新一轮，不挡 steering；只在内存里，带 TTL，
+   * 所以管家中途挂了也不会把这台席位冻成一块砖。
+   *
+   * `ttlMs: 0` = 放开。
+   */
+  ctx.server.post('/api/quiesce', async (req, res) => {
+    const body = (await req.json().catch(() => ({}))) as { ttlMs?: unknown }
+    const until = ctx.agents.quiesce(Number(body?.ttlMs ?? 0))
+    const load = ctx.agents.busy()
+    res.json({ ok: true, quiesced: ctx.agents.quiesced(), until, ...load })
   })
 
   /**
@@ -178,6 +224,23 @@ export function apply(ctx: Context, _config: Config = {}) {
       res.json({ error: 'text 不能为空' })
       return
     }
+    /**
+     * 席位正在换版：**这一条当场回绝，而不是收下再被重启砍掉**。
+     *
+     * 收下的后果是最坏的那一种：界面上画着一条已经发出去的消息，几秒后进程没了，那一轮
+     * 连 turn/end 都没写成——人只会以为「发出去了但它不理我」。回绝则明白得多，草稿也
+     * 原样退回去（见 ui/chat.js 的 sendChat 那个 catch），过几秒重发就是。
+     *
+     * **在跑的那一轮不受影响**：steering 照旧插得进去（静默只挡新一轮）。
+     *
+     * 但**带 `@` 的那种要一起挡**：它走的是排队（这一轮跑完自动接上），而静默期里
+     * drainQueue 停手、紧接着进程就被换掉了——收下它等于开一张不会兑现的空头支票，
+     * 那条消息会一直躺在队列里，直到某天另一轮跑完才被想起来。
+     */
+    if (ctx.agents.quiesced() && mentions.length) {
+      refuseQuiet(res)
+      return
+    }
     if (ctx.agents.isRunning(req.params.id)) {
       if (mentions.length) {
         try {
@@ -195,6 +258,20 @@ export function apply(ctx: Context, _config: Config = {}) {
         return
       }
       // 刚好在这几毫秒里跑完了：落回下面开新一轮，别把这条丢掉。
+    }
+    /**
+     * 开新一轮之前的最后一道闸——**位置就得在这儿**。
+     *
+     * 早先这一道放在最前面，按「没在跑就回绝」判。可上面那条 steering 会落空：这一轮
+     * 正好在那几毫秒里跑完了，于是掉到这里来开新一轮——而这会儿是静默期，`send` 会抛，
+     * 抛在一个 `void ... .catch()` 里，而 HTTP 那头**早已经回了 `accepted: true`**。
+     * 用户看到「发出去了」，实际上一个字都没跑，日志里只有一行 warn。
+     *
+     * 挪到真正要开新一轮的这一刻判，那个缝就没了。
+     */
+    if (ctx.agents.quiesced()) {
+      refuseQuiet(res)
+      return
     }
     // 不等 turn 跑完就返回：结果通过 SSE 推，HTTP 只负责「收到了」。
     void ctx.agents.send(req.params.id, body.text ?? '', images, mentions).catch((e: Error) => {
@@ -344,6 +421,11 @@ export function apply(ctx: Context, _config: Config = {}) {
       res.json({ error: '写一句你做了什么、结论是什么，Bot 要靠它接着做' })
       return
     }
+    // 静默期里开不了新的一轮（见 quietBlocks）。`closed` 不叫醒 Bot，不受影响。
+    if (disposition !== 'closed' && quietBlocks(req.params.id)) {
+      refuseQuiet(res)
+      return
+    }
     const actor = actorOf(body)
     const r = await ctx.handoffs.finish(req.params.hid, disposition, text, actor)
     if (r.result !== 'ok' || !r.handoff) {
@@ -380,6 +462,12 @@ export function apply(ctx: Context, _config: Config = {}) {
   ctx.server.post('/api/sessions/:id/handoffs/:hid/expire', async (req, res) => {
     const body = (await req.json().catch(() => ({}))) as { hours?: unknown }
     const hours = Math.max(1, Math.round(Number(body.hours) || 24))
+    // 同交还：静默期里叫不醒 Bot，就别先把单子改成「已过期」。Gateway 那边的清扫是
+    // 周期性的（见 handoff-sweep.ts），下一轮再来时席位早就换完了。
+    if (quietBlocks(req.params.id)) {
+      refuseQuiet(res)
+      return
+    }
     const r = await ctx.handoffs.expire(req.params.hid)
     if (r.result !== 'ok' || !r.handoff) {
       res.status = 409

@@ -386,6 +386,16 @@ document.getElementById('app').addEventListener('click', async (e) => {
     render()
     return
   }
+  if (act === 'chat-reconnect') {
+    // 退避认输之后那句「连接断开」上的按钮。人点它的时候，多半是刚看见席位重新部署
+    // 完了——比再等一轮自动重试快，也比让人去刷新整页强（刷新会丢草稿和附件）。
+    if (!reviveChatStream(state.chatSessionId, state.chatBotId)) {
+      // 流其实还活着（重连已经自己成功了，只是这句话还挂着）。把话撤掉就行。
+      state.runtimeError = ''
+    }
+    render()
+    return
+  }
   if (act === 'chat-ctx') {
     state.chatCtxOpen = !state.chatCtxOpen
     paintChatCtx()

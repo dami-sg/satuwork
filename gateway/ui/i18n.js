@@ -994,7 +994,14 @@ window.SATU_I18N = {
   '实例还在上线，这条还发不出去；等它接上再发': 'The instance is still starting, so this message cannot be sent yet — try again once it connects',
   '实例还没接上，这会儿发不出去': 'The instance is not connected — messages cannot be sent right now',
   '实例还没接上，等一会儿再试，或者重新部署一次': 'Still cannot reach the instance — try again in a moment, or redeploy',
-  '连接断开，刷新页面重试': 'Connection lost — refresh the page to retry',
+  // 退避认输之后那一句。旁边跟着一颗「重新连接」按钮（见 chat.js 的
+  // runtimeDownBanner），所以话里不再叫人去刷新整页——刷新会把草稿和附件一起丢掉。
+  // 席位换版那几秒回绝新消息时，bot 原样送回来的那一句（见 bot/src/agent/index.ts 的
+  // QUIET_MESSAGE）。服务端只发中文，这里翻一次，英文界面才不会突然冒出一句中文。
+  '席位正在换新版本，这几秒不接新消息；等它起来再发一次':
+    'This seat is being updated — it is not taking new messages for a few seconds; send again once it is back',
+  '连接断开': 'Connection lost',
+  '重新连接': 'Reconnect',
   '已复制全文': 'Transcript copied',
   '复制失败，浏览器不允许': 'Copy failed — the browser blocked it',
   '上下文用量': 'Context usage',

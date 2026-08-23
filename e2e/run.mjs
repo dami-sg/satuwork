@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { runRuntimePath } from './runtime-path.mjs'
 import { runGatewayChat } from './gateway-chat.mjs'
 import { runDeployErrors } from './deploy-errors.mjs'
+import { runUpgradeDrain } from './upgrade-drain.mjs'
 import { runPairing } from './pairing.mjs'
 import { runMachineDeploy } from './machine-deploy.mjs'
 import { runLlmUsage } from './llm-usage.mjs'
@@ -2860,6 +2861,13 @@ async function runBot() {
     assert(!child._exited, `发消息后进程退出 code=${child._exited?.code} sig=${child._exited?.sig}`)
     const health = await req(base, 'GET', '/api/health')
     assert(health.status === 200 && health.json.ok === true, 'health 挂了')
+    // 管家换 bot 版本之前要问这条路「你忙不忙」（见 manager/src/seats.ts 的排空）。
+    // 少了这两个字段，管家只会当成「问不出来」，然后照旧把跑着的那一轮拦腰重启。
+    assert(typeof health.json.busy === 'boolean', `/api/health 不报忙闲：${health.text}`)
+    assert(
+      typeof health.json.running === 'number' && typeof health.json.queued === 'number',
+      `/api/health 的计数少了：${health.text}`,
+    )
 
     const file = join(BOT_HOME, 'sessions', `${sessionId}.jsonl`)
     assert(existsSync(file), `没有 JSONL ${file}`)
@@ -2869,6 +2877,41 @@ async function runBot() {
     assert(ev.data.botId === botId, `botId ${ev.data.botId}`)
     assert(ev.data.origin, '缺 origin')
     skips.push('模型回复：bot 不持有上游 key，只断言接口收了、进程还在、JSONL 根字段在')
+  })
+
+  await test('换版静默：落闸之后不接新一轮，放开之后立刻恢复；无票调不动', async () => {
+    /**
+     * 管家在重启这个进程之前先落这道闸（见 manager/src/seats.ts 的排空）：等到「此刻
+     * 没人在跑」之后，到真的 `systemctl restart` 之间还隔着拉包、解包、rsync 那几秒，
+     * 不落闸的话人在那几秒里发一句照样被拦腰砍断。
+     *
+     * 这一条走的是 HTTP 面，钉的正是「开新一轮之前那道闸」——它必须判在真正要开新一轮
+     * 的那一刻，而不是请求刚进来时：steering 落空（那一轮正好跑完）会掉回开新一轮的
+     * 路上，早判的话那里就是个缝，`accepted: true` 已经回出去了，消息却一个字没跑。
+     */
+    const anon = await req(base, 'POST', '/api/quiesce', { body: { ttlMs: 60_000 } })
+    assert(anon.status === 401, `静默开关无票该 401，实际 ${anon.status} ${anon.text}`)
+
+    const on = await req(base, 'POST', '/api/quiesce', { token: SEAT_TOK, body: { ttlMs: 60_000 } })
+    assert(on.status === 200 && on.json.quiesced === true, `落闸失败：${on.status} ${on.text}`)
+    const h = await req(base, 'GET', '/api/health')
+    assert(h.json.quiesced === true, `health 该自报静默中：${h.text}`)
+
+    const refused = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
+      token: SEAT_TOK,
+      body: { text: '换版这几秒发的' },
+    })
+    assert(refused.status === 409, `静默期该当场回绝，实际 ${refused.status} ${refused.text}`)
+    assert(String(refused.json.error).includes('换新版本'), `回绝的话说不清：${refused.text}`)
+
+    const off = await req(base, 'POST', '/api/quiesce', { token: SEAT_TOK, body: { ttlMs: 0 } })
+    assert(off.status === 200 && off.json.quiesced === false, `放开失败：${off.status} ${off.text}`)
+    const again = await req(base, 'POST', `/api/sessions/${sessionId}/messages`, {
+      token: SEAT_TOK,
+      body: { text: 'ping' },
+    })
+    assert(again.status === 200, `放开之后该照常收下，实际 ${again.status} ${again.text}`)
+    assert(!again.json.quiesced, `放开了还说自己在静默：${again.text}`)
   })
 
   await test('GET /api/billing → 404（账单已挪到 Gateway）', async () => {
@@ -2998,6 +3041,7 @@ async function main() {
       treeHas,
     })
     await runDeployErrors({ root, test, assert, log })
+    await runUpgradeDrain({ root, test, assert, log })
     await runPairing({ root, test, assert, log })
     await runMachineDeploy({
       gwRoot,
