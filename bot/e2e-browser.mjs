@@ -350,17 +350,25 @@ try {
    * 边界不是边界，是死局。
    */
   /**
-   * 停在空白页时，话要说在点子上。
+   * **导航失败时话要说在点子上——而且要走真实那条路。**
    *
-   * 导航没成功（解析不了、连不上、被拦了）之后页面停在 about:blank，而早先那句是拿
-   * about:blank 去过站点判据得出的「只能打开 http / https 的地址」——地址本来就是
-   * https，那句话只会把人往协议上带。
+   * 早先这条测的是「直接导航到 about:blank」，它当然停在 about:blank，于是断言全绿；
+   * 而真正出事的场景是「导航一个真实 https 地址、它没成功」——那条路停在
+   * `chrome-error://chromewebdata/`，一步都没被走到。这里用一个**没映射过**的域名走
+   * 真的解析失败（探针本来就用 --host-resolver-rules 只映射了 HOST 那一个）。
    */
-  const blank = await run('browser_navigate', { url: 'about:blank' })
-  out.blank = {
-    说的是导航没成功: blank.failed === true && blank.text.includes('停在空白页'),
-    没有胡说协议不对: !blank.text.includes('只能打开 http'),
+  const failed = await run('browser_navigate', { url: 'https://nowhere.satuwork.test/' })
+  out.navFail = {
+    // 拿的是 Page.navigate 回执里的 errorText，不是从地址反推出来的。
+    说得出真实原因: failed.failed === true && /ERR_|没有成功/.test(failed.text),
+    没有胡说协议不对: !failed.text.includes('只能打开 http'),
+    // 这一步失败可以换个地址再试，不是一道过不去的边界——措辞不能让模型直接放弃。
+    没说成是边界拦截: !failed.text.includes('行为边界'),
   }
+  // 换一把工具再试一次，不该撞回同一句错话（read 早先没跟上 snapshot 的判断）。
+  const readAfterFail = await run('browser_read')
+  out.navFail.换把工具也说得对 =
+    readAfterFail.failed === true && !readAfterFail.text.includes('只能打开 http')
   await run('browser_navigate', { url: `http://${HOST}/` })
 
   svc.poisoned = '（探针造的）解析到了 127.0.0.1'

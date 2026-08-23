@@ -146,13 +146,25 @@ export async function runBrowser({ root, test, assert, log }) {
     assert(!bad.length, `这几条不对：${bad.join('、')}`)
   })
 
-  await test('停在空白页时，话要说在点子上', () => {
+  await test('导航失败时，话要说在点子上（走真实那条路）', () => {
     /**
-     * 导航没成功（解析不了、连不上、被拦了）之后页面停在 about:blank。早先那句是拿
-     * about:blank 去过站点判据得出的「只能打开 http / https 的地址」——而地址本来就是
-     * https，那句话只会把人往协议上带。线上那次排查就是被它带走了一圈。
+     * 线上那次的原话是「这一页是 about:blank，只能打开 http / https 的地址」，而地址
+     * 本来就是 https——排查被这句话带走了一圈。
+     *
+     * 两处根因，都钉在这条里：
+     *
+     * 1. **`Page.navigate` 的回执里就带着 `errorText`**（`net::ERR_NAME_NOT_RESOLVED`），
+     *    早先丢掉了，然后在下游靠「页面停在哪个地址」去猜——手上有确切原因却去猜。
+     * 2. **猜错了**：导航失败停在 `chrome-error://chromewebdata/`，不是 `about:blank`。
+     *
+     * 还有一条措辞上的：这一步失败**可以换个地址再试**，不能讲成一道过不去的边界，
+     * 否则模型会直接转人工（线上那次就是这么收场的）。
+     *
+     * 这条测试必须走**真实**那条路——早先它导航到 `about:blank`，那当然停在
+     * `about:blank`，于是断言全绿而真正出事的路径一步没走。现在用一个没映射过的域名
+     * 让解析真的失败。
      */
-    const bad = all(r.blank)
+    const bad = all(r.navFail)
     assert(!bad.length, `这几条不对：${bad.join('、')}`)
   })
 
