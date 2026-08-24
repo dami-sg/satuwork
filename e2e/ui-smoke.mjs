@@ -2746,6 +2746,28 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.stopChatStream()
     })
 
+    await test('「正在想」那条占位不占真实消息的 key', async () => {
+      // 真实消息的 key 是 `'m' + seq`（会话日志的**行号**），占位那条以前用的是
+      // `'m' + 块数`——两套数，撞上就是同一个 key。撞了之后 syncThread 按 key 认节点，
+      // 会把底下的占位节点搬到那条早期消息的位置（正文换成它的、外壳还是助手的头像和
+      // 左对齐），被顶掉的那个既不排序也不清理，一路漂到最下面：界面上就是「前面那句
+      // 话跳到了后面」，刷新才好。这里造的正是最容易撞的形状：三块，最后一块 seq 也是 3。
+      const ui = loadApp({ appPath, base: gwBase, token: adminToken })
+      const evs = [
+        { seq: 1, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '在吗' }] }, source: { kind: 'user' } } },
+        { seq: 2, time: 1, type: 'assistant/message', data: { turn: 1, step: 0, message: { content: [{ type: 'text', text: '在的，请讲～' }] } } },
+        { seq: 3, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '查一下当前目录' }] }, source: { kind: 'user' } } },
+        { seq: 4, time: 1, type: 'turn/start', data: { turn: 2 } },
+      ]
+      const folded = ui.fold(evs)
+      assert(folded.status === 'running', `轮次没开着，这条测的形状就不对了：${JSON.stringify(folded.status)}`)
+      const rows = ui.threadRows(folded, 's-key')
+      assert(rows[rows.length - 1].block.kind === 'assistant', '末尾没补出「正在想」那条占位')
+      const keys = rows.map((r) => r.key)
+      const dup = keys.filter((k, i) => keys.indexOf(k) !== i)
+      assert(!dup.length, `两行认同一个 key，界面会错位：${dup.join(',')} / ${keys.join(',')}`)
+    })
+
     await test('老 bot 不带 live 字段：照旧按事件扫，不改行为', async () => {
       // 席位上的 bot 比 Gateway 旧一步是常态（要重新部署才换版本）。它发的 replay/done
       // 上没有 live，这时候只能回落到扫描——可以不如新版准，但不能比以前更差。
