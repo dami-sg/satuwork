@@ -1423,6 +1423,83 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(html.includes('v5 × 1') && html.includes('还没报到 × 1'), '版本面板没汇总模版版本')
     })
 
+    await test('机器详情：重铺的入口常在，且说得出会往席位里写哪个 Gateway 地址', async () => {
+      /**
+       * 那颗批量按钮原先挂在 `botOutdated` 上——版本都最新时整颗都不画，于是「版本没错、
+       * 只是配置旧了」这一档在界面上没有任何出口。而那正是 Gateway 换了对外地址之后的
+       * 样子：席位的 bot.env 是部署那一刻写死的，版本号一个字都没变。
+       */
+      const ui = await boot(ownerToken)
+      const mid = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+      const detail = (extra) => ({
+        no: 1,
+        machine: {
+          id: mid, host: 'http://10.0.0.12:8443', paired: true, pairedAt: Date.now(),
+          managerVersion: '0.3.1', protocol: 2, lastError: null,
+          lastHeartbeatAt: Date.now() - 12000, link: 'online', heartbeatAge: 12000,
+          timezone: null, currentTimezone: null, arch: 'arm64',
+          telemetry: null, telemetryAt: null, telemetryAge: null, logCapMb: null,
+        },
+        accounts: 1, maxAccounts: 10, seats: 2, full: false,
+        botVersions: [{ version: '0.1.10', seats: 2 }], botOutdated: false,
+        tplVersions: [{ version: 5, seats: 2 }],
+        managerDesired: null, managerOutdated: false, managerPending: false, timezonePending: false,
+        company: { id: 'c1', name: 'Acme', slug: 'acme' },
+        seatGatewayUrl: 'http://127.0.0.1:3080',
+        seatGatewayUrlConfigured: false,
+        seatList: [
+          { seatId: 'sw-1', botId: 'b1', botName: '我的助手', linuxUser: 'u1', who: 'vzz@x.com', whoName: 'vzz', slot: 0, status: 'ready', botVersion: '0.1.10', tplVersion: 5, tplSyncedAt: Date.now(), lastError: null, deployedAt: Date.now(), accountId: 'acc-1', orphan: false },
+          { seatId: 'sw-2', botId: 'b2', botName: null, linuxUser: 'u2', who: 'lee@x.com', whoName: '李四', slot: 1, status: 'ready', botVersion: '0.1.10', tplVersion: 5, tplSyncedAt: Date.now(), lastError: null, deployedAt: Date.now(), accountId: 'acc-2', orphan: true },
+        ],
+        ...extra,
+      })
+      ui.state.path = `/machines/${mid}`
+
+      /**
+       * 断言认的是**按钮那一段**，不是整页里有没有这几个字：底下那段说明里两个名字
+       * 都写着（它讲的正是这颗按钮的两副面孔），拿整页去 includes 会永远为真。
+       */
+      const bulkBtn = (h) => {
+        const i = h.indexOf('data-act="machine-bot-update"')
+        return i < 0 ? '' : h.slice(h.lastIndexOf('<button', i), h.indexOf('</button>', i))
+      }
+
+      // ① 版本都最新：按钮还在，只是换了一副面孔——「全部重铺」。
+      ui.state.machineDetail = detail()
+      ui.render()
+      let html = ui.html()
+      assert(bulkBtn(html), '版本最新时连重铺的入口都没有')
+      assert(bulkBtn(html).includes('全部重铺'), `按钮上写的不是重铺：${bulkBtn(html)}`)
+      assert(bulkBtn(html).includes('data-mode="reflow"'), '批量按钮没带上「这是重铺不是升级」')
+
+      // ② 有新版本：还是那颗按钮，说的是升级。
+      ui.state.machineDetail = detail({ botOutdated: true })
+      ui.render()
+      html = ui.html()
+      assert(bulkBtn(html).includes('全部升级'), `有新版本时按钮上写的不是升级：${bulkBtn(html)}`)
+      assert(bulkBtn(html).includes('data-mode="upgrade"'), '按钮没带上「这是升级」')
+
+      // ③ 会往席位里写哪个地址——摆在按钮旁边，没明确配过还要说出来。
+      assert(html.includes('席位连的 Gateway'), '没说重铺会写哪个 Gateway 地址')
+      assert(html.includes('http://127.0.0.1:3080'), '地址本身没画出来')
+      assert(html.includes('没配 GATEWAY_PUBLIC_URL，这是猜的'), '猜出来的地址没有警示')
+
+      // ④ 席位行上的「重新部署」：有主人的才给，孤儿行给的是「清理」。
+      const rows = html.split('data-bot-row').length // 只是为了让下面的定位读起来清楚
+      assert(rows >= 1)
+      const mine = html.slice(html.indexOf('sw-1'), html.indexOf('sw-2'))
+      assert(mine.includes('data-act="machine-seat-redeploy"'), '有主人的席位没有重铺入口')
+      assert(mine.includes('data-account="acc-1"') && mine.includes('data-bot="b1"'), '重铺按钮没带上是谁的哪一颗')
+      const orphan = html.slice(html.indexOf('sw-2'))
+      assert(!orphan.includes('data-act="machine-seat-redeploy"'), '没有主人的席位不该给重铺入口')
+      assert(orphan.includes('data-act="clean-seat"'), '孤儿席位该给的是清理')
+
+      // ⑤ 没有席位的机器：那颗按钮按下去什么也不会发生，就别画。
+      ui.state.machineDetail = detail({ seats: 0, seatList: [], botVersions: [] })
+      ui.render()
+      assert(!bulkBtn(ui.html()), '一个席位都没有还画着重铺按钮')
+    })
+
     await test('机器管理：菜单在「机器配置」上面，列表和详情画得出，公司侧进不去', async () => {
       // 这一页答的是「平台上挂着哪些机器」，公司详情里那块「运行机器」答的是「这家
       // 有几台」。断言分三层：入口在不在、两张页面画不画得出、以及**没派给公司的机器

@@ -733,8 +733,20 @@ function machineVersionPanel(card) {
   const mgrBtn = card.managerOutdated
     ? `<button type="button" class="btn" data-act="upgrade-manager" data-scope="platform" data-machine="${esc(m.id)}" ${state.busy ? 'disabled' : ''}>${t('升级管家')}</button>`
     : ''
-  const botBtn = card.botOutdated
-    ? `<button type="button" class="btn" data-act="machine-bot-update" data-machine="${esc(m.id)}" ${state.updatingRuntime ? 'disabled' : ''}>${state.updatingRuntime ? t('更新中…') : t('全部升级')}</button>`
+  /**
+   * 这颗按钮**不再只在有新版本时出现**。
+   *
+   * 原先它挂在 `botOutdated` 上：版本都最新时整颗按钮都不画，于是「版本没错、只是配置
+   * 旧了」这一档在界面上没有任何出口——而那恰恰是 Gateway 换了对外地址之后的样子
+   * （席位的 bot.env 是部署那一刻写死的，版本号一个字都没变）。人只能上机器去 sed。
+   *
+   * 所以两副面孔：有新版本 = 「全部升级」，没有 = 「全部重铺」（同一条接口，带 force，
+   * 每个席位仍用它自己那一版，只是重走一遍部署，bot.env 跟着重写）。没有席位就不画
+   * ——那时它按下去什么也不会发生。
+   */
+  const reflow = !card.botOutdated
+  const botBtn = card.seats
+    ? `<button type="button" class="btn" data-act="machine-bot-update" data-machine="${esc(m.id)}" data-mode="${reflow ? 'reflow' : 'upgrade'}" ${state.updatingRuntime ? 'disabled' : ''}>${state.updatingRuntime ? t('处理中…') : reflow ? t('全部重铺') : t('全部升级')}</button>`
     : ''
   return `<div class="satu-panel">
     <span class="satu-panel-title">${t('版本')}</span>
@@ -744,8 +756,29 @@ function machineVersionPanel(card) {
     ${/* 装的是哪个包、跑的是哪一版公司模版，两件事各自会落后。渲染函数在 pages-audit.js，
          那一页的机器卡片画的是同一行——同一台机器不该在两个页面上说两种话。 */ ''}
     ${botTemplateRow(card)}
-    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('一台机器上同时躺着几个 Bot 版本不是错误——有的部署得早。「全部升级」把这台机器上的 Bot 逐个重铺到最新版，正在进行的对话会断。')}</p>
+    ${seatGatewayRow(card)}
+    <p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('一台机器上同时躺着几个 Bot 版本不是错误——有的部署得早。有新版本时这颗按钮是「全部升级」，把它们逐个铺到最新版；没有新版本时它是「全部重铺」，每个席位仍用自己那一版重走一遍部署——为的是让部署时写死的那些配置（比如席位连的 Gateway 地址）跟着刷新。两种都会重启席位，正在进行的对话会断。')}</p>
   </div>`
+}
+
+/**
+ * 重铺一个席位，会往它的 `bot.env` 里写哪个 Gateway 地址。
+ *
+ * **这一行是那两颗重铺按钮的说明书，不是一条无关的环境信息。** 席位靠这个地址拉目录、
+ * 调模型、上报上线；它来自 Gateway 进程的 `GATEWAY_PUBLIC_URL`，而那个变量没配时会
+ * 回落成 `GATEWAY_HOST:GATEWAY_PORT`——通常是 `127.0.0.1:3080`，对席位机器来说是个
+ * 打不通的地址。按下重铺就是把它写死进席位。所以：按之前就得看得见，没明确配过还要
+ * 说出来。
+ */
+function seatGatewayRow(card) {
+  const url = card.seatGatewayUrl
+  if (!url) return ''
+  const warn = card.seatGatewayUrlConfigured
+    ? ''
+    : `<span class="tag tag-accent">${t('没配 GATEWAY_PUBLIC_URL，这是猜的')}</span>`
+  return `<div class="satu-kv"><span>${t('席位连的 Gateway')}</span><span style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">
+    <span style="font-family: var(--font-mono); font-size: 12.5px;">${esc(url)}</span>${warn}
+  </span></div>`
 }
 
 /**
@@ -768,11 +801,15 @@ const SEAT_STATUS = {
 function machineSeatsPanel(card) {
   const seats = card.seatList || []
   /**
-   * **加列之前先量**（e116054 那次是列被挤出屏幕才发现的）。量出来的常数：格间距 12px、
-   * 面板左右内边距各 16px。六列的时候最小宽是 150+120+90+72+140+108 + 5×12 + 32 = 772px；
-   * 加上「模版」这 88px 之后是 872px，比机器列表那张表 940 的门槛还低一档，放得下。
+   * **加列、加按钮之前先量**（e116054 那次是列被挤出屏幕才发现的）。量出来的常数：
+   * 格间距 12px、面板左右内边距各 16px。六列的时候最小宽是
+   * 150+120+90+72+140+108 + 5×12 + 32 = 772px；加上「模版」这 88px 之后是 872px。
+   *
+   * 操作列后来从 108 加宽到 152——那一格里多了一颗「重新部署」（四个字约 56px，加一个
+   * 12px 的间距，正好把原来的 108 撑破）。最小宽因此是
+   * 150+120+90+72+140+88+152 + 6×12 + 32 = 916px，仍在机器列表那张表 940 的门槛之下。
    */
-  const cols = 'minmax(150px, 1.6fr) minmax(120px, 1.2fr) 90px 72px minmax(140px, 1.2fr) 88px 108px'
+  const cols = 'minmax(150px, 1.6fr) minmax(120px, 1.2fr) 90px 72px minmax(140px, 1.2fr) 88px 152px'
   const rows = seats
     .map((s) => {
       // 认不出来的状态照原样显示，别硬塞进某一档——多出一个状态时，屏幕上要看得见
@@ -798,6 +835,15 @@ function machineSeatsPanel(card) {
         )}">${s.tplVersion ? `v${esc(String(s.tplVersion))}` : '—'}</span>
         <span style="display: flex; gap: var(--space-3); justify-content: flex-end;">
           <button type="button" class="satu-linkbtn" data-act="machine-logs" data-scope="platform" data-machine="${esc(card.machine.id)}" data-seat="${esc(s.seatId)}">${t('日志')}</button>
+          ${/* **重铺这一个席位。** 部署脚本每次都整份重写 bot.env，所以这颗按钮同时是
+               「把这台席位的配置刷成 Gateway 现在这一份」——Gateway 换了对外地址之后，
+               要修的就是它（写进去的是哪个地址，见上面那一行「席位连的 Gateway」）。
+
+               没有主人的席位不画：那种行连 Bot 都没有了，重铺无从铺起，它要的是「清理」。
+               公司也得有——接口是挂在公司下面的（POST /orgs/:id/accounts/:id/deploy）。 */ ''}
+          ${!s.orphan && card.company
+            ? `<button type="button" class="satu-linkbtn" data-act="machine-seat-redeploy" data-org="${esc(card.company.id)}" data-account="${esc(s.accountId)}" data-bot="${esc(s.botId)}" data-name="${esc(s.botName || s.botId)}" data-who="${esc(s.whoName || s.who)}" ${state.busy ? 'disabled' : ''}>${t('重新部署')}</button>`
+            : ''}
           ${/* 「清理」只画在没有主人的席位上（orphan 由接口给，见 withSeatNames）。
                Bot 还在的席位从这里掀掉，员工那边只会看到聊天忽然 503，界面上却什么
                都没变——服务端也挡着，这里不画是为了不让人对着一颗会报错的按钮猜。 */ ''}

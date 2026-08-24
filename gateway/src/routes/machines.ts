@@ -4,7 +4,7 @@
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { INSTANCE_DOWN, MIN_MANAGER_NODE, PAIRING_TTL, desiredManagerRelease, gatewayBaseFor, installCommandFor, machineBase, machineCard, machineOfOrg, machineResolver, managerHostOf, normalizePairingCode, randomPairingCode, registerFromBody, sendReleaseFile } from '../lib/machines.ts'
-import { MACHINE_TOMBSTONE_TTL, MIN_MANAGER_PROTOCOL, type MachineLoad, companyMachineOf, deploySeat, machineLink, machineLoadOf, machineLoads, machinePaired, managerHealth, normalizeTimezone, ownerMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
+import { MACHINE_TOMBSTONE_TTL, MIN_MANAGER_PROTOCOL, type MachineLoad, companyMachineOf, deploySeat, gatewayPublicUrl, gatewayPublicUrlExplicit, machineLink, machineLoadOf, machineLoads, machinePaired, managerHealth, normalizeTimezone, ownerMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
 import { accessUrlFor } from '../lib/catalog.ts'
 import { bodyOf, intField, strField } from '../lib/validate.ts'
 import { installScript } from '../install.ts'
@@ -416,7 +416,22 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     // 席位，逐行查等于把同一行数据反复取回来。
     const seatList = await withSeatNames(load.seatRows)
     const companies = (await db.companies()).map((c) => ({ id: c.id, name: c.name, slug: c.slug }))
-    json(res, 200, { ...card, ...latest, seatList, companies })
+    json(res, 200, {
+      ...card,
+      ...latest,
+      seatList,
+      companies,
+      /**
+       * 重铺一个席位会往它的 bot.env 里写哪个 Gateway 地址。
+       *
+       * **摆在按钮旁边，不是装饰。** 那一格的值就是这个进程的 `GATEWAY_PUBLIC_URL`；
+       * 没配的话它会回落成 `GATEWAY_HOST:GATEWAY_PORT`（多半是 127.0.0.1:3080），
+       * 而按下「重新部署」就是把那个打不通的地址写死进席位。这件事必须在按之前
+       * 看得见，所以连「是不是明确配过」一起给出去。
+       */
+      seatGatewayUrl: gatewayPublicUrl(),
+      seatGatewayUrlConfigured: Boolean(gatewayPublicUrlExplicit()),
+    })
   })
 
   /**
@@ -629,18 +644,34 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     requireOwner(account)
     const machine = await machineOr404(req.params.id)
-    const requested = strField(bodyOf(req), 'version', false)
-    let version: string
+    const body = bodyOf(req)
+    /**
+     * **两种活儿，一条路。**
+     *
+     * - 不带 `force`：升级。所有席位铺到同一个版本（指定的那个，或最新的那个）。
+     * - 带 `force`：**照现状重铺**——每个席位仍然是它自己那一版，只是重新走一遍部署。
+     *
+     * 后者要解的是「版本没错，配置旧了」：席位的 `bot.env` 是部署那一刻写死的，
+     * Gateway 换了对外地址之后，那一份还指着旧地址，而版本号一个字都没变——升级那条
+     * 路在这种时候什么都不做（`botOutdated` 为假，界面上连按钮都不画）。重铺会让
+     * 部署脚本整份重写 bot.env，配置跟着回到 Gateway 现在这一份。
+     */
+    const force = body.force === true
+    const requested = strField(body, 'version', false)
+    let version = ''
     if (requested) {
       parseBotVersion(requested)
       const rel = await db.botRelease(requested)
       if (!rel) throw new HttpError(404, '没有这个 Bot 版本')
       version = rel.version
-    } else {
+    } else if (!force) {
       const latest = await db.latestBotRelease()
       if (!latest) throw new HttpError(409, '还没有发布 Bot 版本')
       version = latest.version
     }
+    // 重铺时的兜底：席位那一行没记版本（老数据、上一次部署失败），就用最新的那个——
+    // 总比抛一个「这台机器上有个席位没版本」把整台机器的重铺挡住强。
+    const fallback = force && !version ? ((await db.latestBotRelease())?.version ?? '') : ''
     const seats = (await db.seatRuntimesOfMachine(machine.id)).filter((r) => r.status !== 'none')
     /**
      * `busy` 是**第三种结局**，不是一种失败：席位上有人正在说话，管家等过了也没等到
@@ -661,7 +692,33 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
         })
         continue
       }
-      const out = await deploySeat(db, keys, row, { botId: seat.botId, version, update: true })
+      const target = version || seat.botVersion || fallback
+      if (!target) {
+        results.push({
+          accountId: row.id,
+          botId: seat.botId,
+          status: seat.status,
+          botVersion: null,
+          error: '这个席位没记录版本，平台上也还没有发布包，重铺不了',
+        })
+        continue
+      }
+      /**
+       * 重铺**不打断正在跑的那一轮**（`interrupt: false`）。
+       *
+       * `force` 默认是带打断的——人在员工那一侧按「重新部署」时要的就是「现在就重铺」。
+       * 但这条是整台机器一次推过去：真打断的话，一次点击会掐掉那台机器上所有人正在
+       * 进行的对话。让它照常排空，忙的席位回 `busy`（第三种结局，见下），过会儿再来
+       * 一次就是了。
+       */
+      const out = await deploySeat(
+        db,
+        keys,
+        row,
+        force
+          ? { botId: seat.botId, version: target, force: true, interrupt: false }
+          : { botId: seat.botId, version: target, update: true },
+      )
       results.push(
         out.ok
           ? {
@@ -684,10 +741,12 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     }
     await auditMachine(machine, account.id, 'runtime.update', {
       machineId: machine.id,
-      version,
+      // 重铺时没有「统一的那个版本」——每个席位各是各的，写 null 比写一个假的准。
+      version: version || null,
+      force,
       count: results.length,
     })
-    json(res, 200, { version, results })
+    json(res, 200, { version: version || null, force, results })
   })
 
   /**

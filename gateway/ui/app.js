@@ -60,6 +60,9 @@ async function runConfirm() {
       // 而它恰恰是机器上出了问题时唯一的自助手段。
       await deployMyRuntime(c.id, { force: true })
       return
+    } else if (c.kind === 'machine-seat-redeploy') {
+      await redeploySeat(c.org, c.account, c.id)
+      return
     } else if (c.kind === 'template-redeploy') {
       state.busy = true
       render()
@@ -479,7 +482,30 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'machine-bot-update') {
-    await updateMachineRuntime(btn.getAttribute('data-machine'))
+    await updateMachineRuntime(btn.getAttribute('data-machine'), btn.getAttribute('data-mode') === 'reflow')
+    return
+  }
+  if (act === 'machine-seat-redeploy') {
+    const who = btn.getAttribute('data-who') || ''
+    const name = btn.getAttribute('data-name') || ''
+    state.confirm = {
+      title: '重新部署这个席位？',
+      /**
+       * **代价要写全**：这一颗走的是带打断的 force（和员工侧那颗「重新部署」同一个
+       * 语义），正在跑的那一轮会被掐掉，桌面会掉线。批量那颗不打断（它会排空），
+       * 所以两处的说辞不一样，不能共用一句。
+       */
+      body: t(
+        `会把「${who}」名下的「${name}」这个席位重装一遍并重启，顺带把它连的 Gateway 地址刷成当前这一份。正在进行的对话会被打断，开着的桌面会掉线；~/work 里的文件和会话记录不受影响。`,
+        `The seat running "${name}" for ${who} is reinstalled and restarted, and its Gateway address is refreshed to the current one. Any turn in flight is interrupted and the desktop disconnects; files in ~/work and session history are unaffected.`,
+      ),
+      label: '重新部署',
+      kind: 'machine-seat-redeploy',
+      org: btn.getAttribute('data-org') || '',
+      account: btn.getAttribute('data-account') || '',
+      id: btn.getAttribute('data-bot') || '',
+    }
+    render()
     return
   }
   if (act === 'machine-filter') {

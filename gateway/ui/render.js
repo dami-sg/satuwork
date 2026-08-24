@@ -907,11 +907,21 @@ async function saveMachineCompany(e) {
   }
 }
 
-/** 把这台机器上的席位逐个重铺到最新的 Bot 版本。慢是正常的：一个席位一次真部署。 */
-async function updateMachineRuntime(machineId) {
+/**
+ * 把这台机器上的席位逐个重铺。慢是正常的：一个席位一次真部署。
+ *
+ * 两种口径共用这条路（见 pages-machines.js 的 botBtn）：
+ *
+ * - `reflow = false`：升级，全铺到最新版本。
+ * - `reflow = true`：**照现状重铺**，不带版本——每个席位仍是它自己那一版，重走一遍
+ *   部署。要的是让部署脚本重写 `bot.env`，把席位连的 Gateway 地址刷成当前这一份。
+ *   这一档不需要平台上有发布包（席位自己那一版就够），所以那道「还没有发布 Bot 版本」
+ *   的闸只拦升级。
+ */
+async function updateMachineRuntime(machineId, reflow) {
   if (!machineId || state.updatingRuntime) return
   const version = state.botLatest || state.latestRelease
-  if (!version) {
+  if (!reflow && !version) {
     flash('err', '还没有发布 Bot 版本')
     render()
     return
@@ -919,7 +929,11 @@ async function updateMachineRuntime(machineId) {
   state.updatingRuntime = true
   render()
   try {
-    const data = await api('POST', `/platform/machines/${encodeURIComponent(machineId)}/runtime/update`, { version })
+    const data = await api(
+      'POST',
+      `/platform/machines/${encodeURIComponent(machineId)}/runtime/update`,
+      reflow ? { force: true } : { version },
+    )
     const results = Array.isArray(data.results) ? data.results : []
     const ok = results.filter((r) => r.status === 'ready' && !r.error).length
     /**
@@ -933,6 +947,13 @@ async function updateMachineRuntime(machineId) {
     const bad = results.filter((r) => !r.busy && (r.error || r.status === 'error')).length
     const tail = held ? t(`，${held} 个有会话在跑没换`, `, ${held} skipped (busy)`) : ''
     if (!results.length) flash('ok', t('没有需要更新的席位', 'No seats needed updating'))
+    else if (reflow)
+      // 重铺没有「统一的那个版本」（每个席位各是各的），所以这一句里不摆版本号——
+      // 摆一个就是在暗示所有席位都变成了它。
+      flash(
+        bad && !ok ? 'err' : 'ok',
+        t(`重铺：成功 ${ok}，失败 ${bad}`, `Reinstalled: ${ok} ok, ${bad} failed`) + tail,
+      )
     else
       flash(
         bad && !ok ? 'err' : 'ok',
@@ -943,6 +964,40 @@ async function updateMachineRuntime(machineId) {
     flash('err', err.message)
   } finally {
     state.updatingRuntime = false
+    render()
+  }
+}
+
+/**
+ * 重铺**一个**席位（机器详情页那张表上的按钮）。
+ *
+ * 走的是公司侧那条 `POST /orgs/:id/accounts/:accountId/deploy`，不另开一条平台接口：
+ * 那条已经做完了全部的事（挑机器、算槽位、下发、落库、写审计），而 owner 过 requireOrg
+ * 是直接放行的。多一条平行的接口，就多一处将来会和它分叉的部署逻辑。
+ *
+ * `force` 而不是 `update`：要的是「版本对、状态也 ready，但机器上不对，照铺一遍」，
+ * 顺带让部署脚本把 bot.env（里面有 Gateway 地址）整份重写。
+ *
+ * 慢是正常的——一次真部署。所以按下之后整页 busy，回来再刷一次详情。
+ */
+async function redeploySeat(orgId, accountId, botId) {
+  if (!orgId || !accountId || !botId || state.busy) return
+  state.busy = true
+  render()
+  try {
+    const rt = await api('POST', `/orgs/${encodeURIComponent(orgId)}/accounts/${encodeURIComponent(accountId)}/deploy`, {
+      botId,
+      force: true,
+    })
+    // 席位那侧把失败写在 lastError 里，状态码仍是 200 的情况是有的（部署登记成了、
+    // 机器上没成）。照实说，别一律报「已重新部署」。
+    if (rt && rt.status === 'error') flash('err', rt.lastError || t('部署失败'))
+    else flash('ok', t('已重新部署', 'Redeployed'))
+  } catch (err) {
+    flash('err', err.message)
+  } finally {
+    state.busy = false
+    if (state.machineDetail?.machine?.id) await loadMachineDetail(state.machineDetail.machine.id).catch(() => {})
     render()
   }
 }

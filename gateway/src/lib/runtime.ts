@@ -7,7 +7,7 @@ import type { ServerResponse } from 'node:http'
 import { HttpError, type Req, json } from '../http.ts'
 import { INSTANCE_DOWN, machineBase } from './machines.ts'
 import { Readable } from 'node:stream'
-import { companyMachineOf, listSeatRuntime } from '../deploy.ts'
+import { companyMachineOf, listSeatRuntime, managerHeaders } from '../deploy.ts'
 import { pipeline } from 'node:stream/promises'
 import { type Account, type Db } from '../db.ts'
 
@@ -143,9 +143,13 @@ export async function seatBearer(db: Db, accountId: string): Promise<string> {
  * `authorization` 是给 **bot** 的席位票（`sat_`），管家原样透传不看；
  * `x-satuwork-machine` 是给 **管家** 的机器票（`smt_`），管家验完就摘掉。
  * 分开是为了让 bot 那边一行都不用改。
+ *
+ * 真正拼头的是 deploy.ts 的 `managerHeaders`——它还会捎上「Gateway 现在在哪」，
+ * 而那一句必须每条发往管家的调用都带着才有意义（见那边的长注释）。这里保留这个名字，
+ * 是因为它有十几个调用点，而它们要的正是「发给管家的那套头」。
  */
 export function machineHeader(machineToken?: string): Record<string, string> {
-  return machineToken ? { 'x-satuwork-machine': machineToken } : {}
+  return managerHeaders(machineToken)
 }
 
 export async function proxyJson(

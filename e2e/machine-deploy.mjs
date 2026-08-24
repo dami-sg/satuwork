@@ -322,6 +322,57 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       )
     })
 
+    await test('从机器页重铺一个席位：走公司那条 deploy，force 真的重铺', async () => {
+      // 机器详情页那颗「重新部署」按下去就是这一条。**不另开平台接口**：这条已经做完了
+      // 全部的事（挑机器、算槽位、下发、落库、写审计），owner 过 requireOrg 是直接放行的。
+      const before = await req(gwBase, 'GET', '/runtime/desktop?botId=' + botA, { token: memberTok })
+      const r = await req(gwBase, 'POST', `/orgs/${orgId}/accounts/${memberId}/deploy`, {
+        token: ownerTok,
+        body: { botId: botA, force: true },
+      })
+      assert(r.status === 200, `owner 重铺 ${r.status} ${r.text}`)
+      assert(r.json.status === 'ready', `重铺之后 ${r.json.status}`)
+      assert(r.json.deployedAt > before.json.deployedAt, 'deployedAt 没动，等于什么都没发生')
+      // 重铺是「照现状再来一遍」，不是升级——版本不该被顺手换掉。
+      assert(r.json.botVersion === before.json.botVersion, `版本被换了：${before.json.botVersion} → ${r.json.botVersion}`)
+    })
+
+    await test('照现状重铺整台机器：不带版本也推得动，每个席位各留各的版本', async () => {
+      /**
+       * 这一档要的是「版本没错，配置旧了」：席位的 bot.env 是部署那一刻写死的，Gateway
+       * 换了对外地址之后那一份还指着旧地址，而版本号一个字都没变——升级那条路在这种
+       * 时候什么都不做（界面上连按钮都不画）。重铺让部署脚本整份重写 bot.env。
+       */
+      const machineId = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machine.id
+      const before = await req(gwBase, 'GET', '/runtime/desktop?botId=' + botA, { token: memberTok })
+      const r = await req(gwBase, 'POST', `/platform/machines/${machineId}/runtime/update`, {
+        token: ownerTok,
+        body: { force: true },
+      })
+      assert(r.status === 200, `重铺 ${r.status} ${r.text}`)
+      assert(r.json.force === true, `没认出这是重铺：${r.text.slice(0, 200)}`)
+      // 重铺没有「统一的那个版本」。报一个就是在暗示所有席位都变成了它。
+      assert(r.json.version === null, `重铺不该报一个统一版本：${r.json.version}`)
+      assert(r.json.results.length >= 1, `一个席位都没推：${r.text.slice(0, 200)}`)
+      const after = await req(gwBase, 'GET', '/runtime/desktop?botId=' + botA, { token: memberTok })
+      assert(after.json.botVersion === before.json.botVersion, `重铺换了版本：${before.json.botVersion} → ${after.json.botVersion}`)
+      assert(after.json.deployedAt > before.json.deployedAt, '整台重铺之后 deployedAt 没动')
+    })
+
+    await test('机器详情说得出「重铺会往席位里写哪个 Gateway 地址」', async () => {
+      // 那一格不是装饰：席位靠这个地址拉目录、调模型、上报上线，而它来自 Gateway 进程的
+      // GATEWAY_PUBLIC_URL。没配时会回落成 GATEWAY_HOST:GATEWAY_PORT（多半是 127.0.0.1），
+      // 按下重铺就是把一个打不通的地址写死进席位——所以「这是猜的」必须说出来。
+      const machineId = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machine.id
+      const d = await req(gwBase, 'GET', `/platform/machines/${machineId}`, { token: ownerTok })
+      assert(d.status === 200, `详情 ${d.status} ${d.text}`)
+      assert(
+        typeof d.json.seatGatewayUrl === 'string' && d.json.seatGatewayUrl.startsWith('http'),
+        `没给出将写入的地址：${JSON.stringify(d.json.seatGatewayUrl)}`,
+      )
+      assert(d.json.seatGatewayUrlConfigured === false, '这个套件没配 GATEWAY_PUBLIC_URL，界面必须说这是猜的')
+    })
+
     await test('已经 ready 就跳过；但 force 必须真的重铺一遍', async () => {
       // 「已经是这个版本、而且好着 → 不重装」是对的，可它把「重新部署」这个自助手段
       // 也一起挡掉了：接口回 200 和 ready，deployedAt 一秒没动，什么都没发生。

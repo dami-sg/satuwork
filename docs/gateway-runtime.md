@@ -246,6 +246,7 @@ CPU 占用和出网速率允许是 `null`（第一次采样只存基准、计数
 - 员工能看见：桌面地址、linuxUser、seatId、共享目录、botVersion。看不见 CDP、sudo、LLM 密钥。**VNC 密码不再显示在对话页右栏**——票里已经带着它自动填进 noVNC，界面上留一行等于把随时可用的凭据摆在屏幕上；接口仍然返回，管理员在公司详情的席位卡里看得到
 - Bot 环境必有 `SATUWORK_BOT_ID`。目录 `GET /runtime/catalog?botId=`，只钉那一颗，不种本地 `default`
 - Bot 运行包在 Gateway 按版本发布；部署指定版本。公司可批量更新已部署的 pair：`POST /platform/orgs/:id/runtime/update`
+- **「Gateway 在哪」在机器上冻着两份**：管家的 `/etc/satuwork/manager.json`（配对那天写的，心跳用它）和每个席位的 `bot.env`（部署那一刻写的，值来自 Gateway 进程的 `GATEWAY_PUBLIC_URL`）。Gateway 换了对外地址之后两份都是旧的，而且都不报错。前者由 Gateway 每次入站调用捎的 `x-satuwork-gateway-url` 自动纠正（只在明确配过 `GATEWAY_PUBLIC_URL` 时才发，见 manager/README.md）；后者要重铺席位才会重写
 - `$SATUWORK_HOME` 是 `/home/{linuxUser}/.satuwork/{seatId}`，席位之间不共用
 
 **共享的只有 `/home/{linuxUser}/work`。** 这是同一员工的多个 bot 看见同一批资料的唯一入口，靠 uid 相同实现，没有任何代码。其余一切按席位隔离——Chrome profile（同一个 `--user-data-dir` 起第二个 Chrome 会把网页开到别的席位屏上）、`XDG_RUNTIME_DIR`（logind 给的 `/run/user/{uid}` 是按 uid 的，会撞）、`XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME`（plank、dconf、picom、`.desktop` 跟着一起隔离）、`satuwork.db` 与 `sessions/`（`settings/change` 事件只在进程内广播，共用一份库会让另一个进程一直读到内存里的旧值）。
@@ -792,6 +793,8 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/runtime/catalog/version?botId=&have=` | 「变了没有」的探针，只回 `templateVersion` + `stamp`。实例每分钟打一次，指纹没动就一个字节都不再取。`have` 是席位自报的当前模版版本，顺路记成同步状态（见上）。同样只认 `sat_` |
 | PUT | `/platform/bot-releases/:version` | **上传**发布包（body 就是 tgz）。CI 用 `GATEWAY_PLATFORM_TOKEN`，人用 `owner` 登录态 |
 | POST | `/platform/orgs/:id/runtime/update` | 公司批量把已部署 pair 更新到某版本 |
+| POST | `/platform/machines/:id/runtime/update` | `owner`：这台机器上的席位逐个重铺。带 `version`（或默认最新）= **升级**；带 `force` 不带 `version` = **照现状重铺**，每个席位仍用它自己那一版，只是重走一遍部署——为的是让部署时写死的配置（`bot.env` 里的 `GATEWAY_URL` 等）跟着重写。重铺不打断正在跑的那一轮，忙的席位回 `busy` |
+| POST | `/orgs/:id/accounts/:accountId/deploy` | admin/`owner`：给该账号部署 `{ botId }`。带 `force` = 照现状重铺**这一个**席位（机器详情页每行那颗「重新部署」走的就是它，会打断正在跑的那一轮） |
 
 ### Gateway（模型代理；API Key `sk_sw_` 或登录 JWT。`sat_` → 401。`x-api-key` 若出现也只当席位 API Key / JWT，不是上游密钥）
 

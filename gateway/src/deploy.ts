@@ -344,12 +344,47 @@ export function desktopUrlOf(keys: JwtKeys, machine: Machine | undefined, row: S
   return novncUrlOf(machine.host, row.seatId, signDesktopTicket(keys, row.seatId, row.vncPassword))
 }
 
-function gatewayPublicUrl(): string {
-  const explicit = (process.env.GATEWAY_PUBLIC_URL || '').trim().replace(/\/$/, '')
+/**
+ * **明确配置过的**对外地址。没配就是空串。
+ *
+ * 和 `gatewayPublicUrl()` 分开，是因为「猜出来的地址」和「有人写下来的地址」能承担的
+ * 责任不一样：猜出来的多半是 `GATEWAY_HOST:GATEWAY_PORT`，而那两个值通常是
+ * `127.0.0.1:3080`——对席位机器来说是个打不通的地址。写进 bot.env 已经够糟（那至少
+ * 只发生在一次明确的部署动作里），拿它去教管家改自己的心跳地址就是当场把机器打死。
+ * 所以 `managerHeaders` 只在这一份非空时才说话。
+ */
+export function gatewayPublicUrlExplicit(): string {
+  return (process.env.GATEWAY_PUBLIC_URL || '').trim().replace(/\/$/, '')
+}
+
+export function gatewayPublicUrl(): string {
+  const explicit = gatewayPublicUrlExplicit()
   if (explicit) return explicit
   const host = process.env.GATEWAY_HOST || '127.0.0.1'
   const port = process.env.GATEWAY_PORT || '3080'
   return `http://${host}:${port}`
+}
+
+/**
+ * 发往**管家自己**那几条控制接口的头：机器票，外加一句「Gateway 现在在哪」。
+ *
+ * 第二个头是给管家学地址用的（见 manager/src/index.ts 的 adoptGatewayUrl）。它要解的
+ * 是一个死结：Gateway 换了地址之后，管家手上那份 `gatewayUrl` 还是配对那天写死的，
+ * 心跳打向一个不存在的地方——而它唯一能被告知这件事的通道，恰恰是它**打不出去**的
+ * 那一条。入站这条还通着（机器没挪窝），那就从这条告诉它。
+ *
+ * **信任面没有变大**：这个头只有过了 `requireMachine` 的调用方才会被采信，也就是拿得出
+ * `smt_` 的那一个；而部署请求的 body 里本来就带着 `gatewayUrl`，管家一直原样把它写进
+ * 席位的 bot.env。差别只是这次它也写给自己。
+ *
+ * **只在明确配置过时才带**，理由见 gatewayPublicUrlExplicit。
+ */
+export function managerHeaders(machineToken?: string): Record<string, string> {
+  const url = gatewayPublicUrlExplicit()
+  return {
+    ...(machineToken ? { 'x-satuwork-machine': machineToken } : {}),
+    ...(url ? { 'x-satuwork-gateway-url': url } : {}),
+  }
 }
 
 /** 槽位**按机器**分配，不是按公司：端口从槽位算出来，两台机器上的 slot 0 互不冲突。 */
@@ -808,7 +843,7 @@ async function managerDeploy(machine: Machine, spec: SeatSpec, timeoutMs = DEPLO
       // 区分开的；控制类调用没有这个冲突，带上 `authorization` 让 curl 和旧版管家也认。
       headers: {
         'content-type': 'application/json',
-        'x-satuwork-machine': machine.token,
+        ...managerHeaders(machine.token),
         authorization: 'Bearer ' + machine.token,
       },
       body: JSON.stringify(spec),
@@ -846,7 +881,7 @@ export async function managerRemoveSeat(machine: Machine, seatId: string): Promi
   const url = `${machine.host!.replace(/\/$/, '')}/seats/${encodeURIComponent(seatId)}`
   const res = await fetch(url, {
     method: 'DELETE',
-    headers: { 'x-satuwork-machine': machine.token, authorization: 'Bearer ' + machine.token },
+    headers: { ...managerHeaders(machine.token), authorization: 'Bearer ' + machine.token },
     signal: AbortSignal.timeout(120_000),
   })
   if (!res.ok && res.status !== 404) throw new Error(`管家拆席位失败 ${res.status}`)
@@ -955,7 +990,9 @@ export async function managerHealth(
   const q = opts.challenge ? `?challenge=${encodeURIComponent(opts.challenge)}` : ''
   try {
     const res = await fetch(`${base}/health${q}`, {
-      headers: opts.token ? { authorization: 'Bearer ' + opts.token } : {},
+      // 探活也捎上「Gateway 现在在哪」：界面上那颗「保存并探活」于是顺带把地址教给
+      // 管家——换了 Gateway 地址之后，那正是人第一个会去按的按钮。
+      headers: opts.token ? { authorization: 'Bearer ' + opts.token, ...managerHeaders() } : {},
       signal: AbortSignal.timeout(opts.timeoutMs ?? 8000),
     })
     if (!res.ok) return { ok: false, error: `管家返回 ${res.status}` }
