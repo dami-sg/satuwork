@@ -47,6 +47,28 @@ const SETTLE_MS = 350
  */
 const PAGE_CALL_TIMEOUT = 5_000
 
+/**
+ * 截图：**拍给人看的，不进模型的上下文**（见 tools/index.ts 的 `ToolResult.shot`）。
+ *
+ * JPEG 而不是 PNG：一屏网页的 PNG 动辄几百 KB（图多的页面上更大），同一屏 JPEG 七成
+ * 质量只有它的几分之一。而这张图的用途是「事后看一眼当时页面长什么样」，不是取证。
+ * 它落在员工自己的工作区里，一次多步浏览就是十几张，差出来的是实打实的盘。
+ *
+ * 只拍视口，不拍整页（`captureBeyondViewport`）：整页截图在无限滚动的页面上会拍出一张
+ * 几万像素高的东西，而「Bot 当时看到的」本来就是那一屏。
+ *
+ * 超时压短：拍照卡住不该把这次工具调用一起拖住——这张图没拍成，动作本身照样是成功的。
+ */
+const SHOT_QUALITY = 70
+const SHOT_TIMEOUT = 5_000
+/**
+ * 一条会话最多留多少张。
+ *
+ * 不是为了省那点盘，是给跑飞的循环兜底：模型卡在「点一下、看一眼」上转两百圈时，
+ * 前六十张已经把「它卡在哪儿」说清楚了，后面一百四十张只是同一屏的复印件。
+ */
+const MAX_SHOTS = 60
+
 /** wait_for 的硬上限。不接受模型传更大的值——它很愿意让你等五分钟。 */
 const MAX_WAIT_MS = 30_000
 
@@ -56,13 +78,15 @@ interface Snapshot {
   title: string
   body: string
   truncated: boolean
-  /**
-   * 这一页上的链接，**结构化的那一份**（正文里每条 link 行也各自带着地址）。
-   *
-   * 单独带一份是为了让上层不必回头去正则扫自己写给模型的散文——那条路每次改措辞
-   * 都会断，而它断掉的样子是「界面上那张卡突然空了」，没有任何报错。
-   */
-  links?: { text: string; url: string }[]
+}
+
+/**
+ * 工作区里我们要用的那两样。**结构化地写在这里，不 import 那个类**——见 workspaceOf：
+ * 这个服务不 inject workspace，类型上也不该反过来依赖它。
+ */
+interface WorkspaceLike {
+  root?: string
+  saveBytes?: (dir: string, filename: string, bytes: Uint8Array) => Promise<{ path: string; name: string }>
 }
 
 interface Located {
@@ -150,8 +174,6 @@ export class BrowserService extends Service {
    * 只需要在回执上加一句话。
    */
   private opened = 0
-  /** 上一次快照看到的链接。见 takeLinks。 */
-  private links: { text: string; url: string }[] = []
   /** 上一次快照给出的 ref → 名字。**策略要同步问「点的是什么」，所以缓存在这边。** */
   private labels = new Map<string, { name: string; role: string }>()
   /** 已经发到第几号 ref。跳转之后接着往下发，见 page.ts 里 snapshot 的说明。 */
@@ -177,6 +199,8 @@ export class BrowserService extends Service {
    */
   private downloading = new Map<string, string>()
   private downloads: string[] = []
+  /** 每条会话已经拍了多少张。见 MAX_SHOTS。 */
+  private shots = new Map<string, number>()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'browser')
@@ -435,21 +459,25 @@ export class BrowserService extends Service {
     }
   }
 
-  private async setDownloadDir(cdp: Cdp): Promise<void> {
-    /**
-     * 走 `reflect.get` 而不是 inject。inject 了 workspace 的话，没有工作区的场合
-     * （探针、以后某个精简组合）这个服务整个起不来——而下载落哪儿只是它的一个附带
-     * 功能，不该反过来决定它能不能存在。
-     */
-    let root = ''
+  /**
+   * 工作区服务，**取不到就当没有**。
+   *
+   * 走 `reflect.get` 而不是 inject。inject 了 workspace 的话，没有工作区的场合
+   * （探针、以后某个精简组合）这个服务整个起不来——而「下载落哪儿」「截图存哪儿」
+   * 只是它的附带功能，不该反过来决定它能不能存在。
+   */
+  private workspaceOf(): WorkspaceLike | undefined {
     try {
-      const ws = (this.ctx as unknown as { reflect?: { get?: (name: string) => unknown } }).reflect?.get?.(
-        'workspace',
-      ) as { root?: string } | undefined
-      root = ws?.root ?? ''
+      return (this.ctx as unknown as { reflect?: { get?: (name: string) => unknown } }).reflect?.get?.('workspace') as
+        | WorkspaceLike
+        | undefined
     } catch {
-      return
+      return undefined
     }
+  }
+
+  private async setDownloadDir(cdp: Cdp): Promise<void> {
+    const root = this.workspaceOf()?.root ?? ''
     if (!root) return
     try {
       await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: root, eventsEnabled: true })
@@ -704,7 +732,6 @@ export class BrowserService extends Service {
       throw new ScopeError(`这一页是 ${snap.url}，${bad}。内容没有取回来。`)
     }
     this.url = snap.url
-    if (Array.isArray(snap.links)) this.links = snap.links
     // ref → 名字。**策略靠这张表判「点的是不是提交」**，所以它必须和模型看到的那份
     // 快照是同一次的产物；从别处现取会出现「卡片上写的按钮和它要点的不是一个」。
     this.labels.clear()
@@ -888,24 +915,6 @@ export class BrowserService extends Service {
     return pending.message
   }
 
-  /**
-   * 上一次动作之后经过的非幂等请求，**取走即清空**。
-   *
-   * 给策略的事后审计用：提交判据漏掉的那一次（只有图标、没有名字的删除按钮），
-   * 至少在会话日志里留得下「这次点击发出了一条 POST」。
-   */
-  /**
-   * 上一次快照看到的链接。**取走即清零**——它属于那一次动作，不该跟着下一次一起报。
-   *
-   * 和下载那一份同一个形状（takeDownloads），因为它们在界面上是同一类东西：
-   * 这次调用产出了什么可以点的。
-   */
-  takeLinks(): { text: string; url: string }[] {
-    const out = this.links
-    this.links = []
-    return out
-  }
-
   /** 上一次动作之后新开出来的标签页数。取走即清零。 */
   takeOpened(): number {
     const n = this.opened
@@ -913,10 +922,61 @@ export class BrowserService extends Service {
     return n
   }
 
+  /**
+   * 上一次动作之后经过的非幂等请求，**取走即清空**。
+   *
+   * 给策略的事后审计用：提交判据漏掉的那一次（只有图标、没有名字的删除按钮），
+   * 至少在会话日志里留得下「这次点击发出了一条 POST」。
+   */
   takeWrites(): { method: string; url: string }[] {
     const out = this.writes
     this.writes = []
     return out
+  }
+
+  /**
+   * 这一步之后页面长什么样，拍一张落进工作区。**给人看，不给模型看。**
+   *
+   * 为什么值得拍：一次多步浏览在日志里只剩十几段 a11y 文本，出了问题（点错了、页面
+   * 弹了个没见过的东西、登录掉了）翻那些文本几乎看不出所以然，而一眼截图就够。模型
+   * 那边不需要它——它手上有快照，而且默认那个对话模型没有视觉（见 docs/browser-tools.md
+   * 第 1 节，那一条没有变）。
+   *
+   * **拍不成一律当没拍**，不往上抛：这张图是痕迹，不是动作的一部分。因为拍照失败把一次
+   * 成功的点击报成失败，是拿一个附带功能去毁主功能。
+   *
+   * 三种情况直接不拍：
+   * - **页面上挂着原生对话框**——那时候整页是冻住的，`captureScreenshot` 的回执和快照
+   *   一样永远等不到，只会白等一个超时。这是 settleAndSnapshot 上那段说明的同一个坑。
+   * - 没有工作区（图没地方放）。
+   * - 这条会话已经拍够了（见 MAX_SHOTS）。
+   */
+  async screenshot(sessionId: string, action: string, signal?: AbortSignal): Promise<WorkspaceFile | undefined> {
+    if (this.dialog) return undefined
+    const cdp = this.cdp
+    const target = this.sessionId
+    // 没有页面就没什么可拍的。**不在这里 page()**：那会为了一张截图把一个已经关掉的
+    // 标签页重新开出来，而这一步本来只是想留个痕迹。
+    if (!cdp?.alive || !target) return undefined
+    const ws = this.workspaceOf()
+    if (!ws?.saveBytes) return undefined
+    const taken = this.shots.get(sessionId) ?? 0
+    if (taken >= MAX_SHOTS) return undefined
+    try {
+      const got = await cdp.send<{ data?: string }>(
+        'Page.captureScreenshot',
+        { format: 'jpeg', quality: SHOT_QUALITY },
+        { sessionId: target, signal, timeout: SHOT_TIMEOUT },
+      )
+      const data = typeof got?.data === 'string' ? got.data : ''
+      if (!data) return undefined
+      const file = await ws.saveBytes(`browser/${sessionId}`, `${shotStamp()}-${action}.jpg`, Buffer.from(data, 'base64'))
+      this.shots.set(sessionId, taken + 1)
+      return { path: file.path, name: file.name }
+    } catch (e) {
+      this.ctx.logger?.warn?.(`browser: 截图没拍成 ${(e as Error).message}`)
+      return undefined
+    }
   }
 
   /** 这一次动作之后新落下来的文件。报给界面用，模型不看。 */
@@ -968,6 +1028,23 @@ const KEYS: Record<string, { key: string; code: string; windowsVirtualKeyCode: n
 function httpUrl(url: unknown): string {
   const s = typeof url === 'string' ? url.trim() : ''
   return /^https?:\/\//i.test(s) ? s : ''
+}
+
+/**
+ * 截图的文件名前缀：`20260824-113045-321`。
+ *
+ * 用时间而不是序号：序号得有个计数器，而计数器跟着进程走——席位重启之后从头数，
+ * 同一条会话的目录里就会撞名，而撞名的后果要么是覆盖掉一张旧的（那是数据丢失），
+ * 要么是 `-1` `-2` 这种谁也看不懂的后缀。带毫秒的时间戳既不会撞，又刚好按顺序排，
+ * 人直接在工作区里按文件名就能把这次浏览从头看到尾。
+ */
+function shotStamp(): string {
+  const d = new Date()
+  const p = (n: number, w = 2) => String(n).padStart(w, '0')
+  return (
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-` +
+    `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}`
+  )
 }
 
 async function settle(signal?: AbortSignal): Promise<void> {

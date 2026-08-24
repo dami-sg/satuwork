@@ -1,6 +1,6 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { createReadStream, createWriteStream, type WriteStream } from 'node:fs'
-import { mkdir, rm, stat } from 'node:fs/promises'
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, relative, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
 import { satuworkHome } from '../home.ts'
@@ -110,6 +110,25 @@ export class WorkspaceService extends Service {
       throw e
     }
     return { path: this.show(target), name: basename(target), size, ...contentTypeOf(target) }
+  }
+
+  /**
+   * 把一段**已经在手上的**字节落进 `<dir>/<filename>`。目录不存在就建，重名不覆盖。
+   *
+   * 和 saveUpload 分开而不是合并：那条收的是外面一条不受信的请求体，所以边写边数、
+   * 超限就地中断；这条收的是我们自己生成的东西（浏览器截图），大小早就定了，再套一层
+   * 流只是绕路。共用的是路径这一头——`resolve` 的越界检查和 `freshPath` 的不覆盖，
+   * 那两样按这个文件开头的说法只能有一份。
+   */
+  async saveBytes(dir: string, filename: string, bytes: Uint8Array) {
+    // dir 是我们自己拼的（`browser/<sessionId>`），但 sessionId 一路来自外面，
+    // 所以每一段照样过一遍清洗；resolve 那道是最后的兜底，不是唯一一道。
+    const cleaned = dir.split('/').map(safeSegment).filter(Boolean).join('/') || 'misc'
+    const target = this.resolve(cleaned)
+    await mkdir(target, { recursive: true })
+    const file = await freshPath(target, safeName(filename))
+    await writeFile(file, bytes)
+    return { path: this.show(file), name: basename(file), size: bytes.byteLength }
   }
 
   /** 读一个文件用来预览。返回 Web 流，不进内存。 */

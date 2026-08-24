@@ -643,6 +643,34 @@
 .sw-md hr { margin: var(--space-4) 0; border: 0; border-top: 1px solid var(--border); }
 .sw-md a { color: var(--color-accent-700); font-weight: 500; text-decoration: underline; text-underline-offset: 2px; }
 .sw-md a:hover { color: var(--color-accent-600); }
+/*
+ * 链接文字后面跟一枚小图标。
+ *
+ * Bot 列一串东西时（十个视频、十条搜索结果），**每一项自己就是链接**，人要的就是
+ * 点进去。而正文里加粗、列表、序号本来就多，一段带下划线的文字混在里面并不显眼——
+ * 这枚图标是「这一条点得开」的那个记号，箭头朝外也说明了它开的是新标签页。
+ *
+ * 跟在文字后面而不是前面：前面会把每一行的起点推开，一列标题就对不齐了。它长在
+ * <a> 自己的 ::after 上，所以连它一起是可点的，点哪儿都跳。
+ *
+ * 用 mask 不用 <img>：颜色跟着 currentColor 走，链接的常态色、hover 色、以及用户
+ * 气泡里那套反色，一处都不用再各配一张图。
+ */
+.sw-md a[data-md='link']::after {
+  /* 图标本身。写成变量是因为 -webkit- 和标准写法各要一份，抄两遍必然有一处抄歪。 */
+  --sw-icon-external: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 4h6v6'/%3E%3Cpath d='M20 4L11 13'/%3E%3Cpath d='M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4'/%3E%3C/svg%3E");
+  content: '';
+  display: inline-block;
+  width: 0.82em;
+  height: 0.82em;
+  margin-left: 0.22em;
+  vertical-align: -0.06em;
+  background-color: currentColor;
+  -webkit-mask: var(--sw-icon-external) no-repeat center / contain;
+  mask: var(--sw-icon-external) no-repeat center / contain;
+}
+/* 图片本身就是链接时不加：那张图已经摆在那儿了，角上再挂个小箭头只是脏。 */
+.sw-md a[data-md='link']:has(img)::after { content: none; }
 .sw-md img { margin: var(--space-2) 0; border-radius: var(--radius-sm); border: 1px solid var(--border); }
 .sw-md strong { font-weight: 600; }
 
@@ -798,23 +826,6 @@
   font-family: inherit;
   transition: background 120ms ease, border-color 120ms ease;
 }
-/*
- * 网页链接那颗。和产出文件同一副长相——它们在这一排里是同一类东西：
- * 「这次调用产出了什么可以点的」。区别只在它是 <a>，所以要按掉下划线，
- * 并且给一个够宽的上限：链接标题比文件名长得多，截太窄就只剩「Grok AI…」。
- */
-.sw-linkchip {
-  border: 1px solid var(--border);
-  background: var(--background);
-  color: var(--foreground);
-  cursor: pointer;
-  text-decoration: none;
-  max-width: 320px;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-.sw-linkchip:hover { background: var(--secondary); border-color: var(--muted-foreground); }
-/* 没摆下的那些。不是可点的东西，所以别长成可点的样子。 */
-.sw-linkmore { color: var(--muted-foreground); }
 .sw-filechip:hover { background: var(--secondary); border-color: var(--ring); }
 .sw-filechip svg { opacity: 0.6; }
 
@@ -889,6 +900,19 @@
 /* 还没取回来、或者太大不自动取的那些，留一个占位而不是塌成一条缝。 */
 .sw-shot-ph { color: var(--muted-foreground); opacity: 0.7; }
 .sw-bubble[data-role='user'] .sw-shot { border-color: color-mix(in srgb, var(--primary-foreground) 28%, transparent); }
+/*
+ * 浏览器一步一张的过程截图。和用户发的图共用 .sw-shots / .sw-shot，只改两处：
+ *
+ * - 摆成 16:10 而不是正方形——拍的是 1280x800 那块屏，方框裁出来的只剩页面正中央
+ *   那一小块，十有八九什么都看不出来。
+ * - 对齐顶部（object-position）。网页的信息都在上面：标题、导航、第一屏结果。居中裁
+ *   会把它们全裁掉，只留一片中段的白。
+ */
+.sw-steps { margin: 8px 0 0; }
+.sw-steps .sw-shot { width: 132px; height: 82px; }
+.sw-steps .sw-shot img { object-position: top center; }
+/* 没摆下的那些。不是可点的东西，所以别长成可点的样子。 */
+.sw-stepmore { color: var(--muted-foreground); align-self: center; }
 
 /* ── 右栏里的内嵌桌面 ─────────────────────────────────────────────────────
    槽是占位，真正的 iframe 在 body 上的常驻层里（见 chat.js 的 syncDesktop）——

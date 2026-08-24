@@ -300,11 +300,13 @@ export interface SessionEventMap {
      */
     files?: { path: string; name: string }[]
     /**
-     * 这次调用在网页上看到的链接。界面据此摆一张可点的卡。
+     * 这次调用之后页面长什么样（浏览器工具拍的，路径相对工作区根目录）。界面据此在
+     * 这条消息底下摆一条缩略图。
      *
-     * 和 files 一样是可选的、一样**不去正则扫 text 猜**——那段文本是写给模型的散文。
+     * 和 files 分开：那一排是「产出了什么」，这一张是「过程中看到了什么」。老日志没有
+     * 这个字段，界面照旧不显示。
      */
-    links?: { text: string; url: string }[]
+    shot?: { path: string; name: string }
   }
 }
 
