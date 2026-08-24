@@ -195,6 +195,11 @@ function pipeUpstream(
       if (!transform || up.statusCode !== 200) {
         res.writeHead(up.statusCode ?? 502, head)
         up.pipe(res)
+        // 管家半路断了要把浏览器那头一起拆掉：pipe 只在干净的 end 上收尾 res，
+        // aborted/error 时只 unpipe，下游会悬着不关（同 manager/src/proxy.ts 那处）。
+        up.on('close', () => {
+          if (!res.writableEnded) res.destroy()
+        })
         return
       }
       const chunks: Buffer[] = []

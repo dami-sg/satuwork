@@ -71,6 +71,7 @@ function resetBotStream(row) {
     try {
       row.ac.abort()
     } catch {}
+    dropPulse(row.ac)
     // 它可能正是「当前那条」。闩留着指向一个已经掐掉的流，后面谁也认不回来。
     if (chatAbort === row.ac) {
       chatAbort = null
@@ -673,6 +674,8 @@ function releaseChatStream(ac, owner) {
   // 一个空的事件桶，刷新整页才回得来。
   const row = owner ? botStreams.get(owner) : null
   if (row && row.ac === ac) row.ac = null
+  // 看门狗那本脉搏账也一起销掉（见 notePulse）：这条流已经不归任何人了。
+  dropPulse(ac)
   if (chatAbort !== ac) return
   chatAbort = null
   chatStreamId = ''
@@ -686,6 +689,7 @@ function stopChatStream() {
     try {
       chatAbort.abort()
     } catch {}
+    dropPulse(chatAbort)
   }
   chatAbort = null
   chatStreamId = ''
@@ -1379,6 +1383,8 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
       // 唯一来源。只有当前这条要盯 chatStreamId（重连时它会被换掉）。
       if (isActive() && chatStreamId !== sessionId) break
       armStall()
+      // 任何字节都算脉搏——`: ping` 不是事件、下面的解析会跳过它，但它证明这条链活着。
+      notePulse(ac, sessionId, owner)
       buf += decoder.decode(value, { stream: true })
       buf = buf.replace(/\r\n/g, '\n')
       let idx
@@ -1717,6 +1723,76 @@ function chatStreamAlive(sessionId, botId) {
   const row = botId ? botStreams.get(botId) : null
   if (row && row.sessionId === sessionId && row.ac) return true
   return chatStreamId === sessionId && Boolean(chatAbort)
+}
+
+/**
+ * 心跳静默看门狗：**连接没断、字节也再也不来**的那种半死流，只有它救得回来。
+ *
+ * 这条链有三跳（浏览器 → Gateway → 管家 → 席位），任何一跳把「断」吞掉——反代的
+ * pipe 没收尾、网络半开（NAT 超时、机器断电）——浏览器手上这条流就成了「看着还开
+ * 着、永远等不来下一个字节」。而重连、退避、慢速长跑、发消息前的 reviveChatStream、
+ * 切回前台那一路，**全都以 `row.ac` 在不在为判据**：半死的流 ac 还在，谁都以为它
+ * 好着，于是没有任何东西会去碰它。消息照发照跑，回答经 SSE 送出来时没人在听，
+ * 屏幕上那句「正在思考」就一直挂着——这正是修了好几轮都没除根的那个形状：每一轮
+ * 修的都是「断了之后接不回来」，而这一种压根**没有断**。
+ *
+ * 判据是 bot 每 15 秒一条的 `: ping`（见 bot/src/web/index.ts 的心跳）：它不是事件、
+ * 解析时直接跳过，但它是字节。任何字节都把脉搏往后推；45 秒（三个心跳）没有任何
+ * 字节，就把这条流当死的拆掉重连——带 after 游标，静默期间错过的一起补回来。
+ *
+ * **只盯收到过字节的流。** 连上了却一个字节都没来的那种归重放看门狗管
+ * （REPLAY_STALL_MS，8 秒），这边不掺和——也免得对一条还在建连的流下错结论。
+ *
+ * 定时器懒起懒收：有流才跑，表空了就停。后台标签页里被节流到分钟级没关系——
+ * 晚一点发现死流总好过永远不发现，而回到前台还有 visibilitychange 那一路先补。
+ */
+const STREAM_SILENT_MS = 45_000
+const STREAM_SWEEP_MS = 15_000
+/** ac -> { sessionId, owner, at }。at = 最后一个字节到达的时刻。 */
+const streamPulse = new Map()
+let streamSweepTimer = null
+
+function notePulse(ac, sessionId, owner) {
+  const p = streamPulse.get(ac)
+  if (p) {
+    p.at = Date.now()
+    return
+  }
+  streamPulse.set(ac, { sessionId, owner, at: Date.now() })
+  if (streamSweepTimer == null) {
+    streamSweepTimer = setInterval(() => sweepSilentStreams(), STREAM_SWEEP_MS)
+    // Node 环境（e2e 垫片）下别拽着进程不退出；浏览器里 setInterval 是数字，没有 unref。
+    if (streamSweepTimer && typeof streamSweepTimer.unref === 'function') streamSweepTimer.unref()
+  }
+}
+
+function dropPulse(ac) {
+  if (ac) streamPulse.delete(ac)
+}
+
+function sweepSilentStreams(now) {
+  const t = now || Date.now()
+  for (const [ac, p] of streamPulse) {
+    const row = p.owner ? botStreams.get(p.owner) : null
+    // 已经不是任何人手上的那条了（重连换了 ac、或者早被掐了）：只清账，不动流。
+    const held = (row && row.ac === ac) || chatAbort === ac
+    if (ac.signal.aborted || !held) {
+      streamPulse.delete(ac)
+      continue
+    }
+    if (t - p.at < STREAM_SILENT_MS) continue
+    streamPulse.delete(ac)
+    // 和重放看门狗同一套拆法：先把这一行的 ac 让出去，否则重连会撞上「已经在跑」的闸。
+    try {
+      ac.abort()
+    } catch {}
+    if (row && row.ac === ac) row.ac = null
+    void startChatStream(p.sessionId, 0, p.owner)
+  }
+  if (!streamPulse.size && streamSweepTimer != null) {
+    clearInterval(streamSweepTimer)
+    streamSweepTimer = null
+  }
 }
 
 /**
