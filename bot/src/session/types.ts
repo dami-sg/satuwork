@@ -299,6 +299,12 @@ export interface SessionEventMap {
      * 那段文本是写给模型看的散文，措辞一改就扫不出来了。
      */
     files?: { path: string; name: string }[]
+    /**
+     * 这次调用在网页上看到的链接。界面据此摆一张可点的卡。
+     *
+     * 和 files 一样是可选的、一样**不去正则扫 text 猜**——那段文本是写给模型的散文。
+     */
+    links?: { text: string; url: string }[]
   }
 }
 

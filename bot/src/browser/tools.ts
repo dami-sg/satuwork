@@ -108,9 +108,17 @@ export function apply(ctx: Context) {
     }
   }
 
+  /**
+   * 给人看的那两样：这次落下来的文件、这一页上的链接。
+   *
+   * **都不进模型的上下文**——它已经从 text 里看到了带地址的快照。这一份是为了让
+   * 界面能摆出可点的东西：不然「展示链接」这件事就得指望模型愿意把地址抄进回答里，
+   * 而它天然倾向于只写标题。
+   */
   const withFiles = (text: string): ToolResult => {
     const files = browser.takeDownloads()
-    return files.length ? { text, files } : { text }
+    const links = browser.takeLinks()
+    return { text, ...(files.length ? { files } : {}), ...(links.length ? { links } : {}) }
   }
 
   ctx.tools.register({
@@ -150,7 +158,7 @@ export function apply(ctx: Context) {
     execute: guarded<{ full?: boolean }>(async (a, call) => {
       const snap = await browser.snapshot(a.full === true, call.signal)
       const cut = snap.truncated ? '\n…（元素太多，已截断。先点进更具体的页面，别指望在这一页上找全）' : ''
-      return { text: `${snap.title || '（无标题）'}\n${page(snap.url, `${snap.body || '（这一页没有可操作的元素）'}${cut}`)}` }
+      return withFiles(`${snap.title || '（无标题）'}\n${page(snap.url, `${snap.body || '（这一页没有可操作的元素）'}${cut}`)}`)
     }),
   })
 
@@ -280,9 +288,8 @@ export function apply(ctx: Context) {
     execute: guarded<{ direction?: string; amount?: number }>(async (a, call) => {
       const pos = await browser.scroll(String(a.direction ?? 'down'), Number(a.amount) || 0, call.signal)
       const bottom = pos.y + pos.viewport >= pos.height - 4 ? '（已经到底了）' : ''
-      return {
-        text: after(`滚到了 ${Math.round(pos.y)} / ${Math.round(pos.height)} ${bottom}`, await browser.settleAndSnapshot(call.signal)),
-      }
+      // 走 withFiles：这一步也拍了快照，看到的链接不该因为「用的是滚动而不是快照」就不报。
+      return withFiles(after(`滚到了 ${Math.round(pos.y)} / ${Math.round(pos.height)} ${bottom}`, await browser.settleAndSnapshot(call.signal)))
     }),
   })
 
@@ -372,7 +379,7 @@ export function apply(ctx: Context) {
       const got = await browser.select(ref, values, call.signal)
       if (got.err) return refError(got.err)
       if (!got.picked) return fail(`这个下拉框里没有 ${values.join('、')}。先 browser_snapshot 看看它有哪些选项。`)
-      return { text: after(`已在「${got.name ?? ref}」里选好。`, await browser.settleAndSnapshot(call.signal)) }
+      return withFiles(after(`已在「${got.name ?? ref}」里选好。`, await browser.settleAndSnapshot(call.signal)))
     }),
   })
 
@@ -410,7 +417,7 @@ export function apply(ctx: Context) {
         return { text: `已关掉「${target.title || target.url}」。` }
       }
       await browser.selectTab(target.targetId, call.signal)
-      return { text: after('已切过去。', await browser.settleAndSnapshot(call.signal)) }
+      return withFiles(after('已切过去。', await browser.settleAndSnapshot(call.signal)))
     }),
   })
 }

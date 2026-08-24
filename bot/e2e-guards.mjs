@@ -660,6 +660,31 @@ out.record = {
     sessions.appended.filter((e) => e.type === 'tool/policy' && e.data.outcome === 'noted').length === n3
 }
 
+// ── 9.75 注入页面的那段脚本，语法得是对的 ──────────────────────────────
+//
+// **它是拼字符串拼出来的，TypeScript 只看得见「这是个模板字符串」。** 里面一个反引号、
+// 一个少写的反斜杠，都会让发到页面上的那段代码语法错误——而表现不是某一把工具坏了，
+// 是**所有 browser_\* 一起失灵**，且只有真连上浏览器才看得见。
+//
+// 今天两次都栽在这儿：注释里写了反引号（模板字符串提前闭合）、正则里 \\/ 只写了一遍
+// （发过去成了提前闭合的正则）。这条断言两次都当场抓得住，而且不需要浏览器。
+{
+  const { BOOTSTRAP } = await import('./src/browser/page.ts')
+  let err = ''
+  try {
+    new Function(BOOTSTRAP)
+  } catch (e) {
+    err = e.message
+  }
+  out.pageScript = {
+    语法是对的: err === '',
+    // 顺带钉死那两个具体的坑，报错时一眼看得出是哪一种。
+    没有漏网的反引号: !BOOTSTRAP.includes('`'),
+    正则没被吃掉一层: /\^https\?:\\\/\\\//.test(BOOTSTRAP),
+  }
+  if (err) out.pageScriptError = err
+}
+
 // ── 9.8 判地址和判主机名是两件事 ───────────────────────────────────────
 //
 // **线上撞过一次，代价是所有 https 站点全打不开。** 响应回来那一步拿到的是已经解析好的

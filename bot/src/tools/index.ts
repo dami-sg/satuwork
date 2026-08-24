@@ -41,6 +41,14 @@ export interface WorkspaceFile {
   name: string
 }
 
+/** 工具在网页上看到的一条链接。 */
+export interface PageLink {
+  /** 链接上的文字。可能为空（只有图标的链接）。 */
+  text: string
+  /** 绝对地址。 */
+  url: string
+}
+
 export interface ToolResult {
   /** 给模型看的文本。业务失败也写在这里，用工具自己的语义表达。 */
   text: string
@@ -57,6 +65,15 @@ export interface ToolResult {
    * 那个工具直接报出来，是这条链路上唯一不靠猜的一环。
    */
   files?: WorkspaceFile[]
+  /**
+   * 这一页上的链接。**和 files 同一个用途：给人看，不给模型看**——模型已经从 text 里
+   * 拿到了带地址的那份快照。
+   *
+   * 存在的理由是「用户怎么点进 Bot 提到的那些东西」：让它列十个搜索结果，它回答里
+   * 多半只写标题（模型天然倾向于写得简短），人拿到之后还得自己再搜一遍。界面据此
+   * 摆一张可点的卡，这条链路上不依赖模型愿不愿意把地址抄进正文。
+   */
+  links?: PageLink[]
 }
 
 /**

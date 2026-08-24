@@ -342,6 +342,19 @@ export async function runGuards({ root, test, assert, log }) {
     assert(!note.length, `事后补记这几条不对：${note.join('、')}`)
   })
 
+  await test('注入页面的那段脚本，语法得是对的', () => {
+    /**
+     * **它是拼字符串拼出来的，TypeScript 只看得见「这是个模板字符串」。** 里面一个
+     * 反引号、一个少写的反斜杠，都会让发到页面上的代码语法错误——而表现不是某一把
+     * 工具坏了，是**所有 browser_\* 一起失灵**，且只有真连上浏览器才看得见。
+     *
+     * 加这条的那天栽了两次：注释里写了反引号（模板字符串提前闭合）、正则里的反斜杠
+     * 只写了一遍（发过去成了提前闭合的正则）。这条不需要浏览器，两次都当场抓得住。
+     */
+    const bad = all(r.pageScript)
+    assert(!bad.length, `这几条不对：${bad.join('、')}${r.pageScriptError ? '（' + r.pageScriptError + '）' : ''}`)
+  })
+
   await test('判地址和判主机名是两件事：公网 IPv6 不能被当成内网', () => {
     /**
      * **线上撞过一次，代价是所有 https 站点全打不开。**

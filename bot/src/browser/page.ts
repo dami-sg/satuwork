@@ -15,6 +15,29 @@
 /** 快照最多列多少个元素。超了截断并**明说**——闷声截断会让模型以为下面没东西了。 */
 const MAX_NODES = 400
 
+/**
+ * 结构化带出去的链接上限。
+ *
+ * 一个搜索结果页轻松上百条，全带出去有两处代价：进模型上下文的那份变长，界面上那张卡
+ * 也会变成一堵墙。三十条够覆盖「这一页主要通向哪儿」，而想看全的人本来就该去看页面。
+ *
+ * **注意这只封结构化那一份**，正文里每条 link 行仍旧带着自己的地址——模型要引用第
+ * 四十条时，它在正文里找得到。
+ */
+const MAX_LINKS = 30
+
+/**
+ * 地址长过这个数就**整条不要**，而不是截一刀。
+ *
+ * 截断的 URL 不是一个更短的地址，是一个**错的**地址——而它照样以可点链接的样子摆到
+ * 人面前，点下去落到别处，没有任何迹象表明它被动过手脚。带签名参数的下载链接、带一
+ * 大串追踪参数的商品页都可能超。截文字（text）没关系，那只影响显示；截地址不行。
+ *
+ * 2000 是现实里 URL 的实用上限（IE 那条 2083 的老限制留下来的行业惯例），超过它的
+ * 多半本来也不是给人点的。
+ */
+const MAX_URL = 2000
+
 export const BOOTSTRAP = `
 (() => {
   if (window.__satu) return
@@ -110,6 +133,37 @@ export const BOOTSTRAP = `
     // 而不丢的后果是这张表跟着页面一直涨。
     if (S.refs.size > 5000) { S.refs = new Map(); S.ids = new WeakMap() }
     const lines = []
+    /**
+     * 这一页上的链接：**地址要带出去**。
+     *
+     * 早先快照只写「- link "Learn more" [@e12]」——名字有、地址没有。后果是模型手上
+     * 从来就没有链接可给：让它列十个搜索结果，它只能给出十个标题，人拿到之后还得自己
+     * 去搜一遍。界面上也无从展示，因为压根没有 URL 这个东西。
+     *
+     * 结构化地单独带一份（不只是写进正文），是为了让席位那边不必回头去正则扫自己写给
+     * 模型的散文——那条路每次改措辞都会断。
+     */
+    const links = []
+    const seenHref = new Set()
+    const addLink = (el, name) => {
+      // el.href 是**解析过的绝对地址**（相对路径、"./x" 都已经展开），比 getAttribute 可靠。
+      const href = typeof el.href === 'string' ? el.href : ''
+      if (!href) return ''
+      // 页内锚点和 javascript: 不算链接：前者不换页，后者根本不是地址。
+      // 反斜杠要写两遍。这段整个在一个模板字符串里，单个反斜杠会被吃掉一层，
+      // 发到页面上的就成了提前闭合的正则——整段脚本语法错误，而表现是**所有**
+      // browser_* 一起失灵。同理这里面一个反引号都不能出现。见文件头那段说明。
+      if (!/^https?:\\/\\//i.test(href)) return ''
+      if (href.split('#')[0] === location.href.split('#')[0]) return ''
+      // 超长的整条丢掉，见 MAX_URL：截出来的是个错地址，比没有更坏。
+      if (href.length > ${MAX_URL}) return ''
+      const url = href
+      if (!seenHref.has(url) && links.length < ${MAX_LINKS}) {
+        seenHref.add(url)
+        links.push({ text: (name || '').slice(0, 120), url })
+      }
+      return url
+    }
     let cut = false
     const push = (line) => {
       if (lines.length >= ${MAX_NODES}) { cut = true; return false }
@@ -145,7 +199,12 @@ export const BOOTSTRAP = `
         const opts = [...(el.options || [])].slice(0, 12).map((o) => o.value || o.text)
         if (opts.length) bits.push('options=[' + opts.join(', ') + ']')
       }
-      if (!push('- ' + role + ' "' + name + '" [' + ref(el) + ']' + (bits.length ? ' ' + bits.join(' ') : ''))) break
+      /**
+       * 地址跟在行尾。**只给链接，不给按钮**——按钮没有地址，而给每一行都塞点东西
+       * 只会让这份快照更长，而它已经是进上下文的大头。
+       */
+      const href = role === 'link' ? addLink(el, name) : ''
+      if (!push('- ' + role + ' "' + name + '" [' + ref(el) + ']' + (bits.length ? ' ' + bits.join(' ') : '') + (href ? ' ' + href : ''))) break
     }
     return {
       version: S.version,
@@ -153,6 +212,7 @@ export const BOOTSTRAP = `
       title: document.title,
       body: lines.join('\\n'),
       truncated: cut,
+      links,
     }
   }
 
