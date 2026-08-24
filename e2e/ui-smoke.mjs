@@ -1769,6 +1769,115 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       }
     })
 
+    await test('会话还没到手时发的那一条：挂着，接上之后自动补发（只发一次）', async () => {
+      /**
+       * 席位换版必然踩中这一刻：换了进程之后客户端要重新拿一次会话，中间隔着一个往返，
+       * 而人正好在这时候按发送。以前退回给他一句「接上再按一次」——等于把重试的活派给
+       * 了人，而这正是「升级之后第一条消息发不出去」的由来。
+       */
+      let ready = false
+      let posted = []
+      const sse = fakeSse()
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/events')) return sse.response
+          if (path.includes('/bots/bot-h/session')) {
+            // 头一下还没接上；ready 之后才给会话。
+            if (!ready) return { ok: false, status: 503, text: async () => '实例还没上线' }
+            return { ok: true, status: 200, text: async () => JSON.stringify({ sessionId: 's-h' }) }
+          }
+          if (path.includes('/messages') && init && init.method === 'POST') {
+            posted.push(JSON.parse(init.body).text)
+            return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.path = '/chat'
+      ui.state.chatBotId = 'bot-h'
+      ui.state.chatSessionId = ''
+      ui.state.chatDraft = '换版那一刻打的这句'
+      try {
+        await ui.sendChat()
+        assert(posted.length === 0, `会话都没有就发出去了：${JSON.stringify(posted)}`)
+        assert(ui.state.chatDraft === '换版那一刻打的这句', '草稿被吞了——人得重打一遍')
+        assert(String(ui.state.error || '').includes('自动发出去'), `没告诉人它挂着：${ui.state.error}`)
+
+        // 席位回来了：会话一到手，那条挂着的就该自己出去。
+        ready = true
+        await ui.ensureChatSession('bot-h')
+        for (let i = 0; i < 200 && posted.length === 0; i++) await new Promise((r) => setTimeout(r, 10))
+        assert(posted.length === 1, `接上之后没有自动补发（发了 ${posted.length} 条）`)
+        assert(posted[0] === '换版那一刻打的这句', `补发的内容不对：${posted[0]}`)
+        assert(!ui.state.chatDraft, `补发之后草稿还留着，人会以为没发出去：${JSON.stringify(ui.state.chatDraft)}`)
+
+        // 再拿一次会话不该把同一条又发一遍——标记是一次性的。
+        await ui.ensureChatSession('bot-h')
+        await new Promise((r) => setTimeout(r, 50))
+        assert(posted.length === 1, `同一条被补发了 ${posted.length} 次`)
+      } finally {
+        sse.close()
+        ui.stopChatStream()
+      }
+    })
+
+    await test('挂上之后人切走了：切回来也不许突然把它发出去', async () => {
+      /**
+       * 草稿是按 Bot 收的（chatDrafts），人挂上之后切走再切回来，那条草稿会原样回来——
+       * 标记要是还留着，这一刻就会**在人没按任何键的情况下**把它发出去。他当初按发送
+       * 是冲着「现在就发」，中间去别处转了一圈回来，那个意图早就不作数了。
+       *
+       * 切走那一下就作废（ensureChatSession 换 Bot 的那一支）。
+       */
+      const sse = fakeSse()
+      const posted = []
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/events')) return sse.response
+          if (path.includes('/session')) return { ok: true, status: 200, text: async () => JSON.stringify({ sessionId: 's-x' }) }
+          if (path.includes('/messages') && init && init.method === 'POST') {
+            posted.push(JSON.parse(init.body).text)
+            return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.path = '/chat'
+      ui.state.chatBotId = 'bot-one'
+      ui.state.chatSessionId = ''
+      ui.state.chatDraft = '这句是写给 bot-one 的'
+      try {
+        await ui.sendChat()
+        assert(posted.length === 0, '前置没成立')
+        assert(ui.state.chatDraft === '这句是写给 bot-one 的', '前置没成立：草稿该留着')
+
+        // 人切到别的 Bot 去了……
+        await ui.ensureChatSession('bot-two')
+        await new Promise((r) => setTimeout(r, 50))
+        assert(posted.length === 0, `挂着的那条被发进了另一个 Bot 的对话：${JSON.stringify(posted)}`)
+
+        // ……又切了回来。草稿原样回来了，但那次「按发送」的意图早就不作数了。
+        await ui.ensureChatSession('bot-one')
+        await new Promise((r) => setTimeout(r, 80))
+        assert(
+          posted.length === 0,
+          `切回来时把它自动发了出去，而人一个键都没按：${JSON.stringify(posted)}`,
+        )
+        assert(ui.state.chatDraft === '这句是写给 bot-one 的', '草稿该原样留着，等人自己决定发不发')
+      } finally {
+        sse.close()
+        ui.stopChatStream()
+      }
+    })
+
     await test('bot 停机超过五分钟：会话那条链认输之后也要接着慢慢试', async () => {
       /**
        * 「bot 停机」最常见的那一种，恰恰是页面**还没拿到会话**的时候：没有会话就开不出

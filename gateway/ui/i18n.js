@@ -994,8 +994,8 @@ window.SATU_I18N = {
   '实例还在上线，这条还发不出去；等它接上再发': 'The instance is still starting, so this message cannot be sent yet — try again once it connects',
   // 按下发送时还没拿到会话：那一下同时把「重新拿会话」和「重连那条流」都叫醒了，
   // 所以话是「正在接回来」，不是让人干等（见 chat.js 的 sendChat）。
-  '还没接上席位，这条先没发出去——正在接回来，接上再按一次':
-    'Not connected to the seat yet, so this message was not sent — reconnecting now; press send again once it is back',
+  '还没接上席位，这条先挂着——接上就自动发出去':
+    'Not connected to the seat yet — this message is held and will be sent automatically once the connection is back',
   '实例还没接上，这会儿发不出去': 'The instance is not connected — messages cannot be sent right now',
   '实例还没接上，等一会儿再试，或者重新部署一次': 'Still cannot reach the instance — try again in a moment, or redeploy',
   // 退避认输之后那一句。旁边跟着一颗「重新连接」按钮（见 chat.js 的
