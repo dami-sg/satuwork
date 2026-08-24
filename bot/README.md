@@ -91,6 +91,29 @@ SQLite 用 Node 24 内置的 node:sqlite：零依赖，不用编译原生模块�
 
 ctx.storage 给三样东西：命名空间化的设置（写入后广播 settings/change，插件据此自我更新，不用重启）、文档集合（Bot、任务、连接器），以及一个原生库句柄——需要真正的 SQL 时用它，别硬套文档接口。
 
+## Gateway 换了地址
+
+`bot.env` 里的 `GATEWAY_URL` 是**部署那一刻写死的**（管家的 deploy-seat.sh 从 Gateway 的
+`GATEWAY_PUBLIC_URL` 抄过来）。Gateway 换了对外地址之后——家里 DHCP 换一次租约就够——
+这台席位**彻底哑掉**：模型调用、目录拉取、会话上报全是 `fetch failed`，而对话里只有一句
+「模型调用失败：Gateway 不可达」，没有任何线索指向「地址过期了」。
+
+它自己也无从知道新地址：唯一能告诉它的通道，恰恰是它打不出去的那一条。
+
+**反过来走**：入站那条还通着（机器没挪窝），所以 Gateway 每次打进来时顺便报一下自己在
+哪——`x-satuwork-gateway-url`，由 Gateway 的 `managerHeaders()` 拼在每条发往席位的代理
+请求上，管家的 `forwardHeaders` 原样透传。席位在**席位票验过之后**认它（见
+[src/guard/index.ts](src/guard/index.ts) 与 [src/gateway-url.ts](src/gateway-url.ts)），
+**先落盘再改内存**：写回 `bot.env`（临时文件 + rename，保住 600 和其余各行）管下一次
+重启，改 `process.env.GATEWAY_URL` 让当下立刻生效——所有消费者都是每次现调
+`gatewayUrl()`，没有谁在启动时把它读死。
+
+所以现在只要界面上还打得开这颗 Bot，地址就会自己回来，不用重铺席位。管家那半见
+[manager/README.md](../manager/README.md)，两边是同一套头。
+
+**没有 bot.env 时（本地开发）什么都不做**，连内存也不改：改了却没地方落盘，得到的是
+「这次好了、重启又回去」的间歇故障，比一直不生效难查得多。
+
 ## 上下文
 
 **每开一轮都从 JSONL 全量重建一次请求**：系统提示词、工具表、消息数组三样全是现算的，
