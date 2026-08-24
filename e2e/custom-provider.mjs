@@ -116,6 +116,49 @@ export async function runCustomProvider({ gwRoot, test, req, start, waitHttp, as
       assert(r.status === 200, `chat ${r.status} ${r.text}`)
     })
 
+    await test('模型 id 带斜杠：openrouter 那种 vendor/model 能录、能测、能调', async () => {
+      const slashed = { ...model, id: 'vendor/model-1', name: 'Slashed' }
+      const upd = await req(base, 'PUT', '/platform/providers/my-llm', {
+        token,
+        body: { name: 'My LLM', baseUrl, api: 'openai-completions', models: [model, slashed] },
+      })
+      assert(upd.status === 200, `带斜杠的模型没存下 ${upd.status} ${upd.text}`)
+
+      const list = await req(base, 'GET', '/v1/models', { token })
+      const m = (list.json.data || []).find((x) => x.id === 'my-llm/vendor/model-1')
+      assert(m, '带斜杠的模型没进 /v1/models')
+      // 复合 id 只在第一个斜杠上切，model 那一段必须是完整的模型 id。
+      assert(m.model === 'vendor/model-1', `model 字段被切坏了：${m.model}`)
+
+      // probe 传的是「provider + 裸 id」，切的那一刀会落在模型 id 自己的斜杠上，得能找回来。
+      const probe = await req(base, 'POST', '/platform/llm/test', {
+        token,
+        body: { provider: 'my-llm', model: 'vendor/model-1' },
+      })
+      assert(probe.status === 200 && probe.json.ok === true, `probe ${probe.status} ${probe.text}`)
+      assert(probe.json.model === 'vendor/model-1', `probe 回的 model 是 ${probe.json.model}`)
+
+      seen = { auth: null, path: null, body: null }
+      const chat = await req(base, 'POST', '/v1/chat/completions', {
+        token,
+        body: { model: 'my-llm/vendor/model-1', messages: [{ role: 'user', content: 'hi' }] },
+      })
+      assert(chat.status === 200, `chat ${chat.status} ${chat.text}`)
+      // 上游要收到模型自己的 id，不能把 provider 那一段也捎上去。
+      const upModel = JSON.parse(seen.body || '{}').model
+      assert(upModel === 'vendor/model-1', `上游收到的 model 是 ${upModel}`)
+    })
+
+    await test('斜杠只能夹在中间：开头、结尾、连着两个都拦掉', async () => {
+      for (const bad of ['/lead', 'trail/', 'a//b', 'a/ /b']) {
+        const r = await req(base, 'PUT', '/platform/providers/my-llm', {
+          token,
+          body: { name: 'My LLM', baseUrl, api: 'openai-completions', models: [{ ...model, id: bad }] },
+        })
+        assert(r.status === 400, `坏 id ${JSON.stringify(bad)} 被收下了：${r.status} ${r.text}`)
+      }
+    })
+
     await test('改定义后注册表跟着变：新模型立刻能用，删掉的立刻不能用', async () => {
       const upd = await req(base, 'PUT', '/platform/providers/my-llm', {
         token,
