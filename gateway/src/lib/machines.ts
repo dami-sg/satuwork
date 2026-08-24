@@ -198,18 +198,21 @@ export async function desiredManagerRelease(db: Db, machine?: Machine) {
 }
 
 /**
- * 席位 → 它那台机器的管家地址。
+ * 席位 → 它那台机器。
  *
  * 多机之后**不能再用「公司那台机器」**：两个员工的席位可能落在不同机器上，用错
  * 地址的后果是 noVNC 打不开、聊天反代打到别人的机器上。带一个 Map 当本次请求的
  * 缓存，列表接口不至于逐行查库。
+ *
+ * 给的是整行而不是 host：这一行还要答「那台机器通不通」（心跳有多久没来了，见
+ * listSeatRuntime 的 machineLink）。只取 host 的话，调用方就得为同一台机器再查一次库。
  */
-export function machineHostResolver(db: Db) {
-  const cache = new Map<string, string | null>()
-  return async (row: { machineId: string }): Promise<string | null> => {
+export function machineResolver(db: Db) {
+  const cache = new Map<string, Machine | null>()
+  return async (row: { machineId: string }): Promise<Machine | null> => {
     const id = row.machineId
     if (!id) return null
-    if (!cache.has(id)) cache.set(id, (await db.machine(id))?.host ?? null)
+    if (!cache.has(id)) cache.set(id, (await db.machine(id)) ?? null)
     return cache.get(id) ?? null
   }
 }

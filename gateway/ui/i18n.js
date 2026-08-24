@@ -976,6 +976,11 @@ window.SATU_I18N = {
   '昨天': 'Yesterday',
   '在线': 'Online',
   '离线': 'Offline',
+  // 抬头那盏灯和右栏那一行在机器失联时说的话。「心跳迟了」「失联」「从未心跳」
+  // 用的是机器页那份译文（本文件上面已有），这里只补对话页独有的两句。
+  '最后一次心跳 %s': 'last heartbeat %s',
+  '%s 所在的机器失联了（%t）。这期间消息发不出去，它的回复也送不回来；机器回来之后这一页会自己接上。一直不好就找管理员看看那台机器。':
+    'The machine running %s is unreachable (%t). Messages cannot get through and its replies cannot come back; this page reconnects on its own once the machine returns. If it stays down, ask an administrator to check that box.',
   '正在处理': 'Working',
   '运行日志': 'Runtime logs',
   '加载更早的对话': 'Load earlier messages',

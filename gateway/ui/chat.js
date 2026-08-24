@@ -3231,14 +3231,33 @@ function paintChat() {
   ensureClockTick()
 }
 
+/**
+ * 抬头那盏灯此刻该说什么：`{ state, text }`。
+ *
+ * **机器够不着的时候，它先于一切说话——连「正在处理」都压过去。** 那一轮的 status 是
+ * 断线之前留在手上的：机器没了，`turn/end` 永远不会来，于是屏幕上一直挂着「正在处理」，
+ * 看着像它还在替你干活，而那台机器上此刻可能一个进程都没在跑。宁可说「失联」——它至少
+ * 指对了要去看的地方。
+ *
+ * 判断抽出来单放，是因为写进 DOM 那一步没法断言（垫片里没有 lastElementChild 可写），
+ * 而「机器失联时这盏灯说了什么」正是这次要钉住的那句话。
+ */
+function liveLamp(busy) {
+  const link = seatLink()
+  if (linkDown(link)) return { state: link, text: (LINK_TEXT[link] || LINK_TEXT.unknown)() }
+  if (busy) return { state: 'busy', text: t('正在处理') }
+  const ready = state.desktopRuntime && state.desktopRuntime.status === 'ready'
+  return ready ? { state: '1', text: t('在线') } : { state: '0', text: t('离线') }
+}
+
 /** 抬头的在线灯、输入区的提示和中止按钮——都不重绘整页，就地改。 */
 function paintChatChrome(folded) {
   const busy = Boolean(folded.status)
   const live = document.getElementById('chat-live')
   if (live) {
-    const ready = state.desktopRuntime && state.desktopRuntime.status === 'ready'
-    live.setAttribute('data-live', busy ? 'busy' : ready ? '1' : '0')
-    live.lastElementChild.textContent = busy ? t('正在处理') : ready ? t('在线') : t('离线')
+    const lamp = liveLamp(busy)
+    live.setAttribute('data-live', lamp.state)
+    live.lastElementChild.textContent = lamp.text
   }
   const meta = document.getElementById('chat-meta')
   if (meta) meta.textContent = chatMetaText(folded)
@@ -3489,6 +3508,61 @@ function deployBotButton(botId, label) {
 }
 
 /**
+ * 这个 Bot 的席位落在哪台机器上、那台机器现在通不通：
+ * `''`（没这个字段）/ `online` / `stale` / `offline` / `unpaired`。
+ *
+ * **席位的 `status` 答不了这件事。** 它是「上一次部署走到哪一步了」，落库之后就不动
+ * 了：机器断电、网线拔了、管家挂了，那一行照样写着 `ready`。于是平台那一页的灯已经
+ * 打成「失联」，员工这边的 Bot 还挂着「在线」，点发送没有任何反应——发送失败那一路
+ * 只会把 `实例还没上线` 写进 runtimeError，而它被 runtimeDownBanner 挡在界面外（那句
+ * 话是重新部署时的常态，不该弹红字）。两头一凑，就是「什么都没说」。
+ *
+ * 判据直接用平台那一份（gateway 的 machineLink：心跳有多久没来了），一个字都不另算
+ * ——同一台机器在两个页面上说两种话，比少一个字段糟得多。
+ *
+ * **后端没给这个字段 ≠ 机器失联。** 前端比后端新一步（浏览器读的是磁盘上的 app.js，
+ * Gateway 要重启才换代码）就会拿到 undefined。那时老实回 ''、让灯照旧按部署状态走，
+ * 不替它猜一个「失联」——猜错的方向恰恰是最吓人的那个。
+ */
+function seatLinkOf(bot) {
+  const rt = bot && bot.runtime
+  return (rt && rt.machineLink) || ''
+}
+
+function seatLink() {
+  return seatLinkOf(chatBotOf())
+}
+
+/** 这盏灯该说「它现在够不着」的两档。`unpaired` 不算——那是「还没装」，另有话说。 */
+function linkDown(link) {
+  return link === 'offline' || link === 'stale'
+}
+
+/**
+ * 「这个 Bot 的机器失联了」摆在对话最上面。
+ *
+ * **只有 `offline` 才出横幅，`stale` 不出。** 中间那一档（3 到 20 轮心跳）本来就是
+ * 换版重启会落进去的窗口，出一条红字等于每次自升级都喊一次狼来了。抬头那盏灯会先
+ * 变成「心跳迟了」——想看的人看得见，不想看的人不被打断。
+ *
+ * 话要说到「所以现在会怎样」：人看见「失联」两个字之后真正要知道的是，这期间发出去
+ * 的消息不会到、它的回复也回不来，以及这事不用他去点什么按钮。
+ */
+function machineDownBanner() {
+  const bot = chatBotOf()
+  if (!bot || seatLinkOf(bot) !== 'offline') return ''
+  const age = bot.runtime.machineHeartbeatAge
+  const when = age == null ? t('从未心跳') : t('最后一次心跳 %s').replace('%s', sinceMs(age))
+  const name = bot.name || t('这个 Bot')
+  // 两个占位符用不同的记号：都写 %s 的话，名字里恰好有一个 %s 就会把第二次替换吃掉。
+  return `<div class="gw-flash gw-flash-err">${esc(
+    t('%s 所在的机器失联了（%t）。这期间消息发不出去，它的回复也送不回来；机器回来之后这一页会自己接上。一直不好就找管理员看看那台机器。')
+      .replace('%t', when)
+      .replace('%s', name),
+  )}</div>`
+}
+
+/**
  * 对话页右侧的「这个 Bot 的机器」栏。
  *
  * 部署按钮和环境信息原来挤在左边名册的上方，两者都不好用。挪到右栏之后：名册只管
@@ -3571,6 +3645,28 @@ function chatMachinePanel() {
     rows.push(`<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(mine.lastError || t('部署失败'))}</div>`)
   } else if (stage === 'deploying') {
     rows.push(`<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('部署中…')}</p>`)
+  }
+
+  /**
+   * 机器通不通，**这一栏也要说一句**。
+   *
+   * 席位铺好之后这一栏里就只剩那块桌面了，而机器失联时它是一块静止的死屏——不写这
+   * 一行的话，人会以为是桌面这一路坏了，去点「重新连接」。灯和横幅在正文那边，右栏
+   * 收起时同样看不见（它默认常常是收着的）。
+   *
+   * 两档都说，用的还是机器页那套词和那盏灯：`stale` 只是一句灰字（换版重启就长这样），
+   * `offline` 才用错误色。
+   */
+  if (stage === 'ready' && linkDown(seatLink())) {
+    const link = seatLink()
+    const age = (chatBotOf() || {}).runtime?.machineHeartbeatAge
+    const when = age == null ? t('从未心跳') : sinceMs(age)
+    const label = (LINK_TEXT[link] || LINK_TEXT.unknown)()
+    rows.push(
+      link === 'offline'
+        ? `<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(t('机器') + ' ' + label + ' · ' + when)}</div>`
+        : `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${esc(t('机器') + ' ' + label + ' · ' + when)}</p>`,
+    )
   }
 
   if (mine && mine.status === 'ready') {
@@ -4643,7 +4739,14 @@ function chatPage() {
    * 的就是「点了没反应」，而代码里明明写着话。别的页早就都拼了这一句（见各 pages-*.js）。
    * 导航时 go() 会清掉这两格，不会把上一页的红字带过来。
    */
-  const banner = flashes() + runtimeDownBanner()
+  /**
+   * 机器失联那一条**顶掉** runtimeDownBanner，不并排摆两条红字。
+   *
+   * 后者能说的只有「连接断开」外加一颗「重新连接」——而机器都不在了，那颗按钮点下去
+   * 是白敲一次接口。真正的原因由前者说，而且它说得出「多久没心跳了」。
+   */
+  const machineDown = machineDownBanner()
+  const banner = flashes() + (machineDown || runtimeDownBanner())
   if (!selected) {
     return `<div class="gw-chat"><section class="gw-chat-main">${banner}
       <div class="gw-chat-empty-main"><p>${bots.length ? t('从左边选一个 Bot 开始对话。') : t('还没有 Bot。点左下角「新建 Bot」建一个，它会用公司的 Bot 模版当底座。', 'No bots yet. Use “New bot” at the bottom left — it will run on your company template.')}</p></div>
@@ -5295,6 +5398,55 @@ function startHandoffPoll() {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) void loadHandoffs()
   })
+}
+
+/**
+ * 席位通联的轮询：这些 Bot 的机器还在不在。
+ *
+ * **非有不可。** 这一份数据只在进页面时拉过一次（loadPage → loadRuntimeBots），而机器
+ * 失联恰恰是「人已经坐在这一页上」的时候发生的：不再拉一次，那盏灯就会一直停在他进
+ * 来时的样子——正是「平台说失联、员工这边还写着在线」的后半截。事件流救不了这件事，
+ * 机器没了它同样收不到任何东西。
+ *
+ * 30 秒一轮，和管家的心跳同频（MANAGER_HEARTBEAT_MS）：再密也没有新数据，Gateway 那
+ * 一份也是等心跳来才变的。规矩照抄待办那条——只在页面可见时转，切回前台立刻补一次。
+ *
+ * **只有真的变了才重绘**：横幅和名册由 chatPage() / chatRosterNav() 拼，改不动就得整页
+ * 重画，而那一下会把正在打字的输入框换掉（见 paintChatCtx 上的注释）。半分钟一次的
+ * 无条件重绘，等于让人没法在这一页上安心打字。
+ */
+const SEAT_WATCH_MS = 30_000
+let seatWatchTimer = null
+
+function startSeatWatch() {
+  if (seatWatchTimer) return
+  seatWatchTimer = setInterval(() => {
+    if (document.hidden) return
+    void pollSeatLinks()
+  }, SEAT_WATCH_MS)
+  // Node 环境（e2e 垫片）下别拽着进程不退出；浏览器里 setInterval 是数字，没有 unref。
+  if (seatWatchTimer && typeof seatWatchTimer.unref === 'function') seatWatchTimer.unref()
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void pollSeatLinks()
+  })
+}
+
+async function pollSeatLinks() {
+  if (isOwner()) return
+  // 名册里每个 Bot 的通联状态都在这一份里，一次请求就够——一个 Bot 一次的话，
+  // 名册长一点就是每半分钟一串请求，而它们全在问同一件事。
+  const before = (state.runtimeBots || []).map((b) => b.id + ':' + seatLinkOf(b)).join(',')
+  try {
+    await loadRuntimeBots()
+  } catch {
+    // 拉不动就算了：这一份只用来点亮那盏灯，不该因为一次网络抖动把界面上的话改掉。
+    return
+  }
+  const after = (state.runtimeBots || []).map((b) => b.id + ':' + seatLinkOf(b)).join(',')
+  if (after === before) return
+  // 别的页上没有这盏灯，也没有那条横幅——重绘只会把人正在填的表单换掉。回到对话页时
+  // loadPage 自己会重画。
+  if (isChatPath(state.path)) render()
 }
 
 async function updateOrgRuntime() {

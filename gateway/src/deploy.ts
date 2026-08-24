@@ -300,17 +300,40 @@ export function publicSeatRuntime(
   }
 }
 
-export function listSeatRuntime(row: SeatRuntime, managerHost: string | null) {
+export function listSeatRuntime(row: SeatRuntime, machine: Machine | null, now = Date.now()) {
   return {
     botId: row.botId,
     status: row.status,
     linuxUser: row.linuxUser,
     seatId: row.seatId,
     // 列表里不签票：这是给管理员看的引用，点进去要走 /runtime/desktop 现签一张。
-    novncUrl: novncUrlOf(managerHost, row.seatId) || null,
+    novncUrl: novncUrlOf(machine?.host ?? null, row.seatId) || null,
     botVersion: row.botVersion ?? null,
     tplVersion: row.tplVersion ?? null,
     tplSyncedAt: row.tplSyncedAt ?? null,
+    /**
+     * **这个席位所在那台机器通不通。**
+     *
+     * `status` 答不了这件事：它是「上一次部署走到哪一步了」，落库之后就不动了——机器
+     * 断电、网线拔了、管家挂了，这一行照样写着 `ready`。于是平台那一页已经把灯打成
+     * 「失联」，员工手上那颗 Bot 还挂着「在线」，点发送没有任何反应。两边说的是同一
+     * 台机器，判据却一个来自部署记录、一个来自心跳。
+     *
+     * 判据就用平台那一份（`machineLink`），一个字都不另算——同一台机器在两个页面上
+     * 说两种话，比少一个字段糟得多。
+     *
+     * **是席位那台机器，不是公司的默认机器。** 公司配了第二台之后，员工的席位完全
+     * 可能落在 M2 上，而 `companies.machineId` 指着 M1：拿默认机器的心跳去答「我这颗
+     * Bot 通不通」，正好在多机的时候开始骗人。
+     */
+    machineLink: machine ? machineLink(machine, now) : 'unpaired',
+    /**
+     * 距最近一次心跳多少毫秒；没心跳过是 null。
+     *
+     * 界面**不能**拿 lastHeartbeatAt 自己减本地时钟（理由见 publicMachine 里那段）：
+     * 员工的电脑和 Gateway 差几分钟是常事，而这一格答的恰恰是时间问题。
+     */
+    machineHeartbeatAge: machine?.lastHeartbeatAt ? Math.max(0, now - machine.lastHeartbeatAt) : null,
   }
 }
 

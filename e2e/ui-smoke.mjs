@@ -431,6 +431,50 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(handler.includes('sw-toolpop'), '滚动收浮层时没有区分事件源头，滚浮层自己也会把它收掉')
     })
 
+    await test('机器失联：抬头那盏灯不许还写着「在线」，正文里要说清楚为什么', async () => {
+      /**
+       * 这一条钉的是那次报障：平台那一页已经把灯打成「失联」，员工手上的 Bot 还挂着
+       * 「在线」——因为界面那盏灯看的是席位的部署状态（`ready`），而它落库之后就不动
+       * 了，答不了「那台机器现在通不通」。
+       *
+       * 灯的判断和横幅都不碰 DOM，就地拿函数验：垫片里没有 lastElementChild 可写。
+       */
+      const ui = await boot()
+      const bot = (link, age) => [{ id: 'b1', name: '小满', runtime: { status: 'ready', machineLink: link, machineHeartbeatAge: age } }]
+      ui.state.me = { account: { id: 'me', companyId: 'c1', role: 'member', email: 'm@x' }, company: { id: 'c1' } }
+      ui.state.path = '/a/b1'
+      ui.state.chatBotId = 'b1'
+      ui.state.desktopRuntime = { status: 'ready', seatId: 'seat-1' }
+
+      // 机器好着：照旧是「在线」，忙的时候是「正在处理」。
+      ui.state.runtimeBots = bot('online', 1200)
+      assert(ui.liveLamp(false).text === '在线', `机器在线时该说在线，得到 ${ui.liveLamp(false).text}`)
+      assert(ui.liveLamp(true).state === 'busy', `在跑的时候该是 busy，得到 ${ui.liveLamp(true).state}`)
+      assert(ui.machineDownBanner() === '', '机器好着却弹了失联横幅')
+
+      // 失联：灯要改口，**连「正在处理」都压过去**——那一句是断线之前留在手上的，
+      // 挂着它等于告诉人「它还在替你干活」。
+      ui.state.runtimeBots = bot('offline', 12 * 60_000)
+      assert(ui.liveLamp(false).text === '失联', `失联时灯说的是「${ui.liveLamp(false).text}」`)
+      assert(ui.liveLamp(true).text === '失联', '还在跑的那一轮把失联盖掉了')
+      assert(ui.liveLamp(false).state === 'offline', `灯的档位 ${ui.liveLamp(false).state}`)
+      const banner = ui.machineDownBanner()
+      assert(banner.includes('小满'), `横幅没说是谁的机器：${banner}`)
+      assert(banner.includes('失联') && banner.includes('12 分钟前'), `横幅没说多久没心跳了：${banner}`)
+      assert(banner.includes('发不出去'), `横幅没说清这期间会怎样：${banner}`)
+
+      // 心跳迟了是中间那一档：灯变，**但不出横幅**——换版重启就落在这个窗口里，
+      // 出红字等于每次自升级都喊一次狼来了。
+      ui.state.runtimeBots = bot('stale', 5 * 60_000)
+      assert(ui.liveLamp(false).text === '心跳迟了', `迟了那一档说的是「${ui.liveLamp(false).text}」`)
+      assert(ui.machineDownBanner() === '', '心跳迟了不该弹红字横幅')
+
+      // 后端还没给这个字段（前端比后端新一步）：不许猜成失联，照旧按部署状态走。
+      ui.state.runtimeBots = [{ id: 'b1', name: '小满', runtime: { status: 'ready' } }]
+      assert(ui.liveLamp(false).text === '在线', '字段缺席时被猜成了失联')
+      assert(ui.machineDownBanner() === '', '字段缺席时弹了失联横幅')
+    })
+
     await test('空库 + 没有票 → 画「创建系统管理员」，不是登录页', async () => {
       const ui = await boot()
       const html = ui.html()

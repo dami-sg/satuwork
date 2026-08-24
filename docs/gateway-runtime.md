@@ -783,7 +783,7 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/orgs/:id/sessions/:sessionId` | **现场**向机器拉全文，Gateway 不存，公司 admin |
 | GET | `/orgs/:id/audit` | 公司审计，公司 admin |
 | GET | `/me/stats` | 员工看自己的统计；admin / owner 看各自范围 |
-| GET | `/runtime/bots` | Gateway 目录名册，200 即使实例未上线；每条 `runtime` 或 null |
+| GET | `/runtime/bots` | Gateway 目录名册，200 即使实例未上线；每条 `runtime` 或 null。`runtime` 里除了部署状态（`status`），还带**席位那台机器的通联状态** `machineLink`（`online` / `stale` / `offline` / `unpaired`，判据与平台机器页那盏灯同一份）与 `machineHeartbeatAge`：`status` 落库之后就不动了，答不了「那台机器现在还在不在」，而对话页抬头那盏灯问的正是后者。界面每 30 秒重拉一次这份名册 |
 | GET | `/runtime/bots/:id/session` 等 | 反代到**该 pair**；未部署 503 `实例还没上线` |
 | GET | `/runtime/desktop?botId=` | 该 pair 的桌面（noVNC / 密码 / linuxUser / botVersion）。`botId` 必填 |
 | POST | `/runtime/deploy` | `{ botId }` 必填。给当前席位部署该 Bot |

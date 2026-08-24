@@ -63,7 +63,7 @@ export async function visibleBotOf(db: Db, account: Account, botId: string) {
 export async function pairRuntime(db: Db, account: Account, botId: string) {
   const rt = await db.seatRuntime(account.id, botId)
   if (!rt) return null
-  return listSeatRuntime(rt, (await db.machine(rt.machineId))?.host ?? null)
+  return listSeatRuntime(rt, (await db.machine(rt.machineId)) ?? null)
 }
 
 /**
