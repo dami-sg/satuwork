@@ -86,6 +86,9 @@ function errText(msg) {
   if (dict[msg]) return dict[msg]
   const pw = msg.match(/^口令至少 (\d+) 位$/)
   if (pw) return `Password must be at least ${pw[1]} characters`
+  // 带数字的那几句进不了字典（键是变的），在这里按模式翻。
+  const queued = msg.match(/^还有 (\d+) 条消息排着队，先取消它们再开新对话$/)
+  if (queued) return `${queued[1]} message(s) are still queued — cancel them before starting a new conversation.`
   return msg
 }
 

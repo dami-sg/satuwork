@@ -54,6 +54,39 @@ export interface Config {
 const EMPTY_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0 }
 
 /**
+ * 一次压缩的结果。
+ *
+ * 原来是个 boolean，够自动压缩用——它失败了只是下一轮再试，没人需要知道为什么。
+ * 手动 `/compact` 不一样：人点了一下，界面上必须有个交代，而「还没到阈值」「找不到
+ * 能切的地方」「摘要没写成」是三件完全不同的事，混成一个 false 只能回一句「没成功」。
+ */
+export interface CompactOutcome {
+  compacted: boolean
+  /** 没压成的原因。`inflight` = 已经有一次在跑，这次不排队。 */
+  reason?: 'below-threshold' | 'no-cut' | 'no-summary' | 'inflight'
+  throughSeq?: number
+  tokensBefore?: number
+  tokensAfter?: number
+}
+
+/**
+ * 人手下的那条指令没法执行。`status` 直接就是 HTTP 状态码。
+ *
+ * 形状照抄 WorkspaceError：路由层 `instanceof` 一下就能把状态码和原话透出去，
+ * 而服务这边不用认识 HTTP。**原话要能直接给人看**——这两条命令的每一种拒绝都对应
+ * 界面上的一句提示，含糊一句「操作失败」等于让人对着一个没反应的按钮反复点。
+ */
+export class CommandError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message)
+    this.name = 'CommandError'
+  }
+}
+
+/**
  * 一轮的默认步数硬顶。见 `Config.maxSteps`。
  *
  * 120 是按「真干活的一轮能有多长」定的：装环境、跑测试、按报错改再跑，几十步是常态，
@@ -96,7 +129,7 @@ export class AgentService extends Service {
    * 正在压缩的会话。轮末那次是后台跑的，下一轮很可能在它还没写完时就开始了——
    * 两次压缩同时算，会各自按自己看到的历史挑边界，然后写下两条互相矛盾的压缩点。
    */
-  private compacting = new Map<string, Promise<boolean>>()
+  private compacting = new Map<string, Promise<CompactOutcome>>()
 
   constructor(
     ctx: Context,
@@ -381,6 +414,106 @@ export class AgentService extends Service {
     return true
   }
 
+  /* ── 人手改上下文边界（/compact、/new）─────────────────────────────────
+   *
+   * 两条都是**控制指令，不是消息**：不进 user/message，不占 token，不开新的一轮，
+   * 模型看不见它们。走这两个方法，各落各的会话事件，界面上画成一条分割线。
+   * 设计取舍见 docs/chat-commands.md，边界本身的语义见 docs/context-assembly.md。
+   *
+   * **正在跑的时候两条都拒。** 压缩要读全量历史挑边界，而这一轮的事件还在往里写；
+   * 重置会把边界打进一个没收口的轮次里（切在轮中间 → 无主的 tool/result → provider
+   * 拒收整个请求）。而且人在一轮跑到一半时打 /new，真实意图基本是「停下来重开」——
+   * 那是两个动作，该由人各做一次，不该由命令替他猜。
+   */
+
+  /** 现在就压一次。keepBudget 0 = 只留最后一整轮，理由见 compactOnce。 */
+  async compactNow(sessionId: string): Promise<CompactOutcome> {
+    if (this.isRunning(sessionId)) throw new CommandError('这一轮还在跑，等它跑完再压', 409)
+    // 静默期里拒：它要跑一次模型，而这个进程马上就要被换掉，换来的多半是一次半路夭折。
+    if (this.quiesced()) throw new CommandError(QUIET_MESSAGE, 409)
+
+    const events = await this.ctx.sessions.events(sessionId)
+    const bot = this.botOf(events)
+    const provider = bot?.provider?.trim() || this.provider
+    const modelId = bot?.model?.trim() || this.model
+    const out = await this.maybeCompact(sessionId, provider, modelId, true, { keepBudget: 0, by: 'user' })
+    if (out.compacted) return out
+    // **压不动要说人话**，不能静默返回——人点了一下，界面上必须有个交代。
+    if (out.reason === 'no-cut') throw new CommandError('这条对话还太短，没有可压的历史', 409)
+    if (out.reason === 'no-summary') throw new CommandError('摘要没写成，上下文原样没动，过一会儿再试', 502)
+    /**
+     * 走到这儿说明 compactOnce 返回了一种这里还不认识的「没压成」。**也要抛**——
+     * 返回一个 compacted:false 给调用方，换来的是界面弹一句「已压缩：0 → 0」而实际
+     * 什么都没发生（路由那头照着 CompactOutcome 写响应）。将来加新的 reason 时，
+     * 这一行保证它至少是个明说的失败，不是一句假的成功。
+     */
+    throw new CommandError(`压缩没能完成（${out.reason ?? '未知原因'}），上下文原样没动`, 500)
+  }
+
+  /**
+   * 打一个上下文重置点。不跑模型，一次 append 就完。
+   *
+   * **日志一条不删**（不变量见 docs/context-assembly.md §9）：往上翻看得见，导出带得走，
+   * 模型自己也仍能用 history_read 调阅。清掉的只是「下一轮请求里带什么」。
+   */
+  async resetContext(sessionId: string): Promise<{ throughSeq: number; droppedMessages: number }> {
+    if (this.isRunning(sessionId)) throw new CommandError('这一轮还在跑，先停下或等它跑完', 409)
+    /**
+     * 队里还排着的消息也要拦。
+     *
+     * 那些消息是冲着**旧上下文**发的（带 `@` 的才会入队，见 web/index.ts 那张三岔表），
+     * 留到边界之后再执行，等于人以为清空了、Bot 却在接着回答几分钟前的事。
+     */
+    const queued = this.queued(sessionId).length
+    if (queued) throw new CommandError(`还有 ${queued} 条消息排着队，先取消它们再开新对话`, 409)
+    /**
+     * **还开着的转人工工单是同一类东西，但那道闸在路由那边**（见 web/index.ts 的
+     * `/reset`）。
+     *
+     * 理由和上面这条一模一样：交接单也会在重置之后自动开出新的一轮——人点「交还」时
+     * deliver 走 `agents.send(...)` 把结果送进会话，而那时上下文已经空了。
+     *
+     * 之所以不摆在这儿：这个服务的 inject 里没有 `handoffs`，加进去会把依赖链拉长到
+     * 所有只搭一半应用的探针上（e2e-turn-images、e2e-mentions 那几个不装 handoff 插件，
+     * agents 就永远不就绪）。而 web 那边本来就 inject 了它，那里也正是唯一的调用点。
+     */
+
+    const events = await this.ctx.sessions.events(sessionId)
+    /**
+     * **切在最后一条 turn/end 上，不是最后一条事件上。**
+     *
+     * 绝大多数时候两者之间没有东西（这个方法只在没在跑时才走到这儿）。但进程崩过的
+     * 会话里存在一个永远不会有 turn/end 的残缺轮次——切在它后面，边界就落在了一轮
+     * 中间，下一轮请求的开头会是一条无主的 tool/result。切在这里，那个残缺轮次留在
+     * 边界之后，它本来就该被下一轮看见。
+     */
+    const lastEnd = [...events].reverse().find((e) => e.type === 'turn/end')
+    if (!lastEnd) throw new CommandError('这条会话还没跑成过一轮，没有要清的上下文', 409)
+
+    const prior = contextBoundary(events)
+    if (prior && prior.data.throughSeq >= lastEnd.seq) {
+      // 已经切在这儿了。再打一条只会在对话里叠出两条紧挨着的分割线，而什么都没发生。
+      throw new CommandError('这里已经是新对话的开头了', 409)
+    }
+
+    const scope = prior ? events.filter((e) => e.seq > prior.data.throughSeq) : events
+    const dropped = scope.filter((e) => e.seq <= lastEnd.seq)
+    const data: SessionEventMap['session/reset'] = {
+      throughSeq: lastEnd.seq,
+      from: dropped[0]?.time ?? lastEnd.time,
+      to: lastEnd.time,
+      // 只数进得了上下文的那几种。不走 toAgentMessages：那要读图、转 base64，
+      // 而这里要的只是分割线上那个「切掉了多少条」。
+      droppedMessages: dropped.filter(
+        (e) => e.type === 'user/message' || e.type === 'assistant/message' || e.type === 'tool/result',
+      ).length,
+      by: 'user',
+    }
+    await this.ctx.sessions.append(sessionId, 'session/reset', data)
+    this.ctx.logger?.info?.(`agents: ${sessionId} 上下文重置到 seq ${lastEnd.seq}，切掉 ${data.droppedMessages} 条消息`)
+    return { throughSeq: data.throughSeq, droppedMessages: data.droppedMessages }
+  }
+
   /**
    * 开新的一轮。
    *
@@ -530,9 +663,18 @@ export class AgentService extends Service {
     try {
       if (estMessages(await toAgentMessages(history, model, this.ctx)) > hard) {
         this.ctx.logger?.warn?.(`agents: ${sessionId} 已顶到上下文硬顶，先同步压一次`)
-        if (await this.maybeCompact(sessionId, provider, modelId, true)) {
-          history = await sessions.events(sessionId)
-        }
+        await this.maybeCompact(sessionId, provider, modelId, true, { atLeast: hard })
+        /**
+         * **压没压都要重读**，不能只在 compacted 时重读。
+         *
+         * 上面那个估算用的是 runTurn 开头读的那份 history。轮末那次自动压缩完全可能
+         * 就在这几百毫秒里落地——那时 maybeCompact 会看在眼里（atLeast）并如实返回
+         * 「不用压了」，而手上这份 history 里**还没有那条压缩事件**：只按 compacted
+         * 判的话，这一轮照样把压缩前的全量历史发出去，硬顶这道闸等于没落。
+         *
+         * 重读是内存里的一次 slice（sessions.events 返回 state.events.slice()），不值钱。
+         */
+        history = await sessions.events(sessionId)
       }
     } catch (e) {
       this.ctx.logger?.warn?.(`agents: ${sessionId} 硬顶检查/同步压缩失败，带原上下文继续：${(e as Error).message}`)
@@ -736,38 +878,88 @@ export class AgentService extends Service {
    * turn/end 上）、**摘要写什么**（跑一次模型）。任何一步不成立就原样返回——
    * 压缩是优化，不是正确性的一部分，失败了大不了这一轮多花点 token。
    */
-  private async maybeCompact(sessionId: string, provider: string, modelId: string, force = false): Promise<boolean> {
-    // 已经有一次在跑：轮末那次是后台的，下一轮很可能撞上。同步兜底那条路**要等它**——
-    // 直接返回 false 的话，这一轮就带着已经顶到硬顶的上下文发出去了。
+  private async maybeCompact(
+    sessionId: string,
+    provider: string,
+    modelId: string,
+    force = false,
+    opts: { keepBudget?: number; by?: 'auto' | 'user'; atLeast?: number } = {},
+  ): Promise<CompactOutcome> {
     const inflight = this.compacting.get(sessionId)
-    if (inflight) return force ? await inflight : false
+    // 自动那条路不排队：等一次没意义，下一轮还会再试。
+    if (inflight && !force) return { compacted: false, reason: 'inflight' }
 
-    const run = this.compactOnce(sessionId, provider, modelId, force)
+    /**
+     * 强制那条路**排在上一次后面自己再跑一次**，而不是拿它的结果交差。
+     *
+     * 原来是 `return await inflight`，两种叫法都错：
+     *
+     * · 手动 `/compact` 要的是「压到只剩最后一轮」（keepBudget 0），而在飞的那次是轮末
+     *   的自动压缩，预算是 30%、`by` 是 auto。拿它交差的话，人点了一下，压出来的是别的
+     *   东西，界面上那条分割线还写着「自动压缩了一次」；更常见的是自动那次返回
+     *   `below-threshold`（它自己先判阈值），于是**什么都没压，而两边都以为压过了**。
+     * · 轮末的自动压缩和 isRunning 是错开的：runTurn 的 finally 里先 `live.delete`、
+     *   之后才 `void maybeCompact`，所以那几秒里 `isRunning()` 已经是 false——人正好在
+     *   Bot 刚答完时打 /compact，必然撞上。
+     *
+     * 排队而不是并发：两次同时算会各自按自己看到的历史挑边界，然后写下两条互相矛盾的
+     * 压缩点——那正是 `compacting` 这把锁一开始要防的。
+     */
+    const run = (inflight ? inflight.catch(() => {}) : Promise.resolve()).then(() =>
+      this.compactOnce(sessionId, provider, modelId, force, opts),
+    )
     this.compacting.set(sessionId, run)
     try {
       return await run
     } finally {
-      this.compacting.delete(sessionId)
+      // **只清掉自己那一条**：等待期间可能又有人排在了后面，那时表里已经是它的了。
+      if (this.compacting.get(sessionId) === run) this.compacting.delete(sessionId)
     }
   }
 
-  private async compactOnce(sessionId: string, provider: string, modelId: string, force: boolean): Promise<boolean> {
+  private async compactOnce(
+    sessionId: string,
+    provider: string,
+    modelId: string,
+    force: boolean,
+    opts: { keepBudget?: number; by?: 'auto' | 'user'; atLeast?: number } = {},
+  ): Promise<CompactOutcome> {
     const window = this.windowOf(provider, modelId) ?? this.config.contextWindowFallback ?? 128_000
     const at = this.config.compactAt ?? 0.7
     const keep = this.config.compactKeep ?? 0.3
     const events = await this.ctx.sessions.events(sessionId)
     const before = estMessages(await toAgentMessages(events, undefined, this.ctx))
-    if (!force && before < window * at) return false
+    if (!force && before < window * at) return { compacted: false, reason: 'below-threshold' }
+    /**
+     * `atLeast`：force 了，但**排在别人后面等完之后先看一眼还需不需要压**。
+     *
+     * 只有轮首那道硬顶用它。那里的估算是拿 runTurn 开头读的那份 history 算的，而在飞的
+     * 那次自动压缩很可能就在这几百毫秒里落地——等完再无条件压一次，等于白跑一次摘要
+     * 模型调用，还把本来能留住的原文多切掉一段。
+     *
+     * 手动 `/compact` **不传它**：人明确说了「现在就压」，那就压，不去二次判断。
+     */
+    if (opts.atLeast !== undefined && before <= opts.atLeast) {
+      return { compacted: false, reason: 'below-threshold' }
+    }
 
-    // **只在上一个压缩点之后挑新边界。** 压过一次之后，前面那一段在日志里还是原样，
-    // 按全量去挑会挑到更早的位置——而 toAgentMessages 认的是最后一条压缩事件，
-    // 于是"再压一次"反而把上次压掉的原文放了回来，越压越大。
-    const cut = compactionPoint(scopeAfterLastCompact(events), window * keep)
+    /**
+     * **只在上一条上下文边界之后挑新边界**（压缩点和重置点都算，见 scopeAfterBoundary）。
+     * 按全量去挑会挑到更早的位置，而 toAgentMessages 认的是最后一条边界——于是「再压
+     * 一次」反而把上次压掉的原文放了回来，越压越大。
+     *
+     * 预算：自动压缩留 `窗口 × compactKeep`；手动 `/compact` 传 0，于是
+     * compactionPoint 里没有一个切点「装得下」，落到兜底那条路 ends[maxCut]——
+     * 也就是**只留最后一整轮**。人明确说了「现在太长了收拾一下」，还留三成等于没听懂。
+     */
+    const prior = contextBoundary(events)
+    const scope = scopeAfterBoundary(events)
+    const cut = compactionPoint(scope, opts.keepBudget ?? window * keep)
     if (!cut) {
       // 近期那几轮自己就超预算了——没有能切的位置，切了也不省。这种情况只可能是
       // 单轮塞进了巨大的工具结果，压缩帮不上忙，交给别的手段。
       this.ctx.logger?.warn?.(`agents: ${sessionId} 到了压缩阈值，但找不到能切的轮次边界`)
-      return false
+      return { compacted: false, reason: 'no-cut' }
     }
 
     // older 从**全量**里切，不是从 scope：这样它带上了上一条压缩事件，
@@ -775,9 +967,24 @@ export class AgentService extends Service {
     const older = events.filter((e) => e.seq <= cut.seq)
     const olderMessages = await toAgentMessages(older, undefined, this.ctx)
     const summary = await this.summarize(olderMessages, provider, modelId)
-    if (!summary) return false
+    if (!summary) return { compacted: false, reason: 'no-summary' }
     const kept = events.filter((e) => e.seq > cut.seq)
-    const span = { throughSeq: cut.seq, from: events[0]?.time ?? cut.time, to: cut.time, summary }
+    /**
+     * 摘要抬头里那个区间的起点。**上一条边界是重置点时，它不能是会话开头。**
+     *
+     * 压缩点那种照旧从会话开头算：级联压缩里上一次的摘要被折进了这一次（older 从全量
+     * 切，带上了那条压缩事件），所以这份摘要**真的**覆盖到最早。
+     *
+     * 重置点那种不是：`/new` 的意思就是前面那段不要了，toAgentMessages(older) 会在重置
+     * 点处截断，摘要正文里一个字都没有它。仍写会话开头的话，summaryText 会渲染出
+     * 「[对话摘要 · 8月18日 … 至 8月23日 …]」送进模型，而它同时还写着「需要原文就用
+     * history_read 按时间区间调出来」——模型于是既以为自己手里这份摘要覆盖了那一周
+     * （被问起时会从一份根本不含该内容的摘要里作答），又被明确指去翻**用户刚要求丢掉**
+     * 的那一段。正好把 /new 反过来。
+     */
+    const from =
+      prior?.type === 'session/reset' ? (scope[0]?.time ?? cut.time) : (events[0]?.time ?? cut.time)
+    const span = { throughSeq: cut.seq, from, to: cut.time, summary }
     const data: SessionEventMap['session/compact'] = {
       ...span,
       droppedMessages: olderMessages.length,
@@ -785,12 +992,18 @@ export class AgentService extends Service {
       tokensAfter:
         estTokens(summaryText({ ...span, droppedMessages: 0, tokensBefore: 0, tokensAfter: 0 })) +
         estMessages(await toAgentMessages(kept, undefined, this.ctx)),
+      by: opts.by ?? 'auto',
     }
     await this.ctx.sessions.append(sessionId, 'session/compact', data)
     this.ctx.logger?.info?.(
-      `agents: ${sessionId} 压缩到 seq ${cut.seq}，${data.tokensBefore} → ${data.tokensAfter} tokens（窗口 ${window}）`,
+      `agents: ${sessionId} 压缩到 seq ${cut.seq}，${data.tokensBefore} → ${data.tokensAfter} tokens（窗口 ${window}，${data.by}）`,
     )
-    return true
+    return {
+      compacted: true,
+      throughSeq: cut.seq,
+      tokensBefore: data.tokensBefore,
+      tokensAfter: data.tokensAfter,
+    }
   }
 
   /**
@@ -1204,10 +1417,11 @@ export async function toAgentMessages(
 ): Promise<AgentMessage[]> {
   const stepKey = (t: number, s: number) => `${t}:${s}`
 
-  // 最后一个压缩点之前的事件不逐条回传，换成一条摘要消息。多次压缩只认最后一个：
-  // 每次压缩都是把「摘要 + 这段时间的新对话」再压一次，所以后一个必然覆盖前一个。
-  const compact = [...events].reverse().find((e) => e.type === 'session/compact')
-  if (compact) events = events.filter((e) => e.seq > compact.data.throughSeq)
+  // 最后一条上下文边界之前的事件不逐条回传。只认最后一条：每次压缩都是把「摘要 +
+  // 这段时间的新对话」再压一次，所以后一条必然覆盖前一条；而 /new 打下的重置点更是
+  // 明说了前面的不要了。压缩点还要换成一条摘要消息（见文件末尾那一段），重置点不换。
+  const boundary = contextBoundary(events)
+  if (boundary) events = events.filter((e) => e.seq > boundary.data.throughSeq)
 
   // 先找出每个 step 的助手消息落在哪个 seq，工具结果据此排到它后面。
   const assistantSeq = new Map<string, number>()
@@ -1308,7 +1522,10 @@ export async function toAgentMessages(
   }
 
   const messages = entries.sort((a, b) => a.order - b.order).map((x) => x.message)
-  if (!compact) return messages
+  // 重置点不留摘要——`/new` 的全部意思就是「前面那些不要了」。截断已经在上面做完，
+  // 这里直接返回；下面那一整段是压缩点专属的。
+  if (!boundary || boundary.type !== 'session/compact') return messages
+  const compact = boundary
 
   // 摘要**并进保留段的第一条用户消息**，而不是自己单独占一条。
   //
@@ -1415,16 +1632,36 @@ function estMessages(messages: AgentMessage[]): number {
  * 预算（单轮塞进巨大的工具结果就会这样）。这两种情况压缩都帮不上忙。
  */
 /**
- * 挑新压缩边界时能看的范围：上一个压缩点之后的部分。
+ * 这条会话当前的上下文边界：最后一条压缩点（`session/compact`）或重置点
+ * （`session/reset`），谁在后面算谁。
  *
- * 压过一次之后，前面那一段在日志里还是原样躺着。按全量去挑，挑到的位置可能比上次
- * 更早——而 toAgentMessages 认的是**最后**一条压缩事件，于是「再压一次」反而把上次
- * 压掉的原文放了回来，越压越大。边界必须单调向前。
+ * **两种是同一类东西**——都在回答「下一轮请求从哪儿开始」，区别只在压缩点额外留了
+ * 一段摘要。所以判定只能有这一份：任何一处只认 compact，`/new` 就会在那一处失效
+ * （最贵的一处见 scopeAfterBoundary）。
  */
-export function scopeAfterLastCompact(
+export function contextBoundary(events: Awaited<ReturnType<Context['sessions']['events']>>) {
+  return [...events]
+    .reverse()
+    .find((e) => e.type === 'session/compact' || e.type === 'session/reset') as
+    | Extract<Awaited<ReturnType<Context['sessions']['events']>>[number], { type: 'session/compact' | 'session/reset' }>
+    | undefined
+}
+
+/**
+ * 挑新压缩边界时能看的范围：上一条上下文边界之后的部分。
+ *
+ * 压过（或重置过）一次之后，前面那一段在日志里还是原样躺着。按全量去挑，挑到的位置
+ * 可能比上次更早——而 toAgentMessages 认的是**最后**一条边界，于是「再压一次」反而把
+ * 上次压掉的原文放了回来，越压越大。边界必须单调向前。
+ *
+ * **这里认两种边界，不只是压缩点。** 只认 compact 的话，`/new` 之后的第一次自动压缩
+ * 会从重置点**之前**挑边界，把人刚扔掉的原文整段放回上下文——那一刀于是在几轮之后
+ * 无声失效，而没有任何地方会报错。
+ */
+export function scopeAfterBoundary(
   events: Awaited<ReturnType<Context['sessions']['events']>>,
 ): Awaited<ReturnType<Context['sessions']['events']>> {
-  const prior = [...events].reverse().find((e) => e.type === 'session/compact')
+  const prior = contextBoundary(events)
   return prior ? events.filter((e) => e.seq > prior.data.throughSeq) : events
 }
 

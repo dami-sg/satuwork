@@ -269,6 +269,26 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(r.json.accepted === true || r.json.steered === true, 'accepted/steered')
     })
 
+    await test('斜杠命令那两条经 Gateway 转得到席位，拒绝的原话原样透回', async () => {
+      /**
+       * 这一跳只验**通道**：要票、找得到席位、席位的判断（含 4xx 和那句中文原话）
+       * 一个字不改地回到浏览器。业务判断全在席位那边，Gateway 这层什么都不该懂。
+       *
+       * 不断言 200：这条会话跑没跑完一轮由上游那个假模型决定。但无论哪种结果，
+       * **都不该是 5xx，也不该是一句没有 error 字段的空回复**——那才是通道坏了。
+       */
+      for (const act of ['compact', 'reset']) {
+        const anon = await req(gwBase, 'POST', `/runtime/sessions/${sessionId}/${act}`)
+        assert(anon.status === 401, `${act} 无票该 401，实际 ${anon.status} ${anon.text}`)
+
+        const r = await req(gwBase, 'POST', `/runtime/sessions/${sessionId}/${act}`, { token: adminTok })
+        assert(r.status < 500, `${act} 不该是 5xx：${r.status} ${r.text}`)
+        if (r.status !== 200) {
+          assert(r.json && r.json.error, `${act} 被拒了却没说为什么：${r.status} ${r.text}`)
+        }
+      }
+    })
+
     await test('@ 点名：Gateway 把失效的剔掉，不让它进席位', async () => {
       /**
        * 这一条守的是不变量：**席位收到什么就注入什么**——它信的是那张 `sat_` 票，

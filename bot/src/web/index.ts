@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
-import { QUIET_MESSAGE, type ImageRef, type Mention } from '../agent/index.ts'
+import { CommandError, QUIET_MESSAGE, type ImageRef, type Mention } from '../agent/index.ts'
 import { expiredMessage, returnMessage, type Disposition, type HandoffActor } from '../policy/handoff.ts'
 
 /**
@@ -490,6 +490,66 @@ export function apply(ctx: Context, _config: Config = {}) {
   /** 中止当前这一轮。 */
   ctx.server.post('/api/sessions/:id/abort', async (req, res) => {
     res.json({ aborted: ctx.agents.abort(req.params.id) })
+  })
+
+  /* ── 人手改上下文边界 ──────────────────────────────────────────────────
+   *
+   * 界面上是输入框里的 `/compact` 和 `/new`（见 docs/chat-commands.md）。**它们不是
+   * 消息**：不进 user/message、不占 token、不开新的一轮，模型看不见它们。所以走这两条
+   * 单独的路，而不是塞进 /messages 让模型自己去理解——那样它可能不照做，而且事后从
+   * 日志里分不清「人点了压缩」和「人打了 compact 这几个字」。
+   *
+   * 两条都可能被拒（正在跑、太短、排着队），拒的原因是 CommandError 上那句原话，
+   * 原样透出去——界面照着它给提示，别翻成一句「操作失败」。
+   */
+
+  /** 现在就压一次。会跑一次模型写摘要，几秒。 */
+  ctx.server.post('/api/sessions/:id/compact', async (req, res) => {
+    try {
+      const r = await ctx.agents.compactNow(req.params.id)
+      // `compacted` 照抄返回值，**不写死 true**：写死的话，一个 compacted:false 的结果
+      // 会带着一串 undefined 的数字变成「成功」，界面上就是一句「已压缩：0 → 0」而
+      // 什么都没发生。compactNow 现在压不成一律抛，这里是第二道保险。
+      res.json({
+        compacted: r.compacted,
+        throughSeq: r.throughSeq,
+        tokensBefore: r.tokensBefore,
+        tokensAfter: r.tokensAfter,
+      })
+    } catch (e) {
+      res.status = e instanceof CommandError ? e.status : 500
+      res.json({ error: (e as Error).message })
+    }
+  })
+
+  /** 从这里起不再带前文。一次 append，不跑模型。 */
+  ctx.server.post('/api/sessions/:id/reset', async (req, res) => {
+    try {
+      /**
+       * 还开着的转人工工单要拦，理由和 resetContext 里拦排队消息的那条一模一样：
+       * 它也会在重置**之后**自动开出新的一轮——人点「交还」时上面那个 deliver 走
+       * `agents.send(...)` 把结果送进会话。区别只在时间尺度：排队消息是秒级，交接单是
+       * 分钟到天（见 docs/handoff.md）。所以漏掉它的后果反而更难看：几小时后人做完交
+       * 回来，Bot 收到一句「做完了，结论是 X」，却完全不知道当初交出去的是什么活——
+       * 而那时已经没人记得中间点过一次 /new。
+       *
+       * 拦得住是因为有出口：单子能在待办里取消，也可以等它回来之后再开新对话。
+       *
+       * **闸在这儿而不在 agents 里**：那个服务的 inject 没有 handoffs，加进去会连累
+       * 一批只搭半个应用的探针；而这里本来就有它，也正是 resetContext 唯一的调用点。
+       */
+      const open = ctx.handoffs.of(req.params.id).filter((h) => h.state === 'open' || h.state === 'claimed')
+      if (open.length) {
+        res.status = 409
+        res.json({ error: `还有 ${open.length} 张转人工的单子没结，先处理掉、或等它交回来再开新对话` })
+        return
+      }
+      const r = await ctx.agents.resetContext(req.params.id)
+      res.json({ reset: true, throughSeq: r.throughSeq, droppedMessages: r.droppedMessages })
+    } catch (e) {
+      res.status = e instanceof CommandError ? e.status : 500
+      res.json({ error: (e as Error).message })
+    }
   })
 
   /**

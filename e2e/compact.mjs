@@ -89,6 +89,25 @@ export async function runCompact({ root, test, assert, log }) {
     assert(r.second.naiveGoesBackward, '这条不成立说明用例没造出会退化的场景，断言就白写了')
   })
 
+  await test('重置点（/new）截断照做，但不留摘要', () => {
+    assert(!r.reset.leakedOld, '重置点之前的对话又回到上下文里了，/new 等于没点')
+    assert(r.reset.keptLast, '边界之后的那一轮被一起切掉了')
+    // 这条是 /new 跟 /compact 的唯一区别。留了摘要就是压缩，不是重开。
+    assert(r.reset.noSummaryHead, '重置点不该留摘要')
+    assert(r.reset.startsWithUser, '重置之后第一条应该是用户消息')
+    assert(!r.reset.consecutiveSameRole, '出现了两条连续同角色的消息')
+  })
+
+  await test('压缩点和重置点混着来时，只认最后那一条', () => {
+    assert(r.mixed.boundaryIsLast, 'contextBoundary 没认出最后那条边界')
+    // 这条挂了 = scopeAfterBoundary 只认 compact：/new 之后的第一次自动压缩会从
+    // 重置点之前挑边界，把人刚扔掉的原文整段放回上下文，而且不报任何错。
+    assert(r.mixed.movesPastReset, '新切点退回到了重置点之前')
+    assert(r.mixed.reversedBoundary, '反过来的顺序里没认出最后那条是压缩点')
+    assert(r.mixed.reversedHasSummary, '最后一条是压缩点时，摘要必须回到上下文里')
+    assert(!r.mixed.reversedLeakedOld, '边界之前的原文泄漏了')
+  })
+
   await test('时间区间按席位时区解析，不是 UTC', () => {
     // Asia/Shanghai 的 8/18 00:00 就是 UTC 的 8/17 16:00。
     // 这条挂了 = 直接 Date.parse，「取昨天」会整整偏出 8 小时。

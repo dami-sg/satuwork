@@ -280,6 +280,10 @@ document.getElementById('app').addEventListener('click', async (e) => {
     takeMention(btn.getAttribute('data-id'))
     return
   }
+  if (act === 'chat-cmd-pick') {
+    await takeCommand(btn.getAttribute('data-name'))
+    return
+  }
   if (act === 'chat-mention-drop') {
     const i = Number(btn.getAttribute('data-i'))
     state.chatMentions = (state.chatMentions || []).filter((_, idx) => idx !== i)
@@ -2007,6 +2011,11 @@ document.getElementById('app').addEventListener('input', (e) => {
   const hit = mentionQueryAt(el)
   if (hit) void openMentionPick(hit.q)
   else if (state.mentionPick) closeMentionPick()
+  // 斜杠命令那一个同理。两个选单不会同时开：`/` 只认输入框最开头，而 `@` 要求前面
+  // 是空白或括号——开头那个位置只有 `/` 认得。
+  const cmd = commandQueryAt(el)
+  if (cmd) openCmdPick(cmd.q)
+  else if (state.cmdPick) closeCmdPick()
 })
 
 /**
@@ -2046,6 +2055,46 @@ document.getElementById('app').addEventListener('keydown', (e) => {
       if (hit) {
         e.preventDefault()
         takeMention(hit.getAttribute('data-id'))
+        return
+      }
+    }
+  }
+  /**
+   * 命令选单开着时同理：上下键选、回车执行、Esc 关。
+   *
+   * 回车这一支**可以直接落到下面的发送**——sendChat 第一行就认命令（见那儿的注释），
+   * 结果一样。但选单开着时人选的可能不是第一条，那就必须由这里接住。
+   */
+  if (state.cmdPick && state.cmdPick.open) {
+    const box = document.getElementById('chat-cmdpick')
+    const items = box ? box.querySelectorAll('[data-act="chat-cmd-pick"]') : []
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      closeCmdPick()
+      return
+    }
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && items.length) {
+      e.preventDefault()
+      const cur = state.cmdPick.index || 0
+      state.cmdPick.index = (cur + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length
+      paintCmdPick()
+      return
+    }
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && items.length) {
+      const hit = items[state.cmdPick.index || 0]
+      /**
+       * **标灰的那条不接，也不吞回车**——让它穿到下面的 sendChat 去。
+       *
+       * 那儿会 parseCommand 认出这条命令、再撞上 `idleOnly && state.chatStatus`，
+       * 弹一句「这一轮还在跑，等它跑完再试」。选单右边那行小字容易被忽略，那句 flash
+       * 才是人真正会看到的解释。
+       *
+       * 原来这里是先 preventDefault 再判 disabled：命令不跑、消息不发、一句提示也没有,
+       * 人按下回车，屏幕上什么都不会变。
+       */
+      if (hit && !hit.disabled) {
+        e.preventDefault()
+        void takeCommand(hit.getAttribute('data-name'))
         return
       }
     }

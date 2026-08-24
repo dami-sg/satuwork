@@ -1051,6 +1051,44 @@ window.SATU_I18N = {
   '添加账号': 'Add account',
   '账号名，如 personal': 'Account label, e.g. personal',
   '仅 @ 时可用': 'Only when @-mentioned',
+  // ── 斜杠命令（见 docs/chat-commands.md）────────────────────────────
+  压缩上下文: 'Compact context',
+  '把更早的对话换成摘要，会调用一次模型': 'Replace earlier turns with a summary. Runs the model once.',
+  开始新对话: 'Start a new conversation',
+  '从这里起不再带上前面的内容，记录不删': 'Stop carrying earlier turns into context. Nothing is deleted.',
+  等这一轮跑完: 'Wait for this turn to finish',
+  '没有这条命令：': 'No such command: ',
+  '命令不能和附件或 @ 一起发，先把这条命令单独发出去':
+    'Commands cannot carry attachments or @-mentions. Send the command on its own first.',
+  '这一轮还在跑，等它跑完再试': 'This turn is still running — try again when it finishes.',
+  '还没接上席位，等接上再试': 'Not connected to the seat yet — try again once it is up.',
+  '这台席位的版本还不支持这条命令，升级后可用':
+    'This seat runs a version without that command. It will work after an upgrade.',
+  '正在压缩上下文…': 'Compacting context…',
+  '正在处理…': 'Working…',
+  已压缩: 'Compacted',
+  '已开始新对话，上面的内容不再进上下文':
+    'New conversation started — everything above stays out of context.',
+  // 分割线上那几段。**「记录不删」这层意思必须留住**：写成 "Cleared" 会让人以为
+  // 历史没了，而 JSONL 一条没删。
+  新对话从这里开始: 'New conversation starts here',
+  已压缩上下文: 'Context compacted',
+  '上下文快满了，自动压缩了一次': 'Context was filling up — compacted automatically',
+  上面的内容不再进上下文: 'everything above stays out of context',
+  更早的对话仍在记录里: 'earlier turns are still in the record',
+  '估算，下一轮跑完是实测': 'estimated — measured after the next turn',
+  摘要与保留段: 'Summary and kept turns',
+  系统提示词与工具表: 'System prompt and tools',
+  // 席位那边拒绝时回的原话。**服务端只发中文**，errText 在这张表里查一次
+  // （见 data.js 的 api()）——不补的话英文界面上会蹦出一句中文。
+  '这一轮还在跑，等它跑完再压': 'This turn is still running — compact after it finishes.',
+  '这一轮还在跑，先停下或等它跑完': 'This turn is still running — stop it or wait for it to finish.',
+  '这条对话还太短，没有可压的历史': 'This conversation is too short — there is nothing to compact yet.',
+  '摘要没写成，上下文原样没动，过一会儿再试':
+    'The summary could not be written. Context is unchanged — try again shortly.',
+  '这条会话还没跑成过一轮，没有要清的上下文':
+    'This conversation has not completed a turn yet — there is no context to clear.',
+  '这里已经是新对话的开头了': 'This is already the start of a new conversation.',
   '本公司已禁用': 'Disabled by your company',
   '本公司已禁用这个连接器': 'Your company has disabled this connector',
   '先安装，再连接你的账号。': 'Install it first, then connect your account.',
