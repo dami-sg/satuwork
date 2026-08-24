@@ -282,6 +282,46 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(!JSON.stringify(r.json).includes('sshSecret'), 'deploy 含 sshSecret')
     })
 
+    await test('席位那台机器通不通，名册里说得出来——而 status 照样是 ready', async () => {
+      /**
+       * 病灶就在这两个字段的差别上：`status` 是「上一次部署走到哪一步了」，落库之后就
+       * 不动了。机器断电、网线拔了、管家挂了，它照样写着 `ready`——于是平台那一页的灯
+       * 已经打成「失联」，员工手上那颗 Bot 还挂着「在线」，点发送没有任何反应。
+       *
+       * 所以名册里要另给一格通联状态，判据和平台那盏灯**同一份**（machineLink：心跳
+       * 有多久没来了），而不是让界面拿部署状态去猜。
+       */
+      const listOf = async () => {
+        const r = await req(gwBase, 'GET', '/runtime/bots', { token: memberTok })
+        assert(r.status === 200, `bots ${r.status} ${r.text}`)
+        return r.json.bots.find((b) => b.id === botA)
+      }
+
+      // 这台机器配过对，但一次心跳都没来过（e2e 里没有真管家在听）→ 失联。
+      const cold = await listOf()
+      assert(cold && cold.runtime, '席位铺好了，名册里却没给出 runtime')
+      assert(cold.runtime.status === 'ready', `部署状态该是 ready，实际 ${cold.runtime.status}`)
+      assert(cold.runtime.machineLink === 'offline', `没心跳过该是 offline，得到 ${cold.runtime.machineLink}`)
+      assert(cold.runtime.machineHeartbeatAge === null, `没心跳过不该给年龄：${cold.runtime.machineHeartbeatAge}`)
+
+      // 心跳一来就该变。**不用另建一条接口**：界面每半分钟重拉一次这份名册（见
+      // startSeatWatch），那盏灯跟着它走。
+      const machineId = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machine
+        .id
+      const hb = await req(gwBase, 'POST', `/internal/machines/${machineId}/heartbeat`, {
+        token: machineTok,
+        body: { managerVersion: 'e2e', protocol: 1, seats: [] },
+      })
+      assert(hb.status === 200, `heartbeat ${hb.status} ${hb.text}`)
+
+      const warm = await listOf()
+      assert(warm.runtime.machineLink === 'online', `刚心跳过该是 online，得到 ${warm.runtime.machineLink}`)
+      assert(
+        warm.runtime.machineHeartbeatAge != null && warm.runtime.machineHeartbeatAge < 5000,
+        `年龄不对：${warm.runtime.machineHeartbeatAge}`,
+      )
+    })
+
     await test('已经 ready 就跳过；但 force 必须真的重铺一遍', async () => {
       // 「已经是这个版本、而且好着 → 不重装」是对的，可它把「重新部署」这个自助手段
       // 也一起挡掉了：接口回 200 和 ready，deployedAt 一秒没动，什么都没发生。

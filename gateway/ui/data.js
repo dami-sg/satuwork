@@ -766,6 +766,9 @@ async function loadPage() {
      */
     void loadHandoffs()
     startHandoffPoll()
+    // 「这颗 Bot 的机器还在不在」同理，而且更硬：机器失联多半发生在人已经坐在对话页
+    // 上的时候，不定期再问一次的话，那盏灯会一直停在他进来时的样子。见 startSeatWatch。
+    startSeatWatch()
   }
   try {
     if (state.path === '/') {

@@ -10,7 +10,7 @@ import { parseBilling } from '../db.ts'
 import { bodyOf, deployOptsOf, strField, usd, usdMicros } from '../lib/validate.ts'
 import { companyMachineOf, deploySeat, listSeatRuntime, publicMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
 import { companyStatusOf, emailOf, groupRoleOf, membersInCompany, patchAccount, phoneOf, publicAccount, publicCompany, publicGroup, publicPlan, publicSettings, roleOf, slugOf, stringIds, websiteOf } from '../lib/org.ts'
-import { desktopTicketFor, machineHostOf, machineHostResolver } from '../lib/machines.ts'
+import { desktopTicketFor, machineHostOf, machineResolver } from '../lib/machines.ts'
 import { inviteLinkOf, issueInvite, rangeQuery, requireOrg, requireOwner, requireUser, usagePayload } from '../lib/guards.ts'
 import { randomUUID } from 'node:crypto'
 import { type CompanyStatus, type Group } from '../db.ts'
@@ -222,13 +222,13 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
       list.push(rt)
       byAccount.set(rt.accountId, list)
     }
-    const hostOf = machineHostResolver(db)
+    const machineOf = machineResolver(db)
     const members = await Promise.all(
       (await db.accountsOf(req.params.id)).map(async (row) => {
         const pub = publicAccount(row)
         if (account.role !== 'owner') return pub
         const list = byAccount.get(row.id) || []
-        return { ...pub, runtimes: await Promise.all(list.map(async (rt) => listSeatRuntime(rt, await hostOf(rt)))) }
+        return { ...pub, runtimes: await Promise.all(list.map(async (rt) => listSeatRuntime(rt, await machineOf(rt)))) }
       }),
     )
     json(res, 200, {

@@ -3,7 +3,7 @@
  */
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Router } from '../http.ts'
-import { INSTANCE_DOWN, MIN_MANAGER_NODE, PAIRING_TTL, desiredManagerRelease, gatewayBaseFor, installCommandFor, machineBase, machineCard, machineHostResolver, machineOfOrg, managerHostOf, normalizePairingCode, randomPairingCode, registerFromBody, sendReleaseFile } from '../lib/machines.ts'
+import { INSTANCE_DOWN, MIN_MANAGER_NODE, PAIRING_TTL, desiredManagerRelease, gatewayBaseFor, installCommandFor, machineBase, machineCard, machineOfOrg, machineResolver, managerHostOf, normalizePairingCode, randomPairingCode, registerFromBody, sendReleaseFile } from '../lib/machines.ts'
 import { MACHINE_TOMBSTONE_TTL, MIN_MANAGER_PROTOCOL, type MachineLoad, companyMachineOf, deploySeat, machineLink, machineLoadOf, machineLoads, machinePaired, managerHealth, normalizeTimezone, ownerMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
 import { accessUrlFor } from '../lib/catalog.ts'
 import { bodyOf, intField, strField } from '../lib/validate.ts'
@@ -1069,17 +1069,17 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     if (!company) throw new HttpError(404, '公司不存在')
     const row = await db.account(req.params.accountId)
     if (!row || row.companyId !== company.id) throw new HttpError(404, '账号不存在')
-    const hostOf = machineHostResolver(db)
+    const machineOf = machineResolver(db)
     const botId = (req.query.get('botId') || '').trim()
     if (botId) {
       const runtime = await db.seatRuntime(row.id, botId)
       if (!runtime) throw new HttpError(404, '还没有部署')
-      json(res, 200, { runtimes: [publicSeatRuntime(runtime, await hostOf(runtime), { includePassword: true })] })
+      json(res, 200, { runtimes: [publicSeatRuntime(runtime, (await machineOf(runtime))?.host ?? null, { includePassword: true })] })
       return
     }
     const runtimes = await Promise.all(
       (await db.seatRuntimesOfAccount(row.id)).map(async (rt) =>
-        publicSeatRuntime(rt, await hostOf(rt), { includePassword: true }),
+        publicSeatRuntime(rt, (await machineOf(rt))?.host ?? null, { includePassword: true }),
       ),
     )
     json(res, 200, { runtimes })

@@ -63,9 +63,26 @@
 /* 正在处理：留在品牌赭红上，跟「在线」区分开——它是个短暂状态，不是「正常」。 */
 .sw-convo-live[data-live='busy'] { background: var(--color-accent-100); color: var(--color-accent-800); }
 .sw-convo-live[data-live='busy'] i { background: var(--color-accent-500); animation: sw-pulse 1.4s ease-in-out infinite; }
+/* 机器心跳迟了 / 失联。**形状跟机器页那两盏灯对齐**（见 app.css 的 .satu-linkdot）：
+   迟了是实心琥珀带闪，失联是空心粗环。同一件事在两个页面上长同一个样，人才认得出
+   它们说的是同一台机器。
+
+   失联**不能**借赭红那一格：那是「正在处理」，绿→赭红→绿是它的正常节奏，而这一格
+   要说的是「它现在谁也够不着」。 */
+.sw-convo-live[data-live='stale'] { background: var(--color-warn-100); color: var(--color-warn-800); }
+.sw-convo-live[data-live='stale'] i { background: var(--color-warn-500); animation: sw-pulse 1.6s ease-in-out infinite; }
+.sw-convo-live[data-live='offline'] { background: var(--color-neutral-200); color: var(--foreground); }
+.sw-convo-live[data-live='offline'] i {
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  background: transparent;
+  border: 2px solid var(--destructive);
+}
 @keyframes sw-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) {
   .sw-convo-live[data-live='busy'] i { animation: none; }
+  .sw-convo-live[data-live='stale'] i { animation: none; }
 }
 .sw-convo-meta {
   margin: 1px 0 0;
