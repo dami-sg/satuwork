@@ -2832,9 +2832,15 @@ function threadRows(folded, sessionId) {
   })
   // 轮次开着但助手那条还没建出来（工具先跑、或者刚发出去）——补一条空的，
   // 让「正在想」有地方待着，而不是让输入框上面挂一行状态文字。
+  //
+  // **key 用常量，不能用 `'m' + blocks.length`。** 真实消息的 key 是 `'m' + seq`，seq 是
+  // 会话日志的**行号**（turn/tool/分片都占行），跟**块数**是两套数——只要会话里恰好有
+  // 一块 seq 等于当前块数，这条占位就和那条早期消息顶了同一个 key：下一帧 syncThread
+  // 按 key 认节点时会把底下的占位节点搬到那条消息的位置（正文换成它的、外壳还是助手的
+  // 头像和左对齐），被顶掉的原节点则一路被挤到最下面，看着就是「前面那句话跳到后面了」。
   const last = blocks[blocks.length - 1]
   if (folded.status && (!last || last.kind === 'user')) {
-    rows.push({ kind: 'msg', key: 'm' + blocks.length, block: { kind: 'assistant', text: '', tools: [], time: 0 } })
+    rows.push({ kind: 'msg', key: 'm-live', block: { kind: 'assistant', text: '', tools: [], time: 0 } })
   }
   return rows
 }
@@ -2905,10 +2911,17 @@ function syncThread(thread, folded, sessionId) {
   // **按 key 认节点，不按位置。** 位置对齐在「只往后追加」的年代够用，但往前翻会在
   // 开头插一批，之后每个位置都对不上，于是每个节点都被替换掉——看着是「重绘了一下」，
   // 实际是整段 Markdown 重渲染 + 滚动位置丢失。
+  //
+  // 重名的一律就地删掉，只认先来的那个。key 本该唯一，但一旦哪里算重了（历史上就是
+  // 「正在想」那条占位撞上了某条真实消息的 seq），后来的会在 map 里盖掉先来的：认回
+  // 来的是错的那个节点，被盖掉的那个既不参与排序也进不了下面的 stale 清理，于是留在
+  // 正文里一路往下漂。宁可多建一个节点，也不能让一个野节点留在 DOM 里。
   const byKey = new Map()
   for (const kid of [...thread.children]) {
     const k = kid.getAttribute('data-key')
-    if (k) byKey.set(k, kid)
+    if (!k) continue
+    if (byKey.has(k)) thread.removeChild(kid)
+    else byKey.set(k, kid)
   }
   let prev = null
   for (let i = 0; i < rows.length; i++) {
