@@ -778,6 +778,28 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   })
 
   /**
+   * 人手改上下文边界：`/compact` 压一次、`/new` 从这里重开（见 docs/chat-commands.md）。
+   *
+   * **这一层不做业务判断**，形状和上面那条 abort 逐字一样。这条会话跑没跑、有几个
+   * 可切的轮次边界、队里还排着几条——只有席位知道；Gateway 只管身份与归属，剩下的
+   * 原样转、原样透回（拒绝的状态码和那句原话一起）。
+   */
+  for (const act of ['compact', 'reset'] as const) {
+    router.post(`/runtime/sessions/:id/${act}`, async (req, res) => {
+      const account = await requireUser(req, db, keys)
+      const target = await seatTargetForSession(db, account, req.params.id)
+      await proxyJson(
+        res,
+        'POST',
+        `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/${act}`,
+        {},
+        await seatBearer(db, account.id),
+        target.machineToken,
+      )
+    })
+  }
+
+  /**
    * 上传附件到这条会话的工作区。字节边收边转，Gateway 不落地。
    *
    * 文件名走 header 而不是查询串：查询串会进访问日志，而文件名常常就是内容本身

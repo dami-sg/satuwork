@@ -121,6 +121,31 @@
   color: var(--muted-foreground);
 }
 
+/* 上下文边界（自动压缩、/compact、/new）。
+ *
+ * **这一条真的画线**，和上面那条日期分隔不一样。理由正是那条注释的反面：日期换了
+ * 只是个背景信息，而这里是「往上翻的那些，模型这一轮看不见了」——它比气泡之间的
+ * 任何间隔都更该被看见。线的两侧留给字，颜色压到 border 级，不去抢正文。 */
+.sw-ctxdiv {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.sw-ctxdiv::before,
+.sw-ctxdiv::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+/* /new 比压缩硬：压缩还留着摘要，重置什么都不留。线也跟着实一档。 */
+.sw-ctxdiv[data-mark='reset']::before,
+.sw-ctxdiv[data-mark='reset']::after { background: var(--foreground); opacity: 0.28; }
+.sw-ctxdiv-text { flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 .sw-msg { display: flex; gap: var(--space-3); align-items: flex-start; }
 .sw-msg[data-role='user'] { flex-direction: row-reverse; }
 .sw-msg-avatar {
@@ -1232,6 +1257,11 @@
   cursor: pointer;
 }
 .sw-pick:hover, .sw-pick.is-on { background: var(--secondary); }
+/* 这一轮在跑时命令点不了。标灰**而不是从选单里拿掉**：拿掉的话人会以为自己记错了
+   命令名，而不是「这会儿不能用」——右边那行小字说的就是后者。 */
+.sw-pick.is-off { opacity: 0.45; cursor: not-allowed; }
+.sw-pick.is-off:hover { background: transparent; }
+.sw-pick-name { flex: none; }
 .sw-pick small { margin-left: auto; color: var(--muted-foreground); font-size: 11px; }
 .sw-pick-empty { padding: 8px; font-size: 12px; color: var(--muted-foreground); }
 

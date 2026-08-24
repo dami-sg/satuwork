@@ -22,6 +22,7 @@ import { runPairing } from './pairing.mjs'
 import { runMachineDeploy } from './machine-deploy.mjs'
 import { runLlmUsage } from './llm-usage.mjs'
 import { runMarkdown } from './markdown.mjs'
+import { runChatFold } from './chat-fold.mjs'
 import { runToolNames } from './tool-names.mjs'
 import { runSessionStore } from './session-store.mjs'
 import { runLlmIdle } from './llm-idle.mjs'
@@ -2969,6 +2970,54 @@ async function runBot() {
     assert(!again.json.quiesced, `放开了还说自己在静默：${again.text}`)
   })
 
+  /**
+   * 人手改上下文边界：`/compact` 和 `/new`（见 docs/chat-commands.md）。
+   *
+   * 这里钉的是**HTTP 面**：要票、拒绝要带得出原话、成功要真的落一条事件。边界怎么挑
+   * 是纯函数，由 e2e/compact.mjs 那组管。
+   */
+  await test('POST /api/sessions/:id/{compact,reset} → 要票，拒绝时说得出原因', async () => {
+    for (const act of ['compact', 'reset']) {
+      const anon = await req(base, 'POST', `/api/sessions/${sessionId}/${act}`)
+      assert(anon.status === 401, `${act} 无票该 401，实际 ${anon.status} ${anon.text}`)
+    }
+
+    const file = join(BOT_HOME, 'sessions', `${sessionId}.jsonl`)
+    const readLines = () =>
+      readFileSync(file, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
+    const before = readLines()
+    const ends = before.filter((e) => e.type === 'turn/end')
+
+    const r = await req(base, 'POST', `/api/sessions/${sessionId}/reset`, { token: SEAT_TOK })
+    if (!ends.length) {
+      // 这条会话一轮都没跑完（上游是假的，跑不跑得完不由这里决定）。那就必须是这句话，
+      // 不能是 500——「没有要清的上下文」和「它崩了」在界面上得分得开。
+      assert(r.status === 409, `一轮都没跑完时该 409，实际 ${r.status} ${r.text}`)
+      assert(String(r.json.error || '').includes('没跑成过一轮'), `话说不清：${r.text}`)
+      return
+    }
+
+    assert(r.status === 200 && r.json.reset === true, `重置失败：${r.status} ${r.text}`)
+    const after = readLines()
+    const mark = [...after].reverse().find((e) => e.type === 'session/reset')
+    assert(mark, '重置成功了，日志里却没有 session/reset')
+    assert(mark.data.throughSeq === r.json.throughSeq, `回给前端的 seq 和落盘的对不上：${r.text}`)
+    // **边界必须落在 turn/end 上。** 切在轮次中间会留下无主的 tool/result，
+    // provider 直接拒收整个请求——而那要等到下一轮真发出去才炸。
+    const at = after.find((e) => e.seq === mark.data.throughSeq)
+    assert(at?.type === 'turn/end', `边界落在了 ${at?.type} 上，必须是 turn/end`)
+    // **日志一条不删**，这是整件事的前提。
+    assert(after.length > before.length, `重置之后日志反而短了：${before.length} → ${after.length}`)
+
+    const twice = await req(base, 'POST', `/api/sessions/${sessionId}/reset`, { token: SEAT_TOK })
+    assert(twice.status === 409, `连着点两次该 409，实际 ${twice.status} ${twice.text}`)
+
+    // 刚重置完，边界之后一条完整轮次都没有——压不动，而且要说人话。
+    const c = await req(base, 'POST', `/api/sessions/${sessionId}/compact`, { token: SEAT_TOK })
+    assert(c.status === 409, `刚重置完该压不动，实际 ${c.status} ${c.text}`)
+    assert(String(c.json.error || '').includes('太短'), `压不动的理由说不清：${c.text}`)
+  })
+
   await test('GET /api/billing → 404（账单已挪到 Gateway）', async () => {
     const r = await req(base, 'GET', '/api/billing', { token: SEAT_TOK })
     assert(r.status === 404 || r.status === 410, `billing ${r.status} ${r.text}`)
@@ -3132,6 +3181,7 @@ async function main() {
     await runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runUiFiles({ root, test, assert, log })
     await runMarkdown({ root, test, assert, log })
+    await runChatFold({ root, test, assert, log })
     await runToolNames({ root, test, assert, log })
     await runSessionStore({ root, test, assert, log })
     await runLlmIdle({ root, test, assert, log })

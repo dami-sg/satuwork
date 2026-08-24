@@ -271,6 +271,9 @@ function render() {
     paintChatQueue()
     paintChatMentions()
     paintMentionPick()
+    // 命令选单也在这三块里。漏掉它的话，重绘之后 state.cmdPick 还开着、DOM 里却空了——
+    // 上下键选不动（一条候选都查不到），回车穿到发送那条路上去。
+    paintCmdPick()
   }
   // 日志面板同理：壳在 render 里，内容由 paintLogs 增量填。
   if (document.getElementById('log-body')) paintLogs()

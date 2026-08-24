@@ -11,7 +11,8 @@
 import {
   toAgentMessages,
   compactionPoint,
-  scopeAfterLastCompact,
+  scopeAfterBoundary,
+  contextBoundary,
   clampTranscript,
   contentDigest,
 } from './src/agent/index.ts'
@@ -152,13 +153,106 @@ const out = {}
     }),
   ]
   // 预算给足，让两边都去挑「最早的可切点」——差别才看得出来。
-  const scoped = compactionPoint(scopeAfterLastCompact(withCompact), 1e9)
+  const scoped = compactionPoint(scopeAfterBoundary(withCompact), 1e9)
   const naive = compactionPoint(withCompact, 1e9)
   out.second = {
     movesForward: scoped.seq > first.seq,
     // 不做 scope 的话会挑到更早的位置——而 toAgentMessages 只认最后一条压缩事件，
     // 于是上次压掉的原文又回来了。这一行就是那个 bug 的现场。
     naiveGoesBackward: naive.seq <= first.seq,
+  }
+}
+
+// 3d. 重置点（/new）：截断照做，但不留摘要
+{
+  const all = conversation(6)
+  const ends = all.filter((e) => e.type === 'turn/end')
+  const cut = ends[ends.length - 2] // 留最后一整轮，跟 resetContext 切的位置同一个形状
+  const withReset = [
+    ...all,
+    ev('session/reset', T0 + 999 * MIN, {
+      throughSeq: cut.seq,
+      from: T0,
+      to: cut.time,
+      droppedMessages: 10,
+      by: 'user',
+    }),
+  ]
+  const msgs = await toAgentMessages(withReset)
+  const texts = msgs.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+  const roles = msgs.map((m) => m.role)
+  out.reset = {
+    // 前面那几轮一句都不该留下
+    leakedOld: texts.some((t) => t.includes('问题1') || t.includes('问题5')),
+    keptLast: texts.some((t) => t.includes('问题6')),
+    // 重置点不留摘要——这正是它跟压缩点的唯一区别
+    noSummaryHead: !texts.some((t) => t.includes('[对话摘要')),
+    startsWithUser: roles[0] === 'user',
+    consecutiveSameRole: roles.some((r, i) => i > 0 && r === roles[i - 1]),
+  }
+}
+
+// 3e. 两种边界混着来：contextBoundary / scopeAfterBoundary 必须都认最后那一条
+//
+// 只认 compact 的话，/new 之后的第一次自动压缩会从重置点**之前**挑边界，
+// 把人刚扔掉的原文整段放回上下文——那一刀于是无声失效，且没有任何报错。
+{
+  const all = conversation(9)
+  const ends = all.filter((e) => e.type === 'turn/end')
+  const compactAt = ends[1]
+  const resetAt = ends[4]
+  const mixed = [
+    ...all,
+    ev('session/compact', T0 + 500 * MIN, {
+      throughSeq: compactAt.seq,
+      from: T0,
+      to: compactAt.time,
+      summary: '第一次的摘要',
+      droppedMessages: 4,
+      tokensBefore: 900,
+      tokensAfter: 300,
+      by: 'auto',
+    }),
+    ev('session/reset', T0 + 600 * MIN, {
+      throughSeq: resetAt.seq,
+      from: compactAt.time,
+      to: resetAt.time,
+      droppedMessages: 6,
+      by: 'user',
+    }),
+  ]
+  const scoped = compactionPoint(scopeAfterBoundary(mixed), 1e9)
+  // 反过来的顺序：先 reset 再 compact，最后一条是 compact，摘要要回来
+  const reversed = [
+    ...all,
+    ev('session/reset', T0 + 500 * MIN, {
+      throughSeq: compactAt.seq,
+      from: T0,
+      to: compactAt.time,
+      droppedMessages: 4,
+      by: 'user',
+    }),
+    ev('session/compact', T0 + 600 * MIN, {
+      throughSeq: resetAt.seq,
+      from: compactAt.time,
+      to: resetAt.time,
+      summary: '重置之后又压了一次',
+      droppedMessages: 6,
+      tokensBefore: 800,
+      tokensAfter: 200,
+      by: 'auto',
+    }),
+  ]
+  const revTexts = (await toAgentMessages(reversed)).map((m) =>
+    typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+  )
+  out.mixed = {
+    boundaryIsLast: contextBoundary(mixed)?.type === 'session/reset',
+    // 认对了边界，新切点必须落在 reset 之后；认成 compact 就会退回它前面
+    movesPastReset: scoped.seq > resetAt.seq,
+    reversedBoundary: contextBoundary(reversed)?.type === 'session/compact',
+    reversedHasSummary: revTexts.some((t) => t.includes('重置之后又压了一次')),
+    reversedLeakedOld: revTexts.some((t) => t.includes('问题1')),
   }
 }
 

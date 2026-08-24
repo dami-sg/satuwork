@@ -131,6 +131,44 @@ export interface SessionEventMap {
     droppedMessages: number
     tokensBefore: number
     tokensAfter: number
+    /**
+     * 谁切的。老日志没有这个字段，按 `auto` 读。
+     *
+     * 「它自己压的」和「人在输入框里打了 /compact」在排查「怎么突然忘事了」时是两个
+     * 不同的答案，而事后从别的字段反推不出来。
+     */
+    by?: 'auto' | 'user'
+  }
+
+  /**
+   * 上下文重置点（人在输入框里打了 `/new`，见 docs/chat-commands.md）。
+   *
+   * 和 `session/compact` 是同一类东西——**决定下一轮请求从哪儿开始**——区别只在这一条
+   * 不留摘要。两者共用一套判定（agent/index.ts 的 contextBoundary），任何「找最后一条
+   * 压缩点」的地方都必须同时认它，否则 `/new` 之后的第一次自动压缩会从重置点**之前**
+   * 挑边界，把刚扔掉的原文又放回上下文——人点过的 `/new` 会在几轮之后无声失效。
+   *
+   * **不新建会话。** 一个 Bot 一条长会话是架构不变量（侧栏摘要、会话索引、工作区归属、
+   * 跨轮认单的转人工都挂在上面），而人要的只是「别把前面带上」——那是上下文边界，
+   * 不是会话边界。
+   *
+   * **throughSeq 同样必须落在 turn/end 上**，理由和压缩点一字不差。
+   *
+   * 加一种事件不是破坏性变更（老版本读到不认识的 type 会跳过），所以不动
+   * SESSION_FORMAT_VERSION。要留意的是**退化的方向**：老席位读到它会把前文全带回
+   * 上下文，也就是「像没执行过 /new 一样」——多带不是少带，方向是安全的，但回滚一次
+   * 版本，这一刀的效果就消失了。
+   */
+  'session/reset': {
+    /** 这一条（含）之前的事件不再进上下文。 */
+    throughSeq: number
+    /** 被切掉那一段的首尾时间。界面上那条分割线要写出来。 */
+    from: number
+    to: number
+    /** 切掉了多少条消息（估算口径同 compact 的 droppedMessages）。 */
+    droppedMessages: number
+    /** 只有人能触发。留着这个字段是为了跟 compact 的 by 对齐，将来真有自动重置也不用改形状。 */
+    by: 'user'
   }
 
   'turn/start': { turn: number }

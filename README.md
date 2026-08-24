@@ -56,6 +56,14 @@ GATEWAY_DATABASE_URL=... node gateway/scripts/backfill-charges.mjs --dry-run
 
 模型、时区口径、为什么调度器在 Gateway 而不在席位，见 [docs/routines.md](docs/routines.md)。
 
+## 上下文
+
+一个 Bot 一条长会话，只增不减，而每一轮都把历史重建成一次模型请求。顶到窗口七成就在轮末
+把旧的那一段换成摘要——原文一条不删，模型想看还调得回来。
+
+装配路径（提示词、工具表、消息重建、压缩、几处会让它失效的地方）见
+[docs/context-assembly.md](docs/context-assembly.md)。
+
 ## 检查
 
 ```bash

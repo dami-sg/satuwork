@@ -647,6 +647,41 @@ function fold(events, live) {
       hs.push(fresh)
       handoffSeen.set(data.id, fresh)
       assistant.endTime = at
+    } else if (type === 'session/compact' || type === 'session/reset') {
+      /**
+       * 上下文边界。画成一条横穿的分割线，不是气泡。
+       *
+       * 自动压缩画的是同一条线，这是顺带修好的一件事：在这之前自动压缩在界面上完全
+       * 不可见，人只看到 Bot 从某一刻起开始忘事，没有任何解释。
+       *
+       * **这里绝不能顺手 `assistant = null; tools = []`。**
+       *
+       * 直觉上该断：不断的话下一条助手消息会续写到分割线之前那一块上。但那个担心是空的
+       * ——两轮之间紧跟着边界的必然是 `user/message`，而那一支自己就会断（见上面）。
+       *
+       * 而断了会咬人：压缩事件**完全可能落在一个正在跑的轮次中间**（轮末那次是
+       * `void maybeCompact`，不 await，还要跑一次摘要模型调用，几秒到十几秒；这期间人
+       * 早就发了下一句、下一轮的工具也开跑了）。这时把 `tools` 换成新的空数组，该轮后
+       * 到的 `tool/result` 三次 find 全落空、结果被丢掉，而那颗药丸挂在上一块里、
+       * `result` 永远是 null——界面上就是一颗**永远停在「调用中」的工具药丸**，刷新也
+       * 回不来（重放同一串事件，结果一样）。同一个原因还会把正在流式输出的回答从中间
+       * 劈成两个气泡。
+       *
+       * 不断的话，落在轮中间时这条线就画在那一块的后面，位置诚实，别的什么都不影响。
+       */
+      blocks.push({
+        kind: 'mark',
+        mark: type === 'session/reset' ? 'reset' : 'compact',
+        // 老日志没有 by（那时只有自动压缩），按 auto 读。
+        by: data.by || (type === 'session/reset' ? 'user' : 'auto'),
+        from: Number(data.from) || 0,
+        to: Number(data.to) || 0,
+        tokensBefore: Number(data.tokensBefore) || 0,
+        tokensAfter: Number(data.tokensAfter) || 0,
+        dropped: Number(data.droppedMessages) || 0,
+        time: at,
+        seq: ev.seq,
+      })
     } else if (type === 'turn/start') {
       status = 'running'
     } else if (type === 'turn/end') {
@@ -1108,6 +1143,9 @@ async function loadChatPage() {
   // 换了会话，上一条还没发出去的 `@` 不该跟过来——它指的是「这一条消息带谁」。
   state.chatMentions = []
   state.mentionPick = null
+  // 命令选单和「正在压缩」那句提示都是**上一页**的事，跟着走会挂在一条不相干的会话上。
+  state.cmdPick = null
+  state.chatCmdBusy = ''
   // 候选清空：换 Bot 之后连接没变，但换公司/换人之后就变了，重开一页重拉一次不亏。
   state.mentionOptions = null
   /**
@@ -3065,6 +3103,38 @@ function paintLoadMore() {
   if (document.getElementById('chat-thread')) paintChat()
 }
 
+/**
+ * 上下文边界那条线。
+ *
+ * **必须说清楚记录还在。** 「已清空」会让人以为历史没了，而 JSONL 一条没删——往上翻
+ * 看得见，导出带得走，模型自己也还能用 history_read 调回来。清掉的只是「下一轮请求里
+ * 带什么」（见 docs/context-assembly.md）。
+ *
+ * 自动压缩和手动压缩画同一条线，只是措辞不同：一个是「它自己压的」，一个是人点的。
+ */
+function ctxDivText(b) {
+  const head =
+    b.mark === 'reset'
+      ? t('新对话从这里开始')
+      : b.by === 'user'
+        ? t('已压缩上下文')
+        : t('上下文快满了，自动压缩了一次')
+  const parts = [head]
+  // 数字只在压缩那条线上有意义。0 → 老日志缺字段，那就不摆一个假的。
+  if (b.mark === 'compact' && b.tokensBefore && b.tokensAfter) {
+    parts.push(ctxNum(b.tokensBefore) + ' → ' + ctxNum(b.tokensAfter))
+  }
+  parts.push(b.mark === 'reset' ? t('上面的内容不再进上下文') : t('更早的对话仍在记录里'))
+  return parts.join(' · ')
+}
+
+function ctxDivHtml(b) {
+  return (
+    `<div class="sw-ctxdiv" data-mark="${esc(b.mark)}">` +
+    `<span class="sw-ctxdiv-text">${esc(ctxDivText(b))}</span></div>`
+  )
+}
+
 function threadRows(folded, sessionId) {
   const blocks = folded.blocks || []
   const rows = []
@@ -3076,6 +3146,12 @@ function threadRows(folded, sessionId) {
     if (day && day !== lastDay) {
       lastDay = day
       rows.push({ kind: 'day', key: 'd' + day, html: `<div class="sw-daydiv"><span>${esc(chatDayLabel(b.time) + ' ' + chatClock(b.time))}</span></div>` })
+    }
+    // 上下文边界走「html 行」那条路（和日期分隔线、加载更多同一条）：它没有气泡、
+    // 没有头像、没有工具条，套 rowShell 只会画出一个空壳。
+    if (b.kind === 'mark') {
+      rows.push({ kind: 'mark', key: 'k' + b.seq, html: ctxDivHtml(b) })
+      return
     }
     // key 必须**跟着这一块自己**走，不能用下标：往前翻加载旧消息会让所有下标移位，
     // 于是整棵 DOM 重建——Markdown 全部重渲染，滚动位置也跟着没了。
@@ -3265,7 +3341,13 @@ function paintChatChrome(folded) {
   // 会话还没拿到（席位刚起来那几十秒）就直说。这一行是人在按发送之前唯一会看的地
   // 方，而那期间按下去是发不出去的——不说的话就是「点了没反应」。
   if (tip) {
-    tip.textContent = !state.chatSessionId
+    tip.textContent = state.chatCmdBusy
+      ? // `/compact` 要跑一次模型写摘要，几秒。这几秒里没有任何事件会经 SSE 过来——
+        // 不说一句的话，人只看到输入框被清空了，然后什么都没发生。
+        state.chatCmdBusy === 'compact'
+        ? t('正在压缩上下文…')
+        : t('正在处理…')
+      : !state.chatSessionId
       ? sessionGaveUp
         ? t('实例还没接上，这会儿发不出去')
         : t('实例还在上线，接上之后就能发消息…')
@@ -3296,7 +3378,8 @@ function paintChatChrome(folded) {
 }
 
 function chatMetaText(folded) {
-  const blocks = (folded && folded.blocks) || []
+  // 分割线不算「一条消息」——它不是谁说的话。不滤的话，压过几次的会话条数会虚高。
+  const blocks = ((folded && folded.blocks) || []).filter((b) => b.kind !== 'mark')
   const account = (state.me && state.me.account) || {}
   const who = account.name || account.email || ''
   const first = blocks.find((b) => b.time)
@@ -3354,10 +3437,25 @@ function chatContextStat(events) {
   const list = events || []
   let header = null
   let usage = null
-  // 从后往前找，找齐两样就停：这两条在长会话里都在末尾附近，没必要从头扫一遍。
+  /**
+   * 从后往前找，找齐两样就停：这两条在长会话里都在末尾附近，没必要从头扫一遍。
+   *
+   * **扫到上下文边界就停**（压缩点或重置点）。越过它继续找，找到的是**压缩之前**那一轮
+   * 报的用量——人点完 `/compact`，输入框底下那颗 chip 纹丝不动，看起来就是命令没生效。
+   * 停在这里、拿边界自带的数字当估算，下一轮跑完再换成实测。
+   */
+  let boundary = null
   for (let i = list.length - 1; i >= 0; i--) {
     const ev = list[i] || {}
     const data = ev.data || {}
+    if (ev.type === 'session/compact' || ev.type === 'session/reset') {
+      // **只有还没拿到用量时才在这儿停。** 已经拿到了就接着往前找 header——
+      // 分段（系统提示词/Skill/工具表）是这颗 Bot 的属性，不随边界变，而它可能就落在
+      // 边界之前。为了这条线把分段丢掉，等于让浮层从此只报一个总量。
+      if (usage) continue
+      boundary = { type: ev.type, data }
+      break
+    }
     if (!usage && ev.type === 'assistant/message') {
       const u = data.usage
       // 出错时补的那几条助手消息带的是全零 usage，跳过——认了它，占比会在一次
@@ -3366,6 +3464,44 @@ function chatContextStat(events) {
     }
     if (!header && ev.type === 'request/header') header = data
     if (usage && header) break
+  }
+  /**
+   * 边界之后还没跑过一轮：没有实测，给一个估算。
+   *
+   * 压缩点自带 `tokensAfter`（摘要 + 保留段）；重置点之后消息是空的，剩下的是**清不掉
+   * 的固定开销**——系统提示词、Skill 正文、工具表，由最后那条 request/header 的分段给出。
+   * 写 0 是错的：人下一轮马上会发现对不上。
+   */
+  if (!usage && boundary) {
+    // header 要接着往前找：它在边界之前，上面那个循环已经停了。
+    if (!header) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        if ((list[i] || {}).type === 'request/header') {
+          header = list[i].data || {}
+          break
+        }
+      }
+    }
+    const sec = header && header.sections
+    const fixed = sec ? (sec.system || 0) + (sec.skills || 0) + (sec.builtinTools || 0) + (sec.mcpTools || 0) : 0
+    const est = boundary.type === 'session/compact' ? Number(boundary.data.tokensAfter) || 0 : fixed
+    const bot0 = chatBotOf()
+    const window0 =
+      Number(header && header.contextWindow) ||
+      ctxWindowOf((header && header.provider) || (bot0 && bot0.provider) || '', (header && header.model) || (bot0 && bot0.model) || '')
+    if (!est || !window0) return null
+    return {
+      used: est,
+      window: window0,
+      prompt: est,
+      cached: 0,
+      model: header && header.provider && header.model ? header.provider + ' / ' + header.model : '',
+      split: false,
+      // 估算，不是实测。浮层脚注会写明这一点。
+      estimated: true,
+      ratio: Math.min(1, est / window0),
+      parts: [{ key: 'msg', label: boundary.type === 'session/compact' ? '摘要与保留段' : '系统提示词与工具表', tokens: est }],
+    }
   }
   if (!usage) return null
   const bot = chatBotOf()
@@ -3430,6 +3566,8 @@ function chatCtxPop(stat) {
     notes.push(t('缓存命中') + ' ' + Math.round((stat.cached / stat.prompt) * 100) + '%')
   }
   if (stat.split) notes.push(t('分段为估算，总量来自模型回报'))
+  // 刚压过 / 刚重置过，还没跑过一轮：这一整条都是估的，别让它看起来像实测。
+  if (stat.estimated) notes.push(t('估算，下一轮跑完是实测'))
   return `<div class="sw-ctxhead">
       <span>${t('上下文窗口')}</span>
       <b>${esc(ctxNum(stat.used))} / ${esc(ctxNum(stat.window))}</b>
@@ -3477,6 +3615,12 @@ function chatExportText() {
   const title = (bot && bot.name) || t('对话')
   const out = ['# ' + title, '', '> ' + chatMetaText(folded), '']
   for (const b of folded.blocks || []) {
+    // 上下文边界：一条分隔线加一句说明。套 `## 我 / ## Bot` 那个壳的话，这里会导出
+    // 一个空的二级标题——它既不是谁说的话，也没有正文。
+    if (b.kind === 'mark') {
+      out.push('---', '', '*' + ctxDivText(b) + '*', '')
+      continue
+    }
     out.push('## ' + (b.kind === 'user' ? me : title) + (b.time ? ' · ' + fmtTime(b.time) : ''), '')
     for (const x of b.tools || []) {
       out.push('- ' + t('工具') + ' `' + x.name + '` · ' + (x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')))
@@ -4770,6 +4914,7 @@ function chatPage() {
         <div class="sw-composer">
           <div class="sw-queue" id="chat-queue" hidden></div>
           <form id="chat-form" class="sw-composer-box">
+            <div class="sw-pickbox" id="chat-cmdpick" hidden></div>
             <div class="sw-pickbox" id="chat-mentionpick" hidden></div>
             <div class="sw-files" id="chat-mentions" hidden></div>
             <div class="sw-files" id="chat-files" hidden></div>
@@ -5070,6 +5215,37 @@ async function sendChat() {
   const mentions = state.chatMentions || []
   const sessionId = state.chatSessionId
   if ((!text && !files.length && !mentions.length) || state.chatUploading) return
+  /**
+   * 斜杠命令**在这里拦下，绝不往 /messages 走**。
+   *
+   * 选单只是提示，真正的闸必须在发送路径上：人完全可以把 `/compact` 打完再按回车，
+   * 那时选单可能已经关了（打完最后一个字母时它还开着，但失焦、Esc 都会关掉）。
+   */
+  const cmd = parseCommand(text)
+  if (cmd) {
+    if (cmd.unknown) {
+      // **不当普通消息发出去。** 一个手滑的 `/copmact` 发给模型，它会礼貌地回一段
+      // 「你是想…吗」，而人以为自己压缩过了。草稿留着，改一个字母就能重来。
+      flash('err', t('没有这条命令：') + cmd.unknown)
+      closeCmdPick()
+      render()
+      return
+    }
+    if (cmd.extra) {
+      flash('err', '/' + cmd.cmd.name + ' ' + t('不带参数，单独发这一条就行'))
+      closeCmdPick()
+      render()
+      return
+    }
+    if (files.length || mentions.length) {
+      // 命令占满整条消息，不捎带附件和点名。那些东西原样留在输入框上。
+      flash('err', t('命令不能和附件或 @ 一起发，先把这条命令单独发出去'))
+      render()
+      return
+    }
+    await runChatCommand(cmd.cmd)
+    return
+  }
   /**
    * **没有会话不能一声不吭地咽下去。** 席位刚部署完的那几十秒里 chatSessionId 就是空
    * 的（见 ensureChatSession），而这里原先和「草稿是空的」共用一句 `return`：字打得
@@ -5600,6 +5776,190 @@ function takeMention(id) {
   closeMentionPick()
   paintChatMentions()
   el?.focus()
+}
+
+/* ── 斜杠命令 ─────────────────────────────────────────────────────────
+ *
+ * 一条命令 = **人对这条会话下的一次控制指令，不是发给模型的一句话**。它不进
+ * `user/message`、不占 token、不开新的一轮，模型看不见它；走各自的 runtime 接口，
+ * 落各自的会话事件，界面上画成一条分割线（见 docs/chat-commands.md）。
+ *
+ * 命令表是**本地常量，不走接口**：这两条是界面对席位发起的两次调用，不是席位提供的
+ * 能力清单，为它多一跳只会让第一屏更慢。
+ */
+const CHAT_COMMANDS = [
+  {
+    name: 'compact',
+    title: '压缩上下文',
+    // 「会调用一次模型」要写出来：点一下是要花钱的，虽然不值得为它弹一个确认框。
+    hint: '把更早的对话换成摘要，会调用一次模型',
+    /** 这一轮在跑时能不能点。两条都不行，理由见 docs/chat-commands.md。 */
+    idleOnly: true,
+    run: (sessionId) => api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/compact'),
+  },
+  {
+    name: 'new',
+    title: '开始新对话',
+    hint: '从这里起不再带上前面的内容，记录不删',
+    idleOnly: true,
+    run: (sessionId) => api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/reset'),
+  },
+]
+
+/**
+ * 输入框开头那条 `/xxx`。
+ *
+ * 判据比 `@` 严一档：**必须在最开头，而且后面只跟命令名**。斜杠在正文里太常见——
+ * `/etc/hosts`、「他说的 /compact 是什么意思」、贴一段路径——那些都不该弹选单，
+ * 更不该被当成命令执行。而命令本来就占满整条消息，不和正文混着发。
+ */
+function commandQueryAt(el) {
+  if (!el) return null
+  const pos = el.selectionStart ?? el.value.length
+  const before = el.value.slice(0, pos)
+  if (!/^\/[a-zA-Z-]*$/.test(before)) return null
+  return { q: before.slice(1).toLowerCase() }
+}
+
+function closeCmdPick() {
+  if (!state.cmdPick) return
+  state.cmdPick = null
+  paintCmdPick()
+}
+
+function openCmdPick(q) {
+  state.cmdPick = { open: true, q, index: 0 }
+  paintCmdPick()
+}
+
+function cmdMatches(q) {
+  return CHAT_COMMANDS.filter((c) => !q || c.name.startsWith(q))
+}
+
+/** 命令选单。形状和 `@` 那个一样，共用 .sw-pickbox。 */
+function paintCmdPick() {
+  const box = document.getElementById('chat-cmdpick')
+  if (!box) return
+  const pick = state.cmdPick
+  if (!pick) {
+    box.hidden = true
+    box.innerHTML = ''
+    return
+  }
+  const list = cmdMatches(pick.q)
+  if (!list.length) {
+    box.hidden = true
+    box.innerHTML = ''
+    return
+  }
+  // 这一轮在跑时不能执行——**先标灰，别让人撞一次 409 才知道**。
+  // 判据用 state.chatStatus：它是 paintChat 每帧算出来的那一份，`sending`（刚发出去、
+  // 还没等到回执）也算在内——那时候一轮马上就要开始，压缩同样不该插进去。
+  const busy = Boolean(state.chatStatus)
+  const i = Math.min(pick.index || 0, list.length - 1)
+  box.hidden = false
+  box.innerHTML = list
+    .map((c, n) => {
+      const off = busy && c.idleOnly
+      return `<button type="button" class="sw-pick${n === i ? ' is-on' : ''}${off ? ' is-off' : ''}"
+        data-act="chat-cmd-pick" data-name="${esc(c.name)}"${off ? ' disabled' : ''}>
+        <span class="sw-pick-name">/${esc(c.name)} · ${esc(t(c.title))}</span>
+        <small>${esc(off ? t('等这一轮跑完') : t(c.hint))}</small>
+      </button>`
+    })
+    .join('')
+}
+
+/** 从选单里选中一条：直接执行。命令没有「填进输入框再确认」这一步。 */
+function takeCommand(name) {
+  const one = CHAT_COMMANDS.find((c) => c.name === name)
+  if (!one) return
+  return runChatCommand(one)
+}
+
+/**
+ * 这条草稿是不是一条命令。
+ *
+ * 三种结果：命中一条、`{ unknown }`（打了斜杠但不认识）、null（不是命令）。
+ * **不认识的不能当普通消息发出去**——一个手滑的 `/copmact` 就发给模型了，它会礼貌地
+ * 回一段「你是想…吗」，而人以为自己压缩过了。参数也一样不收：`/compact 只留三轮`
+ * 当作不认识，不猜意图。
+ */
+function parseCommand(text) {
+  const raw = String(text || '').trim()
+  const first = raw.split(/\s+/)[0]
+  /**
+   * **命令名里不会有第二个斜杠。** 这一条把「整条消息就是一个路径」放行——
+   * `/etc/hosts`、`/var/log/syslog` 是人真的会单独发过来的一句话（「看下这个文件」的
+   * 省略说法），把它拦成「没有这条命令」纯属添乱。而 `/copmact` 这种仍然拦得住，
+   * 那才是这道闸要防的。
+   */
+  if (!/^\/[a-zA-Z-]+$/.test(first)) return null
+  const hit = CHAT_COMMANDS.find((c) => c.name === first.slice(1).toLowerCase())
+  if (!hit) return { unknown: first }
+  // 认得这条，但后面还跟着别的字。第一批两条都不收参数——**不猜意图**，
+  // 也不把多出来的那半句悄悄丢掉。
+  if (raw !== first) return { cmd: hit, extra: true }
+  return { cmd: hit }
+}
+
+/**
+ * 执行一条命令。
+ *
+ * 成功了**不清输入框以外的东西**：附件和 `@` 留在原地（命令不带它们，人多半是打完
+ * 命令还要接着发那条消息）。结果由 SSE 推回来的那条事件画成分割线，这里只负责把
+ * 「点了没反应」变成一句话。
+ */
+async function runChatCommand(cmd) {
+  const sessionId = state.chatSessionId
+  if (!sessionId) {
+    flash('err', t('还没接上席位，等接上再试'))
+    render()
+    return
+  }
+  if (cmd.idleOnly && state.chatStatus) {
+    flash('err', t('这一轮还在跑，等它跑完再试'))
+    render()
+    return
+  }
+  // 失败要把命令还回去（下面的 catch）。清空之前先留一份——同 sendChat 那条约定：
+  // 一次 409 / 换版 404 不该让人重新把命令打一遍。
+  const draft = state.chatDraft || '/' + cmd.name
+  // 命令占满整条消息，走到这儿正文就该清掉了——它不会被发出去，留着只会让人再按一次。
+  state.chatDraft = ''
+  closeCmdPick()
+  const input = document.getElementById('chat-input')
+  if (input) {
+    input.value = ''
+    input.style.height = ''
+  }
+  state.chatCmdBusy = cmd.name
+  paintChat()
+  try {
+    const r = await cmd.run(sessionId)
+    if (r && r.compacted) {
+      flash('ok', t('已压缩') + '：' + ctxNum(r.tokensBefore) + ' → ' + ctxNum(r.tokensAfter))
+    } else if (r && r.reset) {
+      flash('ok', t('已开始新对话，上面的内容不再进上下文'))
+    }
+    /**
+     * **不在这里自己画那条线。** 席位紧接着会经 SSE 把 `session/compact` /
+     * `session/reset` 推过来，fold 认得它。自己先垫一条的话，等真事件到了就是两条。
+     *
+     * 老席位不认这两条路：404 落到下面的 catch，翻成「版本还不支持」。
+     */
+  } catch (err) {
+    // **把命令还回输入框。** 换版期间的 404、正跑着的 409、断线——这些都是过几秒
+    // 再按一次就好的事，没道理让人重打一遍（finally 里的 render 会把它填回去）。
+    state.chatDraft = draft
+    // 席位那边每一种拒绝都带着一句能直接给人看的原话（正在跑、太短、排着队），
+    // 原样显示，别翻成一句「操作失败」。
+    flash('err', err.status === 404 ? t('这台席位的版本还不支持这条命令，升级后可用') : err.message)
+  } finally {
+    state.chatCmdBusy = ''
+    paintChat()
+    render()
+  }
 }
 
 /** 取消一条排队的消息。已经开跑的席位回 409——那时如实说，不装作取消成功。 */
