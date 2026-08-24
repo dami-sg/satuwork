@@ -766,6 +766,24 @@
       })
   }
 
+  /**
+   * 高亮完一块代码之后叫一声。
+   *
+   * 上色是把 `innerHTML` 整块换掉，外面往代码块里加过的东西（对话那边把文件名接成了
+   * 可点开预览的链接）会一起被抹掉，而且抹在**异步**那一拍——外面自己看不见这件事
+   * 发生。所以这里留一个回调：谁往里面加过东西，谁在这一拍再加一次。
+   */
+  let codeReady = null
+
+  function fireCodeReady(el) {
+    if (!codeReady) return
+    try {
+      codeReady(el)
+    } catch {
+      /* 回调是外面的事，坏了不该把高亮这一趟拖下水 */
+    }
+  }
+
   function enhanceCode(scope) {
     const nodes = scope.querySelectorAll('.sw-code pre code:not([data-done])')
     if (!nodes.length) return
@@ -780,10 +798,16 @@
             el.innerHTML = res.value
           } catch {}
           el.setAttribute('data-done', '1')
+          fireCodeReady(el)
         }
       })
+      // 拉不到 hljs 就不上色。**这一声照样要叫**：外面不该因为高亮没跑成，就永远等不到
+      // 自己那一次补接——没有上色的代码块，里面的文件名一样该点得动。
       .catch(() => {
-        for (const el of nodes) el.setAttribute('data-done', 'off')
+        for (const el of nodes) {
+          el.setAttribute('data-done', 'off')
+          fireCodeReady(el)
+        }
       })
   }
 
@@ -963,5 +987,16 @@
     true,
   )
 
-  window.satuMd = { render, splitBlocks, healStream, enhance, retheme, esc }
+  window.satuMd = {
+    render,
+    splitBlocks,
+    healStream,
+    enhance,
+    retheme,
+    esc,
+    /** 注册「这块代码高亮完了」的回调。只留一个——用它的就对话那一处。 */
+    onCodeReady: (fn) => {
+      codeReady = typeof fn === 'function' ? fn : null
+    },
+  }
 })()

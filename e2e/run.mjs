@@ -43,6 +43,7 @@ import { runBrowser } from './browser.mjs'
 import { runMounted } from './mounted.mjs'
 import { runSetup } from './setup.mjs'
 import { runUiSmoke } from './ui-smoke.mjs'
+import { runUiFiles } from './ui-files.mjs'
 import { uiSource } from './ui-dom.mjs'
 import { runCustomProvider } from './custom-provider.mjs'
 import { runStats } from './stats.mjs'
@@ -3129,6 +3130,7 @@ async function main() {
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runManagerConfirm({ root, test, assert, log })
     await runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log })
+    await runUiFiles({ root, test, assert, log })
     await runMarkdown({ root, test, assert, log })
     await runToolNames({ root, test, assert, log })
     await runSessionStore({ root, test, assert, log })

@@ -39,6 +39,30 @@ export async function runWorkspaceFiles({ root, test, assert, log }) {
     assert(r && r.escape && r.upload, `结果不完整：${JSON.stringify(r)}`)
   })
 
+  await test('列目录：目录在前、隐藏项和符号链接不列、越界照样拦', () => {
+    assert(r.list.路径 === 'sub', `path → ${r.list.路径}`)
+    assert(r.list.目录在前, `顺序不对：${JSON.stringify(r.list.条目)}`)
+    assert(r.list.带大小 === 2, `a.txt 的大小 → ${r.list.带大小}`)
+    // 这个 path 要能直接喂给预览接口——两处对不上的话，树上点开就是 404。
+    assert(r.list.路径可直接预览 === 'sub/a.txt', `path → ${r.list.路径可直接预览}`)
+    assert(r.list.没有符号链接, '符号链接被列出来了，那是一条能走出工作区的路')
+    assert(r.list.没有隐藏项, '隐藏项被列出来了')
+    assert(r.listEscape, '`../../../etc` 没被拦住')
+    assert(r.listFile, '拿文件当目录列没被拦住')
+  })
+
+  await test('只读工具报出看到的文件，写只报产出', () => {
+    // 没有这一条，界面就只能回去正则扫工具结果的文本猜路径——那正是这套设计要躲开的。
+    assert(r.refs.ls.includes('sub/note.md'), `ls → ${JSON.stringify(r.refs.ls)}`)
+    assert(r.refs.read.length === 1 && r.refs.read[0] === 'sub/note.md', `read → ${JSON.stringify(r.refs.read)}`)
+    assert(r.refs.grep.includes('sub/note.md'), `grep → ${JSON.stringify(r.refs.grep)}`)
+    assert(r.refs.find.includes('sub/note.md'), `find → ${JSON.stringify(r.refs.find)}`)
+    // 目录不进 refs：那一屏点开的是预览，目录预览不了。
+    assert(!r.refs.ls.some((p) => p.endsWith('/deep')), `ls 把目录也报了：${JSON.stringify(r.refs.ls)}`)
+    assert(r.refs.写的是产出.includes('sub/new.txt'), `write → ${JSON.stringify(r.refs.写的是产出)}`)
+    assert(r.refs.写的不报refs, 'write 把产出又报了一遍 refs，界面会摆两次')
+  })
+
   await test('路径逃不出工作区', () => {
     assert(r.escape.上跳, '`../../../etc/passwd` 没被拦住')
     assert(r.escape.绕一圈上跳, '先下去再上来能绕过检查')

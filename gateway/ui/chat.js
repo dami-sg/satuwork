@@ -557,6 +557,9 @@ function fold(events, live) {
         // 工具自己报出来的产出文件。老日志没有这个字段，也**不去扫 text 猜路径**——
         // 那段文本是写给模型的散文，措辞一改就扫不出来了。
         hit.files = Array.isArray(data.files) ? data.files : null
+        // 这次调用**看到**的文件（ls 列的、grep 命中的、read 读的那一个）。正文里
+        // 出现的文件名靠它接成能点开的链接——同样是工具报出来的，不是扫文本猜的。
+        hit.refs = Array.isArray(data.refs) ? data.refs : null
         // 浏览器工具拍的那张页面截图。老日志没有这个字段，那就没有——**不去猜**。
         hit.shot = data.shot && typeof data.shot.path === 'string' && data.shot.path ? data.shot : null
       }
@@ -1019,6 +1022,7 @@ async function ensureChatSession(botId, attempt = 0) {
     const kept = state.chatDrafts[botId] || { text: '', files: [] }
     state.chatBotId = botId
     state.chatSessionId = warm.sessionId
+    resetWorkspaceTree()
     state.chatEvents = warm.events
     state.chatReplaying = false
     state.chatDraft = kept.text
@@ -1063,6 +1067,7 @@ async function ensureChatSession(botId, attempt = 0) {
     row.sessionId = sessionId
     state.chatEvents = row.events
     state.chatSessionId = sessionId
+    resetWorkspaceTree()
     state.chatStatus = ''
     // 接上了。等席位那段时间挂的话要撤掉，否则界面上会一直留着一句已经不成立的
     // 「还没接上」——流那边要是断了，它自己会再挂一次。
@@ -2183,6 +2188,231 @@ function inlineFileChips(host, files) {
   }
 }
 
+/**
+ * 当前这条会话的「要在正文里找的文件名」表。每次重绘由 paintChat 重算一次。
+ *
+ * 挂在模块上而不是一路当参数传：updateRow 是从 syncThread 里逐条调的，为这一样东西
+ * 给沿途每个函数加一个形参，只会让下一个人以为它是每条消息各自不同的东西——它不是，
+ * 整条会话共用一份。
+ */
+let chatFileCands = []
+
+/**
+ * 代码高亮会把代码块的 innerHTML 整块换掉（见 markdown.js 的 enhanceCode），
+ * 里面的文件链接自然一起没了。高亮完再接一次——这是目录树那一屏能点得动的关键：
+ * 那一片正好在代码块里。
+ *
+ * **只管对话里的。** enhance 在预览层也会跑（见 openPreview / setPreviewMode），
+ * 而那儿画的是文件自己的内容：往里塞按钮等于改了人正在看的那份文件，点一下还会把
+ * 当前预览换成另一个文件。
+ */
+if (window.satuMd && satuMd.onCodeReady) {
+  satuMd.onCodeReady((el) => {
+    if (el && el.closest && el.closest('#chat-thread')) linkFiles(el, chatFileCands)
+  })
+}
+
+/**
+ * 这条会话里已经露过面的工作区文件：path → { path, name }。
+ *
+ * 三个来源，都是**报出来的、不是猜出来的**：人上传的附件、工具落地的产出（files）、
+ * 工具看到的那些（refs，见 tools/index.ts）。有了这份名册，正文里出现的文件名才能
+ * 接回一个真实存在的路径——没有它就只能拿正则去散文里认路径，措辞一改就散架。
+ *
+ * **按整条会话攒，不是按消息。** 模型常常上一条列了目录、下一条才说「那份 PDF 里
+ * 写着…」，只看本条的话，人最想点的那一次恰好点不了。
+ */
+function knownFiles(blocks) {
+  const map = new Map()
+  const add = (f) => {
+    if (!f || !f.path || map.has(f.path)) return
+    map.set(f.path, { path: f.path, name: f.name || f.path.split('/').pop() || f.path })
+  }
+  for (const b of blocks || []) {
+    for (const f of b.files || []) add(f)
+    for (const x of b.tools || []) {
+      for (const f of x.files || []) add(f)
+      for (const f of x.refs || []) add(f)
+    }
+  }
+  return map
+}
+
+/** 带扩展名才算文件名。没有它，一个叫「报告」的文件会把正文里每一个「报告」都点亮。 */
+const FILE_EXT_RE = /\.[A-Za-z0-9]{1,8}$/
+
+/**
+ * 名册摊成一张「要在正文里找的字串」表，长的排前面。
+ *
+ * 两种字串：**完整路径**（模型写全的那种）和**文件名**。文件名这一类有两道闸——
+ * 必须带扩展名、且在整条会话里不重名。重名的一律不认：`index.ts` 有三个的时候，
+ * 猜中的那次不值得赔上另外两次指到错的文件。
+ */
+function fileCands(known) {
+  const byBase = new Map()
+  for (const f of known.values()) {
+    const base = f.path.split('/').pop() || f.path
+    // 撞名的置空而不是删掉——后面再来一个同名的，也得继续认得出它撞过。
+    byBase.set(base, byBase.has(base) ? null : f)
+  }
+  const out = []
+  for (const f of known.values()) if (f.path.includes('/')) out.push({ needle: f.path, file: f })
+  for (const [base, f] of byBase) if (f && FILE_EXT_RE.test(base)) out.push({ needle: base, file: f })
+  return out.sort((a, b) => b.needle.length - a.needle.length)
+}
+
+/**
+ * 一段文本里出现的那些文件名，落在哪几段区间上。
+ *
+ * 纯函数，DOM 一点不碰：这条规则最容易出错的地方是边界（`报表.xlsx.bak` 不是
+ * `报表.xlsx`、`src/a.ts` 里的 `a.ts` 不该单独再算一次），而那几条拿字符串就能钉死。
+ * 长的先认、认过的区间不再让给短的，所以完整路径永远赢过它自己的文件名。
+ */
+function fileHits(text, cands) {
+  const src = String(text == null ? '' : text)
+  if (!src || !cands || !cands.length) return []
+  const hits = []
+  for (const c of cands) {
+    let from = 0
+    for (;;) {
+      const at = src.indexOf(c.needle, from)
+      if (at < 0) break
+      const end = at + c.needle.length
+      from = end
+      if (!fileEdgeOk(src, at, end)) continue
+      if (hits.some((h) => at < h.end && h.start < end)) continue
+      hits.push({ start: at, end, file: c.file })
+    }
+  }
+  return hits.sort((a, b) => a.start - b.start)
+}
+
+/**
+ * 这一段确实是「一个完整的名字」，不是从更长的东西里截出来的一半。
+ *
+ * 中日韩的字不算词字符（`\w` 不匹配），所以「已生成印尼山火报告2026-08.html，请查收」
+ * 里那个文件名照样接得上——这恰恰是最常见的写法。
+ */
+function fileEdgeOk(src, start, end) {
+  const before = start > 0 ? src[start - 1] : ''
+  const after = end < src.length ? src[end] : ''
+  if (before && /[\w./\\-]/.test(before)) return false
+  if (after && /[\w/\\-]/.test(after)) return false
+  // `报表.xlsx.bak` 不是 `报表.xlsx`。
+  if (after === '.' && /[A-Za-z0-9]/.test(src[end + 1] || '')) return false
+  return true
+}
+
+/** 走文本节点时不进去的那些。链接和药丸里面已经是可点的了，再套一层只会打架。 */
+const FILE_LINK_SKIP = new Set(['A', 'BUTTON', 'FIGCAPTION', 'SCRIPT', 'STYLE', 'TEXTAREA'])
+
+/**
+ * 把正文（含代码块）里出现的文件名原地变成可以点开预览的链接。
+ *
+ * **和行内药丸的分工**：`` `路径` `` 那种是模型明确写下的一整条路径，换成药丸；
+ * 剩下的——目录树那一屏、句子里带出来的一个文件名——只加链接，**不换节点**。
+ * 代码块尤其不能换：那一片要能整段抄走，塞个按钮进去就抄不成了。加链接不影响
+ * `textContent`，上面那颗「复制」照样复制出原样的文本。
+ */
+function linkFiles(host, cands) {
+  if (!host || !cands || !cands.length) return
+  const walk = (node) => {
+    for (const kid of [...node.childNodes]) {
+      if (kid.nodeType === 3) {
+        paintFileLinks(kid, cands)
+      } else if (kid.nodeType === 1 && !FILE_LINK_SKIP.has(kid.tagName)) {
+        walk(kid)
+      }
+    }
+  }
+  walk(host)
+}
+
+/** 一个文本节点，切成「原文 + 链接 + 原文」。没命中就一个字都不动。 */
+function paintFileLinks(node, cands) {
+  const src = node.data || ''
+  // 一屏正文里绝大多数文本节点一个文件名都没有，先拿最便宜的那一刀挡掉。
+  if (src.length < 3) return
+  const hits = fileHits(src, cands)
+  if (!hits.length) return
+  const frag = document.createDocumentFragment()
+  let at = 0
+  for (const h of hits) {
+    if (h.start > at) frag.appendChild(document.createTextNode(src.slice(at, h.start)))
+    frag.appendChild(fileLinkNode(src.slice(h.start, h.end), h.file))
+    at = h.end
+  }
+  if (at < src.length) frag.appendChild(document.createTextNode(src.slice(at)))
+  node.parentNode.replaceChild(frag, node)
+}
+
+/** 一个文件链接。字面照抄原文——目录树那一屏的对齐全靠它一个字符都不多不少。 */
+function fileLinkNode(label, file) {
+  const el = document.createElement('button')
+  el.type = 'button'
+  el.className = 'sw-filelink'
+  el.setAttribute('data-act', 'chat-preview')
+  el.setAttribute('data-path', file.path)
+  el.setAttribute('data-name', file.name)
+  el.title = file.path
+  el.textContent = label
+  return el
+}
+
+/**
+ * 这条消息里 Bot 读过的文件。
+ *
+ * 单独挑出来是因为**读完之后的那句话常常一个文件名都不带**：「已读取《某某报告》，
+ * 内容概要如下」——用的是文档标题。正文里接不上，就只能在底下给一颗药丸，否则那份
+ * 报告在界面上根本没有入口。`ls`/`grep` 看到的那些不给药丸：一次能列出几十个，
+ * 摆出来就是一堵墙，它们在正文里已经是链接了。
+ */
+function readFiles(tools) {
+  const seen = new Map()
+  for (const x of tools || []) {
+    if (x.name !== 'read') continue
+    for (const f of x.refs || []) if (f && f.path && !seen.has(f.path)) seen.set(f.path, f)
+  }
+  return [...seen.values()]
+}
+
+/** 读过的文件最多摆几颗。再多就把这条回答本身挤下去了。 */
+const MAX_READ_CHIPS = 6
+
+/** 读过的那种药丸。比产出淡一档——它不是这一轮的成果，只是「它看过这个」。 */
+function readChipHtml(f) {
+  return (
+    `<button type="button" class="sw-chip sw-filechip sw-refchip" data-act="chat-preview" ` +
+    `data-path="${esc(f.path)}" data-name="${esc(f.name || f.path)}" title="${esc(f.path)}">` +
+    `${ICON_FILE}<span>${esc(f.name || f.path)}</span></button>`
+  )
+}
+
+/** 没摆下的那几个。和过程截图一样：**不闷声吞掉**。 */
+function readMoreHtml(n) {
+  return `<span class="sw-chip sw-stepmore">${esc(t('还有 N 个读过的文件', 'N more files read').replace('N', String(n)))}</span>`
+}
+
+/**
+ * 一条消息渲染完之后，把里面的文件接上。
+ *
+ * 两件事一起做，按 Markdown 块逐块来并留个记号：`syncMd` 只重画签名变了的那一块，
+ * 所以已经接过的块不必再走一遍——流式那几十帧里，这是整段正文里最费的一段。
+ *
+ * 记号带上「名册有多大」：工具是边跑边报文件的，先写下的那句话可能在后一颗工具
+ * 结果回来之后才认得出文件名。名册一变，记号就对不上，那一块自然会再接一次。
+ */
+function decorateFiles(md, outs) {
+  const cands = chatFileCands
+  const stamp = cands.length + '·' + outs.length
+  for (const block of md.querySelectorAll('.sw-mdblock')) {
+    if (block.getAttribute('data-fl') === stamp) continue
+    block.setAttribute('data-fl', stamp)
+    inlineFileChips(block, outs)
+    linkFiles(block, cands)
+  }
+}
+
 /** 药丸上那几个字。比卡片上那句话短——药丸要一眼扫过，长了就换行。 */
 const APPROVAL_CHIP_LABEL = {
   approved: () => t('已批准', 'approved'),
@@ -2531,7 +2761,7 @@ function updateRow(el, b, streaming) {
   } else {
     if (md.querySelector('.sw-typing')) md.innerHTML = ''
     syncMd(md, b.text, streaming)
-    if (inlined.size) inlineFileChips(md, outs)
+    decorateFiles(md, outs)
   }
 
   /**
@@ -2574,10 +2804,29 @@ function updateRow(el, b, streaming) {
 
   // 底下只留没被正文点过名的。
   const rest = outs.filter((f) => !inlined.has(f.path))
+  /**
+   * 读过、但正文里一个字也没提到的那些（见 readFiles）。
+   *
+   * 正文里接得上就不摆——那颗药丸离说这句话的地方隔着好几行，而链接就在句子里。
+   * 判据拿的是**正文源码**：DOM 那边要等这一帧画完才知道接上了没有，而药丸和正文
+   * 是同一帧决定的。
+   */
+  const wasRead = readFiles(tools)
+  // 扫正文只在真读过东西的时候做。绝大多数消息一次 read 都没有，而这个函数每帧
+  // 对每一行都会跑一次。
+  const linked = new Set(wasRead.length ? fileHits(b.text, chatFileCands).map((h) => h.file.path) : [])
+  const outPaths = new Set(outs.map((f) => f.path))
+  const reads = wasRead.filter((f) => !outPaths.has(f.path) && !linked.has(f.path))
+  const shownReads = reads.slice(0, MAX_READ_CHIPS)
+  const moreReads = reads.length - shownReads.length
   const sig =
     tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|') +
     '#' +
     rest.map((f) => f.path).join('|') +
+    '#' +
+    shownReads.map((f) => f.path).join('|') +
+    '+' +
+    moreReads +
     '#' +
     settled.map((a) => a.callId + ':' + approvalState(a)).join('|')
   if (chips.getAttribute('data-sig') !== sig) {
@@ -2585,8 +2834,10 @@ function updateRow(el, b, streaming) {
     chips.innerHTML =
       tools.map(chipHtml).join('') +
       rest.map(fileChipHtml).join('') +
+      shownReads.map(readChipHtml).join('') +
+      (moreReads > 0 ? readMoreHtml(moreReads) : '') +
       settled.map((a, i) => approvalChipHtml(a, tools.length + i)).join('')
-    chips.hidden = !tools.length && !rest.length && !settled.length
+    chips.hidden = !tools.length && !rest.length && !shownReads.length && !settled.length
     /**
      * 工具对象直接挂到节点上，悬浮窗按需取。
      *
@@ -2962,6 +3213,9 @@ function paintChat() {
   const folded = mergePending(fold(state.chatEvents, chatLive.get(state.chatSessionId)), state.chatSessionId)
   state.chatStatus = folded.status
   if (!thread) return
+  // 正文里的文件名要接回哪几个文件，整条会话算一次（见 chatFileCands）。
+  chatFileCands = fileCands(knownFiles(folded.blocks))
+  ensureWorkspaceTree()
 
   const stick = thread.getAttribute('data-touched') !== '1' || nearBottom(thread)
   syncThread(thread, folded, state.chatSessionId)
@@ -3350,6 +3604,186 @@ function chatMachinePanel() {
   }
 
   return rows.join('')
+}
+
+/* ── 工作区文件 ───────────────────────────────────────────────────────────
+ *
+ * 右栏的另一屏：这台席位工作区里到底有些什么。
+ *
+ * 为什么要有它：在此之前，一个文件想被人看见，必须先在对话里被提到——Bot 写出来的
+ * 那份报告、上传上去的那个附件。可工作区是**同一个员工所有席位共用的一个目录**，
+ * 上周那次对话生成的东西、今天早上日常任务跑出来的东西，全都在里面躺着，界面上却
+ * 一个入口都没有，人只能反过来问 Bot「我那份报告叫什么来着」。
+ *
+ * 一次只取一层（`/runtime/sessions/:id/workspace?path=`），展开哪个目录取哪个：
+ * 跑上几周的工作区底下是几千个文件，一次拉整棵树既慢又没人看得完。
+ */
+
+/**
+ * 文件那一屏开着、但根还没取过：补一次。
+ *
+ * 挂在每帧的重绘上，而不是在「点开那一屏」那一处调一次——进这一页的路不止一条
+ * （偏好里本来就开着、从别的页面切回来、席位刚接上），少接一条的表现就是那一屏
+ * 永远停在「载入中」。取过一次之后这里是一个 Map 查询，白跑也不值几个周期。
+ *
+ * **推迟一拍再取，不在这一帧里动手。** 这个函数是从 paintChat 里叫的，而
+ * loadWorkspaceDir 开跑之前会 render() 一次；在重绘中间再来一次整页重绘，会把
+ * paintChat 手上那个 #chat-thread 整个换掉，它接着往一个已经脱离文档的节点上画——
+ * 往前翻历史时那套「内容在上面长高了多少就把视线推回多少」的锚定，就是这么失灵的。
+ *
+ * 那道「取过没有」的闸这里也要判一遍（loadWorkspaceDir 里还有一道）：不判的话，
+ * 流式的每一帧都会排一个白跑的定时器出去。
+ */
+function ensureWorkspaceTree() {
+  if (!asidePref.open || asidePref.tab !== 'files') return
+  const cur = wsDirs()['']
+  if (cur && (cur.loading || cur.entries || cur.error)) return
+  setTimeout(() => {
+    // 这一拍之内人可能已经切走了。切走之后再取一份没人看的目录、还为它整页重绘一次，
+    // 会把新那一页上正在打字的输入框换掉。
+    if (!document.getElementById('chat-thread')) return
+    void loadWorkspaceDir('')
+  }, 0)
+}
+
+/**
+ * 换了一条会话（切 Bot、席位重建过）：手上这棵树是上一台席位的，作废。
+ */
+function resetWorkspaceTree() {
+  state.wsDirs = {}
+  state.wsOpen = {}
+  // 不在这里重取：那一屏开着的话，下一帧 paintChat 自己会补（见 ensureWorkspaceTree）。
+}
+
+/** 目录的展开状态与内容。key 是相对工作区根的路径，根目录是空串。 */
+function wsDirs() {
+  return state.wsDirs || (state.wsDirs = {})
+}
+
+/** 取一层。已经取过就不再取——除非 force（那是人按了刷新）。 */
+async function loadWorkspaceDir(path, force) {
+  const key = path || ''
+  const dirs = wsDirs()
+  const cur = dirs[key]
+  // 取过、正在取、或者上次取失败了，都不再自动重来——这个函数每次重绘都会被叫一次
+  // （见 paintChat），失败了还自动重试的话，一台没上线的席位会被打成一串重试。
+  // 重来的入口是那颗刷新。
+  if (!force && cur && (cur.loading || cur.entries || cur.error)) return
+  if (!state.chatSessionId) {
+    // 会话还没接上（席位刚起来那几十秒）。**说出来**，别画一棵空树让人以为工作区是空的。
+    dirs[key] = { loading: false, error: t('实例还没接上，稍后再看'), entries: null }
+    render()
+    return
+  }
+  dirs[key] = { ...(cur || {}), loading: true, error: '' }
+  render()
+  try {
+    const url = '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/workspace?path=' + encodeURIComponent(key)
+    const data = await api('GET', url)
+    dirs[key] = {
+      loading: false,
+      error: '',
+      entries: Array.isArray(data && data.entries) ? data.entries : [],
+      more: Number((data && data.more) || 0),
+    }
+  } catch (e) {
+    // 席位版本旧的时候这条路由根本不存在，席位回的是 404 加一句 `unknown endpoint`
+    // （见 bot 那边 /api/* 的兜底）。照抄给人看等于没说——这一屏是新的，旧席位上没有，
+    // 那就直说要更新（和文档提取那条同一个说法，见 openPreview）。
+    //
+    // **先看状态码。** 文案会被 errText() 过一遍译表，拿它当唯一判据是 data.js 明说过
+    // 别做的事；而「目录真的不见了」同样是 404，所以文案还得跟着一起看。
+    // 截一段就够。这条错在最坏的情况下不是一句话——反代在前面挡一下，回来的可能是
+    // 整页 HTML 错误页（api() 拿不到 JSON 就把响应体原样当消息），糊满右栏那一条。
+    const raw = (e.message || '').slice(0, 200)
+    dirs[key] = {
+      loading: false,
+      error: e.status === 404 && /unknown endpoint/i.test(raw)
+        ? t('这个席位还不支持列工作区文件（要更新 Bot 版本）', 'This seat cannot list workspace files yet (update the bot).')
+        : raw || t('列不出来'),
+      entries: null,
+    }
+  }
+  render()
+}
+
+/** 点一下目录：开就收、收就开，第一次展开时才去取内容。 */
+async function toggleWorkspaceDir(path) {
+  const key = path || ''
+  const open = state.wsOpen || (state.wsOpen = {})
+  if (open[key]) delete open[key]
+  else open[key] = true
+  render()
+  if (open[key]) await loadWorkspaceDir(key)
+}
+
+/**
+ * 刷新。**已经展开的那几层全部重取**，只重取根的话，人正看着的那一层照旧是旧的——
+ * 而按刷新的时刻，多半正是「Bot 刚说它写好了，我想看看在不在」。
+ */
+async function refreshWorkspaceTree() {
+  const keys = ['', ...Object.keys(state.wsOpen || {})]
+  await Promise.all([...new Set(keys)].map((k) => loadWorkspaceDir(k, true)))
+}
+
+/** 右栏那一屏。整页重绘时从 state 重画，没有自己的增量逻辑——它小，且不常动。 */
+function workspacePanel() {
+  const root = wsDirs()[''] || {}
+  const head = `<div class="sw-ws-head">
+    <h3>${t('工作区文件')}</h3>
+    <button type="button" class="btn btn-ghost btn-icon" data-act="ws-refresh"
+      aria-label="${esc(t('刷新'))}" title="${esc(t('刷新'))}">${svg(REFRESH, 15)}</button>
+  </div>`
+  return `<div class="sw-ws">${head}${wsBody(root)}</div>`
+}
+
+function wsBody(root) {
+  if (root.error) return `<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(root.error)}</div>`
+  if (!root.entries) return `<p class="sw-ws-note">${t('载入中…')}</p>`
+  if (!root.entries.length) return `<p class="sw-ws-note">${t('工作区还是空的。上传一个文件，或者让 Bot 写点什么。')}</p>`
+  return `<ul class="sw-ws-tree">${wsRows('', 0)}</ul>`
+}
+
+/** 一层的行。展开的目录把下一层接在自己后面，靠左边距表示深度。 */
+function wsRows(key, depth) {
+  const dir = wsDirs()[key] || {}
+  const out = []
+  for (const e of dir.entries || []) {
+    const open = Boolean((state.wsOpen || {})[e.path])
+    if (e.dir) {
+      out.push(
+        `<li><button type="button" class="sw-ws-row" data-act="ws-dir" data-path="${esc(e.path)}"
+          style="padding-left: ${8 + depth * 12}px" aria-expanded="${open}" title="${esc(e.path)}">
+          <span class="sw-ws-caret">${svg(open ? CHEVRON_SMALL_DOWN : CHEVRON_SMALL_RIGHT, 12)}</span>
+          <span class="sw-ws-name">${esc(e.name)}</span>
+        </button></li>`,
+      )
+      if (open) out.push(wsRows(e.path, depth + 1))
+      continue
+    }
+    // 文件点开走的是**和对话里那些药丸同一个预览**——同一个工作区、同一份字节。
+    out.push(
+      `<li><button type="button" class="sw-ws-row sw-ws-file" data-act="chat-preview"
+        data-path="${esc(e.path)}" data-name="${esc(e.name)}"
+        style="padding-left: ${8 + depth * 12}px" title="${esc(e.path)}">
+        <span class="sw-ws-caret">${ICON_FILE}</span>
+        <span class="sw-ws-name">${esc(e.name)}</span>
+        <small>${esc(fileSize(e.size))}</small>
+      </button></li>`,
+    )
+  }
+  if (dir.loading && !out.length) out.push(`<li><p class="sw-ws-note" style="padding-left: ${8 + depth * 12}px">${t('载入中…')}</p></li>`)
+  if (dir.error) out.push(`<li><p class="sw-ws-note sw-ws-err" style="padding-left: ${8 + depth * 12}px">${esc(dir.error)}</p></li>`)
+  // 截断要说出来（见 workspace/index.ts 的 list）：少列几条不说，看的人只会以为
+  // 那个文件根本不存在。
+  if (dir.more > 0) {
+    out.push(
+      `<li><p class="sw-ws-note" style="padding-left: ${8 + depth * 12}px">${esc(
+        t('还有 N 条没列出', 'N more not listed').replace('N', String(dir.more)),
+      )}</p></li>`,
+    )
+  }
+  return out.join('')
 }
 
 /* ── 内嵌桌面 ─────────────────────────────────────────────────────────────

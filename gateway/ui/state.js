@@ -242,6 +242,12 @@ const state = {
   /** 正在重放历史。期间只收不画，见 startChatStream。 */
   chatReplaying: false,
   /**
+   * 右栏那棵工作区文件树（见 chat.js 的 workspacePanel）。
+   * `wsDirs` 是「路径 → 这一层的内容」，`wsOpen` 是「哪几层展开着」。根目录的 key 是空串。
+   */
+  wsDirs: {},
+  wsOpen: {},
+  /**
    * 日常任务（右栏那一列）。`routinesBotId` 记着这几条是谁的——换 Bot 时先按它清空，
    * 免得上一颗 Bot 的任务留在屏上被人点。
    */

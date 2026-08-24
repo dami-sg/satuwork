@@ -798,6 +798,25 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   })
 
   /**
+   * 列这条会话所在席位的工作区里的一层目录（界面右栏那棵文件树）。
+   *
+   * 和下面那条预览同一道门：越界检查在席位那头，这里只证明「这个人有权打这台席位」。
+   */
+  router.get('/runtime/sessions/:id/workspace', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    const path = req.query.get('path') ?? ''
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/api/workspace/list?path=${encodeURIComponent(path)}`,
+      undefined,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
+  /**
    * 预览（或下载）这条会话所在席位的工作区里的一个文件。
    *
    * 上传进来的和 Bot 自己写出来的走同一条路——它们本来就在同一个目录里。越界检查在

@@ -828,6 +828,30 @@
 }
 .sw-filechip:hover { background: var(--secondary); border-color: var(--ring); }
 .sw-filechip svg { opacity: 0.6; }
+/* 读过的（不是产出的）淡一档：它不是这一轮的成果，只是「它看过这个」。 */
+.sw-refchip { border-style: dashed; color: var(--muted-foreground); }
+.sw-refchip:hover { color: var(--foreground); }
+
+/* ── 正文里的文件名 ───────────────────────────────────────────────────────
+   目录树里那一行、句子里带出来的一个文件名，点开就是预览。
+
+   长成链接而不是药丸：它嵌在正文（常常是代码块）中间，换成药丸会把那一片的对齐
+   和行距全撑坏，也就抄不走了。所以只改颜色和下划线，尺寸一概继承外面——
+   `font: inherit` 那一条是关键，按钮默认字体在代码块里会突然变成系统字体。 */
+.sw-filelink {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-accent-700);
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.sw-filelink:hover { text-decoration-style: solid; }
+.sw-filelink:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; border-radius: 2px; }
 
 .sw-file > small { flex: none; color: var(--muted-foreground); font-size: 11px; }
 
@@ -913,6 +937,45 @@
 .sw-steps .sw-shot img { object-position: top center; }
 /* 没摆下的那些。不是可点的东西，所以别长成可点的样子。 */
 .sw-stepmore { color: var(--muted-foreground); align-self: center; }
+
+/* ── 右栏里的工作区文件树 ─────────────────────────────────────────────────
+   行是按钮但看起来是一行文字：这一栏窄，任何边框和圆角都会把名字挤到换行。 */
+.sw-ws { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sw-ws-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.sw-ws-head h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  line-height: 30px;
+}
+.sw-ws-tree { list-style: none; margin: 0; padding: 0; }
+.sw-ws-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px 3px 8px;
+  border: 0;
+  border-radius: var(--radius-sm, 6px);
+  background: none;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.7;
+  text-align: left;
+  cursor: pointer;
+}
+.sw-ws-row:hover { background: var(--secondary); }
+.sw-ws-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.sw-ws-caret { flex: none; display: inline-flex; color: var(--muted-foreground); }
+/* 名字要能被截断，不能把整栏撑开——工作区里的文件名常常很长。 */
+.sw-ws-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-ws-row > small { flex: none; color: var(--muted-foreground); font-size: 11px; }
+.sw-ws-note { margin: 0; padding: 3px 8px; font-size: 12px; color: var(--muted-foreground); line-height: 1.6; }
+.sw-ws-err { color: var(--color-accent-700); }
 
 /* ── 右栏里的内嵌桌面 ─────────────────────────────────────────────────────
    槽是占位，真正的 iframe 在 body 上的常驻层里（见 chat.js 的 syncDesktop）——
