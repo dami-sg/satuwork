@@ -56,6 +56,13 @@ interface Snapshot {
   title: string
   body: string
   truncated: boolean
+  /**
+   * 这一页上的链接，**结构化的那一份**（正文里每条 link 行也各自带着地址）。
+   *
+   * 单独带一份是为了让上层不必回头去正则扫自己写给模型的散文——那条路每次改措辞
+   * 都会断，而它断掉的样子是「界面上那张卡突然空了」，没有任何报错。
+   */
+  links?: { text: string; url: string }[]
 }
 
 interface Located {
@@ -143,6 +150,8 @@ export class BrowserService extends Service {
    * 只需要在回执上加一句话。
    */
   private opened = 0
+  /** 上一次快照看到的链接。见 takeLinks。 */
+  private links: { text: string; url: string }[] = []
   /** 上一次快照给出的 ref → 名字。**策略要同步问「点的是什么」，所以缓存在这边。** */
   private labels = new Map<string, { name: string; role: string }>()
   /** 已经发到第几号 ref。跳转之后接着往下发，见 page.ts 里 snapshot 的说明。 */
@@ -695,6 +704,7 @@ export class BrowserService extends Service {
       throw new ScopeError(`这一页是 ${snap.url}，${bad}。内容没有取回来。`)
     }
     this.url = snap.url
+    if (Array.isArray(snap.links)) this.links = snap.links
     // ref → 名字。**策略靠这张表判「点的是不是提交」**，所以它必须和模型看到的那份
     // 快照是同一次的产物；从别处现取会出现「卡片上写的按钮和它要点的不是一个」。
     this.labels.clear()
@@ -884,6 +894,18 @@ export class BrowserService extends Service {
    * 给策略的事后审计用：提交判据漏掉的那一次（只有图标、没有名字的删除按钮），
    * 至少在会话日志里留得下「这次点击发出了一条 POST」。
    */
+  /**
+   * 上一次快照看到的链接。**取走即清零**——它属于那一次动作，不该跟着下一次一起报。
+   *
+   * 和下载那一份同一个形状（takeDownloads），因为它们在界面上是同一类东西：
+   * 这次调用产出了什么可以点的。
+   */
+  takeLinks(): { text: string; url: string }[] {
+    const out = this.links
+    this.links = []
+    return out
+  }
+
   /** 上一次动作之后新开出来的标签页数。取走即清零。 */
   takeOpened(): number {
     const n = this.opened

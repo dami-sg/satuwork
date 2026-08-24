@@ -866,7 +866,10 @@ export class AgentService extends Service {
         // 自己写了什么；details 是 pi 留给「日志与界面渲染」的那一格，正好是这个用途。
         return {
           content: [{ type: 'text' as const, text: result.text }],
-          details: result.files?.length ? { files: result.files } : undefined,
+          details:
+            result.files?.length || result.links?.length
+              ? { ...(result.files?.length ? { files: result.files } : {}), ...(result.links?.length ? { links: result.links } : {}) }
+              : undefined,
         }
       },
     })) as any
@@ -1087,6 +1090,7 @@ export class AgentService extends Service {
             text: textOf(event.result),
             failed: Boolean(event.isError),
             files: filesOf(event.result),
+            links: linksOf(event.result),
           })
           break
       }
@@ -1107,6 +1111,21 @@ function textOf(result: any): string {
  * 逐字段挑而不是整个 details 塞进日志：details 是 `unknown`，工具想放什么都行，
  * 原样落盘等于让任意一个工具决定会话日志的形状。
  */
+/**
+ * 工具报出来的网页链接（见 tools/index.ts 的 `ToolResult.links`）。
+ *
+ * 和 filesOf 同一条理由逐字段挑：details 是 `unknown`，原样落盘等于让任意一个工具
+ * 决定会话日志的形状。
+ */
+function linksOf(result: any): { text: string; url: string }[] | undefined {
+  const raw = result?.details?.links
+  if (!Array.isArray(raw)) return undefined
+  const links = raw
+    .filter((l: any) => typeof l?.url === 'string' && l.url)
+    .map((l: any) => ({ text: typeof l.text === 'string' ? l.text : '', url: l.url as string }))
+  return links.length ? links : undefined
+}
+
 function filesOf(result: any): { path: string; name: string }[] | undefined {
   const raw = result?.details?.files
   if (!Array.isArray(raw)) return undefined

@@ -73,6 +73,8 @@ const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>测试页<
   <div style="height:2000px"></div>
   <button id="deep">底下的按钮</button>
   <a id="pop" href="/second" target="_blank">开新标签页</a>
+  <a id="out" href="http://other.example.test/doc">站外那一条</a>
+  <a id="frag" href="#top">页内锚点</a>
 </main></body></html>`
 
 const server = createServer((req, res) => {
@@ -329,6 +331,26 @@ try {
   // 才是边界，但没有标签的话那句话没有指代对象。
   const framed = await run('browser_snapshot')
   const framedRead = await run('browser_read')
+  /**
+   * **链接要把地址带出来。**
+   *
+   * 早先快照只写「- link "名字" [@e12]」——名字有、地址没有。后果是模型手上从来就没有
+   * 链接可给：让它列十个搜索结果，它只能给出十个标题，人拿到之后还得自己再搜一遍；
+   * 界面上也无从展示，因为压根没有 URL 这个东西。
+   */
+  const linkSnap = await run('browser_snapshot')
+  out.links = {
+    '正文里那条 link 带着地址': /link "开新标签页" \[@e\d+\] http:\/\//.test(linkSnap.text),
+    // 结构化那一份是给界面用的，模型不看——不能只写进正文。
+    结构化带出来了: Array.isArray(linkSnap.links) && linkSnap.links.length > 0,
+    站外那条也在: (linkSnap.links || []).some((l) => l.url.includes('other.example.test/doc')),
+    带上了链接文字: (linkSnap.links || []).some((l) => l.text === '站外那一条'),
+    // 页内锚点不是链接：它不换页，摆进来只会把那张卡撑满。
+    页内锚点不算: !(linkSnap.links || []).some((l) => l.url.includes('#top')),
+    // 取走即清零，不然这一批会跟着下一次调用再报一遍。
+    取走就清零: !((await run('browser_wait_for', { time: 10 })).links || []).length,
+  }
+
   out.frame = {
     快照包了标签: framed.text.includes('<page_content url=') && framed.text.includes('</page_content>'),
     正文包了标签: framedRead.text.includes('<page_content url='),

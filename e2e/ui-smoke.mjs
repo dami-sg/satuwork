@@ -91,6 +91,55 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(tools[0].result === '搜到了', `结果配错了：${tools[0].result}`)
     })
 
+    await test('网页链接折进消息里，画成可点的药丸', async () => {
+      /**
+       * 让 Bot 列十个搜索结果，它回答里多半只写标题——模型天然倾向于写得简短，而人要的
+       * 恰恰是点进去。所以链接走**结构化**那条路（和产出文件同一条），不指望模型愿意
+       * 把地址抄进正文。
+       */
+      const ui = await boot()
+      const ev = (seq, type, data) => ({ seq, time: 1, type, data })
+      const folded = ui.fold([
+        ev(1, 'user/message', { message: { content: [{ type: 'text', text: '搜一下' }] }, source: { kind: 'user' } }),
+        ev(2, 'turn/start', { turn: 1 }),
+        ev(3, 'tool/call', { turn: 1, step: 1, callId: 'c1', name: 'browser_snapshot', arguments: '{}' }),
+        ev(4, 'tool/result', {
+          turn: 1,
+          step: 1,
+          callId: 'c1',
+          text: '一页东西',
+          failed: false,
+          links: [
+            { text: '第一个视频', url: 'https://example.com/a' },
+            { text: '第二个视频', url: 'https://example.com/b' },
+          ],
+        }),
+        ev(5, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: '看这个' }] } }),
+        ev(6, 'turn/end', { turn: 1, reason: 'completed' }),
+      ])
+      const tools = folded.blocks.find((b) => b.kind === 'assistant')?.tools || []
+      assert(tools[0]?.links?.length === 2, `链接没折进来：${JSON.stringify(tools[0]?.links)}`)
+
+      // 老日志没有这个字段，界面要退回「只显示工具名」，不能崩。
+      const noLinks = ui.pageLinks([{ name: 'bash' }])
+      assert(Array.isArray(noLinks) && !noLinks.length, '没有 links 的老日志把它弄崩了')
+
+      // 同一个地址在一轮里被看到两次只该出现一次——人关心的是「通向哪儿」，不是被看了几遍。
+      const deduped = ui.pageLinks(tools.concat(tools))
+      assert(deduped.length === 2, `没去重：${deduped.length}`)
+
+      const html = ui.linkChipHtml(deduped[1])
+      assert(html.includes('sw-linkchip'), `不是链接药丸：${html}`)
+      assert(html.includes('第二个视频'), `没写链接文字：${html}`)
+      assert(html.includes('href="https://example.com/b"'), `地址没带上：${html}`)
+      // 开新标签页，而且不把来路带出去——这是站外链接，和正文里的 markdown 链接同一套。
+      assert(html.includes('target="_blank"'), '没开新标签页')
+      assert(html.includes('rel="noopener noreferrer nofollow"'), 'rel 没带全')
+      // 没有文字的链接（只有图标那种）退回显示地址，不能显示成一颗空药丸。
+      const bare = ui.linkChipHtml({ text: '', url: 'https://example.com/c' })
+      assert(bare.includes('>https://example.com/c<'), `空文字没退回显示地址：${bare}`)
+    })
+
     await test('确认卡：还等着的摊开，有结论的收成药丸', async () => {
       /**
        * 摊开是给「你要批的到底是什么」用的——参数看不见就只能凭信任点。可人点完之后
