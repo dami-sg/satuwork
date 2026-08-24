@@ -437,6 +437,13 @@ window.SATU_I18N = {
   '装上机器管家并配对之后，建账号、装包、起桌面全归它——Gateway 不保存任何登录这台机器的凭据。':
     'Once the machine manager is installed and paired it handles accounts, packages and desktops — the Gateway keeps no credentials that can log into the machine.',
   全部升级: 'Upgrade all',
+  // 版本都最新时那颗按钮换成的第二副面孔：不升级，照现状把席位重走一遍部署
+  // （为的是让 bot.env 里那份 Gateway 地址跟着重写，见 pages-machines.js 的 botBtn）。
+  全部重铺: 'Reinstall all',
+  '处理中…': 'Working…',
+  '席位连的 Gateway': 'Gateway the seats use',
+  '没配 GATEWAY_PUBLIC_URL，这是猜的': 'GATEWAY_PUBLIC_URL is unset — this is a guess',
+  '重新部署这个席位？': 'Redeploy this seat?',
   '还没有部署 Bot': 'No bots deployed yet',
   '已下指令，等机器换版': 'Requested; waiting for the machine to swap',
   机器: 'Machine',
@@ -547,8 +554,8 @@ window.SATU_I18N = {
     'Empty = take it back as an unassigned machine. If the new company has none, this becomes its default machine.',
   '账号位算的是激活账号数，不是 Bot 数——一个员工的多个 Bot 落在同一台机器上，只占一个账号位。容量调小到低于当前占用不会赶人，只是不再往上放。':
     'Account slots count active accounts, not bots — one member running several bots on the same machine takes a single slot. Lowering the cap below current usage evicts nobody; it only stops new placements.',
-  '一台机器上同时躺着几个 Bot 版本不是错误——有的部署得早。「全部升级」把这台机器上的 Bot 逐个重铺到最新版，正在进行的对话会断。':
-    'Several bot versions on one machine is not an error — some were deployed earlier. "Upgrade all" reinstalls each bot on this machine to the latest version; ongoing conversations drop.',
+  '一台机器上同时躺着几个 Bot 版本不是错误——有的部署得早。有新版本时这颗按钮是「全部升级」，把它们逐个铺到最新版；没有新版本时它是「全部重铺」，每个席位仍用自己那一版重走一遍部署——为的是让部署时写死的那些配置（比如席位连的 Gateway 地址）跟着刷新。两种都会重启席位，正在进行的对话会断。':
+    'Several bot versions on one machine is not an error — some seats were deployed earlier. When a newer release exists this button reads "Upgrade all" and moves them to it one by one; when none does it reads "Reinstall all" and re-runs the deploy for each seat on its own version — so that settings frozen at deploy time (such as the Gateway address the seat talks to) are rewritten. Either way seats restart and conversations in flight drop.',
   '只从 Gateway 上抹掉这条记录，不碰机器本身——上面的机器管家还跑着，要停得上去停。要让它重新回来，在机器上重跑一次配对。':
     'This only erases the record from the Gateway. The machine itself is untouched — its manager keeps running and must be stopped there. To bring it back, re-run pairing on the machine.',
   有效期至: 'Valid until',

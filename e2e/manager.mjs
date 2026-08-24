@@ -953,6 +953,56 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       }
     })
 
+    await test('Gateway 换了地址：入站那一跳顺带把新地址教给管家', async () => {
+      /**
+       * 这条路解的是一个死结：管家手上那份 gatewayUrl 是**配对那天写死的**，Gateway
+       * 换了对外地址之后，心跳就一直打向一个不存在的地方——而它唯一能被告知这件事的
+       * 通道，恰恰是它自己打不出去的那一条。更糟的是这件事一个字都不报（打不通那一路
+       * 是 catch{}），界面上只有一盏「失联」灯，人只能上机器去改 /etc/satuwork/manager.json。
+       *
+       * 所以反过来走：Gateway → 管家这一跳还通着（机器没挪窝），就从这条告诉它。
+       */
+      const stateFile = join(MGR_HOME, 'manager.json')
+      const urlOf = () => JSON.parse(readFileSync(stateFile, 'utf8')).gatewayUrl
+      const tell = (url, opts = {}) =>
+        fetch(`${mgrBase}/health`, {
+          headers: {
+            ...(opts.anon ? {} : { authorization: 'Bearer ' + machineTok }),
+            ...(url ? { 'x-satuwork-gateway-url': url } : {}),
+          },
+        })
+
+      assert(urlOf() === gwBase, `起点就不对：${urlOf()}`)
+
+      // ① 形状不对的一律不认。这个值会被拼成心跳和拉包的 URL 前缀，**保持原样**比
+      //    采信一个半通不通的地址安全得多。
+      for (const bad of ['not a url', 'ftp://10.0.0.9', `${gwBase}/path`, 'http://u:p@10.0.0.9', '']) {
+        await tell(bad)
+        assert(urlOf() === gwBase, `坏地址被采信了：${JSON.stringify(bad)} → ${urlOf()}`)
+      }
+
+      // ② 没票的说话不算数——它在 requireMachine **之后**才被读到。
+      const anon = await tell('http://10.0.0.9:3080', { anon: true })
+      assert(anon.status === 401, `无票该 401，实际 ${anon.status}`)
+      assert(urlOf() === gwBase, `无票也改动了状态：${urlOf()}`)
+
+      // ③ 带票 + 形状对 → 当场改、当场落盘。**落盘**是关键：重启之后还得是新地址。
+      const moved = 'http://10.0.0.9:3080'
+      await tell(moved)
+      assert(urlOf() === moved, `没学到新地址：${urlOf()}`)
+
+      // ④ 真实的修复路径：**没人上机器**，只是在界面上按了一下「保存并探活」——
+      //    那一跳带着 GATEWAY_PUBLIC_URL 过去，管家就自己回来了。
+      const machineId = (await req(gwBase, 'GET', `/platform/orgs/${orgId}/machine`, { token: ownerTok })).json.machine.id
+      const probe = await req(gwBase, 'PUT', `/platform/machines/${machineId}/host`, {
+        token: ownerTok,
+        body: { host: mgrBase },
+      })
+      assert(probe.status === 200, `探活 ${probe.status} ${probe.text}`)
+      assert(probe.json.reachable === true, `探活没通：${probe.json.error}`)
+      assert(urlOf() === gwBase, `一次探活之后还没回来：${urlOf()}`)
+    })
+
     await test('管家自己的日志：无票 401，有票给得出结构', async () => {
       // 部署失败、升级卡住、配对回拨不通，全写在管家的 journal 里——席位的日志里
       // 一个字都没有。平台端排查「这台机器怎么了」看的是这条。

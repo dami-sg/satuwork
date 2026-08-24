@@ -62,7 +62,7 @@ bot 那条**原样透传 `authorization`**——bot 自己要验席位票（`sat
 
 ```
 /etc/satuwork/manager.env    安装脚本写的启动参数（配对成功后会抹掉配对码）
-/etc/satuwork/manager.json   配对结果：machineId、smt_、Gateway 公钥。0600
+/etc/satuwork/manager.json   配对结果：machineId、smt_、Gateway 地址与公钥。0600
 /etc/satuwork/seats.json     席位名册。反代靠它把 seatId 翻成端口
 /opt/satuwork/manager/
   releases/<version>/        解开的管家包
@@ -70,6 +70,33 @@ bot 那条**原样透传 `authorization`**——bot 自己要验席位票（`sat
   previous -> releases/W     回滚指回它
 /opt/satuwork/releases/      bot 发布包，按版本全机共享
 ```
+
+## Gateway 换了地址
+
+`manager.json` 里的 `gatewayUrl` 是**配对那天写死的**，心跳、拉包、自升级都用它。
+Gateway 换了对外地址之后，这一份还指着旧地址，于是心跳打向一个不存在的地方——而且
+**一个字都不会报**：打不通那一路是静默重试，journal 里干干净净，平台那一页只有一盏
+「失联」灯。
+
+不用上机器改。管家在**带机器票的控制类调用**里会顺带认一下新地址
+（`x-satuwork-gateway-url`，见 [src/index.ts](src/index.ts) 的 `adoptGatewayUrl`）：
+在平台的机器页上按一下「保存并探活」，或者重铺任意一个席位，它就自己回来了，并当场
+按新地址敲一次心跳。
+
+**反代那条路不算**（`/seats/:id/bot/*`、桌面）：它走的是 proxy.ts 自己那道
+`machineTokenOk`，根本不经过 `requireMachine`，所以聊天流量再多也不会把地址教给它。
+会 adopt 的是 `/health`、`/metrics`、`/logs`、`/seats*` 这几条——也就是「有人在平台上
+动了一下这台机器」的那些时刻。
+
+- 只有过了 `requireMachine` 才会被读到——说话的人拿得出 `smt_`。
+- 形状不对（带路径、不是 http/https）一律不认，保持原样。
+- Gateway 那侧只在**明确配过** `GATEWAY_PUBLIC_URL` 时才发这个头：没配时它会回落成
+  `GATEWAY_HOST:GATEWAY_PORT`（多半是 `127.0.0.1:3080`），拿那个去教管家等于当场把
+  机器打死。
+
+**席位那份是另一回事。** 每个席位的 `<seatDir>/bot.env` 里也冻着一份 `GATEWAY_URL`，
+那是部署那一刻写的。要刷新它得重铺一遍席位——平台机器页上每行的「重新部署」、或者
+版本面板上那颗「全部重铺」。
 
 ## 还原
 

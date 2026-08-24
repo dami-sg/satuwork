@@ -1,5 +1,5 @@
 import { hostname } from 'node:os'
-import { bootConfig, managerVersion, PROTOCOL, readState, type ManagerState } from './config.ts'
+import { bootConfig, managerVersion, PROTOCOL, readState, writeState, type ManagerState } from './config.ts'
 import { HttpError, json, listen, Router, type Req } from './http.ts'
 import { attachUpgrade, proxyIntercept } from './proxy.ts'
 import { bootChallenge, pairIfNeeded } from './pair.ts'
@@ -45,6 +45,80 @@ function requireMachine(req: Req): void {
   let diff = 0
   for (let i = 0; i < want.length; i++) diff |= given.charCodeAt(i) ^ want.charCodeAt(i)
   if (diff !== 0) throw new HttpError(401, 'invalid machine credential')
+  // 票对了才听它说地址。顺序不能反——见 adoptGatewayUrl。
+  adoptGatewayUrl(req)
+}
+
+/**
+ * 地址的形状。`http(s)://host[:port]`，不许带路径、查询、用户名口令。
+ *
+ * 这个值会被拼成心跳、拉包、自升级的 URL 前缀，所以宁可挑剔：认不出来的一律当没说，
+ * **保持原样**比采信一个半通不通的地址安全得多。
+ */
+function originOf(raw: string): string {
+  const u = new URL(raw.trim())
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('protocol')
+  if ((u.pathname && u.pathname !== '/') || u.search || u.hash || u.username || u.password) throw new Error('shape')
+  return `${u.protocol}//${u.host}`
+}
+
+/**
+ * 顺路认一下「Gateway 现在在哪」。
+ *
+ * **这是一个死结的唯一解法。** 管家手上那份 `gatewayUrl` 是配对那天写死的
+ * （/etc/satuwork/manager.json）。Gateway 换了对外地址之后，心跳就一直打向一个不存在
+ * 的地方——而更糟的是这件事**一个字都不会报**：打不通那一路是 `catch {}`（见
+ * heartbeat），journal 里干干净净，界面上只有一盏「失联」灯。要告诉它新地址，唯一还
+ * 通着的通道恰恰是它自己打不出去的那条的反方向：Gateway → 管家。那就从这条说。
+ *
+ * **信任面没有变大。** 这个头只有过了上面那道 `requireMachine` 才会被读到，也就是说
+ * 说话的人拿得出 `smt_`；而部署请求的 body 里本来就带着 `gatewayUrl`，管家一直原样把
+ * 它写进席位的 bot.env（见 seats.ts 的 deploySeat）。差别只是这一次它也写给自己。
+ *
+ * **改了就立刻敲一次门**：不然最坏要等满一轮心跳（低频那一档是 5 分钟）界面上才会
+ * 变绿，而按按钮的人正盯着那盏灯。顺带把 401 计数清掉——换地址之后，之前那些拒收
+ * 是上一任 Gateway 的事。
+ */
+function adoptGatewayUrl(req: Req): void {
+  const raw = String(req.headers['x-satuwork-gateway-url'] || '').trim()
+  if (!raw || !state) return
+  let next: string
+  try {
+    next = originOf(raw)
+  } catch {
+    return
+  }
+  if (next === state.gatewayUrl) return
+  const prev = state.gatewayUrl
+  /**
+   * **先落盘，再改内存。**
+   *
+   * 反过来的话，一次写不进去（盘满是这类机器上真会发生的事，logdisk.ts 存在的理由就是
+   * 它）会留下最难查的那种状态：内存里已经是新地址、下一次调用因此提前 return，于是
+   * **再也不会有第二次尝试**；界面上看着好了，重启回来 manager.json 还是旧地址，机器
+   * 又一次静默失联——正是这条路要消灭的那类故障。
+   *
+   * 而且失败不该把调用方那次部署打成 500：那会让人去查一个根本不存在的部署故障。
+   * 喊一句，然后当这次没听见——下一次调用还会再试。
+   */
+  const moved = { ...state, gatewayUrl: next }
+  try {
+    writeState(moved)
+  } catch (e) {
+    console.error(
+      `satuwork-manager: 收到新的 Gateway 地址 ${next}，但写不进 manager.json（${e instanceof Error ? e.message : String(e)}）。` +
+        '这次不改，仍按旧地址心跳；盘满或文件系统只读的话先处理那个。',
+    )
+    return
+  }
+  state = moved
+  authFails = 0
+  if (idled) {
+    idled = false
+    retime(HEARTBEAT_MS)
+  }
+  console.log(`satuwork-manager: Gateway 换地址了 ${prev} → ${next}（由一次带机器票的入站调用告知），立刻按新地址敲一次心跳`)
+  void heartbeat()
 }
 
 function strField(body: unknown, key: string): string {
