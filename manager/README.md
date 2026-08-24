@@ -88,6 +88,11 @@ Gateway 换了对外地址之后，这一份还指着旧地址，于是心跳打
 会 adopt 的是 `/health`、`/metrics`、`/logs`、`/seats*` 这几条——也就是「有人在平台上
 动了一下这台机器」的那些时刻。
 
+**但那个头照样会被转下去。** `forwardHeaders` 只摘 host / connection /
+x-satuwork-machine / cookie，所以反代过去的聊天流量上它还在——链路末端的 bot 自己会认
+（见 [bot/README.md](../bot/README.md) 的「Gateway 换了地址」）。席位那份 `GATEWAY_URL`
+过期的症状和管家不一样：不是一盏失联灯，是每次模型调用都 `fetch failed`。
+
 - 只有过了 `requireMachine` 才会被读到——说话的人拿得出 `smt_`。
 - 形状不对（带路径、不是 http/https）一律不认，保持原样。
 - Gateway 那侧只在**明确配过** `GATEWAY_PUBLIC_URL` 时才发这个头：没配时它会回落成

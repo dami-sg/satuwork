@@ -246,7 +246,7 @@ CPU 占用和出网速率允许是 `null`（第一次采样只存基准、计数
 - 员工能看见：桌面地址、linuxUser、seatId、共享目录、botVersion。看不见 CDP、sudo、LLM 密钥。**VNC 密码不再显示在对话页右栏**——票里已经带着它自动填进 noVNC，界面上留一行等于把随时可用的凭据摆在屏幕上；接口仍然返回，管理员在公司详情的席位卡里看得到
 - Bot 环境必有 `SATUWORK_BOT_ID`。目录 `GET /runtime/catalog?botId=`，只钉那一颗，不种本地 `default`
 - Bot 运行包在 Gateway 按版本发布；部署指定版本。公司可批量更新已部署的 pair：`POST /platform/orgs/:id/runtime/update`
-- **「Gateway 在哪」在机器上冻着两份**：管家的 `/etc/satuwork/manager.json`（配对那天写的，心跳用它）和每个席位的 `bot.env`（部署那一刻写的，值来自 Gateway 进程的 `GATEWAY_PUBLIC_URL`）。Gateway 换了对外地址之后两份都是旧的，而且都不报错。前者由 Gateway 每次入站调用捎的 `x-satuwork-gateway-url` 自动纠正（只在明确配过 `GATEWAY_PUBLIC_URL` 时才发，见 manager/README.md）；后者要重铺席位才会重写
+- **「Gateway 在哪」在机器上冻着两份**：管家的 `/etc/satuwork/manager.json`（配对那天写的，心跳用它）和每个席位的 `bot.env`（部署那一刻写的，值来自 Gateway 进程的 `GATEWAY_PUBLIC_URL`）。Gateway 换了对外地址之后两份都是旧的，而且**都不报错**——管家表现成一盏「失联」灯，席位表现成每次模型调用都 `fetch failed`。两份现在都由 Gateway 每次入站调用捎的 `x-satuwork-gateway-url` 自动纠正：管家在 `requireMachine` 之后认（见 manager/README.md），席位在席位票验过之后认（见 bot/README.md 与 `bot/src/gateway-url.ts`），各自先落盘再改内存。**只在明确配过 `GATEWAY_PUBLIC_URL` 时才发这个头**，免得拿一个按 Host 猜出来的地址教坏机器
 - `$SATUWORK_HOME` 是 `/home/{linuxUser}/.satuwork/{seatId}`，席位之间不共用
 
 **共享的只有 `/home/{linuxUser}/work`。** 这是同一员工的多个 bot 看见同一批资料的唯一入口，靠 uid 相同实现，没有任何代码。其余一切按席位隔离——Chrome profile（同一个 `--user-data-dir` 起第二个 Chrome 会把网页开到别的席位屏上）、`XDG_RUNTIME_DIR`（logind 给的 `/run/user/{uid}` 是按 uid 的，会撞）、`XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME`（plank、dconf、picom、`.desktop` 跟着一起隔离）、`satuwork.db` 与 `sessions/`（`settings/change` 事件只在进程内广播，共用一份库会让另一个进程一直读到内存里的旧值）。

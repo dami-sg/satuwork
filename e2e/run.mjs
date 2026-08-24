@@ -35,6 +35,7 @@ import { runTurnImages } from './turn-images.mjs'
 import { runMentions } from './mentions.mjs'
 import { runHistoryTime } from './history-time.mjs'
 import { runCompact } from './compact.mjs'
+import { runGatewayUrl } from './gateway-url.mjs'
 import { runMaxSteps } from './max-steps.mjs'
 import { runToolCalls } from './toolcalls.mjs'
 import { runShutdown } from './shutdown.mjs'
@@ -3194,6 +3195,7 @@ async function main() {
     await runMentions({ root, test, assert, log })
     await runHistoryTime({ root, test, assert, log })
     await runCompact({ root, test, assert, log })
+    await runGatewayUrl({ root, test, assert, log })
     await runMaxSteps({ root, test, assert, log })
     await runToolCalls({ root, test, assert, log })
     await runGuards({ root, test, assert, log })

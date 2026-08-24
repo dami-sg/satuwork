@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { timingSafeEqual } from 'node:crypto'
+import { adoptGatewayUrl } from '../gateway-url.ts'
 
 /**
  * 入站闸门。**这个进程认的唯一一把凭据是席位票（`sat_`）。**
@@ -75,7 +76,19 @@ export function apply(ctx: Context) {
     const path = guardPath(req.path)
     if (path.startsWith(INTERNAL_SESSIONS)) return next()
     if (!path.startsWith('/api/') || PUBLIC.has(path)) return next()
-    if (bearerMatches(req.headers.get('authorization'), seatToken())) return next()
+    if (bearerMatches(req.headers.get('authorization'), seatToken())) {
+      /**
+       * 票验过了，顺路认一下「Gateway 现在在哪」（见 ../gateway-url.ts 的长注释）。
+       *
+       * **必须在这一行之后**：这个头能改这个进程往外打的地址，凭据门槛就该和
+       * `/api/*` 的其余部分一样高——说得出 `sat_` 的人本来就能让它做任何事。
+       *
+       * 摆在守卫里而不是某条路由里，是因为它要的是「有请求打进来」这件事本身，
+       * 而不是某个具体的接口；地址过期时**能打进来的恰恰只剩下这条入站路**。
+       */
+      adoptGatewayUrl(req.headers.get('x-satuwork-gateway-url'), ctx.logger)
+      return next()
+    }
     res.status = 401
     res.json({ error: '需要席位凭证', code: 'unauthenticated' })
   })
