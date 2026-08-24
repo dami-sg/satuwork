@@ -699,6 +699,48 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(legacy.status === 200, `无后缀的老版本不该被拦，实际 ${legacy.status} ${legacy.text}`)
     })
 
+    await test('重铺一个没记版本的席位：按机器架构挑包，不是按「平台上最新的那个」', async () => {
+      /**
+       * 席位那一行的 botVersion 可能是空的（老数据、上一次部署失败没写上）。重铺这种
+       * 席位时**不能自己兜一个 latestBotRelease()**：那个查询不看架构，而 deploySeat 对
+       * 显式指定的版本是要过架构关的——于是兜出来的 x64 包会被它自己 409 掉，这个席位
+       * 永远重铺不了。不传版本，交给 deploySeat 按 machine.arch 去挑，才挑得对。
+       *
+       * 这时候的现场正好：机器自报 arm64，而平台上最新的是后传的 0.3.0-x64。
+       */
+      const require = createRequire(new URL('../gateway/package.json', import.meta.url))
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      try {
+        await client.query('set search_path to e2e_machine')
+        const seat = await client.query(
+          'select "machineId" from seat_runtimes where "accountId" = $1 and "botId" = $2',
+          [memberId, botA],
+        )
+        assert(seat.rowCount === 1, `没找到 botA 的席位行：${seat.rowCount}`)
+        await client.query('update seat_runtimes set "botVersion" = null where "accountId" = $1 and "botId" = $2', [
+          memberId,
+          botA,
+        ])
+
+        const r = await req(gwBase, 'POST', `/platform/machines/${seat.rows[0].machineId}/runtime/update`, {
+          token: ownerTok,
+          body: { force: true },
+        })
+        assert(r.status === 200, `重铺 ${r.status} ${r.text}`)
+        const mine = r.json.results.find((x) => x.botId === botA && x.accountId === memberId)
+        assert(mine, `结果里没有这个席位：${r.text.slice(0, 300)}`)
+        assert(!mine.error, `没记版本的席位重铺失败了：${mine.error}`)
+        assert(
+          mine.botVersion === '0.3.0-arm64',
+          `该按机器架构挑 arm64 的包，实际 ${mine.botVersion}（挑成 x64 就是自己兜了个不看架构的最新版）`,
+        )
+      } finally {
+        await client.end().catch(() => {})
+      }
+    })
+
     await test('owner POST /platform/orgs/:id/runtime/update 返回结果', async () => {
       const r = await req(gwBase, 'POST', `/platform/orgs/${orgId}/runtime/update`, {
         token: ownerTok,

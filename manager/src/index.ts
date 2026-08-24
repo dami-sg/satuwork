@@ -90,8 +90,28 @@ function adoptGatewayUrl(req: Req): void {
   }
   if (next === state.gatewayUrl) return
   const prev = state.gatewayUrl
-  state = { ...state, gatewayUrl: next }
-  writeState(state)
+  /**
+   * **先落盘，再改内存。**
+   *
+   * 反过来的话，一次写不进去（盘满是这类机器上真会发生的事，logdisk.ts 存在的理由就是
+   * 它）会留下最难查的那种状态：内存里已经是新地址、下一次调用因此提前 return，于是
+   * **再也不会有第二次尝试**；界面上看着好了，重启回来 manager.json 还是旧地址，机器
+   * 又一次静默失联——正是这条路要消灭的那类故障。
+   *
+   * 而且失败不该把调用方那次部署打成 500：那会让人去查一个根本不存在的部署故障。
+   * 喊一句，然后当这次没听见——下一次调用还会再试。
+   */
+  const moved = { ...state, gatewayUrl: next }
+  try {
+    writeState(moved)
+  } catch (e) {
+    console.error(
+      `satuwork-manager: 收到新的 Gateway 地址 ${next}，但写不进 manager.json（${e instanceof Error ? e.message : String(e)}）。` +
+        '这次不改，仍按旧地址心跳；盘满或文件系统只读的话先处理那个。',
+    )
+    return
+  }
+  state = moved
   authFails = 0
   if (idled) {
     idled = false

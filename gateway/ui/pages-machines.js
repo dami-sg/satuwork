@@ -746,7 +746,7 @@ function machineVersionPanel(card) {
    */
   const reflow = !card.botOutdated
   const botBtn = card.seats
-    ? `<button type="button" class="btn" data-act="machine-bot-update" data-machine="${esc(m.id)}" data-mode="${reflow ? 'reflow' : 'upgrade'}" ${state.updatingRuntime ? 'disabled' : ''}>${state.updatingRuntime ? t('处理中…') : reflow ? t('全部重铺') : t('全部升级')}</button>`
+    ? `<button type="button" class="btn" data-act="machine-bot-update" data-machine="${esc(m.id)}" data-mode="${reflow ? 'reflow' : 'upgrade'}" ${state.busy || state.updatingRuntime ? 'disabled' : ''}>${state.updatingRuntime ? t('处理中…') : reflow ? t('全部重铺') : t('全部升级')}</button>`
     : ''
   return `<div class="satu-panel">
     <span class="satu-panel-title">${t('版本')}</span>
@@ -840,9 +840,15 @@ function machineSeatsPanel(card) {
                要修的就是它（写进去的是哪个地址，见上面那一行「席位连的 Gateway」）。
 
                没有主人的席位不画：那种行连 Bot 都没有了，重铺无从铺起，它要的是「清理」。
-               公司也得有——接口是挂在公司下面的（POST /orgs/:id/accounts/:id/deploy）。 */ ''}
+               公司也得有——接口是挂在公司下面的（POST /orgs/:id/accounts/:id/deploy）。
+
+               **和「全部重铺」那颗互锁**（两个标志各看各的，缺一个就锁不住）：批量那条
+               要串着推完整台机器，几分钟里这些按钮如果还是活的，人等得不耐烦点一下，
+               同一个席位就会有两次部署同时落到机器上——而管家那侧没有按席位的互斥
+               （inFlight 只是个计数器，注释里明说允许并发），两个 deploy-seat.sh 会一起
+               rsync 同一个目录、抢同一组端口。 */ ''}
           ${!s.orphan && card.company
-            ? `<button type="button" class="satu-linkbtn" data-act="machine-seat-redeploy" data-org="${esc(card.company.id)}" data-account="${esc(s.accountId)}" data-bot="${esc(s.botId)}" data-name="${esc(s.botName || s.botId)}" data-who="${esc(s.whoName || s.who)}" ${state.busy ? 'disabled' : ''}>${t('重新部署')}</button>`
+            ? `<button type="button" class="satu-linkbtn" data-act="machine-seat-redeploy" data-org="${esc(card.company.id)}" data-account="${esc(s.accountId)}" data-bot="${esc(s.botId)}" data-name="${esc(s.botName || s.botId)}" data-who="${esc(s.whoName || s.who)}" ${state.busy || state.updatingRuntime ? 'disabled' : ''}>${t('重新部署')}</button>`
             : ''}
           ${/* 「清理」只画在没有主人的席位上（orphan 由接口给，见 withSeatNames）。
                Bot 还在的席位从这里掀掉，员工那边只会看到聊天忽然 503，界面上却什么

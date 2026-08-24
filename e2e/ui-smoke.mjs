@@ -1485,8 +1485,6 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(html.includes('没配 GATEWAY_PUBLIC_URL，这是猜的'), '猜出来的地址没有警示')
 
       // ④ 席位行上的「重新部署」：有主人的才给，孤儿行给的是「清理」。
-      const rows = html.split('data-bot-row').length // 只是为了让下面的定位读起来清楚
-      assert(rows >= 1)
       const mine = html.slice(html.indexOf('sw-1'), html.indexOf('sw-2'))
       assert(mine.includes('data-act="machine-seat-redeploy"'), '有主人的席位没有重铺入口')
       assert(mine.includes('data-account="acc-1"') && mine.includes('data-bot="b1"'), '重铺按钮没带上是谁的哪一颗')

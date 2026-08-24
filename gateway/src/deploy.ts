@@ -377,6 +377,10 @@ export function gatewayPublicUrl(): string {
  * `smt_` 的那一个；而部署请求的 body 里本来就带着 `gatewayUrl`，管家一直原样把它写进
  * 席位的 bot.env。差别只是这次它也写给自己。
  *
+ * **反代那条路上带了也没用**：管家转发给 bot 的请求走的是它自己那道 machineTokenOk，
+ * 不经过 requireMachine，所以聊天流量不会 adopt。真正的入口是控制类那几条（探活、
+ * 部署、取日志）——反正它们才是「有人在平台上动了这台机器」的时刻。
+ *
  * **只在明确配置过时才带**，理由见 gatewayPublicUrlExplicit。
  */
 export function managerHeaders(machineToken?: string): Record<string, string> {

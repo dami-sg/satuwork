@@ -669,9 +669,6 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
       if (!latest) throw new HttpError(409, '还没有发布 Bot 版本')
       version = latest.version
     }
-    // 重铺时的兜底：席位那一行没记版本（老数据、上一次部署失败），就用最新的那个——
-    // 总比抛一个「这台机器上有个席位没版本」把整台机器的重铺挡住强。
-    const fallback = force && !version ? ((await db.latestBotRelease())?.version ?? '') : ''
     const seats = (await db.seatRuntimesOfMachine(machine.id)).filter((r) => r.status !== 'none')
     /**
      * `busy` 是**第三种结局**，不是一种失败：席位上有人正在说话，管家等过了也没等到
@@ -692,17 +689,18 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
         })
         continue
       }
-      const target = version || seat.botVersion || fallback
-      if (!target) {
-        results.push({
-          accountId: row.id,
-          botId: seat.botId,
-          status: seat.status,
-          botVersion: null,
-          error: '这个席位没记录版本，平台上也还没有发布包，重铺不了',
-        })
-        continue
-      }
+      /**
+       * 重铺用**这个席位自己那一版**；它没记版本（老数据、上一次部署失败）就干脆不传，
+       * 交给 deploySeat 去挑。
+       *
+       * **不能在这里自己兜一个 `latestBotRelease()`。** 那个查询不看架构，而 deploySeat
+       * 对**显式指定**的版本是要过架构关的：平台上最新的是 x64 包、这台机器是 arm64 时，
+       * 兜出来的那个版本会被它自己 409 掉（「这台机器是 arm64，而 X 是 x64 的包」），
+       * 于是那个席位永远重铺不了。不传版本走的是 `latestBotRelease('bot', machine.arch)`
+       * ——真的没有可用发布包时它照样会回一句「还没有发布 Bot 版本」，落进 results，
+       * 信息一点没少，还挑对了包。
+       */
+      const target = version || seat.botVersion || undefined
       /**
        * 重铺**不打断正在跑的那一轮**（`interrupt: false`）。
        *
