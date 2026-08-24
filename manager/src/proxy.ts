@@ -71,6 +71,17 @@ function pipeUpstream(
     (up) => {
       res.writeHead(up.statusCode ?? 502, up.headers as Record<string, string | string[]>)
       up.pipe(res)
+      /**
+       * 席位半路死掉时要把下游一起拆掉。**pipe 只在干净的 end 上收尾 res**：换版就是
+       * `systemctl restart`，正开着的那条 SSE 从席位那头被掐断，`up` 走的是
+       * aborted/error——pipe 对这两种只 unpipe，res 就此悬着。Gateway 和浏览器于是
+       * 拿着一条「看着还开着、再也不会有字节」的流干等：重连、退避、长跑全都不会
+       * 触发，因为它们等的都是「断」，而「断」从来没传下去。界面上那句永远的
+       * 「正在思考」就是这么来的。close 无论哪种收场都会来，末了核对一句就够。
+       */
+      up.on('close', () => {
+        if (!res.writableEnded) res.destroy()
+      })
     },
   )
   upstream.on('error', (e) => {
