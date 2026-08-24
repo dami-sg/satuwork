@@ -1031,6 +1031,9 @@ async function ensureChatSession(botId, attempt = 0) {
     chatAbort = null
     chatStreamId = ''
     // 没发出去的草稿和附件是写给上一个 Bot 的，跟着它一起收起来；切回去还在。
+    // 挂着的那条「等会话到了就发」同样作废：它指的是上一个 Bot 的那条草稿，而草稿这会儿
+    // 已经收进 chatDrafts 了——补发只会把它发到新这位的对话里去。
+    clearHeldSend()
     if (state.chatBotId) state.chatDrafts[state.chatBotId] = { text: state.chatDraft, files: state.chatFiles }
     const kept = state.chatDrafts[botId] || { text: '', files: [] }
     state.chatBotId = botId
@@ -1064,6 +1067,14 @@ async function ensureChatSession(botId, attempt = 0) {
     // 都不 await：多等一个 RTT 才切页面，人按下去那一下就是白等。
     void hydrateChat(botId, sessionId)
     void startChatStream(sessionId, 0, botId)
+    /**
+     * 会话到手了：把等着这一刻的那条消息补发出去（见 flushHeldSend）。
+     *
+     * **排在开流之后**：那条消息的回答是经 SSE 回来的，先把流挂上，回执和回答才有人接
+     * ——反过来的话，正好落进「消息发出去了、流还没开」那个缝里，屏幕上又是一条挂着的
+     * 「正在思考」。
+     */
+    flushHeldSend(botId)
   } catch (err) {
     const msg = String(err.message || '')
     // 席位还在热身（见 retryChatSession 上面那段）：排一次重来，**并且不往外抛**——
@@ -4319,6 +4330,54 @@ function pickImages(files) {
     .filter((f) => f.path && MODEL_IMAGE.has(f.mime))
 }
 
+/**
+ * 挂着的那一条「等会话到了就发」。
+ *
+ * **只记意图，不记正文。** 正文一直躺在 state.chatDraft 里（这条路是在清草稿之前就
+ * return 的），补发时现取——人在等的这几秒里又补了两个字，发出去的自然该是补过的那份；
+ * 把它清空了，那就等于什么都没挂。
+ *
+ * 同时只留一个：人连按三次发送，挂的还是同一条，补发也只发一次。
+ */
+let heldSend = null
+
+/**
+ * 挂多久就不再补发了。
+ *
+ * 十分钟：换版、重启、网络断一阵都在这个尺度以内，而超过它多半是人早就走开了——那时
+ * 候突然把十分钟前打的半句话发出去，比不发更糟。
+ */
+const HELD_SEND_MAX_MS = 10 * 60_000
+
+function holdSend(botId) {
+  if (!botId) return
+  heldSend = { botId, at: Date.now() }
+}
+
+function clearHeldSend() {
+  heldSend = null
+}
+
+/**
+ * 会话到手了：把挂着的那一条补发出去。
+ *
+ * 三道闸，缺一不可：
+ *
+ * · **同一个 Bot**——人挂上之后切走了，那条草稿跟着上一个 Bot 收进 chatDrafts 里
+ *   （见 ensureChatSession），这会儿补发就是把它发到别人的对话里去；
+ * · **没挂太久**（见 HELD_SEND_MAX_MS）；
+ * · **先清标记再发**——sendChat 里那条「没有会话」的路会重新挂上，不先清的话两边
+ *   互相触发，一次断线能发出去好几条。
+ */
+function flushHeldSend(botId) {
+  const held = heldSend
+  if (!held || held.botId !== botId || state.chatBotId !== botId) return
+  clearHeldSend()
+  if (Date.now() - held.at > HELD_SEND_MAX_MS) return
+  if (!(state.chatDraft || '').trim() && !(state.chatFiles || []).length && !(state.chatMentions || []).length) return
+  void sendChat()
+}
+
 async function sendChat() {
   const text = (state.chatDraft || '').trim()
   const files = state.chatFiles || []
@@ -4337,7 +4396,7 @@ async function sendChat() {
    */
   if (!sessionId) {
     /**
-     * **催那一下必须能把已经认输的链子重新拉起来。**
+     * **这一条不退回给人重按，挂起来等会话。**
      *
      * ensureChatSession 开头就 `cancelSessionRetry()` + `sessionGaveUp = false`，所以
      * 这一句本身就是「重新开始试」——关键是它以前只在**这一次点击**时催一下，人要是
@@ -4345,19 +4404,27 @@ async function sendChat() {
      * 链被浏览器冻着走完了、认了输，人回来一按发送，看到一句「等它接上再发」，然后
      * 干等——而席位早就好了。
      *
-     * 现在按下去就是一次**真的重来**：会话那条链重排（最长 5 分钟），流那条也从慢速
-     * 长跑里叫醒（idleRetry）。话也跟着改口：说的是「正在接回来」，不是让人干等。
+     * 按下去是一次**真的重来**：会话那条链重排（最长 5 分钟），流那条也从慢速长跑里
+     * 叫醒（idleRetry）。**并且记下「这一条要发」**——会话一到就自动补发（见
+     * holdSend / flushHeldSend），人不必守在屏幕前反复按。
+     *
+     * 席位换版必然踩中这一刻：换了进程之后客户端要重新拿一次会话，中间隔着一个往返，
+     * 而人正在这时候按发送。以前退回给他一句「接上再按一次」，等于把重试的活派给了人。
      */
     const botId = state.chatBotId || chatBotIdOf(state.path)
     if (botId) {
+      holdSend(botId)
       void ensureChatSession(botId).catch(() => {})
       const row = botStreams.get(botId)
       if (row && row.sessionId) reviveChatStream(row.sessionId, botId)
     }
-    flash('err', t('还没接上席位，这条先没发出去——正在接回来，接上再按一次'))
+    flash('err', t('还没接上席位，这条先挂着——接上就自动发出去'))
     render()
     return
   }
+  // 走到这儿说明会话在手上：之前挂着的那一条（如果有）就是这一条，标记该退场了，
+  // 免得这次发完之后 flushHeldSend 又补发一遍。
+  clearHeldSend()
   /**
    * **发之前先确认还有人在听。**
    *

@@ -989,6 +989,9 @@ document.getElementById('app').addEventListener('click', async (e) => {
     // 还在照着上一个人的席位敲接口，就不只是难看了。开一条新流时只撤它自己那一根
     // （cancelIdleRetry），别的 Bot 断着还得有人去接。
     cancelIdleRetries()
+    // 挂着「等会话到了就发」的那条也清掉：同一个标签页换人登进来，绝不能把上一个人
+    // 打了一半的话补发出去。
+    clearHeldSend()
     chatLive.clear()
     state.chatBotId = ''
     state.chatSessionId = ''
