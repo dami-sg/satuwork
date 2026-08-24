@@ -100,6 +100,26 @@ export async function runMarkdown({ root, test, assert, log }) {
   await check('裸 URL 自动成链接', '打开 https://example.com/x 看看', { want: ['<a data-md="link" href="https://example.com/x"'] })
   await check('图片', '![图](https://example.com/a.png)', { want: ['<img data-md="image" src="https://example.com/a.png"'] })
 
+  /**
+   * **正文里的链接后面跟一枚小图标，而那枚图标长在 CSS 的 ::after 上。**
+   *
+   * 于是它出不出得来取决于两个文件对不对得上：这里吐出来的 `data-md` 属性，和 chat.css
+   * 里那条选择器。改任何一处都不会有人报错——表现是图标**悄悄没了**，而链接看上去还是
+   * 链接，谁也不会专门去看一眼。
+   *
+   * 图标不是装饰：Bot 列十个视频时每一项自己就是链接，这枚朝外的箭头是「这一条点得开、
+   * 而且开在新标签页」的那个记号（见 bot 里 linkOutBlock 那段）。
+   */
+  await test('链接图标：正文吐的属性和 chat.css 那条选择器对得上', async () => {
+    const html = md.render('见 [文档](https://example.com/a)')
+    const css = readFileSync(join(root, 'gateway/ui/chat.css'), 'utf8')
+    const rule = css.match(/\.sw-md a\[data-md='([^']+)'\]::after/)
+    assert(rule, 'chat.css 里那条链接图标的规则没了')
+    assert(html.includes(`data-md="${rule[1]}"`), `选择器盯着 data-md="${rule[1]}"，而正文吐的是：${html}`)
+    // 只剩一个空的 ::after 也算没了：图标本身是那张 mask。
+    assert(/mask:[^;]*--sw-icon-external/.test(css), '图标那张 mask 没了')
+  })
+
   // ── 正文不可信 ────────────────────────────────────────────────────
   await check('原始 HTML 转义成文本', '<img src=x onerror=alert(1)>', { want: ['&lt;img'], no: ['<img src=x'] })
   await check('javascript: 链接被拦', '[点我](javascript:alert(1))', { no: ['href'] })

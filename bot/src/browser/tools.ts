@@ -109,16 +109,22 @@ export function apply(ctx: Context) {
   }
 
   /**
-   * 给人看的那两样：这次落下来的文件、这一页上的链接。
+   * 这次动作留给人的两样痕迹：新落下来的文件，和一张「这一步页面长什么样」的截图。
    *
-   * **都不进模型的上下文**——它已经从 text 里看到了带地址的快照。这一份是为了让
-   * 界面能摆出可点的东西：不然「展示链接」这件事就得指望模型愿意把地址抄进回答里，
-   * 而它天然倾向于只写标题。
+   * **都不进模型的上下文。** 文件它自己知道下了什么，截图它压根看不见（默认那个对话
+   * 模型没有视觉，见 docs/browser-tools.md 第 1 节）。这一份是给人的：一次多步浏览在
+   * 日志里只剩十几段 a11y 文本，出了问题翻那些文本几乎看不出所以然。
+   *
+   * `action` 只是文件名里那一截（`…-click.jpg`），让人在工作区里一眼看出这张是哪一步。
+   *
+   * 页面上的链接不走这里：它们跟着快照正文进模型的上下文（每条 link 行行尾带着自己
+   * 的地址），由模型在回答里写成 markdown 链接——摆在回答底下的那一排和正文对不上号，
+   * 「第七个视频是哪一颗」人得自己猜。见 agent 里 linkOutBlock 那段。
    */
-  const withFiles = (text: string): ToolResult => {
+  const withTrace = async (text: string, call: ToolCall, action: string): Promise<ToolResult> => {
     const files = browser.takeDownloads()
-    const links = browser.takeLinks()
-    return { text, ...(files.length ? { files } : {}), ...(links.length ? { links } : {}) }
+    const shot = await browser.screenshot(call.sessionId, action, call.signal)
+    return { text, ...(files.length ? { files } : {}), ...(shot ? { shot } : {}) }
   }
 
   ctx.tools.register({
@@ -137,7 +143,7 @@ export function apply(ctx: Context) {
       const url = String(a.url ?? '').trim()
       if (!url) return fail('缺少 url 参数。')
       await browser.navigate(url, call.signal)
-      return withFiles(after('已打开。', await browser.settleAndSnapshot(call.signal)))
+      return withTrace(after('已打开。', await browser.settleAndSnapshot(call.signal)), call, 'navigate')
     }),
   })
 
@@ -158,7 +164,7 @@ export function apply(ctx: Context) {
     execute: guarded<{ full?: boolean }>(async (a, call) => {
       const snap = await browser.snapshot(a.full === true, call.signal)
       const cut = snap.truncated ? '\n…（元素太多，已截断。先点进更具体的页面，别指望在这一页上找全）' : ''
-      return withFiles(`${snap.title || '（无标题）'}\n${page(snap.url, `${snap.body || '（这一页没有可操作的元素）'}${cut}`)}`)
+      return withTrace(`${snap.title || '（无标题）'}\n${page(snap.url, `${snap.body || '（这一页没有可操作的元素）'}${cut}`)}`, call, 'snapshot')
     }),
   })
 
@@ -183,7 +189,7 @@ export function apply(ctx: Context) {
       if (spot.err) return refError(spot.err)
       await browser.clickAt(spot.x!, spot.y!, a.double === true ? 2 : 1, call.signal)
       const what = spot.name ? `「${spot.name}」` : ref
-      return withFiles(after(`点了 ${what}。`, await browser.settleAndSnapshot(call.signal)))
+      return withTrace(after(`点了 ${what}。`, await browser.settleAndSnapshot(call.signal)), call, 'click')
     }),
   })
 
@@ -211,7 +217,7 @@ export function apply(ctx: Context) {
       if (a.submit === true) await browser.pressKey('Enter', call.signal)
       const what = focused.name ? `「${focused.name}」` : ref
       const tail = a.submit === true ? '并回车提交' : ''
-      return withFiles(after(`已在 ${what} 里填好${tail}。`, await browser.settleAndSnapshot(call.signal)))
+      return withTrace(after(`已在 ${what} 里填好${tail}。`, await browser.settleAndSnapshot(call.signal)), call, 'type')
     }),
   })
 
@@ -230,7 +236,7 @@ export function apply(ctx: Context) {
       const key = String(a.key ?? '').trim()
       if (!key) return fail('缺少 key 参数。')
       await browser.pressKey(key, call.signal)
-      return withFiles(after(`按了 ${key}。`, await browser.settleAndSnapshot(call.signal)))
+      return withTrace(after(`按了 ${key}。`, await browser.settleAndSnapshot(call.signal)), call, 'press')
     }),
   })
 
@@ -254,8 +260,10 @@ export function apply(ctx: Context) {
       const before = browser.where.dialog
       if (!before) return fail('现在页面上没有挂着的对话框。')
       const message = await browser.handleDialog(accept, a.text, call.signal)
-      return withFiles(
+      return withTrace(
         after(`已${accept ? '接受' : '关闭'}那个 ${before} 对话框（「${message}」）。`, await browser.settleAndSnapshot(call.signal)),
+        call,
+        'dialog',
       )
     }),
   })
@@ -268,7 +276,7 @@ export function apply(ctx: Context) {
     execute: guarded<Record<string, never>>(async (_a, call) => {
       const moved = await browser.back(call.signal)
       if (!moved) return fail('已经在历史的第一页了，退不回去。')
-      return withFiles(after('已返回上一页。', await browser.settleAndSnapshot(call.signal)))
+      return withTrace(after('已返回上一页。', await browser.settleAndSnapshot(call.signal)), call, 'back')
     }),
   })
 
@@ -288,8 +296,8 @@ export function apply(ctx: Context) {
     execute: guarded<{ direction?: string; amount?: number }>(async (a, call) => {
       const pos = await browser.scroll(String(a.direction ?? 'down'), Number(a.amount) || 0, call.signal)
       const bottom = pos.y + pos.viewport >= pos.height - 4 ? '（已经到底了）' : ''
-      // 走 withFiles：这一步也拍了快照，看到的链接不该因为「用的是滚动而不是快照」就不报。
-      return withFiles(after(`滚到了 ${Math.round(pos.y)} / ${Math.round(pos.height)} ${bottom}`, await browser.settleAndSnapshot(call.signal)))
+      // 走 withTrace：这一步也看了一眼页面，那一眼不该因为「用的是滚动而不是快照」就不留痕迹。
+      return withTrace(after(`滚到了 ${Math.round(pos.y)} / ${Math.round(pos.height)} ${bottom}`, await browser.settleAndSnapshot(call.signal)), call, 'scroll')
     }),
   })
 
@@ -379,7 +387,7 @@ export function apply(ctx: Context) {
       const got = await browser.select(ref, values, call.signal)
       if (got.err) return refError(got.err)
       if (!got.picked) return fail(`这个下拉框里没有 ${values.join('、')}。先 browser_snapshot 看看它有哪些选项。`)
-      return withFiles(after(`已在「${got.name ?? ref}」里选好。`, await browser.settleAndSnapshot(call.signal)))
+      return withTrace(after(`已在「${got.name ?? ref}」里选好。`, await browser.settleAndSnapshot(call.signal)), call, 'select')
     }),
   })
 
@@ -417,7 +425,7 @@ export function apply(ctx: Context) {
         return { text: `已关掉「${target.title || target.url}」。` }
       }
       await browser.selectTab(target.targetId, call.signal)
-      return withFiles(after('已切过去。', await browser.settleAndSnapshot(call.signal)))
+      return withTrace(after('已切过去。', await browser.settleAndSnapshot(call.signal)), call, 'tabs')
     }),
   })
 }

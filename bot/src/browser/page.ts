@@ -16,17 +16,6 @@
 const MAX_NODES = 400
 
 /**
- * 结构化带出去的链接上限。
- *
- * 一个搜索结果页轻松上百条，全带出去有两处代价：进模型上下文的那份变长，界面上那张卡
- * 也会变成一堵墙。三十条够覆盖「这一页主要通向哪儿」，而想看全的人本来就该去看页面。
- *
- * **注意这只封结构化那一份**，正文里每条 link 行仍旧带着自己的地址——模型要引用第
- * 四十条时，它在正文里找得到。
- */
-const MAX_LINKS = 30
-
-/**
  * 地址长过这个数就**整条不要**，而不是截一刀。
  *
  * 截断的 URL 不是一个更短的地址，是一个**错的**地址——而它照样以可点链接的样子摆到
@@ -138,14 +127,13 @@ export const BOOTSTRAP = `
      *
      * 早先快照只写「- link "Learn more" [@e12]」——名字有、地址没有。后果是模型手上
      * 从来就没有链接可给：让它列十个搜索结果，它只能给出十个标题，人拿到之后还得自己
-     * 去搜一遍。界面上也无从展示，因为压根没有 URL 这个东西。
+     * 去搜一遍。
      *
-     * 结构化地单独带一份（不只是写进正文），是为了让席位那边不必回头去正则扫自己写给
-     * 模型的散文——那条路每次改措辞都会断。
+     * 地址只写进正文这一份就够：模型看的就是正文，而「让用户点得进去」这件事落在它把
+     * 地址写成 markdown 链接上（见 agent 里 linkOutBlock 那段）。早先还另外结构化带了
+     * 一份给界面，界面拿它在回答底下摆一排药丸——那排东西和回答对不上号，已经撤掉。
      */
-    const links = []
-    const seenHref = new Set()
-    const addLink = (el, name) => {
+    const hrefOf = (el) => {
       // el.href 是**解析过的绝对地址**（相对路径、"./x" 都已经展开），比 getAttribute 可靠。
       const href = typeof el.href === 'string' ? el.href : ''
       if (!href) return ''
@@ -157,12 +145,7 @@ export const BOOTSTRAP = `
       if (href.split('#')[0] === location.href.split('#')[0]) return ''
       // 超长的整条丢掉，见 MAX_URL：截出来的是个错地址，比没有更坏。
       if (href.length > ${MAX_URL}) return ''
-      const url = href
-      if (!seenHref.has(url) && links.length < ${MAX_LINKS}) {
-        seenHref.add(url)
-        links.push({ text: (name || '').slice(0, 120), url })
-      }
-      return url
+      return href
     }
     let cut = false
     const push = (line) => {
@@ -203,7 +186,7 @@ export const BOOTSTRAP = `
        * 地址跟在行尾。**只给链接，不给按钮**——按钮没有地址，而给每一行都塞点东西
        * 只会让这份快照更长，而它已经是进上下文的大头。
        */
-      const href = role === 'link' ? addLink(el, name) : ''
+      const href = role === 'link' ? hrefOf(el) : ''
       if (!push('- ' + role + ' "' + name + '" [' + ref(el) + ']' + (bits.length ? ' ' + bits.join(' ') : '') + (href ? ' ' + href : ''))) break
     }
     return {
@@ -212,7 +195,6 @@ export const BOOTSTRAP = `
       title: document.title,
       body: lines.join('\\n'),
       truncated: cut,
-      links,
     }
   }
 

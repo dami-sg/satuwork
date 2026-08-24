@@ -1037,7 +1037,6 @@ window.SATU_I18N = {
   '这个文件不适合在浏览器里打开（太大，或者是不能安全内联的格式）。下载下来看吧。': 'This file cannot be shown in the browser — it is either too large or a format that is not safe to render inline. Download it instead.',
   '下载失败：': 'Download failed: ',
   '产出': 'wrote',
-  '链接': 'link',
 
   // ── 连接器 / 插件 ───────────────────────────────────────────────────
   已安装: 'Installed',

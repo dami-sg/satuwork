@@ -10,7 +10,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -110,10 +110,14 @@ const chrome = spawn(
   { stdio: ['ignore', 'ignore', 'ignore'] },
 )
 
+/** 截图落进这里。在 done 之前声明：Ctrl-C 可能发生在它建出来之前。 */
+let workRoot = ''
+
 const done = (code) => {
   try { chrome.kill('SIGKILL') } catch {}
   try { server.close() } catch {}
   try { rmSync(profile, { recursive: true, force: true }) } catch {}
+  if (workRoot) try { rmSync(workRoot, { recursive: true, force: true }) } catch {}
   process.exit(code)
 }
 process.on('SIGINT', () => done(130))
@@ -171,6 +175,13 @@ ctx.provide('sessions', {
 })
 ctx.provide('roster', { get: (id) => bots[id] })
 ctx.plugin(ToolService)
+/**
+ * 工作区要真挂上：截图落盘走的就是它。**没有它这一段会静悄悄地什么都不干**
+ * （browser 那边取不到 workspace 就不拍），断言也就永远绿——所以这里挂的是真服务，
+ * 不是替身，落到一个用完就删的临时目录里。
+ */
+workRoot = mkdtempSync(join(tmpdir(), 'satu-e2e-work-'))
+ctx.plugin(await import('./src/workspace/index.ts'), { root: workRoot })
 await new Promise((r) => setTimeout(r, 30))
 // trustPrivateAddresses：测试页只能在 127.0.0.1 上，见 Config 上的说明。
 ctx.plugin(browserMod, { port: cdpPort, trustPrivateAddresses: true })
@@ -315,6 +326,13 @@ try {
     没有卡到超时: elapsed < 4000,
     说了页面是冻住的: clickAsk.text.includes('冻住'),
   }
+  /**
+   * **页面冻住的时候不拍照。**
+   *
+   * confirm 挂着时整页是冻住的，`Page.captureScreenshot` 的回执和快照一样永远等不到，
+   * 拍下去只会白等一个超时——而那次点击本身是成功的。
+   */
+  out.shotDialog = { 对话框挂着时不拍: clickAsk.shot === undefined }
   const whileDialog = await run('browser_snapshot')
   out.dialog.挂着对话框时别的工具说人话 = whileDialog.failed === true && whileDialog.text.includes('对话框')
   const handled = await run('browser_dialog', { action: 'accept' })
@@ -334,39 +352,58 @@ try {
   const framed = await run('browser_snapshot')
   const framedRead = await run('browser_read')
   /**
-   * **链接要把地址带出来。**
+   * **链接要把地址带出来，带在正文里。**
    *
    * 早先快照只写「- link "名字" [@e12]」——名字有、地址没有。后果是模型手上从来就没有
-   * 链接可给：让它列十个搜索结果，它只能给出十个标题，人拿到之后还得自己再搜一遍；
-   * 界面上也无从展示，因为压根没有 URL 这个东西。
+   * 链接可给：让它列十个搜索结果，它只能给出十个标题，人拿到之后还得自己再搜一遍。
+   *
+   * 只带正文这一份：模型看的就是正文，而「让用户点得进去」靠它把地址写成 markdown
+   * 链接（见 linkOutBlock）。早先另外结构化带过一份给界面摆药丸，那排东西和回答对不上
+   * 号，已经撤掉——这里连着钉一条，免得哪天又悄悄长回来。
    */
   const linkSnap = await run('browser_snapshot')
   out.links = {
     '正文里那条 link 带着地址': /link "开新标签页" \[@e\d+\] http:\/\//.test(linkSnap.text),
-    // 结构化那一份是给界面用的，模型不看——不能只写进正文。
-    结构化带出来了: Array.isArray(linkSnap.links) && linkSnap.links.length > 0,
-    站外那条也在: (linkSnap.links || []).some((l) => l.url.includes('other.example.test/doc')),
-    带上了链接文字: (linkSnap.links || []).some((l) => l.text === '站外那一条'),
-    // 页内锚点不是链接：它不换页，摆进来只会把那张卡撑满。
-    页内锚点不算: !(linkSnap.links || []).some((l) => l.url.includes('#top')),
-    // javascript: 不是地址。这一层滤掉之后，界面那层还会再滤一次（两道都要）。
-    假协议不算: !(linkSnap.links || []).some((l) => l.url.startsWith('javascript:')),
+    站外那条也带着: /link "站外那一条" \[@e\d+\] http:\/\/other\.example\.test\/doc/.test(linkSnap.text),
+    // 页内锚点不是链接：它不换页，跟一个地址出去只会让模型把它当成一条能给人的链接。
+    页内锚点不带地址: /link "页内锚点" \[@e\d+\]\s*$/m.test(linkSnap.text),
+    // javascript: 不是地址。
+    假协议不带地址: !linkSnap.text.includes('javascript:'),
     /**
      * **超长的整条丢掉，不截断。**
      *
-     * 截出来的 URL 不是更短的地址，是错的地址——却照样以可点链接的样子摆到人面前，
-     * 点下去落到别处，没有任何迹象表明它被动过手脚。
+     * 截出来的 URL 不是更短的地址，是错的地址——而模型会照抄进回答里变成一条可点的
+     * 链接，点下去落到别处，没有任何迹象表明它被动过手脚。
      */
-    超长的整条丢掉: !(linkSnap.links || []).some((l) => l.url.includes('LONGLONG')),
-    正文里也不留半截: !linkSnap.text.includes('q=LONGLONG'),
-    // 取走即清零，不然这一批会跟着下一次调用再报一遍。
-    取走就清零: !((await run('browser_wait_for', { time: 10 })).links || []).length,
+    正文里不留半截: !linkSnap.text.includes('q=LONGLONG'),
+    // 按钮没有地址。给每一行都塞点东西只会让快照更长，而它已经是进上下文的大头。
+    按钮不跟地址: !/button "[^"]*" \[@e\d+\][^\n]*http/.test(linkSnap.text),
+    结构化那份已经撤掉: linkSnap.links === undefined,
   }
-
-  // 滚动也拍了快照，看到的链接不该因为「用的是滚动而不是快照」就不报。
-  const scrolledForLinks = await run('browser_scroll', { direction: 'down', amount: 200 })
-  out.links.滚动那一步也报链接 = Array.isArray(scrolledForLinks.links) && scrolledForLinks.links.length > 0
   await run('browser_navigate', { url: `http://${HOST}/` })
+
+  /**
+   * **每走一步拍一张，落进工作区。**
+   *
+   * 给人看的：一次多步浏览在日志里只剩十几段 a11y 文本，出了问题翻那些文本几乎看不出
+   * 所以然。模型那边不看（默认那个对话模型没有视觉），所以这条链路一断没有任何人会
+   * 抱怨——只有断言看得住。
+   */
+  const shotSnap = await run('browser_snapshot')
+  const shot = shotSnap.shot
+  const shotAbs = shot ? join(workRoot, shot.path) : ''
+  const shotBytes = shotAbs && existsSync(shotAbs) ? readFileSync(shotAbs) : Buffer.alloc(0)
+  out.shot = {
+    拍了: Boolean(shot && shot.path),
+    落在会话自己的目录里: Boolean(shot && shot.path.startsWith('browser/s1/')),
+    // 文件名带着是哪一步，人在工作区里按名字就能对上。
+    名字里有动作: Boolean(shot && /-snapshot\.jpg$/.test(shot.path)),
+    文件真在: shotBytes.length > 0,
+    // JPEG 而不是 PNG：见 SHOT_QUALITY 那段。头两个字节是 FF D8。
+    是jpeg: shotBytes[0] === 0xff && shotBytes[1] === 0xd8,
+    // 模型不该看见它——它进的是 details，不是给模型的那段文本。
+    没混进给模型的文本里: !shotSnap.text.includes('browser/s1/'),
+  }
 
   out.frame = {
     快照包了标签: framed.text.includes('<page_content url=') && framed.text.includes('</page_content>'),
