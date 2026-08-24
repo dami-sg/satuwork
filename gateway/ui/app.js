@@ -422,16 +422,12 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   /**
-   * 右栏那两颗。**点正看着的那一屏才是收起**，点另一屏是换过去——收起来之后再点，
-   * 开的就是刚点的那一屏。
+   * 右栏那两颗切屏。**只管换屏，不管开关**——收起是右边那颗自己的事（aside-toggle）。
+   * 栏收着的时候点任意一颗，开的就是刚点的那一屏。
    */
   if (act === 'aside-tab') {
-    const tab = btn.getAttribute('data-tab') === 'files' ? 'files' : 'env'
-    if (asidePref.open && asidePref.tab === tab) asidePref.open = false
-    else {
-      asidePref.open = true
-      asidePref.tab = tab
-    }
+    asidePref.open = true
+    asidePref.tab = btn.getAttribute('data-tab') === 'files' ? 'files' : 'env'
     saveAside()
     // 目录内容不在这儿取：重绘那一趟自己会补（见 chat.js 的 ensureWorkspaceTree）。
     render()
