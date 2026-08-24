@@ -867,8 +867,12 @@ export class AgentService extends Service {
         return {
           content: [{ type: 'text' as const, text: result.text }],
           details:
-            result.files?.length || result.shot
-              ? { ...(result.files?.length ? { files: result.files } : {}), ...(result.shot ? { shot: result.shot } : {}) }
+            result.files?.length || result.refs?.length || result.shot
+              ? {
+                  ...(result.files?.length ? { files: result.files } : {}),
+                  ...(result.refs?.length ? { refs: result.refs } : {}),
+                  ...(result.shot ? { shot: result.shot } : {}),
+                }
               : undefined,
         }
       },
@@ -1106,6 +1110,7 @@ export class AgentService extends Service {
             text: textOf(event.result),
             failed: Boolean(event.isError),
             files: filesOf(event.result),
+            refs: refsOf(event.result),
             shot: shotOf(event.result),
           })
           break
@@ -1140,7 +1145,21 @@ function shotOf(result: any): { path: string; name: string } | undefined {
  * 原样落盘等于让任意一个工具决定会话日志的形状。
  */
 function filesOf(result: any): { path: string; name: string }[] | undefined {
-  const raw = result?.details?.files
+  return pickFiles(result?.details?.files)
+}
+
+/**
+ * 工具报出来的「看到的文件」（见 tools/index.ts 的 `ToolResult.refs`）。
+ *
+ * 和 files 走同一道挑拣、落在同一条 `tool/result` 上，但**不能合成一个字段**：
+ * 界面对这两样的处理完全不同——产出摆成药丸，看到的只用来把正文里的文件名接成链接。
+ */
+function refsOf(result: any): { path: string; name: string }[] | undefined {
+  return pickFiles(result?.details?.refs)
+}
+
+/** details 是 `unknown`，逐字段挑（理由见 filesOf）。 */
+function pickFiles(raw: any): { path: string; name: string }[] | undefined {
   if (!Array.isArray(raw)) return undefined
   const files = raw
     .filter((f: any) => typeof f?.path === 'string' && typeof f?.name === 'string')

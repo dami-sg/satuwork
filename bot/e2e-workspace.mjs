@@ -5,12 +5,14 @@
  * 哪些类型允许浏览器内联。这类错不会在日常使用里露面——它要等到有人专门去试才发作，
  * 所以只能靠断言守着。
  */
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { WorkspaceService, contentTypeOf, safeName } from './src/workspace/index.ts'
+import { ToolService } from './src/tools/index.ts'
+import * as wsTools from './src/tools/workspace.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'satu-ws-'))
 const ctx = new Context()
@@ -127,5 +129,56 @@ out.openEscape = await ws
   .open('../../../etc/passwd')
   .then(() => false)
   .catch(() => true)
+
+// ── 7. 列目录（右栏那棵文件树） ───────────────────────────────────────
+mkdirSync(join(root, 'sub/deep'), { recursive: true })
+mkdirSync(join(root, 'sub/.hidden-dir'), { recursive: true })
+writeFileSync(join(root, 'sub/a.txt'), 'aa')
+writeFileSync(join(root, 'sub/.hidden'), 'x')
+symlinkSync('/etc', join(root, 'sub/link'))
+const listed = await ws.list('sub')
+out.list = {
+  路径: listed.path,
+  条目: listed.entries.map((e) => `${e.name}${e.dir ? '/' : ''}`),
+  // 目录排在文件前面：和 `ls` 工具同一个顺序，两处看到的才是同一个目录。
+  目录在前: listed.entries[0]?.dir === true,
+  带大小: listed.entries.find((e) => e.name === 'a.txt')?.size,
+  路径可直接预览: listed.entries.find((e) => e.name === 'a.txt')?.path,
+  // 符号链接能走出工作区，而这一屏是拿来点开预览的——不给它开这个出口。
+  没有符号链接: !listed.entries.some((e) => e.name === 'link'),
+  没有隐藏项: !listed.entries.some((e) => e.name.startsWith('.')),
+}
+out.listEscape = await ws
+  .list('../../../etc')
+  .then(() => false)
+  .catch(() => true)
+out.listFile = await ws
+  .list('sub/a.txt')
+  .then(() => false)
+  .catch(() => true)
+
+// ── 8. 只读工具报出「看到了哪些文件」 ─────────────────────────────────
+/**
+ * 界面把正文里的文件名接成可点开的链接，靠的就是这一条（见 tools/index.ts 的
+ * `ToolResult.refs`）。**不报就没有链接**，而那时界面什么都不会说——它只会安静地
+ * 少一层能力，所以这里钉死。
+ */
+ctx.plugin(ToolService)
+await new Promise((r) => setTimeout(r, 50))
+ctx.plugin(wsTools)
+await new Promise((r) => setTimeout(r, 100))
+writeFileSync(join(root, 'sub/note.md'), '# hi\nTODO here\n')
+const call = (name, args) =>
+  ctx.tools.execute({ callId: 'c1', name, arguments: JSON.stringify(args), sessionId: 's-1' })
+const paths = (r) => (r.refs || []).map((f) => f.path)
+out.refs = {
+  ls: paths(await call('ls', { path: 'sub' })),
+  read: paths(await call('read', { path: 'sub/note.md' })),
+  grep: paths(await call('grep', { pattern: 'TODO' })),
+  find: paths(await call('find', { pattern: '*.md' })),
+  // 写和改报的是 files（产出），不是 refs——界面对这两样的处理完全不同。
+  写的是产出: (await call('write', { path: 'sub/new.txt', content: 'x' })).files?.map((f) => f.path),
+  写的不报refs: !(await call('write', { path: 'sub/new2.txt', content: 'x' })).refs,
+}
 
 console.log('__RESULT__' + JSON.stringify(out))

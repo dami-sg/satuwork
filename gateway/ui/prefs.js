@@ -17,11 +17,18 @@ const ASIDE_KEY = 'satu.aside'
  * 默认宽度会很烦人。
  */
 const asidePref = (() => {
+  // tab 决定这一栏现在摆的是哪一屏：运行环境（env）还是工作区文件（files）。
+  // 一起记下来，因为「我上次在看文件」和「我把它收起来了」是同一类偏好。
+  const tab = (raw) => (raw === 'files' ? 'files' : 'env')
   try {
     const raw = JSON.parse(localStorage.getItem(ASIDE_KEY) || '{}')
-    return { open: raw.open !== false, width: Math.min(520, Math.max(200, Number(raw.width) || 280)) }
+    return {
+      open: raw.open !== false,
+      width: Math.min(520, Math.max(200, Number(raw.width) || 280)),
+      tab: tab(raw.tab),
+    }
   } catch {
-    return { open: true, width: 280 }
+    return { open: true, width: 280, tab: 'env' }
   }
 })()
 
@@ -249,6 +256,18 @@ const BACK_ARROW = ['M19 12H5', 'M12 19l-7-7 7-7']
 
 /** 收起右栏。展开状态下开关画的是它——那时要说的是「点了会怎样」。 */
 const CHEVRON_RIGHT = ['M9 18l6-6-6-6']
+
+/** 树上那个展开/收起的小三角。 */
+const CHEVRON_SMALL_RIGHT = ['M9 18l6-6-6-6']
+const CHEVRON_SMALL_DOWN = ['M6 9l6 6 6-6']
+
+/** 重新取一次。工作区那一屏用它——文件是 Bot 在背后写的，界面自己不知道什么时候变。 */
+const REFRESH = ['M21 12a9 9 0 1 1-2.64-6.36', 'M21 4v5h-5']
+
+/** 工作区文件那一屏的开关。一个文件夹——它说的就是「这里面是这台席位上的文件」。 */
+const FOLDER = [
+  'M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+]
 
 /**
  * 右栏那颗开关的图标。**收起的时候画一台显示器。**

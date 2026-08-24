@@ -414,6 +414,30 @@ document.getElementById('app').addEventListener('click', async (e) => {
     render()
     return
   }
+  /**
+   * 右栏那两颗。**点正看着的那一屏才是收起**，点另一屏是换过去——收起来之后再点，
+   * 开的就是刚点的那一屏。
+   */
+  if (act === 'aside-tab') {
+    const tab = btn.getAttribute('data-tab') === 'files' ? 'files' : 'env'
+    if (asidePref.open && asidePref.tab === tab) asidePref.open = false
+    else {
+      asidePref.open = true
+      asidePref.tab = tab
+    }
+    saveAside()
+    // 目录内容不在这儿取：重绘那一趟自己会补（见 chat.js 的 ensureWorkspaceTree）。
+    render()
+    return
+  }
+  if (act === 'ws-dir') {
+    await toggleWorkspaceDir(btn.getAttribute('data-path') || '')
+    return
+  }
+  if (act === 'ws-refresh') {
+    await refreshWorkspaceTree()
+    return
+  }
   if (act === 'runtime-redeploy') {
     const id = btn.getAttribute('data-bot') || ''
     const bot = (state.runtimeBots || []).find((b) => b.id === id)

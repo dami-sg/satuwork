@@ -1,7 +1,7 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { createReadStream, createWriteStream, type WriteStream } from 'node:fs'
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, extname, relative, resolve, sep } from 'node:path'
+import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { basename, extname, join, relative, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
 import { satuworkHome } from '../home.ts'
 
@@ -20,6 +20,9 @@ export interface Config {
 
 /** 越界、参数不对、文件不存在这类**业务**失败。不是管道故障。 */
 export class WorkspaceError extends Error {}
+
+/** 一层最多列多少条。再多就不是「看一眼」了，而那一屏也摆不下。 */
+const LIST_MAX = 500
 
 const DEFAULT_UPLOAD_MAX = 100 * 1024 * 1024
 
@@ -129,6 +132,44 @@ export class WorkspaceService extends Service {
     const file = await freshPath(target, safeName(filename))
     await writeFile(file, bytes)
     return { path: this.show(file), name: basename(file), size: bytes.byteLength }
+  }
+
+  /**
+   * 列一个目录，给界面那棵文件树用。
+   *
+   * **只列这一层**，不递归：工作区是同一个员工所有席位共用的那个目录，跑过几周之后
+   * 底下是几千个文件，一次拉整棵树既慢又没人看得完。展开哪一层就取哪一层，和资源
+   * 管理器一样。
+   *
+   * 隐藏条目默认不列（`.git`、`.DS_Store` 之类），符号链接一律跳过——跟着它能走出
+   * 工作区，而这一屏是给人点开预览用的，没有理由把出口开在这儿。
+   */
+  async list(path?: string) {
+    const target = this.resolve(path)
+    const info = await stat(target)
+    if (!info.isDirectory()) throw new WorkspaceError(`${this.show(target)} 不是目录。`)
+    const here = this.show(target)
+    const raw = (await readdir(target, { withFileTypes: true }))
+      .filter((e) => !e.name.startsWith('.') && !e.isSymbolicLink() && (e.isDirectory() || e.isFile()))
+      // 目录在前，其余按名字排。和 `ls` 工具同一个顺序——同一个目录在两处看到的
+      // 排法不一样，人会以为是两个地方。
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+    const shown = raw.slice(0, LIST_MAX)
+    const entries = await Promise.all(
+      shown.map(async (e) => {
+        const full = join(target, e.name)
+        const s = await stat(full).catch(() => undefined)
+        return {
+          name: e.name,
+          path: here === '.' ? e.name : `${here}/${e.name}`,
+          dir: e.isDirectory(),
+          size: e.isDirectory() ? 0 : (s?.size ?? 0),
+          mtime: s?.mtimeMs ?? 0,
+        }
+      }),
+    )
+    // 截断要说出来。闷声少列几条，看的人只会以为那个文件根本不存在。
+    return { path: here, entries, more: raw.length - shown.length }
   }
 
   /** 读一个文件用来预览。返回 Web 流，不进内存。 */

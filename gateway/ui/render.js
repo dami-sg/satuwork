@@ -78,27 +78,45 @@ function pageAside() {
    * 它的 getBoundingClientRect 全是 0，常驻层自己会判成不可见，连接照旧活着；人点
    * 返回，槽一恢复尺寸，画面就在那儿。
    */
+  /**
+   * 文件那一屏和运行环境是**两屏并存、只藏一屏**，理由和日常任务详情那条一样：
+   * 拿掉运行环境等于断一次 VNC。切到文件去看一眼再切回来，屏还在那儿。
+   */
+  const files = asidePref.tab === 'files'
   return `<aside class="gw-aside">
     <div class="gw-aside-grip" data-act="aside-grip" title="${esc(t('拖动调整宽度'))}"></div>
     <div class="gw-aside-body">
-      <div class="gw-aside-stack" ${detail ? 'hidden' : ''}>
+      <div class="gw-aside-stack" ${detail || files ? 'hidden' : ''}>
         <h3>${t('运行环境')}</h3>
         ${chatMachinePanel()}
         ${routineListPanel()}
+      </div>
+      <div class="gw-aside-stack" ${detail || !files ? 'hidden' : ''}>
+        ${workspacePanel()}
       </div>
       ${detail ? routineDetailPanel() : ''}
     </div>
   </aside>`
 }
 
-/** 右栏开关。放在对话 header 上，所以折叠之后仍然点得到——右栏本身是整个不渲染的。 */
+/**
+ * 右栏开关。放在对话 header 上，所以折叠之后仍然点得到——右栏本身是整个不渲染的。
+ *
+ * 两颗：文件、运行环境。点的是「我要看哪一屏」，不是「开还是关」——正看着的那一屏
+ * 再点一次才收起来。这样一次点击就能从桌面切到文件，不用先收再开。
+ */
 function asideToggle() {
   if (!hasAside()) return ''
   const open = asidePref.open
-  return `<button type="button" class="btn btn-ghost btn-icon" style="margin-left: auto; flex: none;"
-    data-act="aside-toggle" aria-pressed="${open}"
-    aria-label="${esc(open ? t('收起运行环境') : t('展开运行环境'))}"
-    title="${esc(t('运行环境'))}">${svg(open ? CHEVRON_RIGHT : MONITOR, 16)}</button>`
+  const tab = (name, icon, label, collapse) => {
+    const here = open && asidePref.tab === name
+    return `<button type="button" class="btn btn-ghost btn-icon" style="flex: none;"
+      data-act="aside-tab" data-tab="${name}" aria-pressed="${here}"
+      aria-label="${esc(here ? collapse : label)}" title="${esc(label)}"
+      >${svg(here ? CHEVRON_RIGHT : icon, 16)}</button>`
+  }
+  return `<span style="margin-left: auto; flex: none; display: inline-flex; gap: 2px;"
+    >${tab('files', FOLDER, t('工作区文件'), t('收起工作区文件'))}${tab('env', MONITOR, t('运行环境'), t('收起运行环境'))}</span>`
 }
 
 /** 在不在对话页。顶栏换不换成会话身份行、右栏开不开，都看它，免得两处判断漂移。 */

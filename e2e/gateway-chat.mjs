@@ -325,6 +325,27 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(csp.includes('sandbox'), `少了 CSP sandbox：${csp}`)
     })
 
+    await test('经 Gateway 列工作区：右栏那棵树看得见刚传上去的文件', async () => {
+      // 这一跳是右栏文件树的全部数据来源（见 chat.js 的 workspacePanel）。它和上面
+      // 那条预览必须给出**同一个 path**，否则树上点开就是 404。
+      const dir = gwPath.split('/').slice(0, -1).join('/')
+      const r = await req(gwBase, 'GET', `/runtime/sessions/${sessionId}/workspace?path=${encodeURIComponent(dir)}`, {
+        token: adminTok,
+      })
+      assert(r.status === 200, `list ${r.status} ${r.text}`)
+      const hit = (r.json.entries || []).find((e) => e.path === gwPath)
+      assert(hit, `列表里没有刚传的那个文件：${r.text}`)
+      assert(hit.dir === false && hit.size > 0, `条目不对：${JSON.stringify(hit)}`)
+      const root = await req(gwBase, 'GET', `/runtime/sessions/${sessionId}/workspace`, { token: adminTok })
+      assert(root.status === 200, `list root ${root.status} ${root.text}`)
+      assert((root.json.entries || []).some((e) => e.name === 'uploads' && e.dir), `根目录里没有 uploads：${root.text}`)
+      // 和预览同一道门：不是自己的会话、没登录，一律进不来。
+      const other = await req(gwBase, 'GET', `/runtime/sessions/${sessionId}/workspace`, { token: memberTok })
+      assert(other.status >= 400, `成员列到了管理员会话的工作区：${other.status}`)
+      const anon = await req(gwBase, 'GET', `/runtime/sessions/${sessionId}/workspace`)
+      assert(anon.status === 401, `未登录列目录 ${anon.status}`)
+    })
+
     await test('附件反代也认账号：别人的会话碰不到', async () => {
       const r = await req(gwBase, 'GET', `/runtime/sessions/${sessionId}/files?path=${encodeURIComponent(gwPath)}`, {
         token: memberTok,

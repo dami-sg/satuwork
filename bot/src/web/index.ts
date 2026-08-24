@@ -534,6 +534,24 @@ export function apply(ctx: Context, _config: Config = {}) {
   })
 
   /**
+   * 列工作区里的一层目录，给界面右栏那棵文件树用。
+   *
+   * **一次一层**（见 workspace/index.ts 的 list）：展开哪个目录就取哪个目录。
+   * 点开某个文件走的仍是下面那条预览——两处看到的是同一个工作区、同一份字节。
+   */
+  ctx.server.get('/api/workspace/list', async (req, res) => {
+    try {
+      res.json(await ctx.workspace.list(req.query.get('path') ?? ''))
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException
+      res.status = e instanceof WorkspaceError ? 400 : err?.code === 'ENOENT' ? 404 : 500
+      res.json({
+        error: e instanceof WorkspaceError ? e.message : err?.code === 'ENOENT' ? '目录不存在' : '列不出来',
+      })
+    }
+  })
+
+  /**
    * 预览工作区里的一个文件。上传进来的和 Bot 自己写出来的走的是同一条路——
    * 它们本来就在同一个目录里，没有理由分两套。
    *

@@ -44,6 +44,14 @@ const MAX_FIND_RESULTS = 200
 const MAX_GREP_MATCHES = 100
 const MAX_WALK_FILES = 20_000
 const MAX_GREP_FILE_BYTES = 2 * 1024 * 1024
+/**
+ * 一次调用最多报几个「看到的文件」（`ToolResult.refs`）。
+ *
+ * 有上限是因为它要跟着结果一起写进会话日志：一次 `find **` 能扫出两百条，条条落盘、
+ * 条条重放。前几十个已经够界面把正文里提到的那几个文件名接上——正文里根本提不到
+ * 第一百个。
+ */
+const MAX_REF_FILES = 60
 const DEFAULT_TIMEOUT = 120_000
 const MAX_TIMEOUT = 600_000
 
@@ -56,6 +64,9 @@ const SKIPPED_DIRS = new Set([
 
 /** 业务失败：参数不对、文件不存在、命令没找到。**不是**管道故障，照常返回文本。 */
 class ToolFailure extends Error {}
+
+/** 工具返回的东西：一段文本，外加它落地的（files）与看到的（refs）文件。 */
+type ToolOut = { text: string; files?: WorkspaceFile[]; refs?: WorkspaceFile[] }
 
 function fail(message: string): never {
   throw new ToolFailure(message)
@@ -204,12 +215,15 @@ export function apply(ctx: Context, config: Config = {}) {
   const root = ctx.workspace.root
   const resolveIn = (path?: string) => ctx.workspace.resolve(path)
   const show = (path: string) => ctx.workspace.show(path)
+  /** 把一串「相对工作区根」的路径收成 refs（见 tools/index.ts 的 `ToolResult.refs`）。 */
+  const refsOf = (paths: string[]): WorkspaceFile[] =>
+    paths.slice(0, MAX_REF_FILES).map((path) => ({ path, name: path.split('/').pop() || path }))
   const defaultTimeout = Math.min(config.timeout || DEFAULT_TIMEOUT, MAX_TIMEOUT)
 
   /** 统一把业务失败收成文本。管道故障（真异常）继续往上抛，由 ToolService 标 failed。 */
   const tool = (
     def: { name: string; description: string; parameters: Record<string, unknown>; risk?: ToolRisk[] },
-    execute: (args: any, call: ToolCall) => Promise<string | { text: string; files: WorkspaceFile[] }> | string,
+    execute: (args: any, call: ToolCall) => Promise<string | ToolOut> | string,
   ) => {
     ctx.tools.register({
       ...def,
@@ -254,6 +268,13 @@ export function apply(ctx: Context, config: Config = {}) {
       const target = resolveIn(path)
       const info = await stat(target)
       if (info.isDirectory()) fail(`${show(target)} 是目录，用 ls 列它的内容。`)
+      /**
+       * 读到的这一个就是 refs。
+       *
+       * 读完之后模型常常只说「已读取《某某报告》」——用的是文档标题，不是文件名，
+       * 界面拿正文一个字也接不上。有这一条，那份报告才在消息底下留下一个能点开的入口。
+       */
+      const me = refsOf([show(target).split(sep).join('/')])
 
       /**
        * PDF / Word / Excel 先转成文本，再照常按行分页。
@@ -275,8 +296,11 @@ export function apply(ctx: Context, config: Config = {}) {
 
       const buf = text === undefined ? await readFile(target) : Buffer.alloc(0)
       if (text === undefined) {
-        if (!buf.length) return `${show(target)} 是空文件。`
-        if (looksBinary(buf)) return `${show(target)} 是二进制文件（${humanSize(info.size)}），不能按文本读。`
+        if (!buf.length) return { text: `${show(target)} 是空文件。`, refs: me }
+        // 二进制读不成文本，但**照样报 refs**：界面能预览的恰恰是这一类（图片、PDF）。
+        if (looksBinary(buf)) {
+          return { text: `${show(target)} 是二进制文件（${humanSize(info.size)}），不能按文本读。`, refs: me }
+        }
       }
 
       const lines = (text ?? buf.toString('utf8')).split('\n')
@@ -293,7 +317,7 @@ export function apply(ctx: Context, config: Config = {}) {
         start - 1 + picked.length < lines.length
           ? `\n…（还有 ${lines.length - (start - 1 + picked.length)} 行，用 offset 继续读）`
           : ''
-      return clip(body, MAX_TEXT_CHARS) + tail
+      return { text: clip(body, MAX_TEXT_CHARS) + tail, refs: me }
     },
   )
 
@@ -399,6 +423,13 @@ export function apply(ctx: Context, config: Config = {}) {
         (e) => all || !e.name.startsWith('.'),
       )
       if (!entries.length) return `${show(target)} 是空目录。`
+      const here = show(target).split(sep).join('/')
+      /** 列出来的**文件**（目录和符号链接不算）。界面靠它把正文里那几个文件名接上。 */
+      const seen = refsOf(
+        entries
+          .filter((e) => e.isFile())
+          .map((e) => (here === '.' ? e.name : `${here}/${e.name}`)),
+      )
 
       entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
       const shown = entries.slice(0, MAX_LIST_ENTRIES)
@@ -411,7 +442,7 @@ export function apply(ctx: Context, config: Config = {}) {
         }),
       )
       const more = entries.length > shown.length ? `\n…（还有 ${entries.length - shown.length} 条未列出）` : ''
-      return `${show(target)}：\n${lines.join('\n')}${more}`
+      return { text: `${show(target)}：\n${lines.join('\n')}${more}`, refs: seen }
     },
   )
 
@@ -453,7 +484,7 @@ export function apply(ctx: Context, config: Config = {}) {
       found.sort((a, b) => b.mtime - a.mtime)
       const shown = found.slice(0, cap)
       const more = found.length > shown.length ? `\n…（共 ${found.length} 个，只列出 ${shown.length} 个）` : ''
-      return shown.map((f) => f.rel).join('\n') + more
+      return { text: shown.map((f) => f.rel).join('\n') + more, refs: refsOf(shown.map((f) => f.rel)) }
     },
   )
 
@@ -537,13 +568,15 @@ export function apply(ctx: Context, config: Config = {}) {
 
       if (filesOnly) {
         if (!hitFiles.length) return `没有文件匹配 ${pattern}。`
-        return hitFiles.join('\n') + (truncated ? `\n…（已达 ${cap} 条上限）` : '')
+        return { text: hitFiles.join('\n') + (truncated ? `\n…（已达 ${cap} 条上限）` : ''), refs: refsOf(hitFiles) }
       }
       if (!lines.length) return `没有匹配 ${pattern} 的内容（范围 ${show(base)}）。`
-      return (
-        `${lines.length} 条匹配，来自 ${hitFiles.length} 个文件：\n${lines.join('\n')}` +
-        (truncated ? `\n…（已达 ${cap} 条上限，缩小范围或加 glob）` : '')
-      )
+      return {
+        text:
+          `${lines.length} 条匹配，来自 ${hitFiles.length} 个文件：\n${lines.join('\n')}` +
+          (truncated ? `\n…（已达 ${cap} 条上限，缩小范围或加 glob）` : ''),
+        refs: refsOf(hitFiles),
+      }
     },
   )
 
