@@ -102,21 +102,29 @@ function pageAside() {
 /**
  * 右栏开关。放在对话 header 上，所以折叠之后仍然点得到——右栏本身是整个不渲染的。
  *
- * 两颗：文件、运行环境。点的是「我要看哪一屏」，不是「开还是关」——正看着的那一屏
- * 再点一次才收起来。这样一次点击就能从桌面切到文件，不用先收再开。
+ * **两颗切屏 + 一颗收起，收起排在最右。** 切屏那两颗永远画自己那一屏的图标（文件夹、
+ * 显示器），正看着的那一屏留个底色；收起是另一件事——它不属于任何一屏，所以自己占一颗，
+ * 而且只有栏开着的时候才在。
+ *
+ * 一开始是让正看着那一屏的图标就地变成收起箭头的：省一颗按钮，但同一个位置上的图标
+ * 一开一关是两个意思，而人是照位置去点的——要收起，得先想起来「现在开着的是哪一屏」。
  */
 function asideToggle() {
   if (!hasAside()) return ''
   const open = asidePref.open
-  const tab = (name, icon, label, collapse) => {
+  const tab = (name, icon, label) => {
     const here = open && asidePref.tab === name
-    return `<button type="button" class="btn btn-ghost btn-icon" style="flex: none;"
+    return `<button type="button" class="btn btn-ghost btn-icon sw-asidetab" style="flex: none;"
       data-act="aside-tab" data-tab="${name}" aria-pressed="${here}"
-      aria-label="${esc(here ? collapse : label)}" title="${esc(label)}"
-      >${svg(here ? CHEVRON_RIGHT : icon, 16)}</button>`
+      aria-label="${esc(label)}" title="${esc(label)}">${svg(icon, 16)}</button>`
   }
+  const collapse = open
+    ? `<button type="button" class="btn btn-ghost btn-icon" style="flex: none;"
+        data-act="aside-toggle" aria-label="${esc(t('收起右栏'))}" title="${esc(t('收起右栏'))}"
+        >${svg(CHEVRON_RIGHT, 16)}</button>`
+    : ''
   return `<span style="margin-left: auto; flex: none; display: inline-flex; gap: 2px;"
-    >${tab('files', FOLDER, t('工作区文件'), t('收起工作区文件'))}${tab('env', MONITOR, t('运行环境'), t('收起运行环境'))}</span>`
+    >${tab('files', FOLDER, t('工作区文件'))}${tab('env', MONITOR, t('运行环境'))}${collapse}</span>`
 }
 
 /** 在不在对话页。顶栏换不换成会话身份行、右栏开不开，都看它，免得两处判断漂移。 */

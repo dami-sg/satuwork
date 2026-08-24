@@ -292,7 +292,7 @@ window.SATU_I18N = {
   收起运行环境: 'Collapse runtime panel',
   // 右栏的另一屏：席位工作区里的文件树（见 chat.js 的 workspacePanel）。
   工作区文件: 'Workspace files',
-  收起工作区文件: 'Collapse workspace files',
+  收起右栏: 'Collapse panel',
   列不出来: 'Could not list it',
   '实例还没接上，稍后再看': 'The seat is not connected yet — check back in a moment',
   '工作区还是空的。上传一个文件，或者让 Bot 写点什么。':

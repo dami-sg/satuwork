@@ -938,6 +938,10 @@
 /* 没摆下的那些。不是可点的东西，所以别长成可点的样子。 */
 .sw-stepmore { color: var(--muted-foreground); align-self: center; }
 
+/* 抬头上那两颗切屏的图标。正看着的那一屏要留个底色——两颗长得一样大、挨在一起，
+   不标出来的话，人得先点一下才知道现在开着的是哪一屏。 */
+.sw-asidetab[aria-pressed='true'] { background: var(--color-accent-100); color: var(--color-accent-800); }
+
 /* ── 右栏里的工作区文件树 ─────────────────────────────────────────────────
    行是按钮但看起来是一行文字：这一栏窄，任何边框和圆角都会把名字挤到换行。 */
 .sw-ws { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
