@@ -1972,6 +1972,64 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.stopChatStream()
     })
 
+    await test('半死的流：连接没断、字节也不来——三个心跳的静默就掐掉重连', async () => {
+      /**
+       * 换版把席位杀掉的那一刻，中间哪一跳要是把「断」吞掉（反代的 pipe 没收尾、网络
+       * 半开），浏览器手上这条流就成了「看着还开着、永远等不来下一个字节」。而重连那
+       * 一整套——退避、慢速长跑、发消息前的 revive、切回前台——判据全是 row.ac 在不
+       * 在：半死的流 ac 还在，谁都以为它好着，没有任何东西会去碰它。这正是「回答其实
+       * 出了、界面上看不见、刷新才好」修了几轮都没除根的那一种：每一轮修的都是「断了
+       * 之后接不回来」，而这一种压根没有断。判据只能是字节本身：bot 每 15 秒一条
+       * `: ping`，三个心跳没等到就当死的拆掉重连（见 chat.js 的 sweepSilentStreams）。
+       */
+      const streams = []
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/events')) {
+            const sse = fakeSse()
+            streams.push(sse)
+            return sse.response
+          }
+          if (path.includes('/bots/bot-mute/session'))
+            return { ok: true, status: 200, text: async () => JSON.stringify({ sessionId: 's-mute' }) }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.path = '/chat'
+      ui.state.chatBotId = 'bot-mute'
+      await ui.ensureChatSession('bot-mute')
+      for (let i = 0; i < 100 && !streams.length; i++) await new Promise((r) => setTimeout(r, 10))
+      assert(streams.length === 1, `前置没成立：该有一条流，实际 ${streams.length}`)
+      try {
+        streams[0].push({ type: 'runtime/hello', instanceId: 'seat-mute', startedAt: 1 })
+        streams[0].push({ type: 'replay/done', live: false })
+        for (let i = 0; i < 100 && !ui.streamPulse.size; i++) await new Promise((r) => setTimeout(r, 10))
+        assert(ui.streamPulse.size === 1, '收到字节却没记脉搏——看门狗从一开始就是瞎的')
+
+        // 刚有过字节：不许误伤，否则好好的流会被半分钟重连一次。
+        ui.sweepSilentStreams(Date.now())
+        assert(streams.length === 1, '脉搏还新鲜就被掐了')
+
+        // 席位死了而「断」没传下来：流还开着，字节再也不来。
+        ui.sweepSilentStreams(Date.now() + ui.STREAM_SILENT_MS + 1000)
+        for (let i = 0; i < 200 && streams.length < 2; i++) await new Promise((r) => setTimeout(r, 10))
+        assert(streams.length === 2, '静默这么久没人管——半死的流就是那句永远的「正在思考」，只能刷新')
+        assert(ui.botStreamOf('bot-mute').ac, '重连之后这一行没有活的 ac，后面谁也认不回它')
+
+        // 新流还一个字节都没吐过：不归这只看门狗管（那是重放看门狗的地界），不许连环掐。
+        ui.sweepSilentStreams(Date.now() + ui.STREAM_SILENT_MS * 3)
+        await new Promise((r) => setTimeout(r, 30))
+        assert(streams.length === 2, '还没开口的新流也被掐了——建连慢一点就会被连环重连')
+      } finally {
+        for (const s of streams) s.close()
+        ui.stopChatStream()
+      }
+    })
+
     await test('后台那几条流断了，不许占用正在看的那条对话的横幅', async () => {
       /**
        * 名单上每个 Bot 都挂着一条流（warmBotStreams），任何一条断掉都会走到认输那一
