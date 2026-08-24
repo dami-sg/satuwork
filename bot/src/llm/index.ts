@@ -86,7 +86,11 @@ export class LlmService extends Service {
       const by = new Map<string, CatalogProvider>()
       for (const m of body.data ?? []) {
         const provider = String(m.provider || m.owned_by || 'unknown')
-        const id = String(m.model || String(m.id || '').split('/').pop() || m.id)
+        // 只在**第一个**斜杠上切：`m.id` 是 `provider/model`，而模型 id 自己可能还带斜杠
+        // （openrouter 的 openai/gpt-4o）。用 pop() 会把它切得只剩最后一段。
+        const composite = String(m.id || '')
+        const cut = composite.indexOf('/')
+        const id = String(m.model || (cut > 0 ? composite.slice(cut + 1) : composite) || m.id)
         if (!by.has(provider)) {
           by.set(provider, { provider, name: provider, models: [] })
         }

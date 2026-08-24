@@ -1,6 +1,6 @@
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Db } from './db.ts'
-import { buildProvider, customEnvVar, MODEL_ID_RE, parseProviderDef, PROVIDER_ID_RE, type CustomProviderDef } from './providers.ts'
+import { buildProvider, customEnvVar, isModelId, parseProviderDef, PROVIDER_ID_RE, type CustomProviderDef } from './providers.ts'
 
 export interface CatalogModel {
   provider: string
@@ -154,7 +154,7 @@ export class Llm {
       // provider 会被 envSecret 拼成 `<PROVIDER>_API_KEY` 去索引 process.env，所以它
       // 不能是任意字符串：一条 `{"provider":"stripe"}` 的公司模型就能让网关拿着
       // STRIPE_API_KEY 去打模型接口。形状不对的条目直接不进目录。
-      if (!PROVIDER_ID_RE.test(provider) || !MODEL_ID_RE.test(id)) continue
+      if (!PROVIDER_ID_RE.test(provider) || !isModelId(id)) continue
       const key = `${provider}/${id}`
       if (seen.has(key)) continue
       seen.add(key)
@@ -186,10 +186,14 @@ export class Llm {
     const ref = parseModelRef(raw, hint)
     const list = await this.catalog(companyId)
     if (ref.provider && ref.id) {
-      return list.find((m) => m.provider === ref.provider && m.id === ref.id)
+      const hit = list.find((m) => m.provider === ref.provider && m.id === ref.id)
+      if (hit) return hit
     }
-    if (ref.id) {
-      const hits = list.filter((m) => m.id === ref.id)
+    // 模型 id 自己带斜杠时（`openai/gpt-4o` 这种），上面那一刀会把前半段当成 provider。
+    // 切错了就把整条再当作裸 id 找一遍——唯一命中，或者跟 hint 的供应商对得上，才算数。
+    const bare = String(raw || '').trim()
+    if (bare) {
+      const hits = list.filter((m) => m.id === bare)
       if (hits.length === 1) return hits[0]
       if (hint) return hits.find((m) => m.provider === hint)
     }

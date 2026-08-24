@@ -53,7 +53,21 @@ export interface CustomProviderDef {
 
 /** provider id 要能安全地进 URL 和 `provider/model` 这种复合 id，所以不收斜杠。 */
 export const PROVIDER_ID_RE = /^[a-z][a-z0-9-]{1,39}$/
-export const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/**
+ * 模型 id 收斜杠：OpenRouter 的 `openai/gpt-4o`、Fireworks 的
+ * `accounts/fireworks/models/…` 就是这个形状，不放行的话这些上游一个都录不进来。
+ *
+ * 斜杠只能夹在中间做分隔——不能开头、不能结尾、不能连着两个。复合 id
+ * `provider/model` 是在**第一个**斜杠上切的（见 parseModelRef），而 provider 那半段
+ * 本来就不收斜杠，所以只要模型 id 自己没有空段，切回来的还是原来那一对。
+ */
+export const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)*$/
+export const MODEL_ID_MAX = 128
+
+export function isModelId(id: string): boolean {
+  return id.length <= MODEL_ID_MAX && MODEL_ID_RE.test(id)
+}
 
 export class DefError extends Error {}
 
@@ -85,7 +99,8 @@ export function parseModelDef(raw: unknown): CustomModelDef {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('模型必须是对象')
   const o = raw as Record<string, unknown>
   const id = str(o, 'id', '模型 id')
-  if (!MODEL_ID_RE.test(id)) fail('模型 id 只能是字母数字和 . _ : -')
+  if (id.length > MODEL_ID_MAX) fail(`模型 id 最长 ${MODEL_ID_MAX} 个字符`)
+  if (!MODEL_ID_RE.test(id)) fail('模型 id 只能是字母数字和 . _ : - /，斜杠只能夹在中间做分隔')
   const cost = (o.cost && typeof o.cost === 'object' ? o.cost : {}) as Record<string, unknown>
   const input = Array.isArray(o.input)
     ? (o.input as unknown[]).filter((x): x is 'text' | 'image' => x === 'text' || x === 'image')
