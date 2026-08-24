@@ -75,6 +75,8 @@ const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>测试页<
   <a id="pop" href="/second" target="_blank">开新标签页</a>
   <a id="out" href="http://other.example.test/doc">站外那一条</a>
   <a id="frag" href="#top">页内锚点</a>
+  <a id="js" href="javascript:void(0)">假链接</a>
+  <a id="huge" href="http://other.example.test/x?q=${'LONGLONG'.repeat(300)}">超长的那条</a>
 </main></body></html>`
 
 const server = createServer((req, res) => {
@@ -347,9 +349,24 @@ try {
     带上了链接文字: (linkSnap.links || []).some((l) => l.text === '站外那一条'),
     // 页内锚点不是链接：它不换页，摆进来只会把那张卡撑满。
     页内锚点不算: !(linkSnap.links || []).some((l) => l.url.includes('#top')),
+    // javascript: 不是地址。这一层滤掉之后，界面那层还会再滤一次（两道都要）。
+    假协议不算: !(linkSnap.links || []).some((l) => l.url.startsWith('javascript:')),
+    /**
+     * **超长的整条丢掉，不截断。**
+     *
+     * 截出来的 URL 不是更短的地址，是错的地址——却照样以可点链接的样子摆到人面前，
+     * 点下去落到别处，没有任何迹象表明它被动过手脚。
+     */
+    超长的整条丢掉: !(linkSnap.links || []).some((l) => l.url.includes('LONGLONG')),
+    正文里也不留半截: !linkSnap.text.includes('q=LONGLONG'),
     // 取走即清零，不然这一批会跟着下一次调用再报一遍。
     取走就清零: !((await run('browser_wait_for', { time: 10 })).links || []).length,
   }
+
+  // 滚动也拍了快照，看到的链接不该因为「用的是滚动而不是快照」就不报。
+  const scrolledForLinks = await run('browser_scroll', { direction: 'down', amount: 200 })
+  out.links.滚动那一步也报链接 = Array.isArray(scrolledForLinks.links) && scrolledForLinks.links.length > 0
+  await run('browser_navigate', { url: `http://${HOST}/` })
 
   out.frame = {
     快照包了标签: framed.text.includes('<page_content url=') && framed.text.includes('</page_content>'),

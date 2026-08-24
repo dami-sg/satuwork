@@ -26,6 +26,18 @@ const MAX_NODES = 400
  */
 const MAX_LINKS = 30
 
+/**
+ * 地址长过这个数就**整条不要**，而不是截一刀。
+ *
+ * 截断的 URL 不是一个更短的地址，是一个**错的**地址——而它照样以可点链接的样子摆到
+ * 人面前，点下去落到别处，没有任何迹象表明它被动过手脚。带签名参数的下载链接、带一
+ * 大串追踪参数的商品页都可能超。截文字（text）没关系，那只影响显示；截地址不行。
+ *
+ * 2000 是现实里 URL 的实用上限（IE 那条 2083 的老限制留下来的行业惯例），超过它的
+ * 多半本来也不是给人点的。
+ */
+const MAX_URL = 2000
+
 export const BOOTSTRAP = `
 (() => {
   if (window.__satu) return
@@ -143,7 +155,9 @@ export const BOOTSTRAP = `
       // browser_* 一起失灵。同理这里面一个反引号都不能出现。见文件头那段说明。
       if (!/^https?:\\/\\//i.test(href)) return ''
       if (href.split('#')[0] === location.href.split('#')[0]) return ''
-      const url = href.slice(0, 500)
+      // 超长的整条丢掉，见 MAX_URL：截出来的是个错地址，比没有更坏。
+      if (href.length > ${MAX_URL}) return ''
+      const url = href
       if (!seenHref.has(url) && links.length < ${MAX_LINKS}) {
         seenHref.add(url)
         links.push({ text: (name || '').slice(0, 120), url })

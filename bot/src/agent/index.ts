@@ -1106,12 +1106,6 @@ function textOf(result: any): string {
 }
 
 /**
- * 工具报出来的产出文件（见 tools/index.ts 的 `ToolResult.files`）。
- *
- * 逐字段挑而不是整个 details 塞进日志：details 是 `unknown`，工具想放什么都行，
- * 原样落盘等于让任意一个工具决定会话日志的形状。
- */
-/**
  * 工具报出来的网页链接（见 tools/index.ts 的 `ToolResult.links`）。
  *
  * 和 filesOf 同一条理由逐字段挑：details 是 `unknown`，原样落盘等于让任意一个工具
@@ -1126,6 +1120,12 @@ function linksOf(result: any): { text: string; url: string }[] | undefined {
   return links.length ? links : undefined
 }
 
+/**
+ * 工具报出来的产出文件（见 tools/index.ts 的 `ToolResult.files`）。
+ *
+ * 逐字段挑而不是整个 details 塞进日志：details 是 `unknown`，工具想放什么都行，
+ * 原样落盘等于让任意一个工具决定会话日志的形状。
+ */
 function filesOf(result: any): { path: string; name: string }[] | undefined {
   const raw = result?.details?.files
   if (!Array.isArray(raw)) return undefined

@@ -138,6 +138,31 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       // 没有文字的链接（只有图标那种）退回显示地址，不能显示成一颗空药丸。
       const bare = ui.linkChipHtml({ text: '', url: 'https://example.com/c' })
       assert(bare.includes('>https://example.com/c<'), `空文字没退回显示地址：${bare}`)
+
+      /**
+       * **协议白名单：这里是第二处把地址渲染成 href 的地方。**
+       *
+       * markdown.js 那道 safeUrl 的注释写着「模型写得出 javascript:，这里是唯一拦得住
+       * 的地方」——那句话在这颗药丸出现之后就不再成立了，所以它得自己也拦一道。
+       * 今天上游是干净的（page.ts 只收 http/https），但这条链路上没有第二道防线：
+       * agent 的 linksOf 只检查「是不是字符串」，而 ToolResult.links 是公开类型。
+       */
+      const evil = [{ name: 'x', links: [{ text: '点我', url: 'javascript:alert(1)' }, { text: '也点我', url: 'data:text/html,x' }] }]
+      assert(!ui.pageLinks(evil).length, `假协议混进来了：${JSON.stringify(ui.pageLinks(evil))}`)
+      assert(ui.linkChipHtml({ text: '点我', url: 'javascript:alert(1)' }) === '', '假协议还是画成了可点的')
+
+      /**
+       * **一条消息底下要封顶。**
+       *
+       * 席位那边每次快照封 30 条，但那是**每次快照**——一次多步浏览在同一轮里轻松跑
+       * 十几次，跨页面的地址几乎不重复，汇总下来两三百条，把真正的回答挤出屏幕。
+       */
+      const many = [{ name: 'browser_snapshot', links: Array.from({ length: 50 }, (_, i) => ({ text: 't' + i, url: 'https://example.com/n' + i })) }]
+      const all50 = ui.pageLinks(many)
+      assert(all50.length === 50, `pageLinks 自己不该截：${all50.length}`)
+      // 封顶发生在渲染那一层，而且多出来的**不闷声吞掉**——要说清还有多少。
+      assert(ui.MAX_LINK_CHIPS === 20, `上限变了就来改这条：${ui.MAX_LINK_CHIPS}`)
+      assert(ui.linkMoreChipHtml(30).includes('30'), '没说清还有多少条')
     })
 
     await test('确认卡：还等着的摊开，有结论的收成药丸', async () => {

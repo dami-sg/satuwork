@@ -813,6 +813,8 @@
   transition: background 120ms ease, border-color 120ms ease;
 }
 .sw-linkchip:hover { background: var(--secondary); border-color: var(--muted-foreground); }
+/* 没摆下的那些。不是可点的东西，所以别长成可点的样子。 */
+.sw-linkmore { color: var(--muted-foreground); }
 .sw-filechip:hover { background: var(--secondary); border-color: var(--ring); }
 .sw-filechip svg { opacity: 0.6; }
 

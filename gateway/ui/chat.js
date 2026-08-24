@@ -1924,19 +1924,51 @@ function pageLinks(tools) {
   const seen = new Map()
   for (const x of tools || []) {
     for (const l of x.links || []) {
-      if (l && l.url && !seen.has(l.url)) seen.set(l.url, l)
+      if (l && safeLinkUrl(l.url) && !seen.has(l.url)) seen.set(l.url, l)
     }
   }
   return [...seen.values()]
 }
 
+/**
+ * 一条消息底下最多摆几颗链接。
+ *
+ * 席位那边每次快照封 30 条，但**那是每次快照**——一次多步浏览（navigate → click →
+ * snapshot → click…）在同一轮里轻松跑十几次，跨页面的地址几乎不重复，汇总下来两三百
+ * 条，把真正的回答挤出屏幕。多出来的不闷声吞掉，末尾摆一颗说清还有多少。
+ */
+const MAX_LINK_CHIPS = 20
+
+/**
+ * 只放行安全协议。
+ *
+ * markdown.js 里那道 `safeUrl` 的注释写着「模型写得出 javascript:，这里是唯一拦得住的
+ * 地方」——而链接药丸是**第二处**把地址渲染成 href 的地方，它得自己也拦一道。
+ *
+ * 今天上游是干净的（page.ts 只收 http/https），但这条链路上没有第二道防线：agent 的
+ * linksOf 只检查「是不是字符串」，而 `ToolResult.links` 是公开类型，任何一把工具都填得了。
+ * 渲染边界自己把关，才不必指望每一个上游都记得。
+ */
+function safeLinkUrl(url) {
+  const s = String(url || '').trim()
+  return /^https?:\/\//i.test(s) ? s : ''
+}
+
 /** 一条链接摆成一颗可点的药丸。开新标签页，且不把来路带出去。 */
 function linkChipHtml(l) {
-  const label = String(l.text || '').trim() || l.url
+  const href = safeLinkUrl(l && l.url)
+  // 协议不对的根本不该走到这儿（pageLinks 已经滤过），真走到了就别画成可点的。
+  if (!href) return ''
+  const label = String((l && l.text) || '').trim() || href
   return (
-    `<a class="sw-chip sw-linkchip" href="${esc(l.url)}" target="_blank" rel="noopener noreferrer nofollow" ` +
-    `title="${esc(l.url)}">${ICON_LINK}<span>${esc(label)}</span></a>`
+    `<a class="sw-chip sw-linkchip" href="${esc(href)}" target="_blank" rel="noopener noreferrer nofollow" ` +
+    `title="${esc(href)}">${ICON_LINK}<span>${esc(label)}</span></a>`
   )
+}
+
+/** 没摆下的那些。**不闷声吞掉**——闷声截断会让人以为这一页就这么几条。 */
+function linkMoreChipHtml(n) {
+  return `<span class="sw-chip sw-linkmore">${esc(t('还有 N 条链接', 'N more links').replace('N', String(n)))}</span>`
 }
 
 /**
@@ -2463,7 +2495,9 @@ function updateRow(el, b, streaming) {
    * 网页链接。**正文里已经写出来的那条就不再重复摆**——模型有时候自己会把地址抄进
    * 回答里，那时候底下再来一颗一模一样的只是噪音。
    */
-  const links = pageLinks(b.tools).filter((l) => !String(b.text || '').includes(l.url))
+  const allLinks = pageLinks(b.tools).filter((l) => !String(b.text || '').includes(l.url))
+  const links = allLinks.slice(0, MAX_LINK_CHIPS)
+  const moreLinks = allLinks.length - links.length
   const sig =
     tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|') +
     '#' +
@@ -2472,6 +2506,8 @@ function updateRow(el, b, streaming) {
     // 链接也要进签名，否则结果回来时这一排不会重画——表现是「链接要刷新一下才出来」。
     links.map((l) => l.url).join('|') +
     '#' +
+    moreLinks +
+    '#' +
     settled.map((a) => a.callId + ':' + approvalState(a)).join('|')
   if (chips.getAttribute('data-sig') !== sig) {
     chips.setAttribute('data-sig', sig)
@@ -2479,6 +2515,7 @@ function updateRow(el, b, streaming) {
       tools.map(chipHtml).join('') +
       rest.map(fileChipHtml).join('') +
       links.map(linkChipHtml).join('') +
+      (moreLinks > 0 ? linkMoreChipHtml(moreLinks) : '') +
       settled.map((a, i) => approvalChipHtml(a, tools.length + i)).join('')
     chips.hidden = !tools.length && !rest.length && !links.length && !settled.length
     /**
@@ -3090,7 +3127,11 @@ function chatExportText() {
       out.push('- ' + t('工具') + ' `' + x.name + '` · ' + (x.result == null ? t('调用中') : x.failed ? t('失败') : t('完成')))
       for (const f of x.files || []) out.push('  - ' + t('产出') + ' `' + f.path + '`')
       // 链接写成 markdown：导出的这份多半是要贴进别处看的，可点比裸地址有用。
-      for (const l of x.links || []) out.push('  - ' + t('链接') + ' [' + (l.text || l.url) + '](' + l.url + ')')
+      for (const l of x.links || []) {
+        // 导出的这份也过一遍协议：它多半是要贴进别处看的，那边不一定还有这道闸。
+        const href = safeLinkUrl(l && l.url)
+        if (href) out.push('  - ' + t('链接') + ' [' + (l.text || href) + '](' + href + ')')
+      }
     }
     if ((b.tools || []).length) out.push('')
     out.push(String(b.text || '').trim(), '')
