@@ -209,6 +209,15 @@ async function consumeOpenAI(
     started = true
     stream.push({ type: 'start', partial })
   }
+  /**
+   * 收口了，但**先不推 done**——等这条流真的读完。
+   *
+   * 上游在流已经开着的时候出事（限流、过载、供应商 5xx），Gateway 那边是**先写一个
+   * finish 块、再写错误帧**（见 gateway/src/v1.ts 的 case 'error'）：读到 finish 就
+   * return 的话，那一帧永远读不到，一次上游报错在这儿变成「正常收口的空回答」——
+   * errorMessage 没人置，runTurn 查不出失败，空消息又不入日志，最后按 completed 落库。
+   */
+  let finished: { reason: string; message: any } | null = null
   for await (const ev of readSse(res, kick)) {
     if (ev.data === '[DONE]') break
     let chunk: any
@@ -221,6 +230,8 @@ async function consumeOpenAI(
       fail(stream, model, chunk.error.message || JSON.stringify(chunk.error))
       return
     }
+    // 收口之后只等错误帧，别的一概不看。
+    if (finished) continue
     const choice = chunk.choices?.[0] ?? {}
     const delta = choice.delta ?? {}
     if (delta.role) start()
@@ -291,9 +302,13 @@ async function consumeOpenAI(
         }
       }
       partial.stopReason = reason
-      stream.push({ type: 'done', reason, message: partial })
-      return
+      finished = { reason, message: partial }
+      continue
     }
+  }
+  if (finished) {
+    stream.push({ type: 'done', reason: finished.reason, message: finished.message })
+    return
   }
   if (!started) {
     fail(stream, model, 'empty stream')

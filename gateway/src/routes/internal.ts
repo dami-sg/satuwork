@@ -44,7 +44,10 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     const code = normalizePairingCode(strField(body, 'code'))
     const port = intField(body, 'managerPort') ?? 8443
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HttpError(400, 'managerPort 不合法')
-    const protocol = intField(body, 'protocol') ?? 0
+    // int4 装得下才收。越界的值会让 PG 抛 22003，整条配对 500——和 runtime.ts 里
+    // 那道 `have=99999999999` 的闸同一个道理。
+    const protocolRaw = intField(body, 'protocol') ?? 0
+    const protocol = Number.isInteger(protocolRaw) && protocolRaw >= 0 && protocolRaw <= 2_147_483_647 ? protocolRaw : 0
     const managerVersion = strField(body, 'managerVersion', false) || null
     const challenge = strField(body, 'challenge', false)
 
@@ -233,7 +236,9 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       // 界面上那句「3 分钟前」必须准。同一个理由见 publicMachine 的 heartbeatAge。
       ...(telemetry ? { telemetry, telemetryAt: Date.now() } : {}),
       ...(managerVersion ? { managerVersion } : {}),
-      ...(Number.isInteger(protocol) ? { protocol } : {}),
+      // 同上：越界的 protocol 一律不写。心跳是这台机器唯一的控制通道，让它 500
+      // 等于把机器锁死在原地，而界面上那盏灯还亮着。
+      ...(Number.isInteger(protocol) && protocol >= 0 && protocol <= 2_147_483_647 ? { protocol } : {}),
       ...(arch ? { arch } : {}),
       ...(reportedTz === undefined ? {} : { currentTimezone: reportedTz }),
       lastError: upgradeError,
@@ -432,7 +437,16 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     if (!HANDOFF_STATES.includes(state)) throw new HttpError(400, 'state 不认识')
 
     const id = strField(body, 'id')
+    /**
+     * 这张单已经在册、而且不是这个人的：拒。和会话根那条同一个道理——`id` 是上报方
+     * 给的，可以是任何字符串。少了这一句，一台被拿下的席位报一个别人的单号，下面
+     * `known` 就成了别家公司那一行，它的 assignee / machineId 会被拿去复用，而
+     * db.upsertHandoff 的 where 虽然挡得住写入，读回来那一行仍是原主人的。
+     */
     const known = await db.handoff(id)
+    if (known && (known.accountId !== accountId || known.companyId !== caller.companyId)) {
+      throw new HttpError(403, '这张交接单不属于这个账号')
+    }
     // 已经在册的不重算指派：人都接手了，模版这时候改了也不该把这张单从他手上挪走。
     const assignee = known ? known.assignee : await resolveAssignee(db, caller.companyId, accountId)
     const machineId =
@@ -440,6 +454,21 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       (caller.kind === 'machine'
         ? caller.machine.id
         : ((await db.seatRuntimesOfAccount(accountId))[0]?.machineId ?? null))
+
+    /**
+     * `claimedBy` 也得校验。
+     *
+     * 它和 accountId 一样是上报方给的，却一直没人查——一台被拿下的席位报一句
+     * `state: 'claimed', claimedBy: '<某个管理员的 accountId>'`，审计里那条
+     * `handoff.claimed` 就记在了那个管理员头上，待办页上的「谁接的」也跟着改姓。
+     * 认不出的一律当没有：宁可丢掉一个署名，不能记错一个人。
+     */
+    const claimedByRaw = strField(body, 'claimedBy', false) || null
+    let claimedBy: string | null = null
+    if (claimedByRaw) {
+      const who = await db.account(claimedByRaw)
+      if (who && who.companyId === caller.companyId) claimedBy = who.id
+    }
 
     const handoff = await db.upsertHandoff({
       id,
@@ -450,7 +479,7 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       machineId,
       state,
       assignee,
-      claimedBy: strField(body, 'claimedBy', false) || null,
+      claimedBy,
       blocking: body.blocking !== false,
       repeats: intField(body, 'repeats') ?? 0,
       reason: strField(body, 'reason', false),
@@ -479,7 +508,7 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     if (handoff.state !== 'closed' && known?.state !== handoff.state) {
       await db.audit({
         companyId: caller.companyId,
-        accountId: strField(body, 'claimedBy', false) || accountId,
+        accountId: claimedBy || accountId,
         action: `handoff.${handoff.state}`,
         detail: {
           handoffId: handoff.id,

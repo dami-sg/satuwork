@@ -330,7 +330,23 @@ export class CatalogService extends Service {
       // 界面上出现红字，而下一轮探针一分钟后就到。
       return
     }
-    if (!next || next === this.stamp) return
+    /**
+     * 指纹没动，但上一轮有 MCP 没连上：到点自己再连一次。
+     *
+     * 不补这一条的话，一次几秒的握手失败会让那台服务器的工具一直缺着——runPull 照样
+     * 走完、stamp 照样写成新的，而 poll 只在指纹变化时才做事，于是要等到有人改模版或
+     * 者进程重启才恢复。
+     */
+    if (!next || next === this.stamp) {
+      if (this.mcpRetryAt && Date.now() >= this.mcpRetryAt) {
+        this.mcpRetryAt = 0
+        this.ctx.logger?.info?.('catalog: 有 MCP 上一轮没连上，重试一次')
+        await this.connectMcp().catch((e) => {
+          this.ctx.logger?.warn?.(`catalog: MCP 重连失败 ${(e as Error).message}`)
+        })
+      }
+      return
+    }
     this.ctx.logger?.info?.(`catalog: 目录有变（${next}），重新拉取`)
     /**
      * **拉取的异常在这里就地收住。**
@@ -501,10 +517,32 @@ export class CatalogService extends Service {
     this.clients.clear()
   }
 
+  /**
+   * 有 MCP 服务器这一轮没连上，到点要再试一次。0 = 不用试。
+   *
+   * 光靠指纹是不够的：连接失败也照样走完 runPull、照样把 stamp 写成新的，于是那台
+   * 服务器的工具一直缺着，直到下一次有人改模版或者进程重启——一次几秒的网络抖动能让
+   * 工具消失好几天。
+   */
+  private mcpRetryAt = 0
+
+  /** 连不上时隔多久再试。 */
+  private static readonly MCP_RETRY_MS = 60_000
+
   private async connectMcp() {
-    this.dropMcpTools()
     const rows = this.ctx.storage.collection<CachedServer>('mcp-servers').list()
     const statuses: ServerStatus[] = []
+    /**
+     * **先把该连的都连上，最后才换工具表。**
+     *
+     * 原先第一行就是 `dropMcpTools()`，然后挨个去握手——一台服务器一次 HTTP 往返，
+     * 串着来就是好几秒，而这几秒里 `mcp_*` 全都不存在。正跑着的那一轮这时候调工具，
+     * 拿到的是一句「未知工具」，模型只会当作这个工具坏了。
+     *
+     * 所以连接（会 await 的那部分）先做完，注册（纯同步）留到最后一起换。
+     */
+    const ready: { s: CachedServer; client: McpHttpClient; listed: JsonRpcTool[] }[] = []
+    let failed = false
     for (const row of rows) {
       const s = row.value
       if (!s.enabled) {
@@ -528,23 +566,9 @@ export class CatalogService extends Service {
       const client = new McpHttpClient(s.endpoint, token, s.timeoutMs)
       try {
         await client.initialize()
-        const listed = await client.listTools()
-        const names: string[] = []
-        for (const tool of listed) {
-          const name = mcpToolName(s.name, tool.name)
-          if (this.ctx.tools.has(name)) {
-            // 重名只可能是截断撞了。**要说出来**：静默跳过的表现是「某个工具时有时无」，
-            // 而没有任何一行日志指向原因。
-            this.ctx.logger?.warn?.(`catalog: ${s.name} 的 ${tool.name} 撞名 ${name}，这一个没注册`)
-            continue
-          }
-          this.registerMcpTool(s.id, name, tool, client)
-          names.push(name)
-        }
-        this.clients.set(s.id, client)
-        if (s.mentionOnly) this.mentionOnly.add(s.id)
-        statuses.push({ id: s.id, name: s.name, kind: s.kind, enabled: true, connected: true, tools: names, ...(s.mentionOnly ? { mentionOnly: true } : {}) })
+        ready.push({ s, client, listed: await client.listTools() })
       } catch (e) {
+        failed = true
         this.ctx.logger?.warn?.(`catalog: MCP ${s.name} 失败 ${(e as Error).message}`)
         statuses.push({
           id: s.id,
@@ -557,7 +581,27 @@ export class CatalogService extends Service {
         })
       }
     }
+    // ── 从这里往下不再 await：旧工具摘掉、新工具装上，中间没有空窗。──
+    this.dropMcpTools()
+    for (const { s, client, listed } of ready) {
+      const names: string[] = []
+      for (const tool of listed) {
+        const name = mcpToolName(s.name, tool.name)
+        if (this.ctx.tools.has(name)) {
+          // 重名只可能是截断撞了。**要说出来**：静默跳过的表现是「某个工具时有时无」，
+          // 而没有任何一行日志指向原因。
+          this.ctx.logger?.warn?.(`catalog: ${s.name} 的 ${tool.name} 撞名 ${name}，这一个没注册`)
+          continue
+        }
+        this.registerMcpTool(s.id, name, tool, client)
+        names.push(name)
+      }
+      this.clients.set(s.id, client)
+      if (s.mentionOnly) this.mentionOnly.add(s.id)
+      statuses.push({ id: s.id, name: s.name, kind: s.kind, enabled: true, connected: true, tools: names, ...(s.mentionOnly ? { mentionOnly: true } : {}) })
+    }
     this.servers = statuses
+    this.mcpRetryAt = failed ? Date.now() + CatalogService.MCP_RETRY_MS : 0
   }
 
   private registerMcpTool(serverId: string, name: string, tool: JsonRpcTool, client: McpHttpClient) {

@@ -7,6 +7,7 @@ import { INVITE_TTL, MIN_PASSWORD, RESET_LINK_TTL, hashPassword } from '../crypt
 import { accessUrlFor } from '../lib/catalog.ts'
 import { balanceOf } from '../lib/billing.ts'
 import { parseBilling } from '../db.ts'
+import { isUniqueViolation } from '../db/rows.ts'
 import { bodyOf, deployOptsOf, strField, usd, usdMicros } from '../lib/validate.ts'
 import { companyMachineOf, deploySeat, listSeatRuntime, publicMachine, publicSeatRuntime, releaseSeats } from '../deploy.ts'
 import { companyStatusOf, emailOf, groupRoleOf, membersInCompany, patchAccount, phoneOf, publicAccount, publicCompany, publicGroup, publicPlan, publicSettings, roleOf, slugOf, stringIds, websiteOf } from '../lib/org.ts'
@@ -83,6 +84,8 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     }
     if (body.slug != null) {
       patch.slug = slugOf(strField(body, 'slug'))
+      // 这一查是为了回一句人话；真正兜底的是 companies.slug 上的唯一约束，两个人同时
+      // 改成同一个 slug 时它会挡住第二个（下面把那个异常翻成同一句 409，不是 500）。
       if (patch.slug !== company.slug && await db.companyBySlug(patch.slug)) throw new HttpError(409, '这个 slug 已被占用')
     }
     if (body.machineId !== undefined) {
@@ -95,7 +98,19 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
         const machine = await db.machine(machineId)
         if (!machine) throw new HttpError(404, '机器不存在')
         if (machine.companyId && machine.companyId !== company.id) throw new HttpError(409, '这台机器已经派给别的公司')
-        if (company.machineId && company.machineId !== machine.id) await db.updateMachine(company.machineId, { companyId: null })
+        // 和 POST /orgs/:id/machine 同一条判据，一个字都不能少：companyId 为空不代表
+        // 这台是干净的新机器——公司被删时它会被置空，而机器上的席位还在跑。少了这一句，
+        // 那边拦住的认领从这条 PATCH 上原样走过去了。
+        if (
+          !machine.companyId &&
+          machine.pairedAt &&
+          account.role !== 'owner' &&
+          !(await db.machinePairedBy(machine.id, company.id))
+        ) {
+          throw new HttpError(403, '这台机器不是本公司配对的，请让系统管理员指派')
+        }
+        // **改默认，不是换一台。** 以前这里会把原来那台解绑——多机之后那等于把一台正在
+        // 跑的机器连同它上面的席位一起踢出公司，容量凭空缩水（POST 那条路已经改掉了）。
         await db.updateMachine(machine.id, { companyId: company.id })
         patch.machineId = machine.id
         // 派机器时写入访问地址。换机器只改解析，地址按 slug 保持。
@@ -106,7 +121,15 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     if (patch.slug && patch.slug !== company.slug && (company.accessUrl || patch.machineId || company.machineId)) {
       patch.accessUrl = accessUrlFor(patch.slug)
     }
-    const next = await db.updateCompany(company.id, patch)
+    let next: Awaited<ReturnType<typeof db.updateCompany>>
+    try {
+      next = await db.updateCompany(company.id, patch)
+    } catch (e) {
+      // 上面那一查和这一写之间没有锁，中间有人占走同一个 slug 的话，唯一约束会在这儿
+      // 抛。翻成 409：让保存失败得像「被占了」，而不是一次说不清的 500。
+      if (patch.slug && isUniqueViolation(e)) throw new HttpError(409, '这个 slug 已被占用')
+      throw e
+    }
     await db.audit({ companyId: company.id, accountId: account.id, action: 'org.update', detail: patch })
     json(res, 200, { company: publicCompany(next) })
   })

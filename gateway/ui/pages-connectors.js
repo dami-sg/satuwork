@@ -359,9 +359,11 @@ function toolModeNote(detail, on, cap) {
   // 开着的 slug 在清单里找不到：既不下发也不报错，界面上必须看得见。供应商改名、
   // 下线一个工具都会走到这里，不只是填错。
   const gone = detail.unknownTools || []
+  // 名字要转义：服务端存 enabledTools 时只 String().trim()，没有 slug 校验，所以
+  // 这几个字符串是**用户写进去的**，原样拼进 innerHTML 就是一条现成的注入。
   const goneLine = gone.length
     ? `<div class="gw-flash gw-flash-err" style="margin-bottom: var(--space-2);">${t(
-        `开着的 ${gone.length} 个工具在这个连接器的清单里已经没有了，不会下发给 Bot：${gone.join('、')}。保存一次就能把它们清掉。`,
+        `开着的 ${gone.length} 个工具在这个连接器的清单里已经没有了，不会下发给 Bot：${esc(gone.join('、'))}。保存一次就能把它们清掉。`,
       )}</div>`
     : ''
   if (mode === 'search' || mode === 'listing') {
@@ -803,11 +805,22 @@ async function connectorAct(act, btn) {
     return true
   }
   if (act === 'conn-price-save') {
-    const pricing = { defaultMicros: dollarsToMicros(valueOf('price-default', '0')), byToolkit: {} }
+    const bad = []
+    const defaultMicros = dollarsToMicros(valueOf('price-default', '0'))
+    if (defaultMicros === null) bad.push(t('默认单价'))
+    const pricing = { defaultMicros: defaultMicros ?? 0, byToolkit: {} }
     for (const c of state.connectors || []) {
       const raw = valueOf(`price-${c.toolkit}`, '')
       // 留空 = 跟默认走，不写这一条。写 0 是「这个连接器免费」，两回事。
-      if (raw !== '') pricing.byToolkit[c.toolkit] = dollarsToMicros(raw)
+      if (raw === '') continue
+      const micros = dollarsToMicros(raw)
+      // 认不出来的不存。默默按 0 存下去就是一条「免费」的覆盖，而人看到的是「已保存」。
+      if (micros === null) bad.push(c.name || c.toolkit)
+      else pricing.byToolkit[c.toolkit] = micros
+    }
+    if (bad.length) {
+      flash('err', t('这几项不是合法的价钱，没保存：') + bad.join('、'))
+      return true
     }
     try {
       await api('PUT', '/platform/settings', { connectorPricing: pricing })
@@ -1113,8 +1126,17 @@ function valueOf(name, fallback) {
 }
 
 /** 美元 → 微元。界面上填的是美元，存的是整数微元，只在这一处换算。 */
+/**
+ * 一个美元数 → micros。**认不出来的返回 null，不是 0。**
+ *
+ * 返回 0 是有含义的（「这个连接器免费」），而 `Number('0,05')` 是 NaN——把它折成 0
+ * 等于把一次手滑存成一条「免费」的价格覆盖，界面上还回一句「已保存」。调用方看到
+ * null 就该拦下来让人改，不该替他决定。
+ */
 function dollarsToMicros(v) {
-  const n = Number(String(v || '').trim())
-  if (!Number.isFinite(n) || n < 0) return 0
+  const raw = String(v ?? '').trim()
+  if (!raw) return null
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0) return null
   return Math.round(n * 1000000)
 }

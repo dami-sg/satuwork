@@ -162,11 +162,39 @@ async function openEvents(link: SeatLink, sessionId: string, afterSeq: number, a
  * 记的 dsh 原始日志写的是 `{ kind }`。两种都认——只认后者的话，失败的那一轮会
  * 静静地记成成功，这个 bug 真出现过一次。
  */
-async function readTurnEnd(reader: ReadableStreamDefaultReader<Uint8Array>, ownTurn: boolean): Promise<string> {
+function textOfUserMessage(data: unknown): string {
+  const content = (data as { message?: { content?: unknown } } | undefined)?.message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: unknown }).text ?? '') : ''))
+    .join('')
+}
+
+async function readTurnEnd(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ownTurn: boolean,
+  instruction: string,
+): Promise<string> {
   const decoder = new TextDecoder()
   let buf = ''
   // 我们那一轮的轮号。null = 还没开始（`steered` 的时候当场就算「已经在跑了」）。
   let turn: number | null = ownTurn ? null : -1
+  /**
+   * **别人的消息各自带走一轮。**
+   *
+   * 游标是发消息之前取的，而流是之后挂的——中间那段里人正好也跟这个 Bot 说了话的话，
+   * 他那条 `user/message` 和随后的 `turn/start` 会一起被回放进来。上面那句「发完消息
+   * 之后开的第一轮就是我们这一轮」在这时候是错的：认下的是人那一轮，于是这次运行按
+   * 他的结局记完了流水，而任务自己那条消息才刚要跑。
+   *
+   * 所以先认自己那条消息：正文和 instruction 对得上就不再计数；在那之前每来一条别人的
+   * 用户消息就记一笔，随后的第一个 `turn/start`（steered 那一岔是 `turn/end`）归它，
+   * 跳过。对不上（正文被改写过之类）时 foreign 一直是 0，行为和以前完全一样——宁可退回
+   * 旧行为，也不在这儿干等到超时。
+   */
+  let mine = false
+  let foreign = 0
   while (true) {
     const { done, value } = await reader.read()
     if (done) throw new Error('事件流断了')
@@ -183,13 +211,29 @@ async function readTurnEnd(reader: ReadableStreamDefaultReader<Uint8Array>, ownT
         } catch {
           continue
         }
+        if (ev.type === 'user/message') {
+          if (!mine) {
+            if (textOfUserMessage(ev.data).trim() === instruction.trim()) mine = true
+            else foreign++
+          }
+          continue
+        }
         if (ev.type === 'turn/start') {
-          // 席位一条会话同时只跑一轮，所以发完消息之后开的第一轮就是我们这一轮。
-          if (turn === null) turn = Number(ev.data?.turn ?? -1)
+          // 席位一条会话同时只跑一轮，所以发完消息之后开的第一轮就是我们这一轮——
+          // 前提是中间没有别人插进来（foreign 记着有几个人排在我们前面）。
+          if (turn === null) {
+            if (foreign > 0) foreign--
+            else turn = Number(ev.data?.turn ?? -1)
+          }
           continue
         }
         if (ev.type !== 'turn/end') continue
         if (turn === null) continue
+        // steered 那一岔不比轮号，所以「别人的那一轮」也得在这儿让开。
+        if (turn === -1 && foreign > 0) {
+          foreign--
+          continue
+        }
         // 轮号对不上就不是我们那一条（-1 = 插进别人正在跑的那一轮，不比轮号）。
         if (turn !== -1 && Number(ev.data?.turn ?? -1) !== turn) continue
         const reason = ev.data?.reason
@@ -257,7 +301,7 @@ export async function runRoutine(db: Db, routine: Routine, trigger: RoutineRunTr
         body: { text: routine.instruction },
       })) as { steered?: boolean } | null
       // `steered` = 插进了正在跑的那一轮，等的就是那一轮的收口；否则我们会另起一轮。
-      const kind = await readTurnEnd(reader, !posted?.steered)
+      const kind = await readTurnEnd(reader, !posted?.steered, routine.instruction)
       await db.finishRoutineRun(run.id, {
         status: kind === 'completed' ? 'ok' : 'error',
         error: kind === 'completed' ? null : turnFailure(kind),

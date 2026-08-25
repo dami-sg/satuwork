@@ -1047,6 +1047,11 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.chatSessionId = ''
     state.chatEvents = []
     state.chatDraft = ''
+    // 按 Bot 存的那份草稿、以及发出去还没回执的那几条，同样是上一个账号的东西。
+    // 上面那句「一条都不能留」原先漏了这两个：chatDraft 只是当前这一个输入框，
+    // chatDrafts 里躺着他在每一个 Bot 上打了一半的话，chatPending 里是正文连同附件。
+    state.chatDrafts = {}
+    state.chatPending = []
     state.chatStatus = ''
     state.runtimeBots = []
     state.runtimeError = ''

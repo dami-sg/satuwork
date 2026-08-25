@@ -1,5 +1,6 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { spawn } from 'node:child_process'
+import { lookup } from 'node:dns/promises'
 import { existsSync } from 'node:fs'
 import { satuworkHome } from '../home.ts'
 import { blockedHost, hostOf, privateAddress, siteAllowed, type ActionContext } from '../policy/browser.ts'
@@ -115,6 +116,27 @@ export class ScopeError extends Error {}
  * 面对边界的正确反应恰恰是**不要重试**。
  */
 export class PageError extends Error {}
+
+/**
+ * 这个地址解析出来落在内网吗。**给「我们没看着它加载」的那些页补的一道。**
+ *
+ * 判不了（解析失败）时返回 null：这一层只在能确定的时候拦，DNS 抽风不该让一次正常的
+ * 切标签页失败——真是内网的话，attach 之后那道按 IP 判的闸还在。
+ */
+async function resolvesPrivate(url: string): Promise<string | null> {
+  const host = hostOf(url)
+  if (!host) return null
+  try {
+    const found = await lookup(host, { all: true })
+    for (const one of found) {
+      const bad = privateAddress(one.address)
+      if (bad) return `它解析到了 ${one.address}：${bad}`
+    }
+  } catch {
+    return null
+  }
+  return null
+}
 
 export class BrowserService extends Service {
   /**
@@ -435,8 +457,14 @@ export class BrowserService extends Service {
      * 策略在切之前判的是「当前停在哪一页」，也就是旧那一页；新那一页它根本没看见。
      * 一次点击开出来的标签页完全可能落在名单外（页面上一个外链、一次 OAuth 跳转），
      * 不在这儿拦，紧接着的那次快照就把内容读回去了。
+     *
+     * **还要自己解析一次地址。** `target=_blank` 开出来的页在我们 attach 之前就已经
+     * 载完了——那一趟没经过 Fetch/Network 拦截，`poisoned` 自然是空的，而 `guardUrl`
+     * 从头到尾只看主机名。一个解析到内网的公网域名（内网别名，或者 rebinding）就这么
+     * 整页读了回来。attach 之后它再发的请求会被 `Network.responseReceived` 那道按 IP
+     * 判的闸接住，但**首屏那一份不会**，所以这儿补一次 DNS 解析。
      */
-    const bad = this.guardUrl(this.url)
+    const bad = this.guardUrl(this.url) ?? (this.trustPrivate ? null : await resolvesPrivate(this.url))
     if (bad) {
       await cdp.send('Target.detachFromTarget', { sessionId: this.sessionId }, { signal }).catch(() => {})
       this.forgetTarget()
@@ -560,9 +588,17 @@ export class BrowserService extends Service {
       }
       case 'Network.responseReceived': {
         if (this.trustPrivate) return
-        const type = String(p.type ?? '')
         const res = p.response as { remoteIPAddress?: string; url?: string } | undefined
-        if (type !== 'Document' || !res?.remoteIPAddress) return
+        /**
+         * **每一种请求都要判，不只是 Document。**
+         *
+         * 这里原先写的是 `type !== 'Document'` 就返回，于是整道 rebinding 兜底只罩着
+         * 顶层文档：页面里一句 `fetch('http://内网别名/…')` 走的是 XHR/Fetch，请求阶段
+         * 那层只看主机名（看着像公网就放行），响应阶段又因为类型不对直接跳过——解析到
+         * 的 IP 从头到尾没人看过一眼。而这类正文会被写进 DOM，下一次 snapshot 就进了
+         * 模型。子资源同样算数：一张图的 URL 也能把内网地址带出去。
+         */
+        if (!res?.remoteIPAddress) return
         /**
          * **按解析到的 IP 再判一次。**
          *
@@ -634,7 +670,12 @@ export class BrowserService extends Service {
      * 都发生在那之后。只判顶层文档：第三方 iframe（支付控件、验证码）和 XHR 打到
      * 别的域是网页的常态，照白名单拦会把好端端的页面拦成白板。
      */
-    if (!bad && String(p.resourceType ?? '') === 'Document' && String(p.frameId ?? '') === this.mainFrame) {
+    // mainFrame 取不到时（enableDomains 里那次 getFrameTree 失败会把它置空）不能因为
+    // `frameId === ''` 恒假就把整道白名单跳过——那等于在最需要兜底的时候把闸关了。
+    // 拿不到主框架 id 就按「顶层文档一律判」处理，宁可多判一次。
+    const isTopDoc =
+      String(p.resourceType ?? '') === 'Document' && (!this.mainFrame || String(p.frameId ?? '') === this.mainFrame)
+    if (!bad && isTopDoc) {
       bad = this.scope?.allowlist ? this.guardUrl(url) : null
     }
     const on = { sessionId: this.sessionId }

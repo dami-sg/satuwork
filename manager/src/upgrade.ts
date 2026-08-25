@@ -202,10 +202,13 @@ export async function maybeUpgrade(offer: UpgradeOffer, token: string): Promise<
     })
     if (!res.ok) throw new Error(`downloading the manager package failed: ${res.status}`)
     const bytes = Buffer.from(await res.arrayBuffer())
-    if (offer.sha256) {
-      const got = createHash('sha256').update(bytes).digest('hex')
-      if (got !== offer.sha256) throw new Error('manager package checksum mismatch')
-    }
+    // **没有校验和就不装。** 这个包解开之后是以 root 跑的，而自检只证明它起得来、
+    // 证明不了它是我们发的那一个。Gateway 侧 sha256 是入库时自己算的（见
+    // gateway/src/releases.ts），一条正常的升级要约必然带着它——空的意味着这一跳上
+    // 有人把它拿掉了，或者上游根本不是我们以为的那个。
+    if (!offer.sha256) throw new Error('the manager package came without a checksum, refusing to install')
+    const got = createHash('sha256').update(bytes).digest('hex')
+    if (got !== offer.sha256) throw new Error('manager package checksum mismatch')
 
     rmSync(dir, { recursive: true, force: true })
     mkdirSync(dir, { recursive: true })
@@ -236,12 +239,22 @@ export async function maybeUpgrade(offer: UpgradeOffer, token: string): Promise<
 
     const prev = currentTarget()
     if (prev) relink('previous', prev)
-    // 先记下「要换到哪个版本、什么时候换的」再真的换：进程马上就要被重启，记晚了就丢了。
+    /**
+     * **先真的换，再记账。**
+     *
+     * 原来的顺序是反的：`lastUpgradeTo = want` 先落盘，然后才 `relink('current')`。
+     * 那一步要是抛了（盘满、权限、目录被人动过），库里记着「已经换到 want」而
+     * `current` 还指着旧的——下一次心跳走到上面那道熔断，看到「说是换到了 want、进程
+     * 自报的却是旧版本」，于是把这个版本永久拉黑，而它其实一次都没被换上过。
+     *
+     * 反过来记的风险是「换成功了但没记上」：那种情况下一次心跳只会再试一遍同一个
+     * 版本，收敛得掉。宁可重试，不要假的黑名单。
+     */
+    relink('current', dir)
     // 时刻是给回滚脚本用的——它靠这个才分得出「连不上 Gateway」和「还没来得及起来」。
     if (state) writeState({ ...state, lastUpgradeTo: want, lastUpgradeAt: Date.now() })
     // 上一次回滚的记号跟这次无关了，清掉；留着会让下一次熔断报出错的原因。
     rmSync(rolledBackPath(), { force: true })
-    relink('current', dir)
 
     // 重启必须由**分离的**单元发起：管家的子进程去 systemctl restart 会连自己一起
     // 被杀（同一个 cgroup），命令根本发不出去。瞬态单元跳出去。
