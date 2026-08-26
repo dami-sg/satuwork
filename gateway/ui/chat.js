@@ -1465,7 +1465,20 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
               // 没变（它在席位的盘上），但**目录、队列、在不在跑全得重新问一遍**，
               // 而且那条 hydrate 也要重跑，否则界面停在换版前那一刻。
               seatRestarted(owner, sessionId)
-              break
+              /**
+               * **`return`，不是 `break`。**
+               *
+               * break 只跳出「这一帧里的各行」，外面按 `\n\n` 切帧的 while 还在转，
+               * 而 hello 帧和新流的回放帧常常挤在同一个网络分片里。于是刚被
+               * resetBotStream 清空的事件桶会被紧随其后的那些帧立刻填回去，而这时
+               * `row.sessionId` 已经被置成空串——等 ensureChatSession 认下新会话时，
+               * 那道 `if (row.sessionId && row.sessionId !== sessionId) reset` 因为空串
+               * 而不成立，这批本该作废的事件就留在了新会话里，seq 还会把
+               * chatCursor/hydrateChat 的合并判据一起带歪。
+               */
+              disarmStall()
+              endReplay()
+              return
             }
             continue
           }
@@ -1494,9 +1507,21 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
             }
             if (typeof ev.live === 'boolean') {
               chatLive.set(sessionId, ev.live)
-              // 名单上那颗点也是扫出来的，同样会挂在「正在执行」上下不来。
+              /**
+               * 名单上那颗点也是扫出来的，同样会挂在「正在执行」上下不来。
+               *
+               * **改 `busy` 再让 settleDot 去算，不能直接写 `state`。** 全场只有这一处
+               * 曾经直接写 state，而 state 是派生量：30 秒一次的 applyHandoffSnapshot
+               * 会对每一行调 settleDot，按 `busy`/`asking`/openIds 重算一遍。busy 还留
+               * 着旧的 true（席位崩在半路，日志里有 turn/start 没 turn/end），那颗点就
+               * 在下一次轮询时被翻回「正在执行」，而且再也下不来——正是这面权威旗子要
+               * 治的病，换个地方又长了出来。顺带 `review`（等审批/转人工）也不该被这一
+               * 下抹掉，交给 settleDot 就都对了。
+               */
               if (owner) {
-                botStreamOf(owner).sum.state = ev.live ? 'busy' : 'idle'
+                const sum = botStreamOf(owner).sum
+                sum.busy = ev.live
+                settleDot(sum)
                 scheduleRosterPaint()
               }
             }
@@ -3165,8 +3190,17 @@ function threadRows(folded, sessionId) {
   // 一块 seq 等于当前块数，这条占位就和那条早期消息顶了同一个 key：下一帧 syncThread
   // 按 key 认节点时会把底下的占位节点搬到那条消息的位置（正文换成它的、外壳还是助手的
   // 头像和左对齐），被顶掉的原节点则一路被挤到最下面，看着就是「前面那句话跳到后面了」。
+  /**
+   * 还在跑、而最后一块不是助手正文：补一条空的「正在回答」占位。
+   *
+   * `last.kind === 'user'` 之外还要认 `mark`——自动压缩完全可能落在一轮的中间（见
+   * fold 里那段长注释），那时候末尾那块是压缩分隔线。只认 user 的话，这一轮既拿不到
+   * 占位、下面 syncThread 又只把**最后一行**标成 streaming（那行是分隔线），于是助手
+   * 那条的秒表停了、光标没了、`healStream` 也不再补收口——半截围栏直接以原文露出来，
+   * 屏幕上看着像已经答完，而这一轮其实还在跑。
+   */
   const last = blocks[blocks.length - 1]
-  if (folded.status && (!last || last.kind === 'user')) {
+  if (folded.status && (!last || last.kind === 'user' || last.kind === 'mark')) {
     rows.push({ kind: 'msg', key: 'm-live', block: { kind: 'assistant', text: '', tools: [], time: 0 } })
   }
   return rows
@@ -5214,6 +5248,16 @@ async function sendChat() {
   const files = state.chatFiles || []
   const mentions = state.chatMentions || []
   const sessionId = state.chatSessionId
+  /**
+   * 发这条消息时人停在哪个 Bot 上。
+   *
+   * 下面几处失败回滚（还草稿、还点名）和 `state.chatFiles = []` 写的都是**当前**那个
+   * Bot 的输入框，而中间隔着一段传附件的时间，几秒起步。人这会儿切到了别的 Bot 的话：
+   * 传失败会把 A 的正文和 @ 塞进 B 的输入框，传成功那句清空又会把 B 刚选好的附件抹掉。
+   * 所以每一处回写前都要问一句「人还在不在 A」——loadDesktopRuntime 那道门是同一个理由。
+   */
+  const forBot = chatBotIdNow()
+  const stillHere = () => chatBotIdNow() === forBot
   if ((!text && !files.length && !mentions.length) || state.chatUploading) return
   /**
    * 斜杠命令**在这里拦下，绝不往 /messages 走**。
@@ -5320,18 +5364,22 @@ async function sendChat() {
     } catch (err) {
       // 传失败就把草稿、附件和点名原样还回去，别让人重新选一遍文件、重新 @ 一遍。
       state.chatUploading = false
-      state.chatDraft = text
-      state.chatMentions = mentions
-      paintChatFiles()
-      paintChatMentions()
+      if (stillHere()) {
+        state.chatDraft = text
+        state.chatMentions = mentions
+        paintChatFiles()
+        paintChatMentions()
+      }
       flash('err', t('附件没传上去：') + err.message)
       render()
       return
     }
     state.chatUploading = false
   }
-  state.chatFiles = []
-  paintChatFiles()
+  if (stillHere()) {
+    state.chatFiles = []
+    paintChatFiles()
+  }
 
   const images = pickImages(uploaded)
   const body = composeChatBody(uploaded, text)
@@ -5376,15 +5424,17 @@ async function sendChat() {
   } catch (err) {
     // 没发出去就把这条回显撤掉，别让屏幕上留一条其实不存在的消息。
     state.chatPending = (state.chatPending || []).filter((p) => p !== pending)
-    // 文件已经传上去了，退回来的只有草稿——附件不还，还了会传第二遍。
-    state.chatDraft = text
-    /**
-     * **点名也要还。** 只还正文的话，人按重发时这一条不带任何 `@`——而
-     * `mentionOnly` 的连接（比如个人邮箱）这一轮根本不在工具表里，Bot 会回一句
-     * 「没有可用的邮箱」，用户却以为自己点过名了。
-     */
-    state.chatMentions = mentions
-    paintChatMentions()
+    if (stillHere()) {
+      // 文件已经传上去了，退回来的只有草稿——附件不还，还了会传第二遍。
+      state.chatDraft = text
+      /**
+       * **点名也要还。** 只还正文的话，人按重发时这一条不带任何 `@`——而
+       * `mentionOnly` 的连接（比如个人邮箱）这一轮根本不在工具表里，Bot 会回一句
+       * 「没有可用的邮箱」，用户却以为自己点过名了。
+       */
+      state.chatMentions = mentions
+      paintChatMentions()
+    }
     if (uploaded.length) flash('err', t('附件已经在工作区里了，但这条消息没发出去。'))
     if (String(err.message || '').includes('实例还没上线')) state.runtimeError = '实例还没上线'
     else if (!uploaded.length) flash('err', err.message)
@@ -5681,11 +5731,19 @@ async function deployMyRuntime(botId, opts = {}) {
     if (opts.force) body.force = true
     await api('POST', '/runtime/deploy', body)
     const startAt = Date.now()
+    // 部署结果按这一份说话，不看 state.desktopRuntime——那一份可能已经是别的 Bot 的了。
+    let last = null
     while (Date.now() - startAt < 15000) {
       try {
         const rt = await api('GET', '/runtime/desktop?botId=' + encodeURIComponent(id))
-        state.desktopRuntime = rt
-        state.desktopRuntimeAt = Date.now()
+        last = rt
+        // 人在这十几秒里换了 Bot 的话，这一份就不能往 state 上写：desktopRuntime 是
+        // remountDesktop 拿去挂屏的那一份，写进去等于把这个 Bot 的桌面挂到另一个
+        // Bot 的对话页上（loadDesktopRuntime 里那道同样的门就是为这个立的）。
+        if (chatBotIdNow() === id) {
+          state.desktopRuntime = rt
+          state.desktopRuntimeAt = Date.now()
+        }
         if (rt.status === 'ready' || rt.status === 'error') break
       } catch {}
       await new Promise((r) => setTimeout(r, 400))
@@ -5695,8 +5753,8 @@ async function deployMyRuntime(botId, opts = {}) {
       state.runtimeError = ''
       await ensureChatSession(id)
     }
-    if (state.desktopRuntime && state.desktopRuntime.status === 'error') {
-      state.deployHint = state.desktopRuntime.lastError || '部署失败'
+    if (last && last.status === 'error') {
+      state.deployHint = last.lastError || '部署失败'
     } else if (!state.runtimeError) {
       state.deployHint = ''
       flash('ok', '已部署')
@@ -6183,8 +6241,14 @@ document.addEventListener('input', (e) => {
    * 也一起放行」。席位那边也会把改过的这一次强制成 once（见 approvals.ts），
    * 这里变灰是让人看得见，不是唯一的一道。
    */
+  // 选择器要和 approvalActs 里真正渲染出来的那颗对上：那颗是 `data-scope="turn"`
+  // （范围早就从「这次对话」收成「这一轮」了），这里却一直在找 `session`——配不上，
+  // 于是这段 disabled 从来没生效过。而重画那条路也指望不上：updateRow 的比对签名只看
+  // waiting 的 callId 列表，改一个字段它不变，卡片不会重画。两道都空着的话，人改完
+  // 内容还能点「这一轮都批准」，而席位那边会把改过的这次强制成 once——按钮承诺的事
+  // 没发生，下一次同样的工具还会再问。
   const card = el.closest('.sw-approval')
-  const wide = card && card.querySelector('[data-act="chat-approve"][data-scope="session"]')
+  const wide = card && card.querySelector('[data-act="chat-approve"][data-scope="turn"]')
   if (wide) {
     wide.disabled = true
     wide.title = t('这一次改过内容，只能批准这一次', 'You edited this one, so it can only be approved once')

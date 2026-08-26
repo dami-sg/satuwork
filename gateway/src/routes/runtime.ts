@@ -7,7 +7,7 @@ import { HttpError, bearer, json, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
 import { KIND, bodyOf, deployOptsOf, strField } from '../lib/validate.ts'
 import type { Account, CatalogItem } from '../db.ts'
-import { companyMachineOf, deploySeat, publicSeatRuntime, purgeBot } from '../deploy.ts'
+import { deploySeat, publicSeatRuntime, purgeBot } from '../deploy.ts'
 import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
 import { LEGACY_BOT_ICONS, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer } from '../lib/catalog.ts'
 import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
@@ -311,8 +311,18 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     if (!botId) throw new HttpError(400, 'botId 不能为空')
     const runtime = await db.seatRuntime(account.id, botId)
     if (!runtime) throw new HttpError(404, '还没有部署')
-    const machine = await companyMachineOf(db, account.companyId!)
-    json(res, 200, publicSeatRuntime(runtime, (await db.machine(runtime.machineId))?.host ?? null, {
+    /**
+     * **票要按这个席位所在的那台机器签，不是公司的默认机器。**
+     *
+     * host 一直是从 `runtime.machineId` 取的，票却问的是 `companyMachineOf`（也就是
+     * `companies.machineId`，第一台配对的那台）。多机之后两者会分家：默认那台被移除
+     * 或解绑之后 `machinePaired` 不成立，desktopTicketFor 返回 undefined，于是这个人
+     * 的桌面永远是一句「这块屏的凭据过期了」——而他席位所在的机器好端端的。
+     * 同一类 host/token 错配 machineTokenFor 已经修过一次，`/runtime/deploy` 那条路
+     * 用的也是 `out.result.machine`。
+     */
+    const machine = await db.machine(runtime.machineId)
+    json(res, 200, publicSeatRuntime(runtime, machine?.host ?? null, {
       includePassword: true,
       ticket: desktopTicketFor(keys, machine, runtime),
     }))

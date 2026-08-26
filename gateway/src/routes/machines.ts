@@ -969,13 +969,27 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     requireOwner(account)
     const seatId = (req.query.get('seatId') || '').trim()
     if (!seatId) throw new HttpError(400, 'seatId 不能为空')
+    /**
+     * **认得出这个席位就把口令带上、把审计记到那家公司名下；认不出也照签。**
+     *
+     * 原先两样都没做：签票时不传 vncPassword，于是 noVNC 还是弹口令框——正好让这条路由
+     * 存在的理由（上面那句「不用去问 VNC 口令」）落空；审计一律落在
+     * `companyId: 'platform'`，被看屏幕的那家公司在自己的审计里一条记录都看不到，而
+     * `machine.logs` 那条正是为这个理由改成按公司记的。
+     *
+     * **但不能因为库里没有这一行就拒签。** 这是一条救急入口：席位在机器上跑着、Gateway
+     * 库里却没有对应的 seat_runtimes（登记丢了、库回滚过、或者干脆是管家侧自己登记的），
+     * 恰恰是最需要它的时候。那种情况下退回原来的行为——签一张不带口令的票，审计记在
+     * platform 名下——总比让人没法看屏幕强。
+     */
+    const row = await db.seatRuntimeBySeatId(seatId)
     await db.audit({
-      companyId: 'platform',
+      companyId: row?.companyId ?? 'platform',
       accountId: account.id,
       action: 'desktop.ticket',
-      detail: { seatId },
+      detail: { seatId, byPlatform: true, ...(row ? {} : { unknownSeat: true }) },
     })
-    json(res, 200, { ticket: signDesktopTicket(keys, seatId) })
+    json(res, 200, { ticket: signDesktopTicket(keys, seatId, row?.vncPassword ?? '') })
   })
 
   // ── 管家发布包。和 bot 那套同一个表、同一套校验，只是 kind 不同。──

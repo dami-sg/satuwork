@@ -192,7 +192,11 @@ function tplSyncWant() {
   if (tplSyncQuiet >= TPL_SYNC_QUIET_MAX) return false
   const sync = state.templateSync
   const seats = sync && Array.isArray(sync.seats) ? sync.seats : []
-  return seats.some((s) => s.version !== sync.version)
+  // 基准要和面板那格用同一个（见 templateSyncCard 里那句「老响应里没有 version」）。
+  // 各用各的话，响应缺 version 时这儿把每一台都算成落后、轮询一直转，而面板同时
+  // 用回落基准显示「全都跟上了」——同一个数字两套判据，正是那格注释在防的事。
+  const version = sync ? (sync.version ?? state.template?.version) : undefined
+  return seats.some((s) => s.version !== version)
 }
 
 /** 重新开始盯：保存之后、以及人按了「刷新」之后。 */
@@ -1046,14 +1050,22 @@ function serverDialogView() {
 }
 
 function skillsPage() {
-  const tab = state.skillsTab === 'MCP 与工具' ? t('MCP 与工具') : 'Skill'
+  /**
+   * **tab 存的是键，不是译文。**
+   *
+   * 原先这里先 `t('MCP 与工具')` 翻成 'MCP & tools' 再拿去和下面那两个键比——英文界面
+   * 下两边永远不相等，于是切到 MCP 那一屏时两颗药丸都不高亮（aria-pressed 全是
+   * false）；药丸上的字也是 `esc(name)`，英文界面照样显示「MCP 与工具」。
+   * 比较用键，显示用 t()。
+   */
+  const tab = state.skillsTab === 'MCP 与工具' ? 'MCP 与工具' : 'Skill'
   const isSkill = tab === 'Skill'
   const skills = state.skills || []
   const servers = state.mcpServers || []
   const tabs = ['Skill', 'MCP 与工具']
     .map(
       (name) =>
-        `<button type="button" class="satu-assignee" style="padding: 5px 14px;" aria-pressed="${String(tab === name)}" data-act="skills-tab" data-tab="${esc(name)}">${esc(name)}</button>`,
+        `<button type="button" class="satu-assignee" style="padding: 5px 14px;" aria-pressed="${String(tab === name)}" data-act="skills-tab" data-tab="${esc(name)}">${esc(name === 'Skill' ? name : t(name))}</button>`,
     )
     .join('')
   const failure = state.skillFailure
@@ -1430,7 +1442,10 @@ function usagePage() {
         <div style="display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap;">
           <div>
             <h1 style="font-size: 24px; margin: 0 0 4px;">${t('用量统计')}</h1>
-            <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(range)} · ${esc((Number((stats.find((x) => x.label === t('任务执行')) || {}).value) || 0) > 0 ? t('已记录调用') : t('还没有调用'))}</p>
+            ${/* label 是服务端原样发过来的中文（见 lib/guards.ts 那份 usagePayload），
+                 拿 t() 翻过再比就永远配不上——英文界面下这句会一直说「还没有调用」，
+                 而下面明明列着几千次。翻译只用在给人看的那半句上。 */ ''}
+            <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(range)} · ${esc((Number((stats.find((x) => x.label === '任务执行') || {}).value) || 0) > 0 ? t('已记录调用') : t('还没有调用'))}</p>
           </div>
           <div style="display: flex; align-items: center; gap: var(--space-2); flex: none;">
             ${pills}

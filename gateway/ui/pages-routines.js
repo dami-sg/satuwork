@@ -529,6 +529,8 @@ function addRoutineTrigger(id) {
   if (!routine) return
   const list = [...(routine.triggers || []), { kind: 'schedule', every: 'day', at: '09:00', weekday: 1, day: 1, tz: rtBrowserTz() }]
   routine.triggers = list
+  // 同 dropRoutineTrigger：新行立刻出来，下标也当场对齐。
+  render()
   void patchRoutine(id, { triggers: list })
 }
 
@@ -537,6 +539,17 @@ function dropRoutineTrigger(id, i) {
   if (!routine) return
   const list = (routine.triggers || []).filter((_, n) => n !== i)
   routine.triggers = list
+  /**
+   * **就地重画，不等 PATCH 回来。**
+   *
+   * 行是按下标认的（`data-i`），而本地这个数组已经短了一截——重画排在 PATCH 之后的话，
+   * 那一整个来回里屏幕上还是旧的几行、带着旧的下标：连点两下同一个垃圾桶，第二下按
+   * `i` 删的是**另一条**；删掉第一条之后马上去改剩下某一行的时间，写进去的也是错的
+   * 那一条（`editRoutineTrigger` 同样按 `list[data-i]` 取）。
+   *
+   * 顺带把「点了没反应」也治了：这一下之后行立刻消失，不用等一个来回。
+   */
+  render()
   void patchRoutine(id, { triggers: list })
 }
 

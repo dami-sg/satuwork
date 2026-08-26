@@ -302,10 +302,39 @@ async function drainSeat(spec: SeatSpec, current: SeatRecord): Promise<void> {
   throw new SeatBusy(spec.seatId, hit.running, hit.queued, Date.now() - started)
 }
 
+/**
+ * 同一个席位上的动作排队走。**部署和拆除都要排。**
+ *
+ * `update()` 只保证名册那一行的读改写是原子的，可这两件事真正动的是 systemd 单元和
+ * 磁盘：`remove-seat.sh` 停单元、`rm -rf` 席位目录，一跑最多 120 秒；同一个 seatId 的
+ * `PUT /seats/:id` 要是落在这中间，`deploy-seat.sh` 会把同一套路径和单元重新建起来，
+ * 两边你拆我建，最后 systemd、磁盘、名册三份状态各说各的。
+ *
+ * 不同席位互不相干，照旧并发——这也是 inFlight 那个计数器还留着的原因。
+ */
+const seatLocks = new Map<string, Promise<unknown>>()
+
+async function withSeatLock<T>(seatId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = seatLocks.get(seatId) ?? Promise.resolve()
+  // 前一个失败了不该把后面的一起带倒，所以只等它「结束」，不管成败。
+  const task = prev.then(fn, fn)
+  // 队尾记的是「结束与否」，不带结果也不带异常——它只用来排队。
+  const tail = task.then(
+    () => {},
+    () => {},
+  )
+  seatLocks.set(seatId, tail)
+  void tail.then(() => {
+    // 自己还是队尾时才清，否则会把后来者的那一把一起摘掉，锁就形同虚设。
+    if (seatLocks.get(seatId) === tail) seatLocks.delete(seatId)
+  })
+  return task
+}
+
 export async function deploySeat(spec: SeatSpec, token: string): Promise<SeatRecord> {
   inFlight += 1
   try {
-    return await doDeploy(spec, token)
+    return await withSeatLock(spec.seatId, () => doDeploy(spec, token))
   } finally {
     inFlight -= 1
     /**
@@ -450,6 +479,10 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
  * 机器上留了什么垃圾，事后只有这里答得上。
  */
 export async function removeSeat(seatId: string): Promise<void> {
+  return withSeatLock(seatId, () => doRemoveSeat(seatId))
+}
+
+async function doRemoveSeat(seatId: string): Promise<void> {
   const row = seat(seatId)
   if (!row) return
   if (!bootConfig().dryRun) {

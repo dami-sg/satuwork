@@ -34,11 +34,36 @@ function safeVersion(version: string): string {
   return version
 }
 
+/**
+ * 同一个版本正在下的那一次。**同版本并发只跑一趟。**
+ *
+ * deploySeat 天生是并发的（inFlight 是个计数器）：Gateway 把新版本铺给一台机器上的
+ * 好几个席位时，几个 `PUT /seats/:id` 同时进来，各自调 ensureRelease。而这个函数用的
+ * 是**共享的目录**和一个**固定名字的临时包**（`.<version>.tgz`）——两趟同时跑就会互相
+ * 拆台：A 正在 untar，B 一句 `rmSync(dir)` 把它的目录端了；A 的 finally 又把 B 正在解的
+ * 那个 tgz 删了。两边最后都报「untarring failed / has no bin/satuwork.mjs」，而包本身
+ * 好好的，看起来像一次莫名其妙的部署故障。
+ *
+ * 让后来的那几趟等前一趟的结果就行——它们要的本来就是同一个目录。
+ */
+const inflight = new Map<string, Promise<string>>()
+
 export async function ensureRelease(
   version: string,
   opts: { gatewayUrl: string; token: string },
 ): Promise<string> {
   safeVersion(version)
+  const running = inflight.get(version)
+  if (running) return running
+  const task = fetchRelease(version, opts).finally(() => inflight.delete(version))
+  inflight.set(version, task)
+  return task
+}
+
+async function fetchRelease(
+  version: string,
+  opts: { gatewayUrl: string; token: string },
+): Promise<string> {
   const dir = releaseDir(version)
   if (haveRelease(version)) return dir
 
@@ -51,11 +76,12 @@ export async function ensureRelease(
   const bytes = Buffer.from(await res.arrayBuffer())
 
   // Gateway 在响应头里给 sha256。对不上就是传输坏了——解开只会得到更难查的症状。
+  // **头缺了也不装**：那一行是入库时服务端自己算的，一次正常的下发不可能没有它
+  // （见 gateway/src/lib/machines.ts 那句「不用 302 打发到远端地址」的注释）。
   const want = String(res.headers.get('x-bot-sha256') || '').trim()
-  if (want) {
-    const got = createHash('sha256').update(bytes).digest('hex')
-    if (got !== want) throw new Error(`release ${version} checksum mismatch: ${got.slice(0, 12)} != ${want.slice(0, 12)}`)
-  }
+  if (!want) throw new Error(`release ${version} came without a checksum, refusing to unpack`)
+  const got = createHash('sha256').update(bytes).digest('hex')
+  if (got !== want) throw new Error(`release ${version} checksum mismatch: ${got.slice(0, 12)} != ${want.slice(0, 12)}`)
 
   rmSync(dir, { recursive: true, force: true })
   mkdirSync(dir, { recursive: true })

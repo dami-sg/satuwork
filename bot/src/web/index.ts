@@ -46,7 +46,9 @@ export function apply(ctx: Context, _config: Config = {}) {
    * 直接 send 会撞上「该会话正在运行中」，那句交还就丢了。
    */
   async function deliver(sessionId: string, hid: string, text: string): Promise<void> {
-    if (ctx.agents.isRunning(sessionId) && (await ctx.agents.steer(sessionId, text))) {
+    // 插话也落 user/message 了（见 agents.steer），source 要如实写成交还，
+    // 否则日志里那句话看起来像用户自己说的。
+    if (ctx.agents.isRunning(sessionId) && (await ctx.agents.steer(sessionId, text, [], { kind: 'plugin', plugin: 'handoff' }))) {
       // 插进了正在跑的那一轮：等它收口，单子就完了。
       ctx.handoffs.waitFor(hid, true)
       return

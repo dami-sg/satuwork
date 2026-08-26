@@ -308,6 +308,9 @@ function isHttps(req: IncomingMessage): boolean {
  */
 export function attachDesktopUpgrade(server: Server, db: Db, keys: JwtKeys) {
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    // Node 在 emit 'upgrade' 之前就摘掉了自己那个 error 监听，交到这儿的 socket 上一个都没有。
+    // 下面要 await 查库、连上游，这中间对面一个 RST 就是没人接的 'error'——那会掀掉整个进程。
+    socket.on('error', () => socket.destroy())
     const bail = (line: string) => {
       try {
         socket.write(`HTTP/1.1 ${line}\r\nconnection: close\r\n\r\n`)

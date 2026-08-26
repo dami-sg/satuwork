@@ -44,6 +44,15 @@ export function databaseUrl(): string {
  * 驼峰列名一律加引号：PG 不加引号会折成小写，而 `select *` 的结果直接喂给上面那些
  * mapper。加了引号，写漏的那一刻 PG 就报 column does not exist，不会静默变 undefined。
  */
+/**
+ * 账本按 refId 收成一行，用于所有「维度在业务表、金额在账本」的汇总。
+ *
+ * `usage_charges."refId"` 上只有普通索引，不是唯一约束，同一次调用完全可能挂上两行账
+ * （崩在写调用和记账之间随后重算、或者一条被重放的上报）。直接 join 会把业务表那一行
+ * 复制一份——calls 翻倍、token 和金额跟着翻倍。先收再 join，扇出这件事就不存在了。
+ */
+const LEDGER_BY_REF = '(select "refId", sum("amountMicros") as micros from usage_charges group by "refId")'
+
 export class Db {
   private pool: pg.Pool
   private schema: string
@@ -259,7 +268,19 @@ export class Db {
     return next
   }
 
+  /**
+   * 硬删一家公司。**整串在一个事务里。**
+   *
+   * 十几条依赖删除要么一起成、要么一起不成：中途失败（连接断、后加的表带上外键、池子
+   * 出错）留下的是一家「公司行还在、账号和席位已经没了」的半删公司——界面上照样列得
+   * 出来，而管理员账号已经没了，没人能登进去看。
+   *
+   * 事务开在这儿而不是只靠调用方：`tx` 是可重入的（已经在事务里就直接跑），所以路由
+   * 那侧现有的 `db.tx(() => db.deleteCompany(...))` 照旧生效，同时这条不变量不再取决于
+   * 「每一个未来的调用方都记得包一层」。deleteAccount / deleteBot 也是这个写法。
+   */
   async deleteCompany(id: string): Promise<void> {
+    await this.tx(async () => {
     await this.run('delete from groups where "companyId" = ?', [id])
     await this.run('delete from skill_tags where "companyId" = ?', [id])
     await this.run('delete from session_index where "companyId" = ?', [id])
@@ -286,6 +307,7 @@ export class Db {
     await this.run('delete from invoices where "companyId" = ?', [id])
     await this.run('delete from plan_orders where "companyId" = ?', [id])
     await this.run('delete from companies where id = ?', [id])
+    })
   }
 
   /**
@@ -544,7 +566,17 @@ export class Db {
         )
         return { accountId, apiKey, accessToken, createdAt }
       } catch (e) {
-        if (i === 7 || !isUniqueViolation(e)) throw e
+        if (!isUniqueViolation(e)) throw e
+        /**
+         * 冲突分两种，处理方式相反。
+         *
+         * `accountId` 是主键：并发的另一次调用先插进去了，重试多少次都是同一个冲突，
+         * 正确结果就在库里，回读一次即可（installConnector 就是这么写的）。只有
+         * apiKey / accessToken 撞了才轮得到「换一串再试」。
+         */
+        const raced = await this.accountSecrets(accountId)
+        if (raced) return raced
+        if (i === 7) throw e
       }
     }
     return undefined
@@ -660,9 +692,9 @@ export class Db {
     const rows = await this.many(
       `select w."companyId", w.backend, w.kind, count(*) as calls,
               coalesce(sum(w.units), 0) as units,
-              coalesce(sum(u."amountMicros"), 0) as micros,
+              coalesce(sum(u.micros), 0) as micros,
               max(w."createdAt") as "lastAt"
-       from web_calls w left join usage_charges u on u."refId" = w.id
+       from web_calls w left join ${LEDGER_BY_REF} u on u."refId" = w.id
        ${where.replace(/"companyId"/g, 'w."companyId"').replace(/"createdAt"/g, 'w."createdAt"')}
        group by w."companyId", w.backend, w.kind`,
       args,
@@ -829,6 +861,11 @@ export class Db {
      * 而后者恰恰是升级前所有历史调用的样子（回填脚本刻意不给模型调用补金额）。
      * 不把它数出来的话，翻上个月看到的是真实的 token 配一个 $0.00 加零句提示——
      * 那正是这套代码一直在防的「$0.00 被读成免费」。
+     *
+     * **账本先按 refId 收成一行再 join。** `usage_charges."refId"` 上只有一条普通索引，
+     * 不是唯一约束——一次崩在 insertLlmCall 和记账之间、随后重算的调用，或者一条被重放
+     * 的 outbox 上报，都会让同一个 refId 上挂两行账。直接 join 的话那一行 llm_calls 会
+     * 被复制一份，calls 数成 2、每一列 token 翻倍，报给公司的 quotedUsd 跟着虚高。
      */
     const rows = await this.many(
       `select l."companyId", l.provider, l.model, count(*) as calls,
@@ -836,9 +873,9 @@ export class Db {
               coalesce(sum(l."completionTokens"), 0) as "completionTokens",
               coalesce(sum(l."cachedTokens"), 0) as "cachedTokens",
               coalesce(sum(l."cacheWriteTokens"), 0) as "cacheWriteTokens",
-              coalesce(sum(case when u.id is null then 1 else 0 end), 0) as "unledgeredCalls",
+              coalesce(sum(case when u."refId" is null then 1 else 0 end), 0) as "unledgeredCalls",
               max(l."createdAt") as "lastAt"
-       from llm_calls l left join usage_charges u on u."refId" = l.id
+       from llm_calls l left join ${LEDGER_BY_REF} u on u."refId" = l.id
        ${where.replace(/"(companyId|accountId|createdAt)"/g, 'l."$1"')}
        group by l."companyId", l.provider, l.model
        order by l."companyId", l.provider, l.model`,
@@ -1130,15 +1167,17 @@ export class Db {
     }
     // 维度在 connector_calls（label / tool / 状态），钱在账本，按 refId 接起来。
     const w = where.join(' and ').replace(/"(accountId|companyId|createdAt)"/g, 'c."$1"')
-    const from = 'from connector_calls c left join usage_charges u on u."refId" = c.id'
+    // 账本先收成一行：refId 不是唯一键，同一次调用挂两行账会让 calls 和金额一起翻倍。
+    const from =
+      'from connector_calls c left join ' + LEDGER_BY_REF + ' u on u."refId" = c.id'
     const g = async (cols: string, group: string) =>
       this.many(
-        `select ${cols}, count(*) as calls, coalesce(sum(u."amountMicros"), 0) as micros, max(c."createdAt") as "lastAt" ${from} where ${w} group by ${group}`,
+        `select ${cols}, count(*) as calls, coalesce(sum(u.micros), 0) as micros, max(c."createdAt") as "lastAt" ${from} where ${w} group by ${group}`,
         args,
       )
 
     const total = await this.one(
-      `select count(*) as calls, coalesce(sum(u."amountMicros"), 0) as micros, max(c."createdAt") as "lastAt" ${from} where ${w}`,
+      `select count(*) as calls, coalesce(sum(u.micros), 0) as micros, max(c."createdAt") as "lastAt" ${from} where ${w}`,
       args,
     )
     const byStatus = await g('c.status', 'c.status')
@@ -2864,14 +2903,15 @@ export class Db {
       for (const row of rows) {
         const s = parsePlatformPayload(row.payload)
         if (s.daily.provider || s.daily.model || s.utility.provider || s.utility.model) {
-          await this.putPlatformSettings({
-            daily: s.daily,
-            utility: s.utility,
-            enabledModels: cur.enabledModels,
-            priceMultiplier: cur.priceMultiplier,
-            connectorPricing: cur.connectorPricing,
-            webTools: cur.webTools,
-          })
+          /**
+           * **原样带上 cur 的全部字段，只覆盖要迁的那两项。**
+           *
+           * putPlatformSettings 是「整份重写」：漏给一项，它就按空值序列化下去。
+           * 这里原先漏了 managerVersion / modelPricing / billing 三项——只要平台的
+           * daily/utility 还空着（上面 `empty` 只看这四个字符串），一次开机迁移就会把
+           * 钉好的机队版本、全部单价覆盖和熔断开关一起清成默认值。
+           */
+          await this.putPlatformSettings({ ...cur, daily: s.daily, utility: s.utility })
           lifted.settings = true
           break
         }
@@ -3148,7 +3188,12 @@ export class Db {
         input.ask.slice(0, 500), input.createdAt, claimedAt, returnedAt, closedAt, input.updatedAt,
       ],
     )
-    return (await this.handoff(input.id))!
+    // 读回真正落下去的那一行：判据挡下时它还是原来的主人，那时候要抛，不能把它回出去。
+    const saved = await this.handoff(input.id)
+    if (!saved || saved.accountId !== input.accountId || saved.companyId !== input.companyId) {
+      throw new Error(`交接单 ${input.id} 属于别的账号，拒绝改写`)
+    }
+    return saved
   }
 
   /**
@@ -3178,9 +3223,10 @@ export class Db {
        * 排除掉的话，顶栏那个数（`openHandoffCount` 是算进去的）和这一页的清单会对不上，
        * 而人只会以为其中一处坏了。
        */
+      // 判据和 openHandoffCount 逐字一致（那边的注释写了为什么）。
       if (who.role === 'member') {
-        where.push('(assignee = ? or "claimedBy" = ?)')
-        args.push(who.id, who.id)
+        where.push('(assignee = ? or "claimedBy" = ? or (assignee is null and "accountId" = ?))')
+        args.push(who.id, who.id, who.id)
       } else {
         where.push('(assignee = ? or assignee is null or "claimedBy" = ?)')
         args.push(who.id, who.id)
@@ -3210,13 +3256,16 @@ export class Db {
    * 管理员多算一类——`assignee is null` 是「模版上指给管理员」，谁都可以接。
    */
   async openHandoffCount(who: { id: string; companyId: string; role: Role }): Promise<number> {
+    // **和 handoffsFor(mine) 是同一条判据，改一处就要改另一处。** 这两处曾经写岔：
+    // 计数认「指给我的 + 我名下且没指人的」，清单认「指给我的 + 我接手的」——于是
+    // 自己的 Bot 开出一张没指人的单时，红点是 1、点进去清单却是空的。
     const mine =
       who.role === 'member'
-        ? '(assignee = ? or ("assignee" is null and "accountId" = ?))'
-        : '(assignee = ? or assignee is null)'
+        ? '(assignee = ? or "claimedBy" = ? or ("assignee" is null and "accountId" = ?))'
+        : '(assignee = ? or assignee is null or "claimedBy" = ?)'
     const r = await this.one(
       `select count(*)::int as n from handoffs where "companyId" = ? and state in ('open','claimed') and ${mine}`,
-      who.role === 'member' ? [who.companyId, who.id, who.id] : [who.companyId, who.id],
+      who.role === 'member' ? [who.companyId, who.id, who.id, who.id] : [who.companyId, who.id, who.id],
     )
     return r ? num(r.n) : 0
   }

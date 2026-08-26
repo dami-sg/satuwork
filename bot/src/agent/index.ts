@@ -214,6 +214,18 @@ export class AgentService extends Service {
     if (!this.quietUntil) return
     this.quietUntil = 0
     this.ctx.logger?.info?.('agents: 静默已放开，恢复接活')
+    /**
+     * **放开之后要主动把队列排一遍。**
+     *
+     * 静默期里 drainQueue 是直接 return 的（见那儿的注释：留在队列里，和进程被杀是同
+     * 一个结局）。可如果管家最后没有重启这个进程、而是调 resume 放开了，那些消息就没
+     * 有任何东西会再来叫醒——队列落着盘，dock 上挂着，人只能自己再发一条。
+     */
+    for (const sessionId of this.queuedSessions()) {
+      void this.drainQueue(sessionId).catch((e) => {
+        this.ctx.logger?.warn?.(`agents: 恢复后排空 ${sessionId} 失败：${(e as Error).message}`)
+      })
+    }
   }
 
   /**
@@ -284,6 +296,11 @@ export class AgentService extends Service {
       .map((r) => r.value)
       .filter((v) => v.sessionId === sessionId)
       .sort((a, b) => a.createdAt - b.createdAt)
+  }
+
+  /** 队列里还压着消息的那几条会话。放开静默之后要挨个排空，见 resume。 */
+  queuedSessions(): string[] {
+    return [...new Set(this.queueCol().list().map((r) => r.value.sessionId))]
   }
 
   /** 队列深度上限。满了就明说，不静默丢——用户以为发出去了才是最糟的。 */
@@ -395,7 +412,12 @@ export class AgentService extends Service {
    * 早就回了「接住了」。先读后取，取和投递落在同一个 tick 里，这个窗口就不存在：
    * 轮次结束了就是 `live.get` 拿不到，如实返回 false，调用方改走 send 开新一轮。
    */
-  async steer(sessionId: string, text: string, images: ImageRef[] = []): Promise<boolean> {
+  async steer(
+    sessionId: string,
+    text: string,
+    images: ImageRef[] = [],
+    source: MessageSource = { kind: 'user' },
+  ): Promise<boolean> {
     // 先探一下，省得为一个根本没在跑的会话白读一遍图。
     if (!this.live.has(sessionId)) return false
     const content = images.length
@@ -405,6 +427,22 @@ export class AgentService extends Service {
     if (!agent) return false
     const at = Date.now()
     agent.steer({ role: 'user', content: stampContent(content, at), timestamp: at } as AgentMessage)
+    /**
+     * **插话也要落一条 `user/message`。**
+     *
+     * 这句话已经进了模型的消息列表，可它以前一个事件都不写——于是下一轮
+     * `toAgentMessages` 从日志重建历史时它就不存在了。后果最重的是转人工：人把结果
+     * 交还回来正好赶上 Bot 在跑，那段话走的就是这条插话路，进了当前这一轮之后从所有
+     * 后续上下文里消失，模型过一会儿会把人已经做完的事再做一遍；界面刷新之后那句交还
+     * 也不见了。docs/context-assembly.md §8-⑤ 把它记成已知缺口，这里把它补上。
+     *
+     * 写在 agent.steer 之后：先保证这一轮真的收到了话，再落账；反过来的话，steer 抛了
+     * 会留下一条「说过但没人听见」的记录。
+     */
+    await this.ctx.sessions.append(sessionId, 'user/message', {
+      message: { id: randomUUID(), role: 'user', content: userBlocks(text, images) },
+      source,
+    })
     return true
   }
 
@@ -557,9 +595,22 @@ export class AgentService extends Service {
       throw new Error('agents: 该会话正在运行中')
     }
     // 同步占位（runGuarded 的第一行），之后才允许出现 await。
-    await this.runGuarded(sessionId, text, images, mentions, source, modelRole)
-    // 这一轮收口了，接上排在后面的。
-    await this.drainQueue(sessionId)
+    /**
+     * **这一轮抛了也要去排空队列。**
+     *
+     * runGuarded 在真正开轮之前那几步（botOf / modelOf / toAgentMessages 重建历史）
+     * 是会抛出来的。原先 drainQueue 排在它后面直写，于是那种失败会把排在后面的消息
+     * 一起晾在那儿：队列是落盘的，没有开机排空、也没有定时器，只有下一次**成功**的
+     * send 才会顺手带走它们——而那时新消息已经先跑了，顺序也倒了。
+     */
+    try {
+      await this.runGuarded(sessionId, text, images, mentions, source, modelRole)
+    } finally {
+      // 这一轮收口了（无论成败），接上排在后面的。
+      await this.drainQueue(sessionId).catch((e) => {
+        this.ctx.logger?.warn?.(`agents: 排空队列失败：${(e as Error).message}`)
+      })
+    }
   }
 
   /**
@@ -1668,8 +1719,22 @@ export async function toAgentMessages(
     // 真到了就单独挂一条，起码不把摘要丢了。
     return [{ role: 'user', content: head, timestamp: compact.data.to } as AgentMessage, ...messages]
   }
+  /**
+   * **正文可能是字符串，也可能是块数组。**
+   *
+   * `userContentFor` 只在纯文字的时候返回字符串；这条消息一旦带图（真的图块，或者
+   * `stale()` 那种占位块），返回的就是数组，`stampContent` 也照数组留着。原先这里
+   * 直接套模板串，数组会被 `String()` 成 `[object Object],[object Object]`——图和正文
+   * 一起没了，而且这条坏消息会跟着每一轮重发，直到下一个压缩边界。压缩边界固定落在
+   * turn/end 上、其后第一条就是 user/message，而带图的用户消息一点都不罕见。
+   *
+   * 所以按形状分开接：字符串照旧拼，数组就在最前面插一个文字块。
+   */
   const target = messages[first] as any
-  messages[first] = { ...target, content: `${head}\n\n${target.content}` }
+  const content = Array.isArray(target.content)
+    ? [{ type: 'text', text: head }, ...target.content]
+    : `${head}\n\n${target.content}`
+  messages[first] = { ...target, content }
   return messages
 }
 

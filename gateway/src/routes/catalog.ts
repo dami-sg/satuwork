@@ -400,7 +400,10 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
 
     router.get(`${s.base}/skills/:skillId`, async (req, res) => {
       const owner = await s.read(req)
-      json(res, 200, { skill: publicSkill(await ownedItem(owner, req.params.skillId, 'skill', '没有这个 Skill')) })
+      // 读详情用 visibleItem：列表给的是「全局 ∪ 本公司」，详情却只认本公司的话，
+      // 点开自己列表里那条平台发布的 Skill 会得到一句「没有这个 Skill」。写路径下面
+      // 两条仍然走 ownedItem——全局项能看不能改，和 Bot 那条路一致。
+      json(res, 200, { skill: publicSkill(await visibleItem(owner, req.params.skillId, 'skill', '没有这个 Skill')) })
     })
 
     router.patch(`${s.base}/skills/:skillId`, async (req, res) => {
@@ -445,7 +448,8 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
 
     router.get(`${s.base}/mcp-servers/:serverId`, async (req, res) => {
       const owner = await s.read(req)
-      json(res, 200, { server: publicServer(await ownedItem(owner, req.params.serverId, 'mcp', '没有这个 MCP 服务器')) })
+      // 同 skill 详情：列表看得见的，详情就得打得开。
+      json(res, 200, { server: publicServer(await visibleItem(owner, req.params.serverId, 'mcp', '没有这个 MCP 服务器')) })
     })
 
     router.patch(`${s.base}/mcp-servers/:serverId`, async (req, res) => {
