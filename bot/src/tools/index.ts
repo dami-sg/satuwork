@@ -29,7 +29,7 @@ export interface ToolCall {
    * 模型那条流，管不到已经开跑的工具。
    *
    * 没有这个信号时，界面上那颗停止按钮在最需要它的时候是失效的：模型刚发起一条
-   * `bash`，人看出来跑错了想喊停，而 bash 的超时上限是十分钟——按钮按下去，日志里
+   * `terminal`，人看出来跑错了想喊停，而它的超时上限是十分钟——按钮按下去，日志里
    * 那一轮照样跑到底，看起来就是「点了没反应」。
    */
   signal?: AbortSignal
@@ -105,6 +105,27 @@ export interface ToolDefinition extends ToolSchema {
 }
 
 /**
+ * 内置工具的旧名字 → 新名字。
+ *
+ * 一个 Bot 一辈子只有一条会话，只增不减，而每一轮都把历史重建成一次模型请求。换完名字
+ * 之后，模型会在自己的历史里看见几百次对 `read` / `grep` 的调用，然后照着再调一次。
+ *
+ * **不注册兼容壳**：那等于工具表长一倍。上下文多花是小事，**模型在更长的表里选得更差**
+ * 才是要害。改在这里——只在真的调错时才花一次，而且那一次的失败文本里就带着出路。
+ *
+ * 历史里的旧调用被摘要压掉之后（两三个版本），这张表可以删。
+ */
+const RENAMED: Record<string, string> = {
+  read: 'read_file',
+  write: 'write_file',
+  edit: 'patch',
+  ls: 'search_files',
+  find: 'search_files',
+  grep: 'search_files',
+  bash: 'terminal',
+}
+
+/**
  * 工具注册表与执行管道。
  *
  * 决策必须在做出它的那个操作里强制执行：拒绝只能来自 pre-execute 短路，
@@ -160,7 +181,14 @@ export class ToolService extends Service {
   async execute(call: ToolCall): Promise<ToolResult> {
     const run = async (): Promise<ToolResult> => {
       const def = this.defs.get(call.name)
-      if (!def) return { text: `未知工具 ${call.name}`, failed: true }
+      if (!def) {
+        const now = RENAMED[call.name]
+        // 认得出是旧名字就把新名字告诉它。见 RENAMED 上面那段。
+        if (now && this.defs.has(now)) {
+          return { text: `未知工具 ${call.name}。它已经改名为 ${now}，参数同名，直接用新名字重调一次。`, failed: true }
+        }
+        return { text: `未知工具 ${call.name}`, failed: true }
+      }
       let args: unknown
       try {
         args = call.arguments.trim() ? JSON.parse(call.arguments) : {}

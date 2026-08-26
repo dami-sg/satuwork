@@ -52,7 +52,7 @@ export async function runGuards({ root, test, assert, log }) {
     // 而只有后者算数——拦截必须发生在 execute 之前，不是之后的道歉。
     assert(r.blockedNeverRan.mcp_b_send_mail === 0, `没授权的 MCP 还是跑了 ${r.blockedNeverRan.mcp_b_send_mail} 次`)
     assert(r.blockedNeverRan.mystery === 0, `没标注风险的工具还是跑了 ${r.blockedNeverRan.mystery} 次`)
-    assert(r.bashRuns === 2, `bash 跑的次数不对（应当只有 ls 和 git status 两次）：${r.bashRuns}`)
+    assert(r.terminalRuns === 2, `terminal 跑的次数不对（应当只有 ls 和 git status 两次）：${r.terminalRuns}`)
   })
 
   await test('拒绝的那句话说得出是什么挡的、下一步能干什么', () => {
@@ -61,8 +61,8 @@ export async function runGuards({ root, test, assert, log }) {
     assert(r.deniedText.includes('模版'), `没给出路：${r.deniedText}`)
   })
 
-  await test('bash：本地命令照跑，联网的挡下', () => {
-    const bad = all(r.bash)
+  await test('terminal：本地命令照跑，联网的挡下', () => {
+    const bad = all(r.terminal)
     assert(!bad.length, `这几条不对：${bad.join('、')}`)
   })
 
@@ -138,8 +138,8 @@ export async function runGuards({ root, test, assert, log }) {
     assert(r.approvals.放行的理由写了出处, '靠本会话授权放行的那次，理由里没写出处')
   })
 
-  await test('bash 按命令判要不要确认，不按它那份最坏情况的 risk', () => {
-    // bash 的 risk 是并集（写 + 毁 + 外联）。照并集判的话每条 ls 都要弹卡片，
+  await test('terminal 按命令判要不要确认，不按它那份最坏情况的 risk', () => {
+    // terminal 的 risk 是并集（写 + 毁 + 外联）。照并集判的话每条 ls 都要弹卡片，
     // 人会在第三次之后学会闭眼点批准——那时候这个开关就真的没用了。
     assert(r.approvals.普通命令不问, '普通命令也在弹确认')
     assert(r.approvals.递归删要问, 'rm -rf 没有要求确认')
@@ -374,7 +374,7 @@ export async function runGuards({ root, test, assert, log }) {
   await test('浏览器：像提交的才弹卡片，点一下看看的不弹', () => {
     /**
      * `browser_click` 正好是 `external + write`，照通用规则判就是每一次点击都弹一张
-     * 卡片——那不是收紧边界，那是让人学会闭眼点批准（bash 那条分支写过同一件事）。
+     * 卡片——那不是收紧边界，那是让人学会闭眼点批准（terminal 那条分支写过同一件事）。
      *
      * 反过来也要钉住：「先 type 再 press Enter」和 `submit: true` 是同一件事，
      * 放过其中一个，模型换个写法就绕过去了——而它换写法不需要任何恶意。

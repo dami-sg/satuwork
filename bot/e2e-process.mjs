@@ -1,0 +1,346 @@
+/**
+ * 后台进程的一生。探针要 tsx 才 import 得了 .ts。
+ *
+ * 这一组和别的不一样：它钉的东西**在这台机器上留得下痕迹**。一个没杀干净的后台进程
+ * 会占着端口和内存活到下次重启，而所有别的信号都是绿的——所以「杀掉了」这件事一律
+ * 用 `kill(pid, 0)` 去问操作系统，不看我们自己那本账。
+ */
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import { WorkspaceService } from './src/workspace/index.ts'
+import { ToolService } from './src/tools/index.ts'
+import * as terminalTools from './src/tools/terminal.ts'
+
+const home = mkdtempSync(join(tmpdir(), 'satu-proc-home-'))
+process.env.SATUWORK_HOME = home
+const root = mkdtempSync(join(tmpdir(), 'satu-proc-'))
+
+const ctx = new Context()
+ctx.provide('logger', { warn() {}, info() {}, error() {} })
+ctx.plugin(WorkspaceService, { root })
+await new Promise((r) => setTimeout(r, 50))
+ctx.plugin(ToolService)
+await new Promise((r) => setTimeout(r, 50))
+ctx.plugin(terminalTools)
+await new Promise((r) => setTimeout(r, 100))
+
+let seq = 0
+const call = (name, args, sessionId = 's-1', signal) =>
+  ctx.tools.execute({ callId: `c${++seq}`, name, arguments: JSON.stringify(args), sessionId, signal })
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+/**
+ * 这个 pid 还在不在。**问操作系统，不问我们自己那本账**——「注册表里标成已终止」和
+ * 「进程真的没了」是两件事，而只有后者算数。
+ *
+ * 问的是 pid 不是进程组：`sleep 60 &` 出来的那个子进程跟着 bash 的组走，它自己的 pid
+ * 不是一个合法的 pgid。
+ */
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+const idOf = (text) => (text.match(/proc_[0-9a-f]+/) ?? [])[0]
+
+/**
+ * **子角色**：被父进程真的发一次 SIGTERM 的那个进程（见 §7）。
+ *
+ * 为什么要另起一个进程：`process.emit('SIGTERM')` 只叫监听器，不走真正的信号投递，
+ * 于是「装了监听器就把 Node 的默认退出摘掉了」这件事在探针里完全看不出来——而那正是
+ * 换版时会让席位白等九十秒的那个 bug。要测它，只能真发一次信号给一个真的进程。
+ */
+if (process.env.SATU_PROC_CHILD) {
+  const r = await call('terminal', { command: 'sleep 300 & echo $!; wait', background: true })
+  await sleep(300)
+  const log = await call('process', { action: 'log', session_id: idOf(r.text) })
+  console.log('__PID__' + (log.text.match(/\|(\d+)/) ?? [])[1])
+  // 挂住等信号。**不能自己 exit**：要测的正是「收到 SIGTERM 会不会退出」。
+  setInterval(() => {}, 1000)
+  await new Promise(() => {})
+}
+
+const out = {}
+
+// ── 1. 前台照旧 ───────────────────────────────────────────────────────
+out.foreground = {
+  跑得通: (await call('terminal', { command: 'echo hi' })).text.trim(),
+  退出码非零不是管道故障: await (async () => {
+    const r = await call('terminal', { command: 'exit 3' })
+    return r.failed !== true && r.text.includes('退出码 3')
+  })(),
+  超时按秒算: await (async () => {
+    const t0 = Date.now()
+    const r = await call('terminal', { command: 'sleep 30', timeout: 1 })
+    // 按毫秒理解的话这里会等满三十秒。
+    return Date.now() - t0 < 5_000 && r.text.includes('超时')
+  })(),
+  workdir生效: (await call('terminal', { command: 'pwd', workdir: '.' })).text.trim().endsWith(root.split('/').pop()),
+}
+
+// ── 2. 输出超限：截断，但全文捞得回来 ─────────────────────────────────
+{
+  const r = await call('terminal', { command: 'for i in $(seq 1 40000); do echo "第 $i 行 xxxxxxxxxxxxxxxxxxxx"; done' })
+  const at = (r.text.match(/完整输出在 (\S+)，用 read_file/) ?? [])[1]
+  out.spill = {
+    截断了: r.text.includes('输出已截断'),
+    给了路径: Boolean(at),
+    路径在隐藏目录里: Boolean(at && at.startsWith('.satuwork/')),
+    // 界面上那一排药丸是「Bot 产出了什么」，过程痕迹不该混进去。
+    不进产出: !r.files && !r.refs,
+  }
+}
+
+// ── 3. 后台：起、poll、wait、kill ─────────────────────────────────────
+const t0bg = Date.now()
+const started = await call('terminal', { command: 'echo one; sleep 0.4; echo two; sleep 30', background: true })
+const startedIn = Date.now() - t0bg
+const bg = idOf(started.text)
+out.background = {
+  返回了id: Boolean(bg),
+  没有阻塞: startedIn < 2_000,
+  说了不随这一轮结束: started.text.includes('不随这一轮结束'),
+}
+
+await sleep(200)
+const poll1 = await call('process', { action: 'poll', session_id: bg })
+await sleep(500)
+const poll2 = await call('process', { action: 'poll', session_id: bg })
+out.poll = {
+  第一次看到one: poll1.text.includes('one'),
+  第一次没看到two: !poll1.text.includes('two'),
+  // poll 给的是「上次之后的新输出」——再看到一遍 one 的话，模型会以为它又跑了一次。
+  第二次只有two: poll2.text.includes('two') && !poll2.text.includes('one'),
+  运行中: poll1.text.includes('运行中'),
+}
+
+out.list = (await call('process', { action: 'list' })).text.includes(bg)
+out.prefix = (await call('process', { action: 'poll', session_id: bg.slice('proc_'.length, 'proc_'.length + 4) })).failed !== true
+out.otherSession = (await call('process', { action: 'poll', session_id: bg }, 's-2')).text
+
+// wait 超时：进程还在跑，等待本身要停得下来
+{
+  const t0 = Date.now()
+  const r = await call('process', { action: 'wait', session_id: bg, timeout: 1 })
+  out.waitTimeout = { 一秒就回来: Date.now() - t0 < 4_000, 说了还没结束: r.text.includes('还没结束') }
+}
+
+// 停止按钮掐的是这一轮，**不是**后台进程
+{
+  const ac = new AbortController()
+  const waiting = call('process', { action: 'wait', session_id: bg, timeout: 300 }, 's-1', ac.signal)
+  await sleep(100)
+  ac.abort()
+  const t0 = Date.now()
+  await waiting
+  out.abortStopsWaitNotProcess = {
+    等待停得下来: Date.now() - t0 < 3_000,
+    进程还活着: (await call('process', { action: 'poll', session_id: bg })).text.includes('运行中'),
+  }
+}
+
+// 杀之前先确认它真的在跑：起一条把子进程 pid 打出来的命令，拿它去问操作系统。
+{
+  const r = await call('terminal', { command: 'sleep 60 & echo $!; wait', background: true })
+  const id = idOf(r.text)
+  await sleep(300)
+  const log = await call('process', { action: 'log', session_id: id })
+  const childPid = Number((log.text.match(/\|(\d+)/) ?? [])[1])
+  const before = childPid ? alive(childPid) : false
+  await call('process', { action: 'kill', session_id: id })
+  await sleep(300)
+  out.killTree = {
+    杀之前fork出去的活着: before,
+    // 只杀 bash 的话，`sleep 60 &` 会留下来，端口和 CPU 一起占着。
+    杀之后整族都没了: childPid ? !alive(childPid) : false,
+    状态变了: (await call('process', { action: 'poll', session_id: id })).text.includes('已被终止'),
+  }
+}
+
+out.killed = (await call('process', { action: 'kill', session_id: bg })).text.includes('已终止')
+
+// ── 4. 并发上限 ───────────────────────────────────────────────────────
+{
+  const ids = []
+  for (let i = 0; i < 8; i++) {
+    ids.push(idOf((await call('terminal', { command: 'sleep 30', background: true }, 's-cap')).text))
+  }
+  const ninth = await call('terminal', { command: 'sleep 30', background: true }, 's-cap')
+  out.cap = {
+    第九个被拒: ninth.text.includes('上限'),
+    // 没有清单的话，模型只知道「不让起」，不知道是自己起了八个。
+    拒绝时列出了前八个: ids.filter(Boolean).every((id) => ninth.text.includes(id)),
+    // 会话之间不互相挤：上限是按会话算的。
+    别的会话不受影响: (await call('terminal', { command: 'sleep 30', background: true }, 's-other')).text.includes('已在后台启动'),
+  }
+  for (const id of ids) await call('process', { action: 'kill', session_id: id }, 's-cap')
+}
+
+// ── 5. 结束通知走 agents ──────────────────────────────────────────────
+/**
+ * `notify_on_complete` 的整个意义是「不用轮询」。它落成一条 `user/message`——不变量 7：
+ * 进入模型的那句话必须在 JSONL 里，重放才对得上。
+ */
+{
+  const sent = []
+  ctx.provide('agents', {
+    isRunning: () => false,
+    steer: async () => false,
+    send: async (sessionId, text, images, mentions, source) => {
+      sent.push({ sessionId, text, source })
+    },
+  })
+  await sleep(50)
+  await call('terminal', { command: 'echo 干完了; exit 0', background: true, notify_on_complete: true }, 's-notify')
+  for (let i = 0; i < 40 && !sent.length; i++) await sleep(100)
+  out.notify = {
+    自己来了一条: sent.length === 1,
+    进的是那条会话: sent[0]?.sessionId === 's-notify',
+    出处写着process: sent[0]?.source?.plugin === 'process',
+    带了退出码: Boolean(sent[0]?.text?.includes('退出码 0')),
+    带了最后几行: Boolean(sent[0]?.text?.includes('干完了')),
+  }
+  // 不设 notify_on_complete 就不该有第二条：永不退出的服务器不需要被通知。
+  const before = sent.length
+  await call('terminal', { command: 'echo 安静', background: true }, 's-notify')
+  await sleep(600)
+  out.notify.没设的就不通知 = sent.length === before
+
+  /**
+   * **自己动手杀的不通知。** kill 是模型刚发起的那次调用，结果它从返回值里已经知道了。
+   * 照样通知的话，那一轮要是已经收口，send 会为此单独开一轮——用户看到一条没来由的
+   * 「已被终止」冒出来，账上还多一次模型调用。
+   */
+  const r = await call('terminal', { command: 'sleep 60', background: true, notify_on_complete: true }, 's-notify')
+  await sleep(200)
+  await call('process', { action: 'kill', session_id: idOf(r.text) }, 's-notify')
+  await sleep(800)
+  out.notify.自己杀的不通知 = sent.length === before
+}
+
+// ── 6. 中文输出不许出现替换字符 ───────────────────────────────────────
+/**
+ * 一个汉字三个字节，而 chunk 的边界落在哪儿只看内核什么时候把数据递上来。切在字符中间
+ * 时两半各自解码，出来的就是 `�`——前台那次最多是屏幕上花一下，后台那份还会**落进
+ * proc/<id>.log**，原字节再也捞不回来。这个产品的命令输出以中文为主。
+ */
+{
+  const cmd = 'for i in $(seq 1 20000); do echo "第 $i 行 中文中文中文中文中文中文中文"; done'
+  const fg = await call('terminal', { command: cmd })
+  const r = await call('terminal', { command: cmd, background: true }, 's-utf8')
+  const id = idOf(r.text)
+  await call('process', { action: 'wait', session_id: id, timeout: 30 }, 's-utf8')
+  const log = await call('process', { action: 'log', session_id: id, offset: 1, limit: 2000 }, 's-utf8')
+  const poll = await call('process', { action: 'poll', session_id: id }, 's-utf8')
+  out.utf8 = {
+    前台没有替换字符: !fg.text.includes('�'),
+    后台日志没有替换字符: !log.text.includes('�'),
+    poll没有替换字符: !poll.text.includes('�'),
+    真的是中文: log.text.includes('中文中文'),
+  }
+}
+
+// ── 7. callId 洗过再拼路径 ────────────────────────────────────────────
+/**
+ * callId 是 provider 在响应里给的，一路透传到落盘那一步，没有任何一层校验过它长什么样。
+ * 上传文件名和 sessionId 早就走 safeName / safeSegment 了，这条新路不该是例外。
+ */
+{
+  const r = await ctx.tools.execute({
+    callId: '../../../evil',
+    name: 'terminal',
+    arguments: JSON.stringify({ command: 'for i in $(seq 1 40000); do echo xxxxxxxxxxxxxxxxxxxx; done' }),
+    sessionId: 's-1',
+  })
+  const at = (r.text.match(/完整输出在 (\S+)，用 read_file/) ?? [])[1]
+  out.callId = {
+    落在了工作区里: Boolean(at && at.startsWith('.satuwork/out/')),
+    没跑出去: !existsSync(join(dirname(root), 'evil.log')) && !existsSync(join(root, '..', '..', 'evil.log')),
+    // 洗完还得真的写成了：一句「没跑出去」如果是因为压根没写，那这条断言什么都没证明。
+    文件真的在: Boolean(at && existsSync(join(root, at))),
+  }
+}
+
+// ── 8. 开机扫掉没主人的日志 ───────────────────────────────────────────
+/**
+ * 删日志靠的是进程退出后那个三十分钟的定时器，而定时器活在内存里——席位换一次版、崩
+ * 一次，正跑着的那些后台进程连同定时器一起没，日志留在盘上再也没有主人。
+ */
+{
+  const dir = join(home, 'proc')
+  mkdirSync(dir, { recursive: true })
+  const stale = join(dir, 'stale.log')
+  const recent = join(dir, 'recent.log')
+  writeFileSync(stale, 'x')
+  writeFileSync(recent, 'x')
+  const longAgo = new Date(Date.now() - 5 * 24 * 3600_000)
+  utimesSync(stale, longAgo, longAgo)
+  // 再挂一次插件 = 再「开一次机」。扫的是同一个 $SATUWORK_HOME/proc。
+  const ctx2 = new Context()
+  ctx2.provide('logger', { warn() {}, info() {}, error() {} })
+  ctx2.plugin(WorkspaceService, { root })
+  await sleep(50)
+  ctx2.plugin(ToolService)
+  await sleep(50)
+  ctx2.plugin(terminalTools)
+  await sleep(400)
+  out.sweep = { 过期的删了: !existsSync(stale), 新的留着: existsSync(recent) }
+}
+
+// ── 9. 关机：进程自己退出，而且不留孤儿 ───────────────────────────────
+/**
+ * 管家换版走的是 `systemctl restart`（SIGTERM），**排空只等模型那一轮跑完，管不到后台
+ * 进程**。两件事都要成立：后台进程被杀干净，**并且这个进程自己真的退出**——给 SIGTERM
+ * 装了监听器就把 Node 的默认退出摘掉了，不重发信号的话它会一直活到 systemd 那九十秒
+ * 的硬杀。所以这一段发的是真信号，收信的是一个真进程（见文件上方的子角色）。
+ */
+{
+  const self = fileURLToPath(import.meta.url)
+  const child = spawn(process.execPath, ['--import', 'tsx', self], {
+    // cwd 钉在 bot/：`--import tsx` 是按 cwd 解析的，从别处跑这个探针时子进程会以
+    // ERR_MODULE_NOT_FOUND 当场死掉，而那看起来跟「进程不肯退出」一模一样。
+    cwd: dirname(self),
+    env: { ...process.env, SATU_PROC_CHILD: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let buf = ''
+  let err = ''
+  child.stderr.on('data', (d) => (err += d))
+  const inner = await new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`子进程没报出 pid\n${err || buf}`)), 30_000)
+    child.stdout.on('data', (d) => {
+      buf += d
+      const m = buf.match(/__PID__(\d+)/)
+      if (m) {
+        clearTimeout(t)
+        resolve(Number(m[1]))
+      }
+    })
+    // 子进程直接夭折（比如解析不到 tsx）时不要干等三十秒。
+    child.on('exit', (code) => {
+      clearTimeout(t)
+      reject(new Error(`子进程还没报出 pid 就退了（${code}）\n${err || buf}`))
+    })
+    child.on('error', reject)
+  })
+  const before = alive(inner)
+  const exited = new Promise((r) => child.on('exit', () => r(true)))
+  child.kill('SIGTERM')
+  const quit = await Promise.race([exited, sleep(6_000).then(() => false)])
+  await sleep(300)
+  out.shutdown = {
+    信号之前活着: before,
+    进程自己退出了: quit === true,
+    孤儿也没了: !alive(inner),
+  }
+  if (quit !== true) child.kill('SIGKILL')
+}
+
+console.log('__RESULT__' + JSON.stringify(out))
+process.exit(0)

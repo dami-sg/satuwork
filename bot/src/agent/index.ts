@@ -1197,7 +1197,7 @@ export class AgentService extends Service {
           arguments: JSON.stringify(params ?? {}),
           sessionId,
           // **这一条不能省。** pi-agent 的文档写得明白：钩子拿到中止信号，要自己负责
-          // 响应它。不往下传的话，agent.abort() 只掐得掉模型那条流，已经开跑的 bash
+          // 响应它。不往下传的话，agent.abort() 只掐得掉模型那条流，已经开跑的 terminal
           // 会一直跑到自己的超时上限（十分钟）——那期间界面上的停止按钮按下去毫无动静。
           //
           // 现取而不是构造时闭包：signal 是**每一轮**新的，bridgeTools 在建 agent 时
@@ -2173,7 +2173,7 @@ function escalateBlock(rule: string): string {
  * **不说这一句的代价是模型开始编。** 线上真发生过：用户 `@Gmail (default)` 说「查看
  * 邮件」，那把连接的工具没挂上，模型一无所知，于是自己找了个替代方案——「你指定的
  * Gmail 应该是指用桌面浏览器操作 Gmail」，接着去开虚拟桌面里的 Chrome。用户看到的是
- * 一堆莫名其妙的 bash 调用，而真正的问题（连接没挂上）没有一个字提到。
+ * 一堆莫名其妙的 terminal 调用，而真正的问题（连接没挂上）没有一个字提到。
  *
  * 只进这一轮的系统提示，不写进消息：落盘的是结构（谁被点名了），重放时工具表可能
  * 已经好了，那时不该还带着这句话（不变量 7）。

@@ -45,7 +45,7 @@ const SERVICES = ['storage', 'sessions', 'roster', 'tools', 'llm', 'workspace', 
  */
 const TOOLS = [
   'now',
-  'read', 'write', 'edit', 'ls', 'find', 'grep', 'bash',
+  'read_file', 'write_file', 'patch', 'search_files', 'terminal', 'process',
   'web_search', 'web_extract',
   'history_read', 'history_search',
   'escalate_to_human',

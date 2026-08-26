@@ -30,15 +30,15 @@ const DEFAULT_UPLOAD_MAX = 100 * 1024 * 1024
  * 工作区：Bot 干活的那个目录，以及所有进出它的字节。
  *
  * 单独成服务而不是散在各处，是因为**根目录和越界检查必须只有一份**。碰这个目录的
- * 有三条路——模型的工具（tools/workspace.ts）、浏览器传进来的附件、浏览器要看的
+ * 有三条路——模型的工具（tools/file.ts）、浏览器传进来的附件、浏览器要看的
  * 预览（都在 web/index.ts）——三条路各写一份 resolve，迟早会有一条写松。
  *
  * **根目录**：`$SATUWORK_WORK_DIR`，部署时注入的 `/home/{linuxUser}/work`，同一个员工
  * 的所有席位共用。没有这个变量（本地跑）时回落 `$SATUWORK_HOME/work`。
  * **不用 `$SATUWORK_HOME`**：那底下是会话日志和 SQLite，让模型的手伸进自己的记忆里，
- * 一条 `bash rm -rf` 就能把历史抹了。
+ * 一条 `terminal rm -rf` 就能把历史抹了。
  *
- * 但要把话说清楚：**这不是沙箱**。工具里的 `bash` 拿到的是真 shell，`cd /` 就出去了。
+ * 但要把话说清楚：**这不是沙箱**。`terminal` 拿到的是真 shell，`cd /` 就出去了。
  * 这里的 resolve 挡的是「路径写错」和「浏览器传了 `../`」，不是「模型想跑出去」。
  * 真正的边界在操作系统那层——专用系统用户、systemd 的 ProtectSystem/ReadWritePaths。
  */

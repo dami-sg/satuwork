@@ -208,7 +208,7 @@ const huge = await extractDocument(hugePath, 'xlsx')
 out.huge = {
   没去解析: huge.text.includes('超过了自动转文本的上限'),
   说了多大: huge.text.includes('26.0 MB'),
-  指了条别的路: huge.text.includes('bash'),
+  指了条别的路: huge.text.includes('terminal'),
 }
 
 // ── 6. 认哪些后缀 ─────────────────────────────────────────────────────

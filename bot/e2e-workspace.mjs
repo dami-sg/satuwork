@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { WorkspaceService, contentTypeOf, safeName } from './src/workspace/index.ts'
 import { ToolService } from './src/tools/index.ts'
-import * as wsTools from './src/tools/workspace.ts'
+import * as fileTools from './src/tools/file.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'satu-ws-'))
 const ctx = new Context()
@@ -165,20 +165,83 @@ out.listFile = await ws
  */
 ctx.plugin(ToolService)
 await new Promise((r) => setTimeout(r, 50))
-ctx.plugin(wsTools)
+ctx.plugin(fileTools)
 await new Promise((r) => setTimeout(r, 100))
 writeFileSync(join(root, 'sub/note.md'), '# hi\nTODO here\n')
 const call = (name, args) =>
   ctx.tools.execute({ callId: 'c1', name, arguments: JSON.stringify(args), sessionId: 's-1' })
 const paths = (r) => (r.refs || []).map((f) => f.path)
 out.refs = {
-  ls: paths(await call('ls', { path: 'sub' })),
-  read: paths(await call('read', { path: 'sub/note.md' })),
-  grep: paths(await call('grep', { pattern: 'TODO' })),
-  find: paths(await call('find', { pattern: '*.md' })),
+  列文件: paths(await call('search_files', { target: 'files', pattern: '*', path: 'sub' })),
+  // 隐藏项默认不列（`ls` 一直是这个口径），点名了才出来。
+  隐藏项要点名: paths(await call('search_files', { target: 'files', pattern: '.*', path: 'sub' })),
+  读: paths(await call('read_file', { path: 'sub/note.md' })),
+  搜内容: paths(await call('search_files', { pattern: 'TODO' })),
+  找文件: paths(await call('search_files', { target: 'files', pattern: '*.md' })),
   // 写和改报的是 files（产出），不是 refs——界面对这两样的处理完全不同。
-  写的是产出: (await call('write', { path: 'sub/new.txt', content: 'x' })).files?.map((f) => f.path),
-  写的不报refs: !(await call('write', { path: 'sub/new2.txt', content: 'x' })).refs,
+  写的是产出: (await call('write_file', { path: 'sub/new.txt', content: 'x' })).files?.map((f) => f.path),
+  写的不报refs: !(await call('write_file', { path: 'sub/new2.txt', content: 'x' })).refs,
+}
+
+// ── 9. file 工具集的形状 ──────────────────────────────────────────────
+/**
+ * 这几条钉的是**换掉七把老工具时不许丢的东西**：行号格式（patch 要靠它剥前缀）、
+ * 目录可见性（`ls` 的那半个用途）、以及旧名字有没有出路。
+ */
+// 顺带钉住「父目录自动创建」：没有它，模型每写一个新目录下的文件都要先跑一条 mkdir。
+const deep = await call('write_file', { path: 'sub/deep/inner.txt', content: 'x\n' })
+const readOut = await call('read_file', { path: 'sub/note.md' })
+const filesOut = await call('search_files', { target: 'files', pattern: '*.md', path: '.' })
+out.file = {
+  行号格式: readOut.text.split('\n')[0],
+  父目录自动建: existsSync(join(root, 'sub/deep/inner.txt')) && !deep.failed,
+  目录看得见: filesOut.text.includes('sub/'),
+  目录不是文件: !filesOut.text.split('\n').some((l) => l.trim() === 'sub'),
+  只列匹配的: filesOut.text.includes('sub/note.md'),
+  按名字数: (await call('search_files', { pattern: 'TODO', output_mode: 'count' })).text.trim(),
+  带上下文: (await call('search_files', { pattern: 'TODO', context: 1 })).text.includes('-1- # hi'),
+  目录不能读: (await call('read_file', { path: 'sub' })).text.includes('search_files'),
+  旧名字有出路: (await call('grep', { pattern: 'TODO' })).text,
+  没注册的还是没注册: (await call('赫尔墨斯', {})).text,
+}
+
+// ── 9b. 翻页时 refs 只报**真的摆出来了**的那些文件 ────────────────────
+/**
+ * 被 offset 整个翻过去的文件一行都没进正文。把它们算进「来自 N 个文件」是虚报；更要紧
+ * 的是它们会进 refs，界面于是在正文底下摆出一颗指向正文根本没提过的文件的药丸——而
+ * refs 存在的全部意义就是「正文里这个文件名指哪个文件」。
+ */
+writeFileSync(join(root, 'sub/一.txt'), 'MARK\n')
+writeFileSync(join(root, 'sub/二.txt'), 'MARK\n')
+const mark1 = await call('search_files', { pattern: 'MARK', path: 'sub', limit: 1 })
+const mark2 = await call('search_files', { pattern: 'MARK', path: 'sub', limit: 1, offset: 1 })
+out.paging2 = {
+  第一页一个文件: (mark1.refs || []).length === 1,
+  第二页也只有一个: (mark2.refs || []).length === 1,
+  两页不是同一个: (mark1.refs || [])[0]?.path !== (mark2.refs || [])[0]?.path,
+  第二页正文里就是那个文件: mark2.text.includes((mark2.refs || [])[0]?.path ?? ' '),
+}
+
+// ── 10. read_file 的分页 ─────────────────────────────────────────────
+/**
+ * 大文件是**必然**要分页的，而分页的唯一出口是末尾那句话里的 offset。它算错一位，
+ * 模型要么漏一行要么重复一行，而两种都看不出来——它只会照着读下去。
+ */
+writeFileSync(join(root, 'big.txt'), Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 行`).join('\n'))
+const page1 = (await call('read_file', { path: 'big.txt', limit: 5 })).text
+const page2 = (await call('read_file', { path: 'big.txt', offset: 6, limit: 3 })).text
+// 单行超长（压成一行的 JSON、日志）：那一行按字符截断，但**行还在**，后面的行也照读。
+// 整份内容不返回、或者卡在第一行，模型都看不出为什么。
+writeFileSync(join(root, 'wide.txt'), 'x'.repeat(400_000) + '\nsecond\n')
+const wide = (await call('read_file', { path: 'wide.txt' })).text
+out.paging = {
+  首页最后一行: page1.split('\n')[4],
+  接着读的提示: page1.split('\n').pop(),
+  第二页第一行: page2.split('\n')[0],
+  越界: (await call('read_file', { path: 'big.txt', offset: 999 })).text,
+  超长单行不空: wide.startsWith('1|xxx'),
+  超长单行被截断: wide.includes('已截断，共 400000 字符'),
+  截断之后后面的行还在: wide.includes('2|second'),
 }
 
 console.log('__RESULT__' + JSON.stringify(out))

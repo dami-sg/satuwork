@@ -47,8 +47,10 @@
 # 根目录是 $SATUWORK_WORK_DIR（部署注入的共享 work 目录），本地回落 $SATUWORK_HOME/work。
 - name: './src/workspace/index.ts'
 
-# 工作区里的手：read / write / edit / ls / find / grep / bash。
-- name: './src/tools/workspace.ts'
+# 工作区里的手。file 工具集看文件改文件（read_file / write_file / patch / search_files），
+# terminal 工具集跑命令。为什么是这个形状见 docs/file-terminal-tools.md。
+- name: './src/tools/file.ts'
+- name: './src/tools/terminal.ts'
 
 # 网页：搜索与提取。后端和密钥都在 Gateway（/runtime/web/*），这边只做形状与摘要。
 # 排在 workspace 之后——web_extract 的 save 要往工作区写。
