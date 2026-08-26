@@ -1310,7 +1310,20 @@ export class AgentService extends Service {
       this.ctx.tools.has('web_extract') ||
       this.ctx.tools.has('browser_snapshot')
     const outFiles = makes ? `\n\n${fileOutBlock()}` : ''
-    const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}${web}${escalate}${cite}${outFiles}`
+    /**
+     * 「长活先列清单」这一段，只在 `todo` 真的挂上时才加。
+     *
+     * **这一段必须有，工具本身不够。** 工具表上多一把 `todo` 只告诉模型「有这么个
+     * 东西」，说不出它最要紧的那两条约定：**动手之前**列（事后补一张全是 completed
+     * 的表毫无用处），以及**每做完一步立刻回来标**（攒到最后一起标，中途被打断就
+     * 什么都没留下——而「中途被打断」正是这把工具存在的全部理由）。
+     *
+     * 这一段是静态的，不带任何每轮都变的东西，所以不影响上游的前缀缓存（理由见
+     * runtimeBlock 开头那段）。清单本身不进提示词：它随时在变，塞进来等于每轮都从
+     * 第一个 token 重算，而模型不带参数调一次 todo 就能读回来。
+     */
+    const todo = this.ctx.tools.has('todo') ? `\n\n${todoBlock()}` : ''
+    const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}${web}${escalate}${cite}${outFiles}${todo}`
     const col = this.ctx.storage.collection<{ id: string; name: string; body: string; enabled?: boolean }>('skills')
     const ids = bot?.skills
     const picked =
@@ -2268,6 +2281,30 @@ function fileOutBlock(): string {
     '**不要教用户去文件系统里找它**：「在工作区根目录」「双击打开」「用浏览器打开这个文件」「路径是 /home/…」这类话一句都不要写。',
     '用户面前是网页上的这段对话，那边没有这台席位机器的文件管理器，也没有可以双击的桌面——那样说等于「东西做好了，但你拿不到」。',
     '同样也不要把整份文件的内容贴进回答来代替它：一份长报告贴进对话只会把回答本身埋掉，而预览就在那颗药丸上。',
+  ].join('\n')
+}
+
+/**
+ * 长活先列清单。只在 `todo` 挂上时才加（见 composeSystem 里那段）。
+ *
+ * **现场**：一次「把这三个仓库的 README 都翻译了，再各写一份摘要」的活，模型翻完
+ * 第一个、摘要写到第二个，中间为了查一个词跑了十几步工具，收口时说的是「三个仓库
+ * 都处理好了」——它不是在撒谎，是真的以为做完了：最初那句「我先做 A 再做 B 再做 C」
+ * 已经被几十条工具结果推到上下文很靠后的地方，而它手上没有任何一份能核对的状态。
+ *
+ * 所以这段话的重点不是「有这么一把工具」，是**什么时候调、调几次**。
+ */
+function todoBlock(): string {
+  return [
+    '## 多步的活先列清单',
+    '`todo` 维护这条会话的任务清单。**三步以上的活、或者用户一次交代了好几件事**，动手之前先用它把步骤列出来；一两步就能做完的不要列，那只是噪音。',
+    '',
+    '开始做某一条**之前**把它标成 `in_progress`，做完**立刻**回来标 `completed`——攒到最后一起标的话，中途被打断就什么都没留下，而这正是这张表存在的理由。',
+    '同一时刻只留一条 `in_progress`。做不成、或者用户改主意不做了的标 `cancelled`，**不要把没做完的标成 `completed`**。',
+    '中途发现还有一步要做，就用 `merge=true` 追加一条，不要在心里记着。',
+    '',
+    '这张表跨轮、跨重启都在，前面的对话被摘要压掉之后它也还在：拿不准做到哪儿了，不带参数调一次 `todo` 就能读回来。',
+    '清单是你自己的工作台，不是交付物——不用在回复里把它抄一遍，用户要的是事情做完。',
   ].join('\n')
 }
 

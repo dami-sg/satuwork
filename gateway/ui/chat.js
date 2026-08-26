@@ -464,6 +464,8 @@ function fold(events, live) {
   let statusAt = 0
   // 空壳工具调用的 callId（见下面 tool/call）。它们的结果也要一起跳过。
   const phantoms = new Set()
+  /** 最后一条 `todo/list` 快照。见下面那一支。 */
+  let todos = null
   /** 单号 → 已经画在某一块上的那张交接卡。跨块认，见下面 human/handoff。 */
   const handoffSeen = new Map()
   const handoffOf = (id) => (id ? handoffSeen.get(id) : undefined)
@@ -690,6 +692,15 @@ function fold(events, live) {
         time: at,
         seq: ev.seq,
       })
+    } else if (type === 'todo/list') {
+      /**
+       * 待办清单的一张全量快照。**不画进消息流**——它是一份状态，不是一句话；每改一次
+       * 就在对话里推一条的话，一次十步的活会把人真正在读的内容挤没。折出来给 dock 用。
+       *
+       * 后一条盖前一条，seq 一起带上：dock 还有第二个数据源（打开这一页时拉的那次快照），
+       * 两边谁新按**日志行号**比，不按时间比（理由见 approvalDead）。
+       */
+      todos = { items: Array.isArray(data.items) ? data.items : [], seq: ev.seq }
     } else if (type === 'turn/start') {
       status = 'running'
       statusAt = at
@@ -721,7 +732,7 @@ function fold(events, live) {
     const tail = blocks[blocks.length - 1]
     statusAt = (tail && (tail.endTime || tail.time)) || 0
   }
-  return { blocks, status, statusAt }
+  return { blocks, status, statusAt, todos }
 }
 
 /**
@@ -882,6 +893,7 @@ async function hydrateChat(botId, sessionId) {
     if (state.chatSessionId === sessionId) paintChat()
     void syncApprovals(botId, sessionId)
     void syncHandoffs(botId, sessionId)
+    void syncTodos(botId, sessionId)
   })()
   row.hydrating = job
   return job
@@ -945,6 +957,43 @@ function handoffDead(h) {
   const snap = state.chatHandoffs
   if (!snap || snap.sessionId !== state.chatSessionId || !snap.upto) return false
   return Boolean(h.seq && h.seq <= snap.upto && !snap.ids.has(h.id))
+}
+
+/**
+ * sessionId → 这条会话待办清单的一张快照（`{ items, upto }`）。
+ *
+ * **按会话存，不是一个槽。** 单槽的话，A → B → A 这么切一圈，槽里留的是 B 那一份，
+ * 而 `chatTodoItems` 认不出会话就只好退回「只看事件」——那时 dock 会在一张真有未完成
+ * 清单的会话上**静静地空掉**，正好是这一跳本来要解决的那件事（确认卡和交接单也是
+ * 单槽，但它们认不出时退化成「当它还活着」，方向是安全的；这里的退化方向不是）。
+ */
+const chatTodoSnap = new Map()
+
+/**
+ * 拉一次这条会话现在的待办清单。
+ *
+ * **事件不够。** dock 平时靠 `todo/list` 事件跟着动，可流上只垫最近一轮
+ * （STREAM_TAIL_TURNS）——一张三天前列出来、还没做完的表根本不在里面，而那正是最该
+ * 被看见的一张：人今天早上打开这一页，第一件想知道的事就是「昨天那摊活做到哪儿了」。
+ *
+ * **拿到过就不再拉**，也不轮询：这条会话只有一个人在看，而看着的时候每一次改动都有
+ * 事件跟过来（不像交接单，那是跨 Bot、跨机器、别人也能改的东西）。反过来，**没拿到
+ * 就还会再试**——这条闸让「席位当时没上线」不至于变成「这一页从此没有 dock」：
+ * `hydrateChat` 拉过一次就再也不进（`row.hydrated`），全靠切回来这一下补。
+ *
+ * 水位（`upto`）取在发请求之前，和事件谁新按 seq 比（理由见 approvalDead）。
+ */
+async function syncTodos(botId, sessionId) {
+  if (!sessionId || chatTodoSnap.has(sessionId)) return
+  const upto = maxSeqOf(botStreamOf(botId).events)
+  try {
+    const data = await api('GET', `/runtime/sessions/${encodeURIComponent(sessionId)}/todos`)
+    chatTodoSnap.set(sessionId, { items: (data && data.todos) || [], upto })
+    if (state.chatSessionId === sessionId) paintChat()
+  } catch {
+    // 席位没上线、或者老版本没有这条路由。**不写进表**：留着空位，下次切回来会再试一次。
+    // dock 这一轮退回只认事件那一份，也就是加这一跳之前的行为。
+  }
 }
 
 async function syncApprovals(botId, sessionId) {
@@ -1095,6 +1144,9 @@ async function ensureChatSession(botId, attempt = 0) {
     paintChat()
     // 更早的那些走 HTTP 补。不 await：补回来自己重画，视线用 chatAnchorHeight 钉住。
     void hydrateChat(botId, warm.sessionId)
+    // 待办快照单独补一次：hydrateChat 拉过一次就再也不进（`row.hydrated`），而这条流
+    // 一直开着的 Bot 走的正是这条热路径。有了就直接返回，没有才真的发请求。
+    void syncTodos(botId, warm.sessionId)
     return
   }
   if (state.chatBotId !== botId) {
@@ -3457,6 +3509,7 @@ function paintChatChrome(folded) {
   }
   const meta = document.getElementById('chat-meta')
   if (meta) meta.textContent = chatMetaText(folded)
+  paintChatTodos(folded)
   const tip = document.getElementById('chat-tip')
   // 会话还没拿到（席位刚起来那几十秒）就直说。这一行是人在按发送之前唯一会看的地
   // 方，而那期间按下去是发不出去的——不说的话就是「点了没反应」。
@@ -5032,6 +5085,11 @@ function chatPage() {
           <button type="button" class="sw-jump" id="chat-jump" data-act="chat-jump" hidden>${ICON_DOWN}${t('回到底部')}</button>
         </div>
         <div class="sw-composer">
+          ${/* 待办 dock（见 docs/todo-tool.md）。摆在输入框**外面的顶上**，和排队那一行
+                同一个位置逻辑：它说的是「这件事现在做到哪儿了」，是发下一句之前顺带
+                知道的东西，不是消息流里的一条内容。默认折叠成一行——展开的清单会把
+                输入框顶掉半屏，而人多半只想知道「还剩几条」。 */ ''}
+          <div class="sw-todock" id="chat-todock" hidden></div>
           <div class="sw-queue" id="chat-queue" hidden></div>
           <form id="chat-form" class="sw-composer-box">
             <div class="sw-pickbox" id="chat-cmdpick" hidden></div>
@@ -5116,6 +5174,188 @@ function paintChatQueue() {
         </div>`
       })
       .join('')
+}
+
+/**
+ * 待办 dock 的四种状态标记。
+ *
+ * 画成图形而不是 ☐☑ 这类字符：那几个字符在不同系统上的字号、基线、甚至有没有字体
+ * 都不一样（Windows 上常常退化成一个方框），而这一行的四个标记必须对得整整齐齐。
+ */
+const TODO_MARK = {
+  pending:
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="8"/></svg>',
+  in_progress:
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none"/></svg>',
+  completed:
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="m8.6 12.2 2.3 2.3 4.5-4.7"/></svg>',
+  cancelled:
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M9.2 9.2 14.8 14.8"/><path d="M14.8 9.2 9.2 14.8"/></svg>',
+}
+
+/**
+ * 状态 → 标记。**走 hasOwn，不直接下标**：`TODO_MARK['__proto__']` 拿到的是
+ * Object.prototype，而它是 truthy，`|| TODO_MARK.pending` 那道兜底接不住——拼进
+ * innerHTML 就是一句 `[object Object]`。席位那边已经校验过状态，这一道是白捡的。
+ */
+const todoMark = (status) => (Object.hasOwn(TODO_MARK, status) ? TODO_MARK[status] : TODO_MARK.pending)
+
+/** dock 抬头那个清单图标。 */
+const ICON_LIST =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 6 2 2 3-3"/><path d="m3 15 2 2 3-3"/><path d="M12 7h9"/><path d="M12 16h9"/></svg>'
+
+/** 折叠箭头。朝上；展开时由 CSS 转 180°——同一个箭头指的是同一件事的两个方向。 */
+const ICON_CHEV =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>'
+
+/**
+ * dock 展开着还是折着，按会话记。**默认折着**：展开的清单会把输入框顶掉半屏，而人
+ * 多半只想知道「还剩几条」。
+ *
+ * 只活在这一次页面加载里，不落 prefs：它是「我现在想不想看细节」，不是一项设置。
+ */
+const chatTodoOpen = new Map()
+
+/**
+ * 人手关掉的那张表，记的是**关掉时它长什么样**（sessionId → 指纹）。
+ *
+ * 不记「关掉了」这个布尔：那样一关就是永久的，而清单还在往前走——下一条做完了、
+ * 新加了两条，人再也看不到。记指纹的话，**表一变它自己就回来**，而没变的时候不来烦人。
+ */
+const chatTodoHidden = new Map()
+
+const todoSign = (items) => items.map((i) => `${i.id}:${i.status}:${i.task}`).join('|')
+
+/**
+ * dock 该照着哪一份画。
+ *
+ * 两个数据源：折出来的最后一条 `todo/list` 事件，和打开这一页时拉的那次快照
+ * （syncTodos）。谁新按**日志行号**比，不按时间比——那是两台机器各自的钟
+ * （理由见 approvalDead）。快照没有 seq，它带的是取快照那一刻的水位。
+ */
+function chatTodoItems(folded) {
+  const ev = folded && folded.todos
+  const snap = chatTodoSnap.get(state.chatSessionId) || null
+  if (ev && (!snap || Number(ev.seq) > Number(snap.upto))) return ev.items || []
+  if (snap) return snap.items || []
+  return []
+}
+
+/**
+ * 待办 dock：输入框顶上那块可折叠的清单（见 docs/todo-tool.md）。
+ *
+ * **为什么值得单占一块地方。** 清单本来只以工具结果的形式躺在消息流里，而那正是它
+ * 最没用的地方：一次十步的活会把它往上顶出屏幕，人想知道「还剩几条」得往回翻。它是
+ * 一份**当前状态**，状态该待在一个固定的位置上。
+ *
+ * 折叠态一行说完三件事：在做什么、做了几条、还剩几条。展开才铺开细节。
+ */
+function paintChatTodos(folded) {
+  const box = document.getElementById('chat-todock')
+  if (!box) return
+  const items = chatTodoItems(folded)
+  const sid = state.chatSessionId
+  // 空表不占位置。清单被清掉、或者这条会话压根没用过 todo，都走这一支。
+  if (!items.length) return clearTodock(box)
+  const sign = todoSign(items)
+  if (chatTodoHidden.get(sid) === sign) return clearTodock(box)
+  const done = items.filter((i) => i.status === 'completed').length
+  const running = items.find((i) => i.status === 'in_progress')
+  const open = items.filter((i) => i.status === 'pending')
+  // 抬头那句话：正在做哪一条 > 下一条该做什么 > 已经收口了。
+  const now = running || open[0] || null
+  const allDone = !running && !open.length
+  const badge = running
+    ? t('正在执行', 'Running')
+    : allDone
+      ? t('已完成', 'Done')
+      : t('待办', 'To do')
+  const opened = chatTodoOpen.get(sid) === true
+  box.hidden = false
+  /**
+   * **清单没变就不重建 DOM。**
+   *
+   * 这个函数挂在 paintChatChrome 上，而那一个在流式期间是**每一帧**都跑的
+   * （schedulePaintChat 走 rAF）。无条件写 innerHTML 的话，展开着的那张清单每帧被拆掉
+   * 重建：它自己有滚动区（.sw-todock-list 的 max-height），于是 scrollTop 每帧归零——
+   * 一张十几条的表在跑活的时候根本滚不动，而那正是人最想看它的时候；键盘焦点和选中的
+   * 文字也一起没。同一件事在交接卡那块是用 hSig 挡住的（见 paintChatBlocks），
+   * 这里照抄。
+   *
+   * 展开态**不进这个指纹**：它由下面几行属性写就地生效，不碰 DOM 结构，所以折起再
+   * 展开时滚动位置和焦点都还在。
+   */
+  if (box.getAttribute('data-sig') !== sign) {
+    box.setAttribute('data-sig', sign)
+    box.innerHTML = todockHtml(items, { done, now, running, allDone, badge, opened })
+  }
+  // 展开 / 折起：改属性，不重建。每次都写一遍是幂等的，也顺手把重建之后的那一帧对齐。
+  applyTodockOpen(box, opened)
+}
+
+/** 把「展开着还是折着」写到 DOM 上。**只改属性**，不碰结构——理由见上面那段。 */
+function applyTodockOpen(box, opened) {
+  box.setAttribute('data-open', opened ? '1' : '0')
+  const head = box.querySelector('.sw-todock-head')
+  if (head) head.setAttribute('aria-expanded', opened ? 'true' : 'false')
+  const list = box.querySelector('.sw-todock-list')
+  if (list) list.hidden = !opened
+}
+
+/** 收起来：连指纹一起清掉，否则下次要显示时会以为「没变」而不重建。 */
+function clearTodock(box) {
+  box.hidden = true
+  box.removeAttribute('data-sig')
+  box.innerHTML = ''
+}
+
+function todockHtml(items, { done, now, running, allDone, badge, opened }) {
+  return (
+    `<div class="sw-todock-bar">` +
+    `<button type="button" class="sw-todock-head" data-act="chat-todo-toggle" aria-expanded="${opened ? 'true' : 'false'}">` +
+    `<span class="sw-todock-icon">${ICON_LIST}</span>` +
+    `<span class="sw-todock-title">${esc(t('任务', 'Tasks'))}</span>` +
+    `<span class="sw-todock-badge" data-s="${running ? 'run' : allDone ? 'done' : 'idle'}">${esc(badge)}</span>` +
+    (now ? `<span class="sw-todock-now">${esc(now.task || '')}</span>` : '') +
+    `<span class="sw-spacer"></span>` +
+    `<span class="sw-todock-count">${done}/${items.length} ${esc(t('已完成', 'done'))}</span>` +
+    `<span class="sw-todock-chev">${ICON_CHEV}</span>` +
+    `</button>` +
+    `<button type="button" class="sw-todock-x" data-act="chat-todo-hide" ` +
+    `aria-label="${esc(t('收起任务清单', 'Dismiss task list'))}" title="${esc(t('收起任务清单', 'Dismiss task list'))}">${ICON_X}</button>` +
+    `</div>` +
+    `<ol class="sw-todock-list"${opened ? '' : ' hidden'}>` +
+    items
+      .map(
+        (i) =>
+          `<li class="sw-todock-item" data-s="${esc(i.status || 'pending')}">` +
+          `<span class="sw-todock-mark">${todoMark(i.status)}</span>` +
+          `<span class="sw-todock-task">${esc(i.task || '')}</span>` +
+          `</li>`,
+      )
+      .join('') +
+    `</ol>`
+  )
+}
+
+/**
+ * 展开 / 折起。**只写三个属性**：不重绘整页（会冲掉输入框里没发出去的字），也不重折
+ * 一遍历史、不重建清单的 DOM（那会把刚滚到的位置甩回顶上）。
+ */
+function toggleChatTodos() {
+  const sid = state.chatSessionId
+  const opened = chatTodoOpen.get(sid) !== true
+  chatTodoOpen.set(sid, opened)
+  const box = document.getElementById('chat-todock')
+  if (box) applyTodockOpen(box, opened)
+}
+
+/** 关掉这一张。**只关这一张**：表一变它自己回来（见 chatTodoHidden）。 */
+function hideChatTodos() {
+  const sid = state.chatSessionId
+  const folded = fold(state.chatEvents, chatLive.get(sid))
+  chatTodoHidden.set(sid, todoSign(chatTodoItems(folded)))
+  paintChatTodos(folded)
 }
 
 /**

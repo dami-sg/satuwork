@@ -774,6 +774,26 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     )
   })
 
+  /**
+   * 这条会话现在的待办清单（输入框上面那块 dock 的初值，见 docs/todo-tool.md）。
+   *
+   * 和上面那条交接单一样只是转发：真相在席位的库里。界面平时靠 `todo/list` 事件跟着
+   * 变，这一跳只在**刚打开这一页**时拉一次——流上只垫最近一轮，早先列出来还没做完的
+   * 那张表不在里面。
+   */
+  router.get('/runtime/sessions/:id/todos', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/todos`,
+      undefined,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
   router.post('/runtime/sessions/:id/abort', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const target = await seatTargetForSession(db, account, req.params.id)
