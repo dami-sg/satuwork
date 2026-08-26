@@ -329,6 +329,26 @@ export async function runSkills({ gwRoot, test, req, start, waitHttp, assert, lo
       assert(rows.some((x) => x.action === 'catalog.promote'), '晋升要落审计')
     })
 
+    await test('删掉 Bot，它攒下的私有档跟着走', async () => {
+      const made = await req(base, 'POST', '/runtime/bots', { token: memberTok, body: { name: '临时工' } })
+      assert(made.status === 201, `bot ${made.status} ${made.text}`)
+      const tmp = made.json.bot.id
+      const wrote = await req(base, 'POST', `/runtime/skills?botId=${tmp}`, {
+        token: seatTok,
+        body: { name: '临时工的做法', body: '正文' },
+      })
+      assert(wrote.status === 201, `write ${wrote.status} ${wrote.text}`)
+
+      const gone = await req(base, 'DELETE', `/runtime/bots/${tmp}`, { token: memberTok })
+      assert(gone.status === 200, `delete bot ${gone.status} ${gone.text}`)
+      /**
+       * 留着的话，它们就是谁也看不见、谁也删不掉的行——界面上那一栏按 botId 认主人，
+       * 而那颗 Bot 已经不在了。
+       */
+      const left = (await req(base, 'GET', `/orgs/${orgId}/skills`, { token: adminTok })).json.skills
+      assert(!left.some((x) => x.id === wrote.json.skill.id), `Bot 删了，它的私有档还在：${wrote.json.skill.id}`)
+    })
+
     await test('模版上那个开关下发到席位', async () => {
       const before = await req(base, 'GET', `/runtime/catalog?botId=${botId}`, { token: seatTok })
       assert(before.json.bots[0].selfSkills === true, `默认该是开的：${JSON.stringify(before.json.bots[0].selfSkills)}`)

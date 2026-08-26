@@ -2383,6 +2383,14 @@ export class Db {
       for (const g of rows.map(groupOf)) {
         await this.updateGroup(g.id, { agents: g.agents.filter((a) => a !== botId) })
       }
+      /**
+       * **它自己攒下的那些 Skill 跟着走。**
+       *
+       * 私有档只对这一颗 Bot 有意义（`skillsFor` 的 where 里带着 botId）。Bot 没了还
+       * 留着，它们就成了谁也看不见、谁也删不掉的行——界面上那一栏按 botId 认主人，
+       * 认不出来就不显示。列上没有外键正是为了这一刻：该做的是一起删掉，不是拒绝删 Bot。
+       */
+      await this.run('delete from catalog_items where kind = \'skill\' and scope = \'user\' and "botId" = ?', [botId])
       await this.run('delete from catalog_items where id = ? and kind = \'bot\'', [botId])
     })
   }

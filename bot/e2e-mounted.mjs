@@ -48,6 +48,7 @@ const TOOLS = [
   'read_file', 'write_file', 'patch', 'search_files', 'terminal', 'process',
   'web_search', 'web_extract',
   'history_read', 'history_search',
+  'todo', 'delegate_task',
   'skill_view', 'skills_list', 'skill_manage',
   'escalate_to_human',
   'browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_press',
