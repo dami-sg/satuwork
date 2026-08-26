@@ -16,10 +16,33 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createContext, runInContext } from 'node:vm'
 
-/** 让 chat.js 在 node 里加载起来的最小垫片。这两组函数一个 DOM API 都不碰。 */
+/**
+ * 让 chat.js 在 node 里加载起来的最小垫片。
+ *
+ * fold / 认命令那两组函数一个 DOM API 都不碰；待办 dock 那一块碰的只有
+ * `getElementById('chat-todock')` 和那个盒子上的几个属性，所以顺手垫一个假盒子出来
+ * ——它是**每次 loadChat 一个新的**，而「重新加载这一页」正是那条规则要认的那一刻。
+ */
 function loadChat(root) {
   const noNode = { style: {}, setAttribute() {}, appendChild() {}, querySelector: () => null, querySelectorAll: () => [] }
+  const todock = {
+    hidden: true,
+    innerHTML: '',
+    attrs: {},
+    setAttribute(k, v) {
+      this.attrs[k] = String(v)
+    },
+    getAttribute(k) {
+      return k in this.attrs ? this.attrs[k] : null
+    },
+    removeAttribute(k) {
+      delete this.attrs[k]
+    },
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  }
   const ctx = {
+    todock,
     console,
     setTimeout,
     clearTimeout,
@@ -39,7 +62,11 @@ function loadChat(root) {
     initialOf: () => 'X',
     chatBotIdOf: () => 'b',
     fmtTime: (n) => new Date(n).toISOString(),
-    document: { getElementById: () => null, addEventListener() {}, createElement: () => noNode },
+    document: {
+      getElementById: (id) => (id === 'chat-todock' ? todock : null),
+      addEventListener() {},
+      createElement: () => noNode,
+    },
     // 顶层挂的那几个监听（resize、keydown）：收下就扔。
     addEventListener() {},
     removeEventListener() {},
@@ -157,5 +184,54 @@ export async function runChatFold({ root, test, assert, log }) {
     assert(q('/')?.q === '', '刚打一个斜杠就该弹')
     assert(q('看下 /compact') === null, '正文中间的斜杠不该弹选单')
     assert(q('/etc/hosts') === null, '路径不该弹选单')
+  })
+
+  /**
+   * 待办 dock 的可见性（见 docs/todo-tool.md §5）。
+   *
+   * 钉的是「全部收口了的那张表，重新加载之后不再摆出来」——而它必须只拦那一下：盯着
+   * 看的时候最后一条打勾，那一帧还得画出「已完成」，否则人看不见事情收口了。这两句话
+   * 在真浏览器里要靠刷新页面才试得出来，而**分辨它们的唯一办法就是分两次 loadChat**。
+   */
+  const dockOf = () => {
+    const c = loadChat(root)
+    c.state.chatSessionId = 's1'
+    return c
+  }
+  const listEv = (seq, statuses) =>
+    ev(seq, 'todo/list', { callId: 'c1', items: statuses.map((st, i) => ({ id: String(i + 1), task: '事' + (i + 1), status: st })) })
+
+  await test('重新加载：全部收口的清单不再占输入框上面那行', async () => {
+    const c = dockOf()
+    c.paintChatTodos(c.fold([listEv(4, ['completed', 'completed'])]))
+    assert(c.todock.hidden, 'dock 还摆着——它能说的只有一句「昨天那件事做完了」')
+    // cancelled 也是收口：做不成、不用做了的标它，不该拿这个把 dock 留在屏幕上。
+    const c2 = dockOf()
+    c2.paintChatTodos(c2.fold([listEv(4, ['completed', 'cancelled'])]))
+    assert(c2.todock.hidden, '全是 completed / cancelled 的表也该收起来')
+  })
+
+  await test('重新加载：还有没做完的照常摆出来', async () => {
+    const c = dockOf()
+    c.paintChatTodos(c.fold([listEv(4, ['completed', 'pending'])]))
+    assert(!c.todock.hidden && c.todock.innerHTML.includes('事2'), '还剩一条没做，dock 却收起来了')
+  })
+
+  await test('盯着看：最后一条打勾那一帧仍然画出「已完成」', async () => {
+    const c = dockOf()
+    c.paintChatTodos(c.fold([listEv(4, ['completed', 'in_progress'])]))
+    assert(!c.todock.hidden, '还在跑的时候 dock 就不见了')
+    c.paintChatTodos(c.fold([listEv(4, ['completed', 'in_progress']), listEv(5, ['completed', 'completed'])]))
+    assert(!c.todock.hidden, '最后一条打勾把 dock 抹掉了——人看不见事情收口了')
+    assert(c.todock.innerHTML.includes('已完成'), `徽标没换成「已完成」：${c.todock.innerHTML}`)
+  })
+
+  await test('收起来之后清单一变，它自己回来', async () => {
+    const c = dockOf()
+    c.paintChatTodos(c.fold([listEv(4, ['completed', 'completed'])]))
+    assert(c.todock.hidden, '第一步就没收起来，后面这一条判不出东西')
+    // 模型接着又列了一张新表：指纹变了，和 × 关掉那一张之后的行为必须一模一样。
+    c.paintChatTodos(c.fold([listEv(4, ['completed', 'completed']), listEv(9, ['in_progress', 'pending'])]))
+    assert(!c.todock.hidden && c.todock.innerHTML.includes('事2'), '新列的一张表没能把 dock 带回来')
   })
 }
