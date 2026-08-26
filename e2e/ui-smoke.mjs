@@ -131,6 +131,147 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(more.includes('browser/'), `没说清去哪儿找：${more}`)
     })
 
+    await test('读秒：这一轮一开始就在走，第一个字落地时不从头数起', async () => {
+      /**
+       * 气泡下面那行秒表回答的是「我已经等了多久」。
+       *
+       * 塌了的样子是这样的：模型先想十几秒（日常任务尤其——它常常先调几把工具），
+       * 这期间末尾那条是「正在想」的占位，而占位块原来的 `time` 是 0，于是 paintRowTime
+       * 判不出「在跑」，**整行时间被隐掉**；等第一个字落地，秒表才凭空冒出来，还从
+       * 「0s」数起——人看到的就是这一行忽有忽无、而且已经等了十几秒却写着刚开始。
+       */
+      const ui = await boot()
+      const t0 = 1787700000000
+      const ev = (seq, time, type, data) => ({ seq, time, type, data })
+      const head = [
+        ev(1, t0, 'user/message', { message: { content: [{ type: 'text', text: '理一遍今天的新闻' }] }, source: { kind: 'user' } }),
+        ev(2, t0 + 1000, 'turn/start', { turn: 1 }),
+      ]
+      const thinking = ui.fold(head)
+      assert(thinking.status === 'running', `该是忙态：${JSON.stringify(thinking.status)}`)
+      assert(thinking.statusAt === t0 + 1000, `这一轮的起点取错了：${thinking.statusAt}`)
+      const rows = ui.threadRows(thinking, 's-clock')
+      const live = rows[rows.length - 1]
+      assert(live.key === 'm-live', `末尾该是「正在想」那条占位：${live.key}`)
+      assert(live.block.time === thinking.statusAt, '占位块没带上这一轮的起点，那一行时间会被整个隐掉')
+
+      // 第一个字落地：秒表的起点仍然是 turn/start，不是这一块自己的时间。
+      const typing = ui.fold([...head, ev(3, t0 + 13000, 'assistant/chunk', { chunk: { type: 'text-delta', index: 0, text: '今天' } })])
+      assert(typing.statusAt === t0 + 1000, `起点被第一个字挪走了：${typing.statusAt}`)
+      const block = typing.blocks[typing.blocks.length - 1]
+      assert(block.kind === 'assistant' && block.time === t0 + 13000, '这一块自己的时间该是第一个字那一刻')
+
+      const node = {
+        hidden: true,
+        textContent: '',
+        attrs: {},
+        setAttribute(k, v) {
+          this.attrs[k] = String(v)
+        },
+        removeAttribute(k) {
+          delete this.attrs[k]
+        },
+        getAttribute(k) {
+          return k in this.attrs ? this.attrs[k] : null
+        },
+      }
+      ui.paintRowTime({ querySelector: () => node }, block, true, typing.statusAt)
+      assert(node.hidden === false, '在跑的那一行时间被隐掉了')
+      assert(node.attrs['data-running'] === '1', '没标成在读秒，心跳就不会来推它')
+      assert(node.attrs['data-since'] === String(t0 + 1000), `秒表从第一个字数起了：${node.attrs['data-since']}`)
+
+      // 占位那条同样要画得出来（它和上面是同一个 since）。
+      const node2 = { ...node, attrs: {}, hidden: true }
+      ui.paintRowTime({ querySelector: () => node2 }, live.block, true, thinking.statusAt)
+      assert(node2.hidden === false, '「正在想」的时候那一行时间还是被隐掉了')
+
+      /**
+       * 上一轮收口了、席位却说「在跑」（live 旗子压过扫出来的结论，新那条 turn/start
+       * 还在路上）：起点**不能**还是上一轮的。留着的话，早上跑完一轮、晚上日常任务
+       * 起来的那一帧，气泡下面直接是个十几个小时的数字。
+       */
+      const done = [...head, ev(3, t0 + 20000, 'assistant/message', { message: { content: [{ type: 'text', text: '好了' }] } }), ev(4, t0 + 21000, 'turn/end', { turn: 1, reason: 'completed' })]
+      assert(ui.fold(done).statusAt === 0, '收口了还留着这一轮的起点')
+      const relive = ui.fold(done, true)
+      assert(relive.status === 'running', 'live 旗子该压过扫出来的结论')
+      assert(relive.statusAt === t0 + 21000, `起点该退到最后一条事件，实际 ${relive.statusAt - t0}ms`)
+    })
+
+    await test('日常任务跑着的时候，轮询没变化就一下都不重画', async () => {
+      /**
+       * 这一栏挂在**对话页**上，而它的轮询只在「有一轮正在跑」时才转——也就是说，
+       * 「试跑的这几十秒」正好是整页每 4 秒被重绘一次的几十秒。`render()` 是
+       * `#app` 的 innerHTML 整块换掉：正在流式输出的 Markdown 全部重渲染、图片重新
+       * 加载、贴底状态（data-touched 在被换掉的那个节点上）跟着丢，气泡下面那行读秒
+       * 也被拆了重建。人看到的就是「一跑起来整块就开始抖」。
+       *
+       * 而这几十秒里这一栏其实什么都没变：那一行一直写着「正在跑…」。
+       */
+      const run = (over) => ({ id: 'run1', trigger: 'manual', status: over ? 'ok' : 'running', sessionId: 's1', error: null, startedAt: 1, endedAt: over ? 2 : null })
+      const routine = { id: 'rt1', botId: 'b1', name: '每日简报', instruction: '理一遍', active: true, triggers: [], modelRole: 'utility', nextRunAt: null, lastRun: run(false), createdAt: 1, updatedAt: 1 }
+      let over = false
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: 'ui-smoke-token',
+        fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ routine, runs: [run(over)] }) }),
+      })
+      // 不在对话页：轮询定时器就不会起，测试进程也不会被它吊着。
+      ui.state.path = '/'
+      ui.state.routinesBotId = 'b1'
+      ui.state.routineOpen = 'rt1'
+      ui.state.routines = [routine]
+      ui.state.routineRuns = [run(false)]
+
+      // 第二个参数就是「这一下是那根 4 秒的定时器打来的」——跳过重画只对它生效。
+      ui.app.innerHTML = 'SENTINEL'
+      await ui.refreshRoutine('rt1', true)
+      assert(ui.html() === 'SENTINEL', '没变化也重画了整页——对话页上这就是每 4 秒把正在输出的正文连根拔一次')
+
+      // 跑完了是真变化，这一下必须画：不画的话那一行会一直转着圈。
+      over = true
+      await ui.refreshRoutine('rt1', true)
+      assert(ui.html() !== 'SENTINEL', '跑完了却没重画，界面上那条会一直停在「正在跑」')
+
+      /**
+       * **不是轮询的调用一律照画。** `sendRoutinePatch` 存不下去时先写下
+       * `state.routineError`、再把重画交给这里——那时快照里已经带着那句错误，按
+       * 「没变化就不画」判就是一下都不画：屏上没有红字，输入框里还留着没存下的内容。
+       */
+      ui.state.routineError = '存不下去了'
+      ui.app.innerHTML = 'SENTINEL2'
+      await ui.refreshRoutine('rt1')
+      assert(ui.html() !== 'SENTINEL2', '保存失败之后那次对账没重画——那句错误就永远到不了屏上')
+    })
+
+    await test('日常任务列表：另一个标签页改了跑的时间，这边要跟上', async () => {
+      // 快照只比触发器**条数**的话，「每天 09:00」改成「每天 21:00」条数没变，
+      // 列表那一行小字（rtWhenText 读的正是触发器内容）就一直停在旧时间上。
+      const trigger = (at) => ({ kind: 'schedule', every: 'day', at, weekday: 1, day: 1, tz: 'UTC' })
+      let at = '09:00'
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: 'ui-smoke-token',
+        fetchImpl: async () => ({
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ routines: [{ id: 'rt1', name: '每日简报', active: true, triggers: [trigger(at)], nextRunAt: 999, lastRun: { id: 'r1', status: 'running' } }] }),
+        }),
+      })
+      ui.state.path = '/'
+      ui.state.routinesBotId = 'b1'
+      ui.state.routines = [{ id: 'rt1', name: '每日简报', active: true, triggers: [trigger('09:00')], nextRunAt: 999, lastRun: { id: 'r1', status: 'running' } }]
+
+      ui.app.innerHTML = 'SENTINEL'
+      await ui.refreshRoutineList()
+      assert(ui.html() === 'SENTINEL', '一模一样也重画了整页')
+
+      at = '21:00'
+      await ui.refreshRoutineList()
+      assert(ui.html() !== 'SENTINEL', '跑的时间改了却不重画，那一行会一直写着旧时间')
+    })
+
     await test('确认卡：还等着的摊开，有结论的收成药丸', async () => {
       /**
        * 摊开是给「你要批的到底是什么」用的——参数看不见就只能凭信任点。可人点完之后

@@ -308,8 +308,49 @@ async function openRoutine(id) {
   await refreshRoutine(id)
 }
 
-/** 拉一条的详情（主要是运行记录），顺带把列表里那一行也换成最新的。 */
-async function refreshRoutine(id) {
+/**
+ * 屏上这一栏此刻长什么样。轮询回来的一份和它一模一样，就**一下都不用重画**。
+ *
+ * 这不是省几毫秒的优化。`render()` 是整页重绘（`#app` 的 innerHTML 换掉），而这一栏
+ * 挂在**对话页**上：轮询每 4 秒一次、只在有一轮正在跑的时候转，于是「试跑的这几十秒」
+ * 恰好是聊天正文每 4 秒被连根拔起重建一次的几十秒——正在流式输出的那段 Markdown 全部
+ * 重渲染、图片重新加载、贴底状态（`data-touched` 在被换掉的那个节点上）跟着丢，气泡
+ * 下面那行读秒也跟着被拆了重建。人看到的就是「一跑起来整块就开始抖」。
+ *
+ * 而这几十秒里这一栏其实什么都没变：那一行一直写着「正在跑…」。所以按内容比一下，
+ * 没变就不画——**这是修那个抖动的正路**，比在重绘里补各种保位置的补丁都简单。
+ */
+function routineShot(id) {
+  const row = rtFind(id)
+  return JSON.stringify({
+    e: state.routineError || '',
+    r: row
+      ? {
+          n: row.name,
+          i: row.instruction,
+          a: row.active,
+          m: row.modelRole,
+          t: row.triggers || [],
+          x: row.nextRunAt,
+        }
+      : null,
+    // 流水只比看得见的那几样。`runs` 整个 JSON 也行，但那一份里还有 sessionId 之类
+    // 画不出来的字段，它们一变就白重绘一次。
+    u: (state.routineRuns || []).map((x) => [x.id, x.status, x.trigger, x.startedAt, x.error || '']),
+  })
+}
+
+/**
+ * 拉一条的详情（主要是运行记录），顺带把列表里那一行也换成最新的。
+ *
+ * **`fromPoll` 只有那根 4 秒的定时器会给。** 「没变化就不画」是给轮询准备的（见
+ * routineShot），不能对所有调用方生效：`sendRoutinePatch` 存不下去时，是**先写下
+ * `state.routineError`、再把重画交给这里**——那时快照里已经带着那句错误，前后自然
+ * 相等，于是一下都不画：屏上既没有那条红字，输入框里还留着他刚打的、其实没存下的
+ * 内容。人只会以为存好了。
+ */
+async function refreshRoutine(id, fromPoll = false) {
+  const before = routineShot(id)
   try {
     const r = await api('GET', '/runtime/routines/' + encodeURIComponent(id))
     if (state.routineOpen !== id) return
@@ -320,7 +361,8 @@ async function refreshRoutine(id) {
     // 轮询途中被别处删掉了，和保存时撞上删除是同一件事：本地这一份也留不得。
     if (err.status === 404) dropRoutineLocally(id)
   }
-  render()
+  // 轮询：什么都没变就别重画（见 routineShot）。别的调用方一律照画（见函数头）。
+  if (!fromPoll || routineShot(id) !== before) render()
   syncRoutinePoll()
 }
 
@@ -350,10 +392,24 @@ function closeRoutine() {
   render()
 }
 
+/**
+ * 列表那一份的快照。同 routineShot：轮询回来没变化就一下都不画。
+ *
+ * **触发器要比内容，不是条数。** 那一行小字画的是 `rtWhenText`，读的是每天几点、
+ * 周几、哪个时区；只比条数的话，另一个标签页把「每天 09:00」改成「每天 21:00」，
+ * 这边的快照一字未变，屏上就一直停在旧时间上。
+ */
+function routineListShot() {
+  return JSON.stringify(
+    (state.routines || []).map((r) => [r.id, r.name, r.active, r.triggers || [], r.nextRunAt, r.lastRun ? r.lastRun.status : '']),
+  )
+}
+
 /** 静静地把列表拉一遍。列表里那个转着的圈也得有人来停。 */
 async function refreshRoutineList() {
   const botId = state.routinesBotId
   if (!botId) return
+  const before = routineListShot()
   try {
     const r = await api('GET', '/runtime/bots/' + encodeURIComponent(botId) + '/routines')
     if (state.routinesBotId !== botId) return
@@ -361,7 +417,8 @@ async function refreshRoutineList() {
   } catch {
     return
   }
-  render()
+  // 详情关着、只有列表里那颗圈在转的时候，这条路同样是每 4 秒一次的整页重绘。
+  if (routineListShot() !== before) render()
   syncRoutinePoll()
 }
 
@@ -391,7 +448,7 @@ function syncRoutinePoll() {
         syncRoutinePoll()
         return
       }
-      if (now === 'detail') void refreshRoutine(state.routineOpen)
+      if (now === 'detail') void refreshRoutine(state.routineOpen, true)
       else void refreshRoutineList()
     }, ROUTINE_POLL_MS)
     return

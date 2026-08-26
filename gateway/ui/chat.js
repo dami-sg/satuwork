@@ -454,6 +454,14 @@ function fold(events, live) {
   let assistant = null
   let tools = []
   let status = ''
+  /**
+   * 正在跑的这一轮是**什么时候开始的**（turn/start 那条事件的时间）。
+   *
+   * 读秒要的是「我已经等了多久」，那个起点只能是这一轮开始的时刻——不是第一个字
+   * 落地的时刻。按后者算，一轮里模型先想十秒再开口，屏幕上的秒表会在第一个字冒出来
+   * 的瞬间从头开始数，而人明明已经等了十秒。
+   */
+  let statusAt = 0
   // 空壳工具调用的 callId（见下面 tool/call）。它们的结果也要一起跳过。
   const phantoms = new Set()
   /** 单号 → 已经画在某一块上的那张交接卡。跨块认，见下面 human/handoff。 */
@@ -684,8 +692,18 @@ function fold(events, live) {
       })
     } else if (type === 'turn/start') {
       status = 'running'
+      statusAt = at
     } else if (type === 'turn/end') {
       status = ''
+      /**
+       * **起点也要跟着清掉。**
+       *
+       * `status` 还有第二个来源：席位的 live 旗子会整个盖掉这里扫出来的结论（见下面
+       * 那一句）。留着上一轮的起点，「live 说在跑、而手上这段事件的最后一条是
+       * turn/end」时，秒表就从上一轮开始数——早上跑完一轮、晚上那条日常任务起来的
+       * 那一帧，气泡下面直接是个「720:00」。清成 0，兜底那句才接得住。
+       */
+      statusAt = 0
       // **这一轮真正收口的时刻。** 气泡下面那个时间要的是「输出完毕」而不是「开始
       // 输出」，靠的就是它：比最后一条 chunk 准，也覆盖「只调工具、一个字没吐」的
       // 那种轮次（那种轮里根本没有 chunk 可以取时间）。
@@ -694,7 +712,16 @@ function fold(events, live) {
   }
   // bot 说过话就听它的：这份历史可能是截断的，而扫描对截断毫无抵抗力（见 chatLive）。
   if (typeof live === 'boolean') status = live ? 'running' : ''
-  return { blocks, status }
+  /**
+   * 席位说「在跑」，可这段历史里根本没有那条 turn/start（截断了，或者只垫了一轮）。
+   * 退到手上最后一条事件的时间：秒表会少数一截，但**它至少在走**——而 0 会让这一行
+   * 整个消失（见 paintRowTime）。
+   */
+  if (status && !statusAt) {
+    const tail = blocks[blocks.length - 1]
+    statusAt = (tail && (tail.endTime || tail.time)) || 0
+  }
+  return { blocks, status, statusAt }
 }
 
 /**
@@ -2766,8 +2793,11 @@ function syncMd(host, text, streaming) {
   while (kids.length > parts.length) host.removeChild(kids[kids.length - 1])
 }
 
-/** 正文 + 工具条就地更新。streaming 指「这条还在写」，只有最后一条会是 true。 */
-function updateRow(el, b, streaming) {
+/**
+ * 正文 + 工具条就地更新。streaming 指「这条还在写」，只有最后一条会是 true。
+ * `since` 是这一轮开始的时刻（fold 的 statusAt），读秒从它起算。
+ */
+function updateRow(el, b, streaming, since) {
   const bubble = el.querySelector('.sw-bubble')
   const md = bubble.querySelector('.sw-md')
   const chips = bubble.querySelector('.sw-chips')
@@ -2973,7 +3003,7 @@ function updateRow(el, b, streaming) {
       }
     }
   }
-  paintRowTime(el, b, streaming)
+  paintRowTime(el, b, streaming, since)
 }
 
 /**
@@ -2988,16 +3018,26 @@ function updateRow(el, b, streaming) {
  * 只有助手那条读秒：status 是 'sending' 时（消息刚发出去、还没有回执）最后一条是
  * 用户自己那句，给它挂个秒表没有意义。
  */
-function paintRowTime(el, b, streaming) {
+function paintRowTime(el, b, streaming, since) {
   const node = el.querySelector('.sw-time')
   if (!node) return
-  const running = Boolean(streaming) && b.kind === 'assistant' && Boolean(b.time)
+  /**
+   * 起点是**这一轮开始的时刻**，不是这一块自己的时间。
+   *
+   * 两者常常差着十几秒（模型先想、先调工具，第一个字很晚才落地），而按后者算，秒表
+   * 会在第一个字冒出来的那一刻从头数起——上一秒还是「正在想」下面什么都没有，下一秒
+   * 蹦出个「0s」。读秒回答的是「我等了多久」，那个问题只有一个起点。
+   *
+   * 拿不到起点（老会话、截断的历史）才退回这一块自己的时间。
+   */
+  const start = Number(since) || b.time
+  const running = Boolean(streaming) && b.kind === 'assistant' && Boolean(start)
   if (running) {
     node.hidden = false
     node.setAttribute('data-running', '1')
-    node.setAttribute('data-since', String(b.time))
+    node.setAttribute('data-since', String(start))
     node.removeAttribute('datetime')
-    node.textContent = elapsedText(Date.now() - b.time)
+    node.textContent = elapsedText(Date.now() - start)
     return
   }
   // endTime 是这一块最后一条事件的时间（turn/end 最准）。老会话没有它——那时候
@@ -3201,7 +3241,14 @@ function threadRows(folded, sessionId) {
    */
   const last = blocks[blocks.length - 1]
   if (folded.status && (!last || last.kind === 'user' || last.kind === 'mark')) {
-    rows.push({ kind: 'msg', key: 'm-live', block: { kind: 'assistant', text: '', tools: [], time: 0 } })
+    /**
+     * **`time` 要给这一轮的起点，不能留 0。**
+     *
+     * 留 0 的话 paintRowTime 判不出「在跑」，那一行时间被整个隐掉——于是模型开口之前
+     * 的那段（想、调工具、日常任务里动辄十几秒）屏幕上一个秒表都没有，等第一个字落地
+     * 才凭空冒出来一个「0s」。人看到的就是这一行忽有忽无、还从头数起。
+     */
+    rows.push({ kind: 'msg', key: 'm-live', block: { kind: 'assistant', text: '', tools: [], time: folded.statusAt || 0 } })
   }
   return rows
 }
@@ -3250,7 +3297,11 @@ function mergePending(folded, sessionId) {
     })
   }
   // 没回执之前也要有「正在想」：那一行是人按下回车之后唯一的进度反馈。
-  if (!folded.status) folded.status = 'sending'
+  if (!folded.status) {
+    folded.status = 'sending'
+    // 秒表从**按下发送**那一刻起算：回执还没回来的这几秒同样是在等（见 fold 的 statusAt）。
+    folded.statusAt = left.reduce((min, p) => (p.at && (!min || p.at < min) ? p.at : min), 0)
+  }
   return folded
 }
 
@@ -3297,7 +3348,7 @@ function syncThread(thread, folded, sessionId) {
     }
     const want = prev ? prev.nextSibling : thread.firstChild
     if (node !== want) thread.insertBefore(node, want)
-    if (row.kind === 'msg') updateRow(node, row.block, folded.status ? i === rows.length - 1 : false)
+    if (row.kind === 'msg') updateRow(node, row.block, folded.status ? i === rows.length - 1 : false, folded.statusAt)
     prev = node
   }
   for (const stale of byKey.values()) {
