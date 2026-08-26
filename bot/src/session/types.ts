@@ -322,6 +322,31 @@ export interface SessionEventMap {
     at: number
   }
 
+  /**
+   * 这条会话的**待办清单在这一刻的样子**（v5.2 起，见 docs/todo-tool.md）。
+   *
+   * **清单本身不在日志里，在 SQLite 里**（它是一份会被反复改写的状态，写成事件流会
+   * 让同一张表在历史里躺下几十个版本）。这条事件只为一件事存在：**输入框上面那块
+   * dock 要跟着变**。没有它，界面只能去轮询席位，而人恰恰是在盯着它看的那几秒里
+   * 期待它动。
+   *
+   * **全量快照，不是增量。** 界面按 seq 取最后一条就是当前状态，不必把整条会话重放
+   * 一遍去推算；而增量还要求一条都不能漏，那是这条链路给不了的保证（流上只垫最近
+   * 一轮，见 session/replay.ts）。
+   *
+   * **不进模型上下文。** toAgentMessages 只认 user/assistant/tool-result 三种，认不出
+   * 的一律跳过——模型要读清单有自己的路（不带参数调一次 `todo`）。所以这条事件的
+   * 全部代价就是 JSONL 里多几行。
+   *
+   * 加一种事件不是破坏性变更（同 `session/compact` 的理由），所以不动
+   * SESSION_FORMAT_VERSION：老版本读到不认识的 type 会跳过，退化成「没有这块 dock」。
+   */
+  'todo/list': {
+    /** 改动这张表的那次工具调用。 */
+    callId: string
+    items: { id: string; task: string; status: 'pending' | 'in_progress' | 'completed' | 'cancelled' }[]
+  }
+
   'tool/call': { turn: number; step: number; callId: string; name: string; arguments: string }
   'tool/result': {
     turn: number

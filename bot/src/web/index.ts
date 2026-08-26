@@ -7,6 +7,7 @@ import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
 import { CommandError, QUIET_MESSAGE, type ImageRef, type Mention } from '../agent/index.ts'
 import { expiredMessage, returnMessage, type Disposition, type HandoffActor } from '../policy/handoff.ts'
+import { readTodos } from '../tools/todo.ts'
 
 /**
  * Satuwork 的 HTTP API。无头运行时：不发 SPA，未知路径 JSON 404。
@@ -389,6 +390,19 @@ export function apply(ctx: Context, _config: Config = {}) {
     }
     res.status = 409
     res.json({ error: '这条确认已经结束了' })
+  })
+
+  /**
+   * 这条会话现在的待办清单（见 docs/todo-tool.md）。
+   *
+   * **和 `todo/list` 事件不是重复的两条路，是两个问题。** 事件解决「盯着看的时候它
+   * 跟着动」；这一跳解决「刚打开这一页」——流上只垫最近一轮（session/replay.ts），
+   * 而一张三天前列出来、还没做完的表恰恰不在里面，而那正是最该被看见的一张。
+   *
+   * 真相在 SQLite 里，不在日志里：清单是一份会被反复改写的状态。
+   */
+  ctx.server.get('/api/sessions/:id/todos', async (req, res) => {
+    res.json({ todos: readTodos(ctx, req.params.id) })
   })
 
   /**

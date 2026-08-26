@@ -42,6 +42,10 @@
 - name: './src/tools/index.ts'
 - name: './src/tools/builtin.ts'
 
+# 任务清单（todo）。一轮最多连跑 120 步，而「我本来打算做什么」不能只存在于几十条
+# 消息之前的那段话里——那段话会被摘要压掉。存 SQLite，跨轮跨重启都读得回来。
+- name: './src/tools/todo.ts'
+
 # 工作区本身：根目录、越界检查、附件落盘、预览取流。
 # **必须排在工具和 web 前面**——那两处都 inject 它，根目录只能有这一份。
 # 根目录是 $SATUWORK_WORK_DIR（部署注入的共享 work 目录），本地回落 $SATUWORK_HOME/work。
