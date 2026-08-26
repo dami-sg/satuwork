@@ -289,7 +289,6 @@ window.SATU_I18N = {
   员工环境: 'Member environments',
   运行机器: 'Runtime machine',
   运行环境: 'Runtime',
-  收起运行环境: 'Collapse runtime panel',
   // 右栏的另一屏：席位工作区里的文件树（见 chat.js 的 workspacePanel）。
   工作区文件: 'Workspace files',
   收起右栏: 'Collapse panel',
@@ -297,7 +296,6 @@ window.SATU_I18N = {
   '实例还没接上，稍后再看': 'The seat is not connected yet — check back in a moment',
   '工作区还是空的。上传一个文件，或者让 Bot 写点什么。':
     'The workspace is empty. Upload a file, or ask the bot to write something.',
-  展开运行环境: 'Expand runtime panel',
   拖动调整宽度: 'Drag to resize',
   打开桌面: 'Open desktop',
   桌面: 'Desktop',

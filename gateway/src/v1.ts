@@ -145,6 +145,39 @@ async function settle(
   await meter.charge(billable, usage ? quote : { ...quote, amountMicros: 0, unpriced: true })
 }
 
+/**
+ * 跑一次上游调用，**无论成败都收口**。
+ *
+ * `recordLlmCall` 是在打上游之前写下的，而失败路径（503、404、上游连不通）都是直接
+ * 抛出去的——settle 于是永远没跑，库里留下一行 token 全 0、账本上没有对应行的
+ * llm_calls。settle 自己的注释写着这种「查不到账的调用」正是要避免的东西（它甚至为
+ * 「上游没报 usage」专门留了 unpriced 这条路），只是抛异常那几条路绕开了它。
+ *
+ * settle 自己再出错时，以原始错误为准：那一个才是调用方需要看到的。
+ */
+async function withSettle(
+  db: Db,
+  meter: Meter,
+  account: Account,
+  found: CatalogModel,
+  callId: string,
+  run: () => Promise<TokenUsage | undefined>,
+): Promise<void> {
+  let usage: TokenUsage | undefined
+  let failed: unknown
+  try {
+    usage = await run()
+  } catch (e) {
+    failed = e
+  }
+  try {
+    await settle(db, meter, account, found, callId, usage)
+  } catch (e) {
+    if (!failed) throw e
+  }
+  if (failed) throw failed
+}
+
 function bodyOf(req: Req): Record<string, unknown> {
   if (req.body == null) return {}
   if (typeof req.body !== 'object' || Array.isArray(req.body)) throw new HttpError(400, '请求体必须是对象')
@@ -587,8 +620,12 @@ async function streamChatCompletions(
         }
         case 'error': {
           const msg = redact(event.error?.errorMessage || 'model error', secret)
-          writeSse(res, chunk(id, modelId, { content: '' }, { finish_reason: 'stop' }))
+          // **错误帧在前，finish 块在后。** 反过来写的话，任何一个「读到 finish_reason
+          // 就收工」的客户端（我们自己的 bot 就是）永远读不到错误那一帧，一次上游报错
+          // 在它眼里就成了一次正常收口的空回答。finish 块本身还得留着——只认
+          // finish_reason 的客户端少了它会一直挂着。
           writeSse(res, { error: { message: msg, type: 'upstream_error' } })
+          writeSse(res, chunk(id, modelId, { content: '' }, { finish_reason: 'stop' }))
           break
         }
       }
@@ -675,18 +712,42 @@ async function proxyUpstream(
   const ac = new AbortController()
   const onClose = () => ac.abort()
   req.on('close', onClose)
+  /**
+   * **这 120 秒只管到响应头为止。**
+   *
+   * 原先是 `AbortSignal.any([ac.signal, AbortSignal.timeout(120_000)])` 交给 fetch，
+   * 而那个信号罩着的是**整次请求，正文也算**：一次 max_tokens 开大、或者带扩展思考的
+   * 生成流上两分钟是常事，到点就被掐断——流式那边的读错误是刻意吞掉的（要保住已累计
+   * 的 usage），于是客户端收到的是一条没有 message_stop、也没有任何错误帧的半截回答，
+   * 而账上按一次正常调用记着。
+   *
+   * 所以计时器只用来防「连上了但迟迟不给响应头」，拿到头就撤掉；正文期间只剩下
+   * 「客户端走了」这一个中断条件。
+   */
+  let headerTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(
+    () => ac.abort(new Error('upstream did not send headers in 120s')),
+    120_000,
+  )
+  const clearHeaderTimer = () => {
+    if (headerTimer !== undefined) {
+      clearTimeout(headerTimer)
+      headerTimer = undefined
+    }
+  }
   let upstream: Response
   try {
     upstream = await fetch(opts.url, {
       method: 'POST',
       headers: opts.headers,
       body: JSON.stringify(opts.body),
-      signal: AbortSignal.any([ac.signal, AbortSignal.timeout(120_000)]),
+      signal: ac.signal,
     })
   } catch (e) {
+    clearHeaderTimer()
     req.off('close', onClose)
     throw new HttpError(503, redact((e as Error).message || 'upstream unreachable', opts.secret))
   }
+  clearHeaderTimer()
   const ctype = upstream.headers.get('content-type') || 'application/json; charset=utf-8'
   const streaming = ctype.includes('text/event-stream') || ctype.includes('text/plain')
   if (streaming) {
@@ -785,12 +846,10 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm, meter:
     const callId = await recordLlmCall(db, account, found)
     const stream = body.stream === true
     if (stream) {
-      const usage = await streamChatCompletions(req, res, llm, found, secret, body)
-      await settle(db, meter, account, found, callId, usage)
+      await withSettle(db, meter, account, found, callId, () => streamChatCompletions(req, res, llm, found, secret, body))
       return
     }
-    const usage = await completeChatCompletions(res, llm, found, secret, body)
-    await settle(db, meter, account, found, callId, usage)
+    await withSettle(db, meter, account, found, callId, () => completeChatCompletions(res, llm, found, secret, body))
   })
 
   router.post('/v1/responses', async (req, res) => {
@@ -810,13 +869,14 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm, meter:
     }
     const beta = req.headers['openai-beta']
     if (typeof beta === 'string' && beta) headers['openai-beta'] = beta
-    const usage = await proxyUpstream(req, res, {
-      url: `${openaiBase()}/v1/responses`,
-      headers,
-      body,
-      secret,
-    })
-    await settle(db, meter, account, found, callId, usage)
+    await withSettle(db, meter, account, found, callId, () =>
+      proxyUpstream(req, res, {
+        url: `${openaiBase()}/v1/responses`,
+        headers,
+        body,
+        secret,
+      }),
+    )
   })
 
   router.post('/v1/messages', async (req, res) => {
@@ -832,16 +892,17 @@ export function attachV1(router: Router, db: Db, keys: JwtKeys, llm: Llm, meter:
     body.model = found.id
     const versionHeader = req.headers['anthropic-version']
     const version = typeof versionHeader === 'string' && versionHeader ? versionHeader : ANTHROPIC_VERSION
-    const usage = await proxyUpstream(req, res, {
-      url: `${anthropicBase()}/v1/messages`,
-      headers: {
-        'x-api-key': secret,
-        'anthropic-version': version,
-        'content-type': 'application/json',
-      },
-      body,
-      secret,
-    })
-    await settle(db, meter, account, found, callId, usage)
+    await withSettle(db, meter, account, found, callId, () =>
+      proxyUpstream(req, res, {
+        url: `${anthropicBase()}/v1/messages`,
+        headers: {
+          'x-api-key': secret,
+          'anthropic-version': version,
+          'content-type': 'application/json',
+        },
+        body,
+        secret,
+      }),
+    )
   })
 }

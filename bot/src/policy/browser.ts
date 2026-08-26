@@ -29,7 +29,9 @@ export function hostOf(url: string): string | null {
     const u = new URL(String(url || '').trim())
     if (!SCHEME.test(u.protocol)) return null
     // IPv6 字面量带方括号，去掉再判。
-    return u.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    // 末尾那个点也去掉：`localhost.` 和 `localhost` 解析到同一台机器，但下面每一条
+    // 判据都是按字符串比的，带点的那种写法能从它们全部旁边走过去。
+    return u.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
   } catch {
     return null
   }

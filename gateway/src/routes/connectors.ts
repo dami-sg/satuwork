@@ -429,13 +429,18 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
     const install = await db.connectorInstall(item.id, account.id)
     if (!install) throw new HttpError(404, '还没装这个连接器')
     const mine = (await db.connectionsFor(account.id, account.companyId)).filter((c) => c.connectorId === item.id && c.scope === 'user')
+    // 供应商那边断不掉的，记下来。**这一句以前是空的**：注释写着「孤儿授权记进审计的
+    // detail，人工去清」，可 detail 里只有连接器 id 和条数——真出现孤儿时，哪一把是
+    // 孤儿哪儿都查不到，而它在供应商侧仍然是一把活着的授权。
+    const orphans: { id: string; externalId: string; error: string }[] = []
     for (const row of mine) {
       if (row.externalId) {
         try {
           await (await providerFor(db, def.vendor)).disconnect(row.externalId)
-        } catch {
+        } catch (e) {
           // 供应商那边断不掉也要把本地这条删了：留着它，界面上会显示一把其实已经
-          // 不属于任何安装的连接。孤儿授权记进审计的 detail，人工去清。
+          // 不属于任何安装的连接。
+          orphans.push({ id: row.id, externalId: row.externalId, error: String((e as Error).message || e).slice(0, 200) })
         }
       }
       await db.deleteConnectorConnection(row.id)
@@ -445,7 +450,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
       companyId: account.companyId!,
       accountId: account.id,
       action: 'connector.uninstall',
-      detail: { connectorId: item.id, connections: mine.length },
+      detail: { connectorId: item.id, connections: mine.length, ...(orphans.length ? { orphans } : {}) },
     })
     json(res, 200, { deleted: true, id: item.id })
   })
@@ -568,11 +573,14 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     const { item, def } = await seatConnector(account, req.params.connectorId)
     const row = await ownConnection(account, item.id, req.params.connectionId)
+    let orphan: { externalId: string; error: string } | null = null
     if (row.externalId) {
       try {
         await (await providerFor(db, def.vendor)).disconnect(row.externalId)
-      } catch {
-        /* 供应商那边断不掉也要把本地这条删了，理由同卸载 */
+      } catch (e) {
+        // 供应商那边断不掉也要把本地这条删了，理由同卸载；断不掉的那一把要留下线索，
+        // 否则一把活着的授权就此从记录里消失。
+        orphan = { externalId: row.externalId, error: String((e as Error).message || e).slice(0, 200) }
       }
     }
     await db.deleteConnectorConnection(row.id)
@@ -580,7 +588,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
       companyId: account.companyId!,
       accountId: account.id,
       action: 'connector.disconnect',
-      detail: { connectorId: item.id, label: row.label, connectionId: row.id },
+      detail: { connectorId: item.id, label: row.label, connectionId: row.id, ...(orphan ? { orphan } : {}) },
     })
     json(res, 200, { deleted: true, id: row.id })
   })
@@ -679,6 +687,19 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
     const item = items.find((i) => i.id === req.params.connectorId && i.scope === 'global')
     if (!item) throw new HttpError(404, '没有这个连接器')
     const def = connectorDefOf(item)
+    /**
+     * **下架的、被本公司禁掉的，都不许再发起新授权。**
+     *
+     * 个人那条路（seatConnector + 下面几处 403）两样都查，公司这条一样都没查。少了它，
+     * 平台出事后把连接器 `enabled: false` 下架，公司管理员照样能去供应商那边完成一次
+     * 全新的公司级授权——调用会被 mcp.ts 的 gate() 拒掉，但那把授权在供应商侧是真的
+     * 建起来了，平台以为已经关掉的东西留下一个活着的授权。
+     */
+    if (!def.enabled) throw new HttpError(404, '没有这个连接器')
+    const block = blockMapOf(items).get(item.id)
+    if (block?.blocked === true) {
+      throw new HttpError(403, block.reason ? `本公司已禁用这个连接器：${block.reason}` : '本公司已禁用这个连接器')
+    }
     if (!def.authConfigId) throw new HttpError(402, '平台还没给这个连接器配 auth config')
     const provider = await providerFor(db, def.vendor)
     if (!provider.configured()) throw new HttpError(402, `还没配 ${def.vendor} 的密钥`)

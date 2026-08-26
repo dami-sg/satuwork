@@ -20,8 +20,13 @@
  * WebToolError，路由层把它翻成一句给模型看的话，不是 500——模型看到文本才知道
  * 该改什么或者该放弃。
  */
+import { lookup as dnsLookup } from 'node:dns'
 import { lookup } from 'node:dns/promises'
-import { isIP } from 'node:net'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import { isIP, type LookupFunction } from 'node:net'
+import { Readable } from 'node:stream'
+import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib'
 
 export class WebToolError extends Error {
   constructor(
@@ -199,6 +204,100 @@ export function stripCredentials(headers: HeadersInit | undefined): Record<strin
 }
 
 /**
+ * 连的那一刻再判一次的 lookup。
+ *
+ * `allowPrivate` 只给管理员明示的那一个地址（自托管 SearXNG）开，别处一律 false。
+ */
+function pinnedLookup(allowPrivate: boolean): LookupFunction {
+  return (hostname, options, callback) => {
+    const raw = dnsLookup as unknown as (
+      h: string,
+      o: unknown,
+      cb: (err: NodeJS.ErrnoException | null, address: unknown, family?: number) => void,
+    ) => void
+    raw(hostname, options, (err, address, family) => {
+      if (err) return callback(err, '', 0)
+      const list = (Array.isArray(address) ? address : [{ address, family }]) as { address: string }[]
+      const bad = list.find((a) => isPrivateIp(String(a.address)))
+      if (bad && !allowPrivate) {
+        const e = new Error(`private ip ${bad.address}`) as NodeJS.ErrnoException
+        e.code = 'EPRIVATEIP'
+        return callback(e, '', 0)
+      }
+      callback(null, address as string, family)
+    })
+  }
+}
+
+/**
+ * 把 IP 钉死的一次请求。**这条路不用 fetch()。**
+ *
+ * guardUrl 解析一次域名、判一次网段，可 `fetch()` 拿着同一个域名**自己再解析一次**，
+ * 两次之间隔着一整个网络往返——一台 TTL 0 的权威 DNS 完全可以第一次答公网地址、
+ * 第二次答 127.0.0.1，闸就这么从中间被穿过去了（经典的 DNS rebinding）。
+ *
+ * node 的 `http(s).request` 收 `lookup`，而那个回调返回的地址**就是 socket 真正要连
+ * 的那个**，判在那儿才算数。SNI 和证书校验照旧按域名走，所以不能改写成「直接连 IP」。
+ *
+ * 顺带说清两件事：跳转一概不跟（`http.request` 本来就不跟，等同于原先的
+ * `redirect: 'manual'`），逐跳重查还是 safeFetch 那个循环的事；`fetch` 会自己解压，
+ * 这里得手动补上，不然正文到下游是一堆压缩字节。
+ */
+async function pinnedFetch(
+  u: URL,
+  init: { method?: string; headers?: HeadersInit; body?: BodyInit | null; signal?: AbortSignal; allowPrivate?: boolean },
+): Promise<Response> {
+  const headers = new Headers(init.headers ?? {})
+  if (!headers.has('accept-encoding')) headers.set('accept-encoding', 'gzip, deflate, br')
+  const bodyOf = (raw: BodyInit): Buffer => {
+    if (typeof raw === 'string') return Buffer.from(raw)
+    if (Buffer.isBuffer(raw)) return raw
+    if (ArrayBuffer.isView(raw)) return Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)
+    throw new WebToolError('unsupported body', '内部错误：这种请求体这条路发不出去。')
+  }
+  const body = init.body == null ? undefined : bodyOf(init.body)
+  if (body && !headers.has('content-length')) headers.set('content-length', String(body.byteLength))
+  const send = u.protocol === 'https:' ? httpsRequest : httpRequest
+  const method = (init.method || 'GET').toUpperCase()
+  return await new Promise<Response>((resolve, reject) => {
+    const req = send(
+      u,
+      { method, headers: Object.fromEntries(headers.entries()), lookup: pinnedLookup(Boolean(init.allowPrivate)), signal: init.signal },
+      (res) => {
+        const enc = String(res.headers['content-encoding'] || '').toLowerCase()
+        let stream: Readable = res
+        if (enc === 'gzip' || enc === 'x-gzip') stream = res.pipe(createGunzip())
+        else if (enc === 'deflate') stream = res.pipe(createInflate())
+        else if (enc === 'br') stream = res.pipe(createBrotliDecompress())
+        stream.on('error', () => res.destroy())
+        const out = new Headers()
+        for (const [k, v] of Object.entries(res.headers)) {
+          for (const one of Array.isArray(v) ? v : [v]) if (one !== undefined) out.append(k, String(one))
+        }
+        // 解压之后这两个头就是假的了，留着会让下游按它去截断。
+        if (stream !== res) {
+          out.delete('content-encoding')
+          out.delete('content-length')
+        }
+        const raw = res.statusCode ?? 502
+        const status = raw >= 200 && raw <= 599 ? raw : 502
+        const empty = status === 204 || status === 304 || method === 'HEAD'
+        resolve(
+          new Response(empty ? null : (Readable.toWeb(stream) as ReadableStream<Uint8Array>), {
+            status,
+            statusText: res.statusMessage || '',
+            headers: out,
+          }),
+        )
+      },
+    )
+    req.on('error', reject)
+    if (body) req.write(body)
+    req.end()
+  })
+}
+
+/**
  * 逐跳重查的 fetch。只跟 5 次，每一跳都过闸——只查第一跳等于没查。
  *
  * **跨主机的那一跳要把凭据摘掉。** 浏览器和 undici 的自动跳转就是这么做的，而这里
@@ -224,9 +323,17 @@ export async function safeFetch(
     if (!origin) origin = here.origin
     let res: Response
     try {
-      res = await fetch(url, { ...opts, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) })
+      res = await pinnedFetch(here, {
+        ...opts,
+        signal: AbortSignal.timeout(timeoutMs),
+        // 管理员明示的那一个地址本来就可以在内网，连的时候那一判也得跟着放行。
+        allowPrivate: Boolean(allowHost && here.host === allowHost),
+      })
     } catch (e) {
       const msg = (e as Error).message || 'fetch failed'
+      if ((e as NodeJS.ErrnoException).code === 'EPRIVATEIP') {
+        throw new WebToolError(msg, `拒绝访问内网地址：${url}`)
+      }
       throw new WebToolError(msg, /timeout|abort/i.test(msg) ? '上游超时了，等一会儿再试。' : `打不通上游：${msg}`)
     }
     if (res.status >= 300 && res.status < 400) {

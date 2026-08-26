@@ -53,6 +53,10 @@
     return out.split(MARK).join('')
   }
 
+  /** 判「这条相对地址是不是还在站内」用的假基地址。只用来比对源，不会出现在输出里。 */
+  const RELATIVE_BASE = 'https://satu.invalid/'
+  const RELATIVE_ORIGIN = 'https://satu.invalid'
+
   /** 只放行安全协议。模型写得出 `javascript:`，这里是唯一拦得住的地方。 */
   function safeUrl(raw, kind) {
     const s = String(raw || '')
@@ -61,7 +65,20 @@
     if (!s) return ''
     if (/^(https?:\/\/|mailto:|tel:)/i.test(s)) return s
     if (kind === 'img' && /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(s)) return s
-    if (/^(\/|\.{1,2}\/|#)/.test(s)) return s
+    /**
+     * 站内相对地址放行。**形状对了还不够，要按浏览器的解析器再问一遍「它落在哪个源」。**
+     *
+     * 光看开头那个 `/` 会漏一整类写法：`//evil.com` 是协议相对 URL，`/\evil.com` 里
+     * 的反斜杠在 WHATWG 解析里等同斜杠，URL 中间的 tab 和换行则会被直接删掉——
+     * `/<tab>/evil.com` 于是也成了 `//evil.com`。三种写法渲染出来都是一张自动加载的
+     * 站外图片，不用点，正文里塞一段就能把对话内容顺着 query 带走。
+     *
+     * 所以拿一个假的基地址解析一遍：解析完还在同一个源，才是真的站内。
+     */
+    if (!/^(\/|\.{1,2}\/|#)/.test(s)) return ''
+    try {
+      if (new URL(s, RELATIVE_BASE).origin === RELATIVE_ORIGIN) return s
+    } catch {}
     return ''
   }
 
@@ -643,7 +660,16 @@
    */
   function render(src, opts) {
     const streaming = !!(opts && opts.streaming)
-    const text = streaming ? healStream(src) : String(src == null ? '' : src)
+    /**
+     * **先把 U+E000 从正文里剔掉。**
+     *
+     * 那个私用区字符是行内解析的占位符记号（见 MARK）。正文是模型输出和工具结果，
+     * 完全可以原样含着一段 `\uE00012\uE000`——unhold 会把它当成一个占位符去查表：
+     * 下标越界就整段消失，撞上另一个真占位符则换成毫不相干的内容。不是注入（表里只有
+     * 我们自己放进去的、已经安全的 HTML），但足以让一段正文凭空变样。
+     */
+    const raw = String(src == null ? '' : src).split(MARK).join('')
+    const text = streaming ? healStream(raw) : raw
     if (!text.trim()) return ''
     const ctx = { store: [], depth: 0 }
     return blocks(text.replace(/\r\n?/g, '\n').split('\n'), ctx)

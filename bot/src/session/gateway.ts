@@ -185,6 +185,20 @@ export function apply(ctx: Context) {
   }
 
   function enqueue(item: OutboxItem) {
+    /**
+     * **`index` 这一类按 sessionId 去重。**
+     *
+     * 它报的是「这条会话现在是什么样」——一份快照，不是一件件要补发的事。而触发它的
+     * 事件（user/message、turn/end、session、session/title）在一次忙碌的会话里几十条
+     * 起步：Gateway 断开一小时，同一条会话就能压出几十行一模一样的待发项。之后每一轮
+     * flush 都要把它们挨个发一遍（每条 8 秒超时，`flushing` 期间新的还进不来），而
+     * Gateway 那边收到的是同一份快照重复几十次。留最新的一条就够。
+     */
+    if (item.kind === 'index') {
+      for (const row of outbox.list()) {
+        if (row.value.kind === 'index' && row.value.sessionId === item.sessionId) outbox.delete(row.id)
+      }
+    }
     outbox.put(randomUUID(), item)
     void flushOutbox()
   }
