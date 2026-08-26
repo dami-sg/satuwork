@@ -101,18 +101,42 @@ export function apply(ctx: Context) {
    * 名字 → 那条 Skill。
    *
    * 三种都认：索引里印的那个名字（重名时带序号）、原名、id。**模型是照抄索引的**，
-   * 但它也会顺手把「退款审核（2）」缩成「退款审核」，所以原名也要认；两条都叫这个
-   * 原名时，认第一条并在返回里说清楚认的是哪一条。
+   * 但它也会顺手把「退款审核（2）」缩成「退款审核」，所以原名也要认。
+   *
+   * **原名撞了两条就不许猜。** 那两条讲的是不同的做法（否则管理员不会建第二条），
+   * 猜中一半的代价是它照着错的那套把活干完，而没有任何东西会提醒任何人。这时候摆出
+   * 带序号的那几个名字，让它自己挑。
    */
-  const find = (key: string): CachedSkill | undefined => {
+  const find = (key: string): CachedSkill => {
     const want = key.trim()
-    if (!want) return undefined
+    if (!want) fail('缺少 skill 参数：要哪一条？')
     const list = all()
+    /**
+     * **重名要看 displayName，不是 name。** 正常情况下 Gateway 已经把重名分开了
+     * （「周报模版」「周报模版（2）」），此时输入哪个都不含糊。分不开只发生在老 Gateway
+     * 不发这个字段的时候——那时索引里是两行一模一样的字，模型没有任何办法指到第二条，
+     * 而**猜中一半的代价是它照着错的那套把活干完**，没有任何东西会提醒任何人。
+     */
+    const byShown = list.filter((s) => s.displayName === want)
+    if (byShown.length > 1) {
+      fail(
+        `有 ${byShown.length} 条都叫「${want}」，我分不出你要哪一条。` +
+          '让管理员把它们改成不同的名字，或者先告诉我这一条是干什么的。',
+      )
+    }
+    if (byShown.length === 1) return byShown[0]
+    const sameName = list.filter((s) => s.name === want)
+    if (sameName.length > 1) {
+      fail(
+        `有 ${sameName.length} 条都叫「${want}」，你要哪一条？照索引里的全名写：` +
+          `${sameName.map((s) => s.displayName).join('、')}`,
+      )
+    }
     return (
-      list.find((s) => s.displayName === want) ??
-      list.find((s) => s.name === want) ??
+      sameName[0] ??
       list.find((s) => s.id === want) ??
-      list.find((s) => s.displayName.toLowerCase() === want.toLowerCase() || s.name.toLowerCase() === want.toLowerCase())
+      list.find((s) => s.displayName.toLowerCase() === want.toLowerCase() || s.name.toLowerCase() === want.toLowerCase()) ??
+      missing(want)
     )
   }
 
@@ -300,7 +324,7 @@ export function apply(ctx: Context) {
     },
     async ({ skill, file }: { skill?: string; file?: string }) => {
       if (!skill) fail('缺少 skill 参数：要展开哪一条？')
-      const s = find(skill) ?? missing(skill)
+      const s = find(skill)
 
       if (file) {
         const files = await fetchFiles(s)
@@ -465,7 +489,7 @@ export function apply(ctx: Context) {
 
       if (action === 'update') {
         if (!skill) fail('缺少 skill：要改哪一条？')
-        const s = find(skill) ?? missing(skill)
+        const s = find(skill)
         if (s.origin !== 'seat') {
           fail(
             `「${s.displayName}」是${s.origin === 'global' ? '平台' : '公司'}目录里的 Skill，我改不了。` +
@@ -491,7 +515,7 @@ export function apply(ctx: Context) {
 
       if (action === 'remove') {
         if (!skill) fail('缺少 skill：要删哪一条？')
-        const s = find(skill) ?? missing(skill)
+        const s = find(skill)
         if (s.origin !== 'seat') {
           fail(`「${s.displayName}」不是你自己记下的，删不了。公司目录里的东西要管理员在界面上删。`)
         }

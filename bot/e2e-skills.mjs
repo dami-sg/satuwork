@@ -185,6 +185,15 @@ out.view = (await call('skill_view', { skill: '退款审核' })).text
 // 重名的那条按带序号的名字取；缩写成原名也认（模型很爱这么干）
 out.viewDup = (await call('skill_view', { skill: '周报模版（2）' })).text
 out.viewMissing = (await call('skill_view', { skill: '退款审' })).text
+/**
+ * 老 Gateway 不发 displayName 时，两条会退成**一模一样**的名字——索引里是两行相同的
+ * 字，模型没有任何办法指到第二条。这时候不许猜。
+ */
+col.put('id-a', skill('值班表', { id: 'id-a' }))
+col.put('id-b', skill('值班表', { id: 'id-b' }))
+out.viewAmbiguous = (await call('skill_view', { skill: '值班表' })).text
+col.delete('id-a')
+col.delete('id-b')
 out.viewFiles = (await call('skill_view', { skill: '对账流程' })).text
 out.viewOneFile = (await call('skill_view', { skill: '对账流程', file: 'references/口径.md' })).text
 // 第二次读同一个文件应当走缓存，不再打 Gateway

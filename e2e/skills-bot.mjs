@@ -84,9 +84,15 @@ export async function runSkillsBot({ root, test, assert, log }) {
     assert(r.viewDup.includes('周报模版（2）') && r.viewDup.includes('重名'), `重名要说清楚：${r.viewDup}`)
   })
 
-  await test('名字对不上不许只回一句失败', () => {
+  await test('名字对不上不许只回一句失败；同名两条不许猜', () => {
     assert(r.viewMissing.includes('退款审核'), `要给出最像的那几条：${r.viewMissing}`)
     assert(r.viewMissing.includes('一字不差'), `要说清下一步怎么做：${r.viewMissing}`)
+    /**
+     * 两条同名讲的是不同的做法（否则管理员不会建第二条）。猜中一半的代价是它照着错的
+     * 那套把活干完，而没有任何东西会提醒任何人。
+     */
+    assert(r.viewAmbiguous.includes('分不出'), `两条名字一模一样时要明说分不出：${r.viewAmbiguous}`)
+    assert(!r.viewAmbiguous.includes('的正文'), `分不出时不该径直展开某一条：${r.viewAmbiguous}`)
   })
 
   await test('包文件按需拉、拉过就缓存；包里没有的要报有什么', () => {
@@ -101,7 +107,7 @@ export async function runSkillsBot({ root, test, assert, log }) {
   await test('skills_list 搜不到不许回空', () => {
     assert(r.list.includes('退款审核'), `搜得到的要列出来：${r.list}`)
     assert(!r.list.includes('的正文'), `列表不该带正文：${r.list}`)
-    assert(r.listEmpty.includes('4 条'), `搜不到要说清一共有多少条：${r.listEmpty}`)
+    assert(/有 \d+ 条 Skill/.test(r.listEmpty), `搜不到要说清一共有多少条：${r.listEmpty}`)
     assert(r.listEmpty.includes('不带 query'), `要给一条可执行的下一步：${r.listEmpty}`)
   })
 
