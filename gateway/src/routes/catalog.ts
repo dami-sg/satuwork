@@ -2,7 +2,7 @@
  * Bot / Skill / MCP 的定义构造，以及平台与公司两套 CRUD——它们共用同一个工厂。
  */
 import type { RouteCtx } from './ctx.ts'
-import { COMPANY_BOT_ICONS, CatalogOwner, escalateToOf, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botBrowserOf, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
+import { COMPANY_BOT_ICONS, CatalogOwner, skillDisplayNames, skillModeOf, escalateToOf, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botBrowserOf, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
 import { HttpError, type Req, type Router, json } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { kindOf, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
@@ -73,6 +73,9 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       tags,
       source,
       enabled: b.enabled !== false,
+      // 新建的默认按需。**存量落常驻**（publicSkill 里那个 fallback），两个默认值方向
+      // 相反是有意的：老的那些是在「全文常驻」的年代写的，改口径就是悄悄改行为。
+      mode: skillModeOf(b.mode, '按需'),
       createdAt: now,
       updatedAt: now,
     }
@@ -85,6 +88,8 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
     if (typeof b.body === 'string') def.body = b.body
     if (Array.isArray(b.tags)) def.tags = tagsOf(b.tags)
     if (typeof b.enabled === 'boolean') def.enabled = b.enabled
+    // 没传就不动：常驻还是按需是人在界面上拨的，改正文不该顺手把它改回默认。
+    if (b.mode !== undefined) def.mode = skillModeOf(b.mode, skillModeOf(def.mode, '常驻'))
     const source = def.source === '单文件 Skill' || def.source === 'ZIP 包' ? def.source : '手动编写'
     if (typeof b.body === 'string' && source === 'ZIP 包' && Array.isArray(def.files)) {
       def.files = (def.files as { path: string; text: string }[]).map((f) =>
@@ -341,11 +346,28 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       json(res, 200, { deleted: true, id: item.id, seats: released.length, orphans })
     })
 
+    /**
+     * 一份 Skill 清单：全局 ∪ 本公司 ∪ **这家公司里 Bot 自己写下的那些**（`origin: 'seat'`）。
+     *
+     * 私有档也要出现在这一屏，理由见 docs/skills.md §7：Bot 给自己写下的方法会持续改变
+     * 它的行为，攒在某个地方而界面上翻不到，等于给自己造一个查不了的故障源。
+     *
+     * **重名序号在这里算一次**（skillDisplayNames）。席位那边按「这颗 Bot 看得见的那些」
+     * 另算一次，两份可能对不齐——只可能发生在两颗 Bot 各自写了同名的私有档时，而那时
+     * 席位上的那份才是模型用的，这一屏是给人看的。
+     */
+    async function listSkills(owner: CatalogOwner) {
+      const items = await db.visibleCatalog('skill', owner.companyId)
+      if (owner.companyId) items.push(...(await db.companySeatSkills(owner.companyId)))
+      const names = skillDisplayNames(items)
+      return items.map((i) => publicSkill(i, names.get(i.id)))
+    }
+
     // ── Skill ──────────────────────────────────────────────────────────
     router.get(`${s.base}/skills`, async (req, res) => {
       const owner = await s.read(req)
       json(res, 200, {
-        skills: (await db.visibleCatalog('skill', owner.companyId)).map(publicSkill),
+        skills: await listSkills(owner),
         servers: (await db.visibleCatalog('mcp', owner.companyId)).map(publicServer),
         tags: await knownTags(db, owner.auditCompanyId),
       })
@@ -396,6 +418,31 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
         touched++
       }
       json(res, 200, { tags: await knownTags(db, owner.auditCompanyId), touched })
+    })
+
+    /**
+     * 把一条「Bot 自己写的」转成公司 Skill。**人点的，没有自动晋升。**
+     *
+     * 公司目录是所有人共用的东西，往里写只能是人的决定——「攒够几次就自动提升」听着
+     * 省事，实际是让一颗 Bot 的一次误判长到全公司身上（docs/skills.md §7）。
+     *
+     * 只在公司这一层有：全局目录不收私有档。
+     */
+    router.post(`${s.base}/skills/:skillId/promote`, async (req, res) => {
+      const { account, owner } = await s.write(req)
+      if (owner.scope !== 'company') throw new HttpError(400, '私有档只能转成公司 Skill')
+      const item = await db.catalog(req.params.skillId)
+      if (!item || item.kind !== 'skill' || item.scope !== 'user' || item.companyId !== owner.companyId) {
+        throw new HttpError(404, '没有这个 Skill')
+      }
+      const next = await db.promoteSkill(item.id)
+      await auditCatalog(owner, account.id, 'catalog.promote', {
+        kind: 'skill',
+        id: item.id,
+        name: item.name,
+        botId: item.botId,
+      })
+      json(res, 200, { skill: publicSkill(next, next.name) })
     })
 
     router.get(`${s.base}/skills/:skillId`, async (req, res) => {

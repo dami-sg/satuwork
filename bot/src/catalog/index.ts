@@ -30,6 +30,8 @@ interface RemoteBot {
    */
   guards?: Record<string, boolean>
   browser?: { on?: boolean; sites?: string[] }
+  /** 模版上「让它自己记 Skill」那个开关。老 Gateway 不发，缺字段按**开**算。 */
+  selfSkills?: boolean
   escalate?: string
   templateVersion?: number
 }
@@ -49,11 +51,25 @@ function roleOf(raw: ModelRole | undefined): ModelRole {
 interface RemoteSkill {
   id: string
   name: string
+  /**
+   * 模型拿去 `skill_view` 的那个名字：重名时 Gateway 已经加过序号（「退款审核（2）」）。
+   *
+   * **不在这边自己算。** 两边各算一次，迟早在某个 Unicode 边界上分叉，而分叉的表现是
+   * 模型照着索引里的名字调、席位说找不到（docs/skills.md §5）。
+   */
+  displayName?: string
   body?: string
   tags?: string[]
   source?: string
   enabled?: boolean
   fileName?: string
+  /** `常驻` 全文进提示词，`按需` 只进索引。老 Gateway 不发这个字段，落 `常驻`。 */
+  mode?: string
+  /** 索引里那一句话。Gateway 从 frontmatter 或正文首段算好发下来。 */
+  description?: string
+  /** 带不带 ZIP 包的文件。真要用时按需拉（tools/skill.ts），不随目录下发。 */
+  hasFiles?: boolean
+  origin?: 'company' | 'global' | 'seat'
 }
 
 interface RemoteServer {
@@ -71,14 +87,26 @@ interface RemoteServer {
   mentionOnly?: boolean
 }
 
-interface CachedSkill {
+export interface CachedSkill {
   id: string
   name: string
+  /** 见 RemoteSkill.displayName。Gateway 没发就退回 name。 */
+  displayName: string
   body: string
   tags: string[]
   source: '手动编写' | '单文件 Skill' | 'ZIP 包'
   fileName?: string
   enabled: boolean
+  /**
+   * `常驻` = 正文每一轮都在提示词里（这套东西之前的样子）；`按需` = 只进索引。
+   *
+   * **老 Gateway 不发这个字段时落 `常驻`**：那些 Skill 是在「全文常驻」的年代写的，
+   * 换个默认值等于趁人不注意改了它们的行为。
+   */
+  mode: '常驻' | '按需'
+  description: string
+  hasFiles: boolean
+  origin: 'company' | 'global' | 'seat'
   createdAt: number
   updatedAt: number
 }
@@ -412,9 +440,42 @@ export class CatalogService extends Service {
     return this.pinOne(bot)
   }
 
-  private syncSkills(items: RemoteSkill[]) {
+  /**
+   * 把这一份 Skill 落进本地缓存。
+   *
+   * **这一份是全集**：目录里没有的那些要跟着删掉。少了这一步，`skill_manage` 删完一条、
+   * 或者管理员在界面上删掉一条，席位这边还留着——模型照着索引去 `skill_view`，读到的
+   * 是一份已经不存在的东西。
+   */
+  /**
+   * 把 Gateway 刚回过来的那一条 Skill 落进本地缓存。
+   *
+   * `skill_manage` 写完之后调它。**落进去的必须是 Gateway 回来的那一份**——名字怎么
+   * 去重、`mode` 落成什么、正文被截了没有，全是那边说了算；席位自己拼一条等于两边
+   * 各有一套归一化，而它们一定会分叉（docs/skills.md §15 不变量 4）。
+   *
+   * 注意它只补这一条：整份目录（连同别的席位改动）等下一次 `pull` 拉回来。
+   */
+  noteSkill(item: unknown) {
+    const s = item as RemoteSkill
+    if (!s || typeof s.id !== 'string' || !s.id) return
+    this.syncSkills([s], { prune: false })
+  }
+
+  /** 删掉一条本地缓存的 Skill。`skill_manage` 删完之后调它，不用等下一次同步。 */
+  dropSkill(id: string) {
+    this.ctx.storage.collection<CachedSkill>('skills').delete(id)
+  }
+
+  private syncSkills(items: RemoteSkill[], opts: { prune?: boolean } = {}) {
     const col = this.ctx.storage.collection<CachedSkill>('skills')
     const now = Date.now()
+    if (opts.prune !== false) {
+      const live = new Set(items.map((s) => s.id))
+      for (const row of col.list()) {
+        if (!live.has(row.value.id)) col.delete(row.value.id)
+      }
+    }
     for (const s of items) {
       const prev = col.get(s.id)
       const source =
@@ -422,11 +483,16 @@ export class CatalogService extends Service {
       col.put(s.id, {
         id: s.id,
         name: s.name,
+        displayName: typeof s.displayName === 'string' && s.displayName.trim() ? s.displayName : s.name,
         body: typeof s.body === 'string' ? s.body : '',
         tags: Array.isArray(s.tags) ? s.tags.map(String) : [],
         source,
         ...(s.fileName ? { fileName: s.fileName } : {}),
         enabled: s.enabled !== false,
+        mode: s.mode === '按需' ? '按需' : '常驻',
+        description: typeof s.description === 'string' ? s.description : '',
+        hasFiles: s.hasFiles === true,
+        origin: s.origin === 'global' || s.origin === 'seat' ? s.origin : 'company',
         createdAt: prev?.createdAt ?? now,
         updatedAt: now,
       })
@@ -495,6 +561,7 @@ export class CatalogService extends Service {
       browser: b.browser && typeof b.browser === 'object'
         ? { on: b.browser.on === true, sites: Array.isArray(b.browser.sites) ? b.browser.sites : [] }
         : undefined,
+      selfSkills: typeof b.selfSkills === 'boolean' ? b.selfSkills : undefined,
       escalate: b.escalate,
       templateVersion: typeof b.templateVersion === 'number' ? b.templateVersion : this.templateVersion,
     })

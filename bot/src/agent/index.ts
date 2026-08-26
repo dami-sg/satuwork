@@ -12,6 +12,7 @@ import type {
 } from '../session/types.ts'
 import type { ReassignedItem, WorkspaceFile } from '../tools/index.ts'
 import { browserOf, type BotRecord } from '../registry/index.ts'
+import type { CachedSkill } from '../catalog/index.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -155,6 +156,30 @@ export class CommandError extends Error {
  * 120 是按「真干活的一轮能有多长」定的：装环境、跑测试、按报错改再跑，几十步是常态，
  * 上百步已经罕见。定得太小会把正经的长活拦腰砍断，而那比跑飞更让人恼火。
  */
+/**
+ * 按需 Skill 的索引最多占多少 token。超了就只留一行摘要，改由 `skills_list` 去找。
+ *
+ * 索引在系统提示词里，也就是**每一轮都在按缓存价付一次**。两千 token 大约装得下
+ * 六七十条「名字 + 一句话」，比一家公司实际会写的多得多；真超了，说明该分档了。
+ */
+const SKILL_INDEX_MAX_TOKENS = Math.max(
+  200,
+  Math.trunc(Number(process.env.SATUWORK_SKILL_INDEX_MAX_TOKENS) || 2000),
+)
+
+/**
+ * 索引那一段的抬头。
+ *
+ * **要明写「名字照抄」**：模型很爱把「退款审核（2）」缩成「退款审核」，而那是另一条
+ * Skill。也要说清正文不在这儿——否则它会把这一行当成 Skill 的全部内容用。
+ */
+const SKILL_INDEX_HEAD = [
+  '## Skill 索引',
+  '',
+  '下面这些是这家公司写好的做事方法，**这里只有名字和一句话说明，正文不在这里**。',
+  '要用哪条，就用 `skill_view("名字")` 把它展开——名字照抄，不要缩写或改写。',
+].join('\n')
+
 const DEFAULT_MAX_STEPS = 120
 
 /**
@@ -1763,17 +1788,59 @@ ${composed.skills}` : base, base, skills: composed.skills }
      */
     const todo = this.ctx.tools.has('todo') ? `\n\n${todoBlock()}` : ''
     const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}${web}${escalate}${cite}${outFiles}${todo}`
-    const col = this.ctx.storage.collection<{ id: string; name: string; body: string; enabled?: boolean }>('skills')
+    const { resident, index } = this.skillsOf(bot)
+    const parts = [
+      ...resident.map((s) => `## Skill: ${s.displayName}\n${s.body}`),
+      ...(index ? [index] : []),
+    ]
+    if (!parts.length) return { text: base, base, skills: '' }
+    const extra = parts.join('\n\n')
+    return { text: `${base}\n\n${extra}`, base, skills: extra }
+  }
+
+  /**
+   * 这颗 Bot 挂上的 Skill，分成**常驻**和**按需**两摞，外加按需那摞的索引。
+   *
+   * 分档在这里算，`composeSystem` 和 `toolSchemasFor` 都调它——两处各判一次的话，
+   * 会出现「提示词说去用 `skills_list`、工具表里却没有它」这种自相矛盾的一轮。
+   * 它是纯函数（读同一份缓存、同一份环境变量），算两次的结果必然相同。
+   */
+  private skillsOf(bot: { skills?: string[] } | undefined): {
+    resident: CachedSkill[]
+    onDemand: CachedSkill[]
+    index: string
+    /** 索引装不下，这一轮要把 `skills_list` 放进工具表。 */
+    listTool: boolean
+  } {
+    const col = this.ctx.storage.collection<CachedSkill>('skills')
     const ids = bot?.skills
     const picked =
       ids === undefined
         ? col.list().map((r) => r.value).filter((s) => s.enabled !== false)
         : ids
             .map((id) => col.get(id))
-            .filter((s): s is { id: string; name: string; body: string; enabled?: boolean } => !!s && s.enabled !== false)
-    if (!picked.length) return { text: base, base, skills: '' }
-    const extra = picked.map((s) => `## Skill: ${s.name}\n${s.body}`).join('\n\n')
-    return { text: `${base}\n\n${extra}`, base, skills: extra }
+            .filter((s): s is CachedSkill => !!s && s.enabled !== false)
+    /**
+     * `off` 是退路：全部按常驻算，一把 skill 工具都不进表，也就是这套东西上线之前
+     * 的样子。退路不能在同一次改动里一起删掉（docs/skills.md §12）。
+     */
+    if ((process.env.SATUWORK_SKILL_TOOLS || 'auto').trim() === 'off') {
+      return { resident: picked, onDemand: [], index: '', listTool: false }
+    }
+    const resident = picked.filter((s) => s.mode !== '按需')
+    const onDemand = picked.filter((s) => s.mode === '按需')
+    if (!onDemand.length) return { resident, onDemand, index: '', listTool: false }
+    const lines = onDemand.map((s) => `- ${s.displayName}：${s.description || '（这条没写说明）'}`)
+    const full = `${SKILL_INDEX_HEAD}\n\n${lines.join('\n')}`
+    /**
+     * **用 estTokens 估，不是 `chars / 3`。**
+     *
+     * Skill 的名字和说明基本都是中文，而 estTokens 里 CJK 是一字一 token、其余才按
+     * 3.6 字符算。照 `chars / 3` 估一份中文索引会低估到三分之一，分档线当场失效。
+     */
+    if (estTokens(full) <= SKILL_INDEX_MAX_TOKENS) return { resident, onDemand, index: full, listTool: false }
+    const brief = `${SKILL_INDEX_HEAD}\n\n这台席位有 ${onDemand.length} 条 Skill，清单太长装不下。用 \`skills_list("关键词")\` 找，再用 \`skill_view("名字")\` 展开。`
+    return { resident, onDemand, index: brief, listTool: true }
   }
 
   /**
@@ -1837,8 +1904,33 @@ ${composed.skills}` : base, base, skills: composed.skills }
      * 会看见十来把它永远调不通的工具，然后一遍遍去试。
      */
     const browserOn = browserOf(bot as BotRecord | undefined).on
+    /**
+     * `skills_list` **只在索引装不下的那一档进表**（见 skillsOf）。
+     *
+     * 索引已经在提示词里的时候还摆一把「列出 Skill」的工具，是在邀请模型多打一轮它
+     * 不需要的往返——而它很乐意接受这个邀请。
+     */
+    const skills = this.skillsOf(bot as { skills?: string[] } | undefined)
+    const skillsOff = (process.env.SATUWORK_SKILL_TOOLS || 'auto').trim() === 'off'
+    /**
+     * `skill_manage` 还要看模版上那个开关（`selfSkills`，缺字段按开算）。
+     *
+     * 这一层同样**只是遮掩**：模型硬报一个不在表里的名字照样调得到，真正的拒绝在
+     * Gateway 那侧（私有档的写接口）。两层都要有——少了这一层，一个关掉了这项能力的
+     * Bot 会看见一把它每次都被拒的工具，然后一遍遍去试。
+     */
+    const selfSkills = (bot as BotRecord | undefined)?.selfSkills !== false
+    const skillTool = (name: string) => {
+      if (!name.startsWith('skill_') && name !== 'skills_list') return true
+      if (skillsOff) return false
+      if (name === 'skill_manage') return selfSkills
+      return name === 'skills_list' ? skills.listTool : true
+    }
     const picked = all.filter(
-      (t) => (!t.name.startsWith('mcp_') || mcpNames.has(t.name)) && (browserOn || !t.name.startsWith('browser_')),
+      (t) =>
+        (!t.name.startsWith('mcp_') || mcpNames.has(t.name)) &&
+        (browserOn || !t.name.startsWith('browser_')) &&
+        skillTool(t.name),
     )
     if (!mentioned.length) return picked
     // 顶到最前。工具表越长，模型越容易在前几个里选——点名了却排在第 40 位，等于没点。
@@ -2242,6 +2334,9 @@ const SUMMARY_SYSTEM = [
   '- **没做完的事**：待办、承诺过要做的、卡住的地方',
   '- 关键的时间点，写成「8月18日 22:10」这样的绝对时间，不要写「昨天」',
   '- 产出物的位置（文件路径、链接、命令）',
+  // 压缩会把 skill_view 的结果整段压掉，而模型不知道自己曾经打开过——它会照着摘要
+  // 继续干，干得看起来很像那么回事。留下名字，它重新 skill_view 一次就回来了。
+  '- **这一段里打开过哪些 Skill**（照抄名字，写成「用了 Skill：退款审核」）',
   '',
   '可以丢掉：寒暄、重复、工具调用的原始输出（只留结论）、已经被推翻的中间过程。',
   '',
