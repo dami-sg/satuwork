@@ -1136,6 +1136,13 @@ window.SATU_I18N = {
   '每次跑的时候，它要做什么？': 'What should this routine do each time it runs?',
   什么时候跑: 'When to run',
   添加时间: 'Add trigger',
+  用哪个模型: 'Which model',
+  'Utility 模型（省 token）': 'Utility model (cheaper)',
+  '日常模型（和聊天时一样）': 'Daily model (same as chat)',
+  '它自己跑的时候没人在等，用便宜的那一档。要它做难一点的活，换成日常模型。':
+    'Nobody is waiting when it runs itself, so it uses the cheaper model. Switch to the daily model for harder work.',
+  '和你自己问它时用的是同一个模型。每天都跑的活，utility 那一档省得多。':
+    'Same model you get when you ask it yourself. For something that runs every day, the utility model costs far less.',
   下一次: 'Next run',
   运行记录: 'Run history',
   还没跑过: 'No runs yet',

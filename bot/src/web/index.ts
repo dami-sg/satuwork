@@ -219,7 +219,21 @@ export function apply(ctx: Context, _config: Config = {}) {
    * 输入框顶上的一行 dock，不是消息气泡。
    */
   ctx.server.post('/api/sessions/:id/messages', async (req, res) => {
-    const body = (await req.json().catch(() => ({}))) as { text?: string; images?: unknown; mentions?: unknown }
+    const body = (await req.json().catch(() => ({}))) as {
+      text?: string
+      images?: unknown
+      mentions?: unknown
+      /**
+       * 这一轮钉到平台的哪个模型角色上（现在只有日常任务会给：见 docs/routines.md）。
+       *
+       * **收的是角色名，不是 provider + model。** 后者等于给这条路开一个「这一轮用
+       * 哪个模型」的入口，而这条路浏览器也走得通——任何人都能借它绕开管理员放开的
+       * 白名单。认不出来的值当没给（照 Bot 自己的模型跑），不回 400：这是一个纯优化
+       * 的开关，为它把一条本该跑起来的定时任务顶回去不划算。
+       */
+      modelRole?: unknown
+    }
+    const modelRole = body.modelRole === 'utility' || body.modelRole === 'daily' ? body.modelRole : undefined
     let images: ImageRef[]
     try {
       images = await imageRefs(ctx, body.images)
@@ -264,6 +278,13 @@ export function apply(ctx: Context, _config: Config = {}) {
         }
         return
       }
+      /**
+       * **插话这一岔用不上 `modelRole`**：那一轮的模型早在开跑时就定了，换不了。
+       *
+       * 日常任务会走到这里（人正好在和这个 Bot 说话），于是那一次不是按 utility 跑的。
+       * 不为它另开一轮：一条会话里两轮抢着说话，出来的东西谁也不认（见 routines.ts），
+       * 而这个开关是省钱，不是正确性。
+       */
       if (await ctx.agents.steer(req.params.id, body.text ?? '', images)) {
         res.json({ steered: true })
         return
@@ -285,7 +306,7 @@ export function apply(ctx: Context, _config: Config = {}) {
       return
     }
     // 不等 turn 跑完就返回：结果通过 SSE 推，HTTP 只负责「收到了」。
-    void ctx.agents.send(req.params.id, body.text ?? '', images, mentions).catch((e: Error) => {
+    void ctx.agents.send(req.params.id, body.text ?? '', images, mentions, { kind: 'user' }, modelRole).catch((e: Error) => {
       console.error(`satuwork: agents.send 失败：${e.message}`)
       ctx.logger?.warn?.(`agents.send 失败：${e.message}`)
     })

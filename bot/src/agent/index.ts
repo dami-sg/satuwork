@@ -19,6 +19,16 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/**
+ * 这一轮钉到平台的哪个模型角色上。
+ *
+ * 目前只有日常任务用得着：一条到点自己跑的任务，默认压在便宜的 utility 上（见
+ * docs/routines.md）。`daily` 和不给这个值是同一个意思——**不覆盖**，跟这个 Bot
+ * 平时聊天用的那个模型走。写成「不覆盖」而不是「钉到平台日常模型」，是因为管理员
+ * 给某颗 Bot 单独挑过模型的话，那句挑选在定时任务里同样该作数。
+ */
+export type TurnModelRole = 'daily' | 'utility'
+
 export interface Config {
   provider?: string
   model?: string
@@ -381,11 +391,12 @@ export class AgentService extends Service {
     images: ImageRef[],
     mentions: Mention[],
     source: MessageSource = { kind: 'user' },
+    modelRole?: TurnModelRole,
   ): Promise<void> {
     this.starting.add(sessionId)
     this.turnMentions.set(sessionId, new Set(mentions.filter((m) => m.kind === 'connector').map((m) => m.id)))
     try {
-      await this.runTurn(sessionId, text, images, mentions, source)
+      await this.runTurn(sessionId, text, images, mentions, source, modelRole)
     } finally {
       this.starting.delete(sessionId)
       this.turnMentions.delete(sessionId)
@@ -565,6 +576,7 @@ export class AgentService extends Service {
     images: ImageRef[] = [],
     mentions: Mention[] = [],
     source: MessageSource = { kind: 'user' },
+    modelRole?: TurnModelRole,
   ): Promise<void> {
     /**
      * 静默期里不开新的一轮（见上面那段）。
@@ -592,7 +604,7 @@ export class AgentService extends Service {
      * send 才会顺手带走它们——而那时新消息已经先跑了，顺序也倒了。
      */
     try {
-      await this.runGuarded(sessionId, text, images, mentions, source)
+      await this.runGuarded(sessionId, text, images, mentions, source, modelRole)
     } finally {
       // 这一轮收口了（无论成败），接上排在后面的。
       await this.drainQueue(sessionId).catch((e) => {
@@ -653,6 +665,7 @@ export class AgentService extends Service {
     images: ImageRef[] = [],
     mentions: Mention[] = [],
     source: MessageSource = { kind: 'user' },
+    modelRole?: TurnModelRole,
   ): Promise<void> {
     const { sessions, llm } = this.ctx
     let history = await sessions.events(sessionId)
@@ -660,12 +673,31 @@ export class AgentService extends Service {
     let provider: string
     let modelId: string
     let model: ReturnType<typeof llm.modelOf>
+    /**
+     * **这颗 Bot 自己那一对**，也就是「人和它聊天时用的那个模型」。
+     *
+     * 和上面那三个分开留着，是因为**上下文压缩一律按它算**（见下面 hard 那一段）：
+     * 这一轮可能被钉到 utility 上，而压缩改的是这条会话本身，那条会话是人和定时任务
+     * 共用的一条（一个 Bot 一条，见 registry 的 ensureSession）。
+     */
+    let homeProvider: string
+    let homeModel: string
+    /** 这一轮真的钉上了吗。装不下的时候要拿它退回去（见下面那道「装不装得下」）。 */
+    let pinned: { provider: string; model: string } | null = null
     let toolSchemas: { name: string; description: string; parameters?: unknown }[]
     try {
       const bot = this.botOf(history)
       system = this.composeSystem(bot)
       provider = bot?.provider?.trim() || this.provider
       modelId = bot?.model?.trim() || this.model
+      homeProvider = provider
+      homeModel = modelId
+      // 这一轮被钉到某个平台角色上（日常任务选了 utility）就换掉上面那一对。
+      pinned = this.roleModel(modelRole)
+      if (pinned) {
+        provider = pinned.provider
+        modelId = pinned.model
+      }
       model = llm.modelOf(provider, modelId)
       toolSchemas = this.toolSchemasFor(bot, mentions)
       /**
@@ -709,12 +741,23 @@ export class AgentService extends Service {
     // 于是**一条会话只要带过一次图，之后每条消息都在这一行静默消失**——注释写着「压缩
     // 失败不能连累这一轮」，实际连累的恰恰是这一行。inject 已经补上，这个 try 是它的
     // 第二道保险：估算上下文长度是优化，不是正确性的一部分，失败了就带着原上下文往下走。
-    const hard = (this.windowOf(provider, modelId) ?? this.config.contextWindowFallback ?? 128_000) *
+    /**
+     * **窗口按 Bot 自己那个模型算，不按这一轮钉的那个。**
+     *
+     * 压缩不是这一轮的私事：它把旧的那段换成摘要，**写进会话日志**，从此人和它聊天
+     * 时看到的也是那份摘要。而这条会话是共用的一条。按钉上的模型算的话，一条选了
+     * utility 的日常任务，会拿那个便宜模型的小窗口去压人的聊天记录——人什么都没做，
+     * 第二天回来上下文就没了，摘要还是那个便宜模型写的。
+     *
+     * 钉的模型自己装不装得下，是另一件事，在下面单独判：那一头的答案是**退回 Bot
+     * 自己的模型跑这一轮**，不是把会话压到它的尺寸。
+     */
+    const hard = (this.windowOf(homeProvider, homeModel) ?? this.config.contextWindowFallback ?? 128_000) *
       (this.config.compactHard ?? 0.9)
     try {
       if (estMessages(await toAgentMessages(history, model, this.ctx)) > hard) {
         this.ctx.logger?.warn?.(`agents: ${sessionId} 已顶到上下文硬顶，先同步压一次`)
-        await this.maybeCompact(sessionId, provider, modelId, true, { atLeast: hard })
+        await this.maybeCompact(sessionId, homeProvider, homeModel, true, { atLeast: hard })
         /**
          * **压没压都要重读**，不能只在 compacted 时重读。
          *
@@ -729,6 +772,41 @@ export class AgentService extends Service {
       }
     } catch (e) {
       this.ctx.logger?.warn?.(`agents: ${sessionId} 硬顶检查/同步压缩失败，带原上下文继续：${(e as Error).message}`)
+    }
+
+    /**
+     * 钉的那个模型**装不下这条会话**：这一轮退回 Bot 自己的模型。
+     *
+     * 上面那道硬顶按 Bot 自己的窗口算，所以走到这里时，会话完全可能仍然比 utility 的
+     * 窗口大（便宜的那一档窗口小得多，这正是它便宜的一部分）。剩下的三条路里只有这条
+     * 站得住：
+     *
+     * · 照发 —— 被 provider 以超长顶回来，那条日常任务从此每天记一条 error；
+     * · 压到它的尺寸 —— 就是上面那段说的，拿便宜模型的小窗口削人的聊天记录；
+     * · 退回去 —— 这一轮贵一点，但它跑成了，而且人的上下文一个字没动。
+     *
+     * 和「平台没配 utility 就照旧跑」是同一句话：**省钱是这个开关的目的，不是它的
+     * 前提**（见 roleModel、docs/routines.md §4）。日志要留一行，否则「这条任务怎么
+     * 没省下钱」查无可查。
+     *
+     * 估算失败不能连累这一轮，同上面那道硬顶——真出不来就照钉的跑，最坏是被顶回来
+     * 记一条 error，而不是这句话根本没送进去。
+     */
+    if (pinned) {
+      try {
+        const room = (this.windowOf(pinned.provider, pinned.model) ?? this.config.contextWindowFallback ?? 128_000) *
+          (this.config.compactHard ?? 0.9)
+        if (estMessages(await toAgentMessages(history, model, this.ctx)) > room) {
+          this.ctx.logger?.warn?.(
+            `agents: ${sessionId} 这条会话装不进 ${pinned.provider}/${pinned.model} 的窗口，这一轮退回 ${homeProvider}/${homeModel}`,
+          )
+          provider = homeProvider
+          modelId = homeModel
+          model = llm.modelOf(provider, modelId)
+        }
+      } catch (e) {
+        this.ctx.logger?.warn?.(`agents: ${sessionId} 算不出钉的模型装不装得下，照钉的跑：${(e as Error).message}`)
+      }
     }
 
     const turn = history.filter((e) => e.type === 'turn/start').length + 1
@@ -916,7 +994,8 @@ export class AgentService extends Service {
       )
       // 压缩放在**回复送出之后**：它自己也要跑一次模型，摆在轮首用户就得干等。
       // 不 await——这一轮已经结束了，压缩失败也只是下一轮再试。
-      void this.maybeCompact(sessionId, provider, modelId).catch((e: Error) =>
+      // 同上：压缩改的是这条共用会话，一律按 Bot 自己那个模型的窗口算。
+      void this.maybeCompact(sessionId, homeProvider, homeModel).catch((e: Error) =>
         this.ctx.logger?.warn?.(`agents: ${sessionId} 压缩失败 ${e.message}`),
       )
     }
@@ -1221,6 +1300,23 @@ export class AgentService extends Service {
     if (!picked.length) return { text: base, base, skills: '' }
     const extra = picked.map((s) => `## Skill: ${s.name}\n${s.body}`).join('\n\n')
     return { text: `${base}\n\n${extra}`, base, skills: extra }
+  }
+
+  /**
+   * 这一轮钉的那个角色对应的模型。**取不到就返回 null，照旧用 Bot 自己的那一对。**
+   *
+   * 取不到是真会发生的：席位刚起来还没拉过目录，或者平台压根没配 utility。那时候
+   * 「不跑」显然比「用贵一点的模型跑」糟得多——省钱是这个开关的目的，不是它的前提。
+   * 但要留一行日志：静静地按原模型跑，和真的按 utility 跑，在会话里长得一模一样，
+   * 而两者的账单差着一个数量级。
+   */
+  private roleModel(role?: TurnModelRole): { provider: string; model: string } | null {
+    // `daily` = 不覆盖（见 TurnModelRole）。现在只有 utility 这一档真的换模型。
+    if (role !== 'utility') return null
+    const pick = this.ctx.catalog?.models?.utility
+    if (pick?.provider && pick.model) return { provider: pick.provider, model: pick.model }
+    this.ctx.logger?.warn?.('agents: 这一轮要用 utility 模型，但平台还没钉——按 Bot 自己的模型跑')
+    return null
   }
 
   /** 模型的上下文窗口，来自 Gateway 目录。拉不到就没有——界面那条占比会自己让位。 */

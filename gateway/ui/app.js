@@ -1909,11 +1909,14 @@ document.getElementById('app').addEventListener('input', (e) => {
 document.getElementById('app').addEventListener('change', async (e) => {
   const el = e.target
   /**
-   * 日常任务的名字与指令。**收在 change 而不是 input 上**：这两处保存都要 render()
+   * 日常任务的名字、指令与用哪个模型。**收在 change 而不是 input 上**：保存都要 render()
    * （列表里那一行、下一次的时间都跟着变），而 render 会把输入框换掉——边打边存
    * 等于每敲一个字丢一次焦点。change 在失焦时才来，那时人已经不在框里了。
    */
-  if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.getAttribute('data-routine-field')) {
+  if (
+    (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) &&
+    el.getAttribute('data-routine-field')
+  ) {
     const id = state.routineOpen
     const key = el.getAttribute('data-routine-field')
     const row = id ? routineOpenRow() : null

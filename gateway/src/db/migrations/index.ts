@@ -13,6 +13,7 @@ import { SQL as m0012 } from './0012-machine-metric-minutes.ts'
 import { SQL as m0013 } from './0013-seat-template-version.ts'
 import { SQL as m0014 } from './0014-handoffs.ts'
 import { SQL as m0015 } from './0015-handoff-webhook.ts'
+import { SQL as m0016 } from './0016-routine-model.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -64,6 +65,7 @@ export const MIGRATIONS: Migration[] = [
   { id: '0013-seat-template-version', name: '席位自报在跑的 Bot 模版版本与汇报时刻', sql: m0013 },
   { id: '0014-handoffs', name: '转人工的交接单：状态、指派、催办', sql: m0014 },
   { id: '0015-handoff-webhook', name: '公司的转人工通知地址', sql: m0015 },
+  { id: '0016-routine-model', name: '日常任务选模型：日常还是 utility', sql: m0016 },
 ]
 
 /**
