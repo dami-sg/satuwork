@@ -98,9 +98,91 @@ export type ToolRisk = 'read' | 'write' | 'external' | 'destructive'
  */
 export const UNKNOWN_RISK: ToolRisk[] = ['external', 'write']
 
+/**
+ * 拿 agents 服务，**不经 inject**。
+ *
+ * cordis 的上下文代理对没 inject 的服务是**直接抛**（`cannot get property "agents"
+ * without inject`），不是给 undefined——所以 `ctx.agents?.rootOf?.()` 这种写法在
+ * tools / policy 这些没 inject 它的地方会当场炸，而且炸在工具执行的关键路径上。
+ *
+ * 而 inject 它是不行的：agents 那边 inject 了 tools，静态依赖绕回来两边都起不来
+ * （terminal.ts 的 notifyExit 上写过同一段）。取不到就当没有——委派没开的进程里本来
+ * 就没有子会话，所有判定退化成「就是它自己」，也就是加委派之前的行为。
+ *
+ * 探针（e2e-guards.mjs 那种只装了 policy 没装 agents 的）走的也是这条路。
+ */
+export function agentsOf(ctx: Context):
+  | { rootOf?: (id: string) => string | undefined; taskOf?: (id: string) => { taskId: string; goal: string; leases: string[] } | undefined }
+  | undefined {
+  try {
+    return (ctx as unknown as { reflect?: { get?: (name: string) => unknown } }).reflect?.get?.('agents') as never
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 一样被移交出去的东西。见 `ToolDefinition.reassign`。
+ *
+ * **要能直接给人和模型看**：它会原样出现在子代理的结论里（「接手的后台进程：…」），
+ * 而主代理下一步很可能就要拿这个 id 去调 `process`。
+ */
+export interface ReassignedItem {
+  /** 主代理拿它就能接着操作（后台进程就是它的 session_id）。 */
+  id: string
+  /** 一句话说清这是什么。命令原文之类。 */
+  label: string
+}
+
+/**
+ * 这把工具在**子代理**手里是什么待遇（见 docs/delegation.md §6.1）。
+ *
+ * 四个问题各自独立，答哪个填哪个。**内置工具必须写**（`register` 会拦），`mcp_*` 不写
+ * = 全默认——那些工具是远端起的，几百个，名字和语义都不归我们管，而它们的共性恰好让
+ * 默认安全：一把 MCP 工具就是「打别人家的系统」，主代理干和子代理干没有区别。
+ *
+ * **判据挂在工具身上，不写成一张名单。** 名单当天就会过期（内置工具集还在长），而漏一
+ * 条的表现是静默的：子代理多一把不该有的手，或少一把本该有的手，两种都要等线上出事才
+ * 被看见。
+ */
+export interface ToolDelegation {
+  /** 子代理有没有它。`root-only` = 只有主代理有。默认 `inherit`。 */
+  mode?: 'inherit' | 'root-only'
+  /**
+   * 它要占一样**席位级的独占资源**，写资源的名字（今天只有 `'browser'`）。
+   * 同名资源在一批委派里只发一份租约。
+   */
+  exclusive?: string
+  /**
+   * 它按 sessionId 摸的那份东西**属于这场对话**（而不是属于这次执行），所以要改摸
+   * 主会话的那一份。今天只有 `history_*`。
+   *
+   * **判据不是「它用不用 sessionId」**——照那个判，`todo` 也该标上，而标上就是子代理
+   * 一开工就把主代理的清单整份覆盖掉（`todo` 是整表替换），人正看着的那块 dock 当场
+   * 变成子任务的步骤。对话只有一场，计划每次执行各有一份。
+   */
+  rebind?: boolean
+  /**
+   * 它会**留下**按 sessionId 记账、而且还活着的东西——后台进程、订阅、定时器。
+   * 子代理收口时这些改挂主会话，见 docs/delegation.md §7.3。
+   *
+   * 标了它就必须实现 `reassign`（`register` 会拦）。
+   */
+  retains?: boolean
+}
+
 export interface ToolDefinition extends ToolSchema {
   /** 见 ToolRisk。不写 = UNKNOWN_RISK。 */
   risk?: ToolRisk[]
+  /** 见 ToolDelegation。内置工具必须写。 */
+  delegation?: ToolDelegation
+  /**
+   * 把这把工具留下的、还活着的东西从一条会话改挂到另一条。返回移交了什么。
+   *
+   * 只有 `delegation.retains` 的工具要实现。**只动记账那一行，不碰东西本身**——
+   * 一个后台进程换个主人不影响它在跑什么。
+   */
+  reassign?(from: string, to: string): ReassignedItem[] | Promise<ReassignedItem[]>
   execute(args: unknown, call: ToolCall): Promise<ToolResult> | ToolResult
 }
 
@@ -140,6 +222,25 @@ export class ToolService extends Service {
 
   register(def: ToolDefinition) {
     if (this.defs.has(def.name)) throw new Error(`tools: ${def.name} 已注册`)
+    /**
+     * **内置工具没标 `delegation` 就抛，进程起不来。**
+     *
+     * 看着很凶，但它拦的是**开发期**的错误：这件事只可能发生在有人刚写完一把新工具、
+     * 第一次把席位跑起来的那一刻，而那正是最该被拦住的时刻——生产上不可能出现，那一版
+     * 早就起来过了。换成 `logger.warn` 的话，它会被启动时那几十行滚屏吃掉，然后这把
+     * 工具带着一个错误的默认待遇上线（见 docs/delegation.md §6.1）。
+     *
+     * `mcp_*` 免于此：那些名字是远端起的，我们标不了。
+     */
+    if (!def.name.startsWith('mcp_') && !def.delegation) {
+      throw new Error(
+        `tools: ${def.name} 没有 delegation 标注。新增内置工具时必须回答「子代理拿不拿得到它」，` +
+          `全默认就写 {}（见 docs/delegation.md §6.1）`,
+      )
+    }
+    if (def.delegation?.retains && !def.reassign) {
+      throw new Error(`tools: ${def.name} 标了 retains 却没有 reassign——子代理收口时它留下的东西会成孤儿`)
+    }
     this.defs.set(def.name, def)
     return this.ctx.effect(() => () => {
       this.defs.delete(def.name)
@@ -174,6 +275,32 @@ export class ToolService extends Service {
     return def.risk
   }
 
+  /** 这把工具在子代理手里的待遇。没标就是全默认（见 ToolDelegation）。 */
+  delegationOf(name: string): ToolDelegation {
+    return this.defs.get(name)?.delegation ?? {}
+  }
+
+  /**
+   * 把 `retains` 的工具留下的东西从一条会话改挂到另一条，返回移交了什么。
+   *
+   * 子代理收口时调一次。**按标注遍历，不按工具名**：今天只有后台进程有这个性质，但
+   * 「留下一样按 sessionId 记账的东西」是个会重复出现的形状（订阅、定时器、没下完的
+   * 下载），它们出现时该自动落进这里，而不是等谁想起来。
+   */
+  async reassign(from: string, to: string): Promise<ReassignedItem[]> {
+    const out: ReassignedItem[] = []
+    for (const def of this.defs.values()) {
+      if (!def.delegation?.retains || !def.reassign) continue
+      try {
+        out.push(...(await def.reassign(from, to)))
+      } catch (e) {
+        // 一把工具移交失败不能连累其余的，也不能连累这次委派的收口。
+        this.ctx.logger?.warn?.(`tools: ${def.name} 移交 ${from} → ${to} 失败：${(e as Error).message}`)
+      }
+    }
+    return out
+  }
+
   /**
    * 跑完整条管道。**永远 resolve**，不 reject——报告失败是调用方的职责，
    * 不是异常路径；异常会让 agent 循环没法把结果写回日志。
@@ -196,7 +323,18 @@ export class ToolService extends Service {
         // 参数不是合法 JSON 是模型的问题，告诉它，让它重试——不算管道故障。
         return { text: `参数不是合法 JSON：${(e as Error).message}` }
       }
-      return await def.execute(args, call)
+      /**
+       * 重绑（见 ToolDelegation.rebind）。**做在这里，不做在工具里。**
+       *
+       * 位置有讲究：**策略之后、execute 之前**。策略要看见这次调用真正来自哪条会话
+       * （root-only 的判定、审批卡片上那句「来自子任务」都靠它），而工具要摸的是主
+       * 会话那一份。
+       *
+       * 做在工具里的话，第二把「读这条会话」的工具出现时要自己记得也写一遍，而漏写的
+       * 表现是它读回来一片空白——一个看起来像「这段历史不存在」的 bug。
+       */
+      const root = def.delegation?.rebind ? agentsOf(this.ctx)?.rootOf?.(call.sessionId) : undefined
+      return await def.execute(args, root && root !== call.sessionId ? { ...call, sessionId: root } : call)
     }
 
     try {

@@ -97,5 +97,9 @@
     # 说明，回「继续」接着跑。防的是绕不出来的工具循环——上下文那条路有压缩兜着，撞不到墙。
     maxSteps: 120
 
+# 委派：把一件事交给一个新开的、干净的子代理（docs/delegation.md）。
+# **必须排在 agent 后面**——它 inject 'agents'，子代理的那一轮由 runTask 跑。
+- name: './src/tools/delegate.ts'
+
 # HTTP API（无 SPA）。对话 UI 在 Gateway。
 - name: './src/web/index.ts'

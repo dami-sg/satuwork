@@ -1,7 +1,16 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { Agent, type AgentEvent, type AgentMessage } from '@earendil-works/pi-agent-core'
 import { randomUUID } from 'node:crypto'
-import type { ContentBlock, Message, MessageSource, SessionEventMap, StreamChunk, Usage } from '../session/types.ts'
+import type {
+  ContentBlock,
+  Message,
+  MessageSource,
+  SessionEventMap,
+  SessionOrigin,
+  StreamChunk,
+  Usage,
+} from '../session/types.ts'
+import type { ReassignedItem, WorkspaceFile } from '../tools/index.ts'
 import { browserOf, type BotRecord } from '../registry/index.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -28,6 +37,50 @@ declare module '@deepseek-ai/cordis' {
  * 给某颗 Bot 单独挑过模型的话，那句挑选在定时任务里同样该作数。
  */
 export type TurnModelRole = 'daily' | 'utility'
+
+/**
+ * 一条委派出去的子任务。**已经解析好的形状**——档位降级、工具收窄、租约分配都在
+ * delegate 那把工具里做完了，`runTask` 只管跑。
+ */
+export interface TaskSpec {
+  /** 一批里的第几条，从 0 开始。结果按它排序，不按谁先跑完。 */
+  index: number
+  goal: string
+  /** 它需要知道的全部。**它看不见主对话**。 */
+  context: string
+  /** 结论里必须包含什么。 */
+  deliver?: string
+  /** 收窄之后的工具名单。undefined = 不收窄。 */
+  tools?: string[]
+  modelRole: TurnModelRole
+  /** 主代理选这一档时给的理由（见 docs/delegation.md §8.3）。 */
+  modelReason?: string
+  /** 这一档不是主代理选的（没给理由的 utility 被降下来了）。 */
+  downgraded?: boolean
+  maxSteps: number
+  /** 这一条拿到了哪几样独占资源的租约（今天只有 `'browser'`）。 */
+  leases: string[]
+  timeoutMs: number
+}
+
+/** 一条子任务跑完之后的全部产出。 */
+export interface TaskOutcome {
+  index: number
+  taskId: string
+  /** 跑在哪条子会话上。界面上「看过程」点开的就是它。 */
+  child: string
+  goal: string
+  state: 'done' | 'capped' | 'timeout' | 'failed' | 'aborted'
+  summary: string
+  files: WorkspaceFile[]
+  steps: number
+  toolCalls: number
+  usage: Usage
+  model: { role: TurnModelRole; provider: string; id: string; reason?: string; downgraded?: boolean }
+  /** 交接给主代理的、还活着的东西（今天只有后台进程）。见 docs/delegation.md §7.3。 */
+  handedOver: ReassignedItem[]
+  ms: number
+}
 
 export interface Config {
   provider?: string
@@ -103,6 +156,14 @@ export class CommandError extends Error {
  * 上百步已经罕见。定得太小会把正经的长活拦腰砍断，而那比跑飞更让人恼火。
  */
 const DEFAULT_MAX_STEPS = 120
+
+/**
+ * 子会话的父子索引在收口之后还留多久（见 runTask 结尾）。
+ *
+ * 五分钟：够接住「移交和进程结束撞在一起」那个窄窗口，又不至于让一台跑几周的席位攒下
+ * 几千条永远查不到头的映射。
+ */
+const TASK_MEMO_TTL_MS = 5 * 60_000
 
 /**
  * 静默期里回绝新一轮时说的那句话。
@@ -286,7 +347,385 @@ export class AgentService extends Service {
   private turnMentions = new Map<string, Set<string>>()
 
   mentionedIn(sessionId: string): Set<string> {
-    return this.turnMentions.get(sessionId) ?? new Set()
+    const own = this.turnMentions.get(sessionId)
+    if (own) return own
+    /**
+     * 子会话顺着往上问一层。
+     *
+     * 「@Gmail 帮我把这周的邮件整理成周报」正是最该被委派的一句话——点名不继承的话，
+     * 那把连接对子代理**不存在**（mentionOnly 的连接平时不进默认表）。继承的作用和
+     * 主代理那边一字不差：顶到表头 + 放开 mentionOnly。
+     *
+     * 生命周期天然对齐：turnMentions 本来就是**这一轮**的东西，而子代理整个活在这一
+     * 轮里（委派是同步的，见 docs/delegation.md §11）。
+     */
+    const root = this.parents.get(sessionId)
+    return (root ? this.turnMentions.get(root) : undefined) ?? new Set()
+  }
+
+  // ── 委派 ──────────────────────────────────────────────────────────
+  //
+  // 一次委派 = 主席位把一件事整个交给一个新开的、干净的它自己，它跑完只交回一段话。
+  // 全部取舍见 docs/delegation.md。
+
+  /**
+   * 子会话 → 它的主会话。**只在内存里。**
+   *
+   * 落盘的那一份在子会话的根事件上（`parent.sessionId`），这里是它的索引——问它的地方
+   * 都在热路径上（每一次工具调用要判 rebind、每一条后台进程结束要判往哪投），而那些地
+   * 方读一遍整条会话是不能接受的。
+   *
+   * 进程重启后这张表是空的：子代理本来就不恢复（§10），而它留下的后台进程也一起没了
+   * （procs 同样只在内存里）。所以「重启后 rootOf 查不到」不是缺陷，是没有东西要查。
+   */
+  private parents = new Map<string, string>()
+
+  /**
+   * 这条会话的主会话。**不是子会话就返回 undefined**，不是返回它自己——调用方靠这个
+   * 区别决定要不要改道，回落成自己的话每一处都要再判一次「改没改」。
+   */
+  rootOf(sessionId: string): string | undefined {
+    return this.parents.get(sessionId)
+  }
+
+  /**
+   * 这条子会话是哪一条子任务。**给策略和审批用**：
+   *
+   *  - 审批卡片上要多一行「来自子任务《…》」。不写的话，人看到的是一次凭空出现的发信
+   *    确认，而他刚才只说了一句「帮我把这周的活收个尾」
+   *  - 独占资源（`leases`）的强制判定：工具表里没有它只是遮掩，模型硬报一个名字照样
+   *    调得通，真正的拒绝要按这份租约来
+   */
+  private tasks = new Map<string, { taskId: string; goal: string; leases: string[] }>()
+
+  taskOf(sessionId: string): { taskId: string; goal: string; leases: string[] } | undefined {
+    return this.tasks.get(sessionId)
+  }
+
+  /**
+   * 跑一条子任务，跑完把结论交回去。
+   *
+   * 和 `runTurn` 共用装配（提示词、工具表、模型、projector），但**刻意不共用的四件事**：
+   *
+   *  - **另一条会话**。子代理的过程一条都不进主会话——那正是委派的全部意义（§4）
+   *  - **不压缩**。它活不过一轮，压缩是给长会话的
+   *  - **不排队、不 drainQueue**。队列是主会话的东西，子会话上没有人在排
+   *  - **有墙钟**。主轮真的 await 在这次调用上，人对着一个转圈的图标（§9）
+   */
+  async runTask(
+    parentSessionId: string,
+    callId: string,
+    spec: TaskSpec,
+    signal?: AbortSignal,
+  ): Promise<TaskOutcome> {
+    const { sessions, llm } = this.ctx
+    const taskId = randomUUID()
+    const startedAt = Date.now()
+    /**
+     * **进门先看信号。**
+     *
+     * 已经是 aborted 的信号**不会再发事件**，所以下面那个监听器挂上去也是死的。人按停止
+     * 的那一刻，模型很可能刚发出这次 delegate_task——没有这一句，这一批会照样开出子会话、
+     * 照样跑满 30 步，而屏幕上那颗停止按钮看起来毫无动静。
+     *
+     * 这里**什么都不建**：连子会话都不开，也就不写 agent/task。什么都没发生，界面上就
+     * 不该多出一张卡。
+     */
+    if (signal?.aborted) {
+      return abortedOutcome(spec, taskId, startedAt)
+    }
+    const history = await sessions.events(parentSessionId)
+    const root = history.find((e) => e.type === 'session')?.data as
+      | { botId?: string; agentId?: string; origin?: SessionOrigin; remoteId?: string }
+      | undefined
+    const bot = this.botOf(history)
+
+    const child = await sessions.create({
+      botId: root?.botId ?? root?.agentId ?? '',
+      origin: root?.origin,
+      remoteId: root?.remoteId,
+      // 标题写清自己是什么：万一哪天回滚一版、过滤没了，它会出现在侧栏里（见
+      // session/types.ts 的 kind）——那时至少读得懂。
+      title: `子任务：${spec.goal.slice(0, 30)}`,
+      kind: 'task',
+      parent: { sessionId: parentSessionId, callId, taskId },
+    })
+    this.parents.set(child, parentSessionId)
+    this.tasks.set(child, { taskId, goal: spec.goal, leases: spec.leases })
+
+    const pinned = this.roleModel(spec.modelRole)
+    const provider = pinned?.provider ?? bot?.provider?.trim() ?? this.provider
+    const modelId = pinned?.model ?? bot?.model?.trim() ?? this.model
+    const model = llm.modelOf(provider, modelId)
+    const usedModel = {
+      role: spec.modelRole,
+      provider,
+      id: modelId,
+      ...(spec.modelReason ? { reason: spec.modelReason } : {}),
+      // 平台没钉 utility 时 roleModel 会回落，那一档同样不是主代理选的——人要看得出来。
+      ...(spec.downgraded || (spec.modelRole === 'utility' && !pinned) ? { downgraded: true } : {}),
+    }
+
+    await sessions.append(parentSessionId, 'agent/task', {
+      id: taskId,
+      callId,
+      child,
+      index: spec.index,
+      goal: spec.goal,
+      state: 'running',
+      model: usedModel,
+      at: startedAt,
+    })
+
+    const system = this.taskSystem(bot, spec)
+    const toolSchemas = this.taskTools(bot, parentSessionId, spec)
+    const brief = taskBrief(spec)
+
+    await sessions.append(child, 'user/message', {
+      message: { id: randomUUID(), role: 'user', content: [{ type: 'text', text: brief }] },
+      source: { kind: 'plugin', plugin: 'delegate', taskId, parent: parentSessionId },
+    })
+    await sessions.append(child, 'turn/start', { turn: 1 })
+
+    let steps = 0
+    let toolCalls = 0
+    let capped = false
+    const agent = new Agent({
+      initialState: {
+        systemPrompt: system.text,
+        model,
+        messages: [],
+        tools: this.bridgeTools(child, toolSchemas),
+      },
+      streamFn: llm.streamFn,
+      steeringMode: 'one-at-a-time',
+      followUpMode: 'one-at-a-time',
+      sessionId: child,
+      shouldStopAfterTurn: ({ toolResults }: { toolResults: unknown[] }) => {
+        if (!toolResults.length) return false
+        steps += 1
+        toolCalls += toolResults.length
+        if (steps < spec.maxSteps) return false
+        capped = true
+        return true
+      },
+    } as any)
+
+    this.live.set(child, agent)
+    const isMcp = (t: { name: string }) => t.name.startsWith('mcp_')
+    const off = agent.subscribe(
+      this.projector(child, 1, {
+        provider,
+        model: modelId,
+        system: system.text,
+        tools: toolSchemas,
+        contextWindow: this.windowOf(provider, modelId),
+        sections: {
+          system: estTokens(system.base),
+          skills: estTokens(system.skills),
+          builtinTools: estTokens(toolsText(toolSchemas.filter((t) => !isMcp(t)))),
+          mcpTools: estTokens(toolsText(toolSchemas.filter(isMcp))),
+        },
+      }),
+    )
+
+    /**
+     * 墙钟。Hermes 那边明确不设，我们必须设——他们的委派在后台，我们的主轮真的
+     * `await` 在这次工具调用上（§9）。
+     */
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      this.ctx.logger?.warn?.(`agents: 子任务 ${taskId} 超过 ${Math.round(spec.timeoutMs / 1000)} 秒，收口`)
+      this.abort(child)
+    }, spec.timeoutMs)
+    /** 主轮被停 → 这一条也停。这条链子断在中间的表现就是「停止按钮点了没反应」。 */
+    const onAbort = () => this.abort(child)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    /**
+     * 挂上之后**再看一次**。上面进门那一眼和这一行之间隔着读日志、建会话、写两条事件
+     * ——全是真的磁盘 I/O，人按停止完全可能正落在这几十毫秒里，而那时监听器还没挂上。
+     */
+    if (signal?.aborted) this.abort(child)
+
+    let state: TaskOutcome['state'] = 'done'
+    let failure = ''
+    this.ctx.logger?.info?.(`agents: 子任务 ${taskId} 开跑（${provider}/${modelId}，最多 ${spec.maxSteps} 步）`)
+    try {
+      const now = Date.now()
+      await agent.prompt(stampUser(brief, now))
+      failure = this.aborting.has(child) ? '' : ((agent.state as any)?.errorMessage ?? '')
+      if (failure) state = 'failed'
+      else if (capped) state = 'capped'
+    } catch (e) {
+      if (this.aborting.has(child)) state = timedOut ? 'timeout' : 'aborted'
+      else {
+        state = 'failed'
+        failure = (e as Error).message
+      }
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      off()
+      this.live.delete(child)
+      if (this.aborting.delete(child)) state = timedOut ? 'timeout' : state === 'done' ? 'aborted' : state
+      await sessions.append(child, 'turn/end', {
+        turn: 1,
+        reason: state === 'done' || state === 'capped' ? (capped ? 'capped' : 'completed') : state === 'failed' ? 'error' : 'aborted',
+      })
+    }
+
+    /**
+     * 移交排在写终态**之前**：结论里要报出移交了什么，不报的话主代理不知道自己刚接手
+     * 了什么，而它下一步很可能就要拿那个 id 去调 `process`（§7.3）。
+     *
+     * **被掐掉的那次也要移交**——那正是没人来得及收尾的一次。
+     */
+    const handedOver = await this.ctx.tools.reassign(child, parentSessionId)
+
+    const events = await sessions.events(child)
+    const summary = lastAssistantText(events)
+    const files = taskFiles(events)
+    const usage = sumUsage(events)
+    if (state === 'done' && !summary) {
+      // 撞顶时最后一步只有工具调用，一个字都没说。**编一段摘要出来是最糟的选项。**
+      state = 'failed'
+      failure = failure || '子任务跑完了但没有留下结论'
+    }
+
+    const outcome: TaskOutcome = {
+      index: spec.index,
+      taskId,
+      child,
+      goal: spec.goal,
+      state,
+      summary: summary || (failure ? `没有结论。${failure}` : '没有结论。'),
+      files,
+      steps,
+      toolCalls,
+      usage,
+      model: usedModel,
+      handedOver,
+      ms: Date.now() - startedAt,
+    }
+
+    await sessions.append(parentSessionId, 'agent/task', {
+      id: taskId,
+      callId,
+      child,
+      index: spec.index,
+      goal: spec.goal,
+      state,
+      summary: outcome.summary,
+      ...(files.length ? { files } : {}),
+      steps,
+      toolCalls,
+      usage,
+      model: usedModel,
+      at: Date.now(),
+    })
+    this.ctx.logger?.info?.(`agents: 子任务 ${taskId} 收口（${state}，${steps} 步，${outcome.ms}ms）`)
+    /**
+     * 两张表**过一会儿清掉**，不是留着。
+     *
+     * 一台席位能连着跑几周、委派几千次，而 `rootOf` 在每一次工具调用的热路径上——只进不
+     * 出的话，那张表只会越查越长。
+     *
+     * 为什么不当场删：§7.3 那个窄窗口还要用它——子代理收口和后台进程移交之间，进程恰好
+     * 在这几毫秒里结束，那条通知要靠 `rootOf` 才投得回主会话。留五分钟远远够，而 `unref`
+     * 保证这个定时器不会拦着进程退出。
+     */
+    const forget = setTimeout(() => {
+      this.parents.delete(child)
+      this.tasks.delete(child)
+    }, TASK_MEMO_TTL_MS)
+    forget.unref?.()
+    return outcome
+  }
+
+  /**
+   * 子代理的系统提示词：在主代理那份上**减一段、加一段**。
+   *
+   * 减掉的是 escalateBlock——子代理没有那把工具，那段话是在教它用一把它没有的手
+   * （条件加载原则，见 docs/context-assembly.md §2）。composeSystem 本来就按
+   * `tools.has('escalate_to_human')` 判，而那个判断是**进程级**的：这颗席位上挂着它，
+   * 于是子代理那份也会带上。所以这里显式切掉。
+   */
+  private taskSystem(
+    bot: ReturnType<AgentService['botOf']>,
+    spec: TaskSpec,
+  ): { text: string; base: string; skills: string } {
+    // Skill 全文继承：它是「这家公司怎么做这件事」，缺了它子代理会用通用做法做完——
+    // 结论看起来对、口径全错，而那比多花几千 token 贵。
+    const composed = this.composeSystem({ ...(bot ?? {}), escalate: undefined })
+    const base = `${composed.base}
+
+${taskBlock(spec)}`
+    return { text: composed.skills ? `${base}
+
+${composed.skills}` : base, base, skills: composed.skills }
+  }
+
+  /**
+   * 子代理那张工具表。
+   *
+   * ```
+   * 主代理这一轮的表（含 @ 点名的排序）
+   *   − mode === 'root-only' 的
+   *   − exclusive 资源没租到的
+   *   − 调用方在 tools 参数里没点的
+   * ```
+   *
+   * 这一层**只是遮掩**。真正的拒绝在 policy 的 pre-execute 短路上，判据同样是标注
+   * （见 docs/delegation.md §6.1）。
+   */
+  private taskTools(
+    bot: ReturnType<AgentService['botOf']>,
+    parentSessionId: string,
+    spec: TaskSpec,
+  ) {
+    const mentions: Mention[] = [...this.mentionedIn(parentSessionId)].map((id) => ({
+      kind: 'connector' as const,
+      id,
+      label: id,
+    }))
+    return this.toolSchemasFor(bot, mentions).filter((t) => {
+      const d = this.ctx.tools.delegationOf(t.name)
+      if (d.mode === 'root-only') return false
+      if (d.exclusive && !spec.leases.includes(d.exclusive)) return false
+      if (spec.tools && !spec.tools.includes(t.name)) return false
+      return true
+    })
+  }
+
+  /**
+   * 席位起来时，把上一条命留下的委派收口。
+   *
+   * 子代理不恢复（§10），所以主会话里最后停在 `running` 的那几条 `agent/task` 要补一条
+   * `lost`。不补的话，界面上那张卡永远转着，而人唯一能做的是怀疑自己的浏览器。
+   *
+   * **`lost` 不是 `failed`。** 那件事做没做成，进程死的时候没人知道，事后也查不出来；
+   * 写成失败是在编。
+   */
+  async healTasks(): Promise<void> {
+    const { sessions } = this.ctx
+    for (const row of await sessions.list()) {
+      let events
+      try {
+        events = await sessions.events(row.id)
+      } catch {
+        continue
+      }
+      const last = new Map<string, SessionEventMap['agent/task']>()
+      for (const e of events) {
+        if (e.type === 'agent/task') last.set((e.data as SessionEventMap['agent/task']).id, e.data as SessionEventMap['agent/task'])
+      }
+      for (const t of last.values()) {
+        if (t.state !== 'running') continue
+        await sessions.append(row.id, 'agent/task', { ...t, state: 'lost', at: Date.now() })
+        this.ctx.logger?.warn?.(`agents: 委派 ${t.id} 在上个进程里没收口，标为 lost`)
+      }
+    }
   }
 
   /** 这条会话排着的，按先来后到。`list()` 是按 updatedAt 倒序的，这里自己排。 */
@@ -2346,6 +2785,119 @@ function safeParse(s: string): unknown {
   }
 }
 
+/**
+ * 一次**什么都没发生**的委派。
+ *
+ * 只有一种来路：runTask 进门时信号已经是 aborted（人在模型发出这次调用和它真正开跑之间
+ * 按了停止）。子会话没建、事件没写，所以这里也不能报出一个 child——空串是诚实的。
+ */
+function abortedOutcome(spec: TaskSpec, taskId: string, startedAt: number): TaskOutcome {
+  return {
+    index: spec.index,
+    taskId,
+    child: '',
+    goal: spec.goal,
+    state: 'aborted',
+    summary: '还没开始就被停止了。',
+    files: [],
+    steps: 0,
+    toolCalls: 0,
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0 },
+    model: { role: spec.modelRole, provider: '', id: '' },
+    handedOver: [],
+    ms: Date.now() - startedAt,
+  }
+}
+
+/**
+ * 送进子代理的那句话。
+ *
+ * **不是 goal 一行。** 子代理以全新对话启动，它对主对话一无所知——`context` 写不全的
+ * 表现就是它回一句「不知道你说的『那个错』是什么」。所以四段分开摆，让主代理写的时候
+ * 也看得见自己漏了哪一段。
+ */
+function taskBrief(spec: TaskSpec): string {
+  const parts = [`# 任务\n${spec.goal}`, `# 背景\n${spec.context}`]
+  if (spec.deliver?.trim()) parts.push(`# 结论里必须包含\n${spec.deliver.trim()}`)
+  return parts.join('\n\n')
+}
+
+/**
+ * 子代理专属的那一段系统提示词。
+ *
+ * 主代理那份里没有的四件事，每一件都对应一个它答不出来就会出错的问题：我是谁、
+ * 卡住了怎么办、东西写哪儿、结论长什么样。
+ */
+function taskBlock(spec: TaskSpec): string {
+  return [
+    '## 你是一个子代理',
+    '',
+    '你被派来单独做一件事。你看不到派你来的那场对话，也**没有人可以问**——界面上没有你的位置，',
+    '你说的话除了最后那段结论之外没有任何人会看到。',
+    '',
+    '- **卡住了不要停在半路装作做完了。** 把卡在哪儿、已经排除了什么写进结论交回去，由主代理去问人',
+    '- **工作区和主代理共享**（同一个 ~/work）。草稿和中间产物写 `tasks/` 下自己的目录，成品才写',
+    '  正常位置；并发跑的几条子任务各有各的文件范围，别越界',
+    '- **你起的后台进程会在你收口时交给主代理**，所以起了什么要在结论里点名（session_id + 命令）',
+    `- 最多 ${spec.maxSteps} 步。到顶会被收口，那时已经做到的照样交回去——所以边做边把结论攒出来`,
+    '',
+    '### 结论怎么写',
+    '',
+    '你最后那条消息**就是**交回去的东西，它会原样进主代理的上下文。所以：',
+    '',
+    '- 第一段是结论本身，不是过程。「改了 7 个文件共 23 处，两处 catch 里的改成了 warn」',
+    '- 没做成的部分单独说，写清卡在哪儿、下一步该看什么',
+    '- 产出的文件写相对工作区的路径',
+    '- 不要复述任务，不要写「好的，我来做这件事」',
+  ].join('\n')
+}
+
+/** 子会话里最后一条助手文本。**这就是结论**——没有就是没有，不编。 */
+function lastAssistantText(events: Awaited<ReturnType<Context['sessions']['events']>>): string {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i]
+    if (e.type !== 'assistant/message') continue
+    const text = (e.data as SessionEventMap['assistant/message']).message.content
+      .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+      .map((c) => c.text)
+      .join('')
+      .trim()
+    if (text) return text
+  }
+  return ''
+}
+
+/** 子代理产出的文件。从 tool/result 上收，**不去正则扫文本猜路径**（同 ToolResult.files）。 */
+function taskFiles(events: Awaited<ReturnType<Context['sessions']['events']>>): WorkspaceFile[] {
+  const seen = new Map<string, WorkspaceFile>()
+  for (const e of events) {
+    if (e.type !== 'tool/result') continue
+    for (const f of (e.data as SessionEventMap['tool/result']).files ?? []) seen.set(f.path, f)
+  }
+  return [...seen.values()]
+}
+
+/**
+ * 这条子会话花了多少。
+ *
+ * 从 assistant/message 上累加，**不新增记账路径**——钱那条链子已经在 Gateway 代理侧
+ * 一次请求一行了（docs/billing.md）。这里的用途只有一个：卡片上那行「这一次委派花了
+ * 多少」，而它答的正是 billing.md 缺口 5 那个问题。
+ */
+function sumUsage(events: Awaited<ReturnType<Context['sessions']['events']>>): Usage {
+  const out: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0 };
+  for (const e of events) {
+    if (e.type !== 'assistant/message') continue
+    const u = (e.data as SessionEventMap['assistant/message']).usage
+    out.inputTokens += u.inputTokens ?? 0
+    out.outputTokens += u.outputTokens ?? 0
+    out.cacheReadTokens += u.cacheReadTokens ?? 0
+    out.reasoningTokens += u.reasoningTokens ?? 0
+    out.cost = (out.cost ?? 0) + (u.cost ?? 0)
+  }
+  return out
+}
+
 export const name = 'satu-agent'
 // 'workspace' 是给 loadImage 用的：日志里的 image 块存的是路径，重建历史时要靠
 // ctx.workspace.resolve 把它变成绝对路径再读字节。**不列在这里不是「拿到 undefined」**
@@ -2357,4 +2909,13 @@ export const inject = ['sessions', 'llm', 'tools', 'storage', 'catalog', 'worksp
 
 export function apply(ctx: Context, config: Config = {}) {
   ctx.plugin(AgentService, config)
+  /**
+   * 起来时把上一条命留下的委派收口（见 healTasks）。
+   *
+   * **不 await、不挡启动**：它要扫一遍会话目录，而席位得先能接活。扫失败也只是那几张
+   * 卡还转着——比起因为一次读盘异常整个进程起不来，这个方向是对的。
+   */
+  ctx.inject(['agents'], (ctx: Context) => {
+    void ctx.agents.healTasks().catch((e: Error) => ctx.logger?.warn?.(`agents: 收口遗留委派失败 ${e.message}`))
+  })
 }

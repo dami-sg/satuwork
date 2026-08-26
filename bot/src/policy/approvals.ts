@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolCall } from '../tools/index.ts'
+import { agentsOf, type ToolCall } from '../tools/index.ts'
 import { applyEdits, type ApprovalForm } from './forms.ts'
 
 /** 一条还等着人拍板的调用。刷新页面之后界面靠它把卡片摆回来。 */
@@ -126,21 +126,36 @@ export class ApprovalGate {
    */
   async ask(call: ToolCall, reason: string, form: ApprovalForm): Promise<Decision> {
     /**
+     * 子代理的调用，**卡片开在主会话上**（见 docs/delegation.md §6.2）。
+     *
+     * 子代理没有人可问，但它能碰要审批的工具。开在子会话上的卡片落在一条界面上根本没
+     * 入口的会话里——等于永远没人点，五分钟后按拒绝收口，而「把这批对账单发出去」这类
+     * 活就整个委派不了。
+     *
+     * **换的只有事件落在哪、名单按谁记，等的仍然是那次真调用本身**（下面那段「不是它的
+     * 副本」照旧成立：人在卡片上改的参数就是子代理真正跑出去的那一份）。
+     *
+     * 顺带两件事自动对了：`scope: 'turn'` 的放行名单记在主会话上，而 clearTurn 由**主
+     * 轮**的 turn/end 触发——子代理跑多久都在这一轮里，语义正好；同一个 callId 不会撞，
+     * 它本来就是全局唯一的。
+     */
+    const sessionId = agentsOf(this.ctx)?.rootOf?.(call.sessionId) ?? call.sessionId
+    /**
      * 拦停名单先看：人这一轮已经说过「别再试了」。
      *
      * 排在放行名单前面——同一把工具不可能既在放行名单又在拦停名单里（点了一个就落定了），
      * 但万一将来两边都能进，**拒绝优先**才是安全的那一侧。
      */
-    const blocked = this.denials.get(call.sessionId)
+    const blocked = this.denials.get(sessionId)
     if (blocked?.has(call.name)) return { verdict: 'denied', scope: 'turn', viaBlock: true }
 
-    const granted = this.grants.get(call.sessionId)
+    const granted = this.grants.get(sessionId)
     if (granted?.has(call.name)) return { verdict: 'approved', scope: 'turn', viaGrant: true }
 
-    const key = `${call.sessionId}:${call.callId}`
+    const key = `${sessionId}:${call.callId}`
     const now = Date.now()
     const rec: PendingApproval = {
-      sessionId: call.sessionId,
+      sessionId,
       callId: call.callId,
       name: call.name,
       arguments: call.arguments,

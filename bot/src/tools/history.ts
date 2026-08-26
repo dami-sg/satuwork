@@ -158,6 +158,17 @@ export function apply(ctx: Context) {
   ) => {
     ctx.tools.register({
       ...def,
+      /**
+       * **重绑到主会话。** 这两把摸的是「这场对话」，而对话只有一场——就是主会话那条。
+       *
+       * 子代理靠它补上隔离的代价：主代理的 `context` 经常写不全，而逼它写一篇交底书
+       * 只是把失败点从「忘了说」挪到「说漏了」。给一把按需检索的手更可靠，拉回来的又是
+       * 有界的几十条（MAX_ROWS），不违反「全量历史不进每一次子请求」。
+       *
+       * 换 sessionId 的动作在管道里做（tools/index.ts 的 run），不在这儿——第二把
+       * 「读这条会话」的工具出现时不用记得再写一遍。见 docs/delegation.md §6.3。
+       */
+      delegation: { rebind: true },
       async execute(args, call) {
         try {
           return { text: await execute((args ?? {}) as any, call.sessionId) }

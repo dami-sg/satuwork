@@ -613,6 +613,27 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     )
   })
 
+  /**
+   * 一次委派的子会话全文（见 docs/delegation.md §13 的「看过程」）。
+   *
+   * **授权走主会话。** 子会话不进会话索引，而 `seatTargetForSession` 查的正是那张索引
+   * ——按子会话 id 直取会换回 503，而那个 503 在界面上长得像「席位掉线了」。父子关系由
+   * 席位那头核对（它才有 JSONL）。
+   */
+  router.get('/runtime/sessions/:id/tasks/:child/history', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    const turns = Math.min(50, Math.max(1, Math.trunc(Number(req.query.get('turns')) || 50)))
+    await proxyJson(
+      res,
+      'GET',
+      `${target.host}/api/sessions/${encodeURIComponent(req.params.id)}/tasks/${encodeURIComponent(req.params.child)}/history?turns=${turns}`,
+      undefined,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
   router.post('/runtime/sessions/:id/messages', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const target = await seatTargetForSession(db, account, req.params.id)

@@ -40,6 +40,7 @@ import { runHistoryTime } from './history-time.mjs'
 import { runCompact } from './compact.mjs'
 import { runGatewayUrl } from './gateway-url.mjs'
 import { runMaxSteps } from './max-steps.mjs'
+import { runDelegate } from './delegate.mjs'
 import { runToolCalls } from './toolcalls.mjs'
 import { runShutdown } from './shutdown.mjs'
 import { runGuards } from './guards.mjs'
@@ -3203,6 +3204,7 @@ async function main() {
     await runCompact({ root, test, assert, log })
     await runGatewayUrl({ root, test, assert, log })
     await runMaxSteps({ root, test, assert, log })
+    await runDelegate({ root, test, assert, log })
     await runToolCalls({ root, test, assert, log })
     await runGuards({ root, test, assert, log })
     await runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log })

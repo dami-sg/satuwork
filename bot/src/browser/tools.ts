@@ -129,6 +129,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_navigate',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['external', 'read'],
     description:
       '在席位桌面上那个浏览器里打开一个网址，并把它作为之后所有 browser_* 操作的当前页。**其它 browser_* 工具都要先调它。**\n' +
@@ -149,6 +151,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_snapshot',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     // 读的是已经加载好的页面，一个字节都没往外送。**站点白名单仍然对它生效**——
     // 把一张登录后的页面读进模型，正是那条边界最该管的动作。
     risk: ['read'],
@@ -170,6 +174,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_click',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['external', 'write'],
     description:
       '点击快照里 ref 指的那个元素。ref 来自 browser_snapshot，形如 @e5。点之前元素会自动滚进视口。' +
@@ -195,6 +201,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_type',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['external', 'write'],
     description:
       '往 ref 指的输入框里填文字。**会先清空原有内容再填**，不是追加。' +
@@ -223,6 +231,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_press',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['external', 'write'],
     description:
       '按一个键。Enter 提交表单、Tab 换焦点、Escape 关弹层、方向键在列表里移动。' +
@@ -242,6 +252,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_dialog',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['external', 'write'],
     description:
       '处理页面弹出的原生对话框（alert / confirm / prompt / beforeunload）。**对话框挂着的时候整页是冻住的**，' +
@@ -270,6 +282,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_back',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['external', 'read'],
     description: '回到浏览器历史里的上一页。',
     parameters: { type: 'object', properties: {} },
@@ -282,6 +296,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_scroll',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['read'],
     description:
       '滚动页面。**不是为了让元素露出来**——快照里已经有页面上所有已渲染的元素，点击也会自动滚过去。' +
@@ -303,6 +319,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_read',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['read'],
     description:
       '读当前页面的正文（优先正文区域，不含导航和页脚）。给 ref 就只读那一块。' +
@@ -334,6 +352,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_wait_for',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['read'],
     description:
       '等页面出现或消失某段文字，或者干等一会儿。提交之后等结果、等加载动画消失时用它，' +
@@ -369,6 +389,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_select',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     risk: ['external', 'write'],
     description: '在下拉框里选项。原生 select 的选项点不动，要用这一把。值可以写 option 的值，也可以写它显示的文字。',
     parameters: {
@@ -393,6 +415,8 @@ export function apply(ctx: Context) {
 
   ctx.tools.register({
     name: 'browser_tabs',
+    // 席位单例：一颗浏览器、一块员工正看着的屏。一批委派里只发一份租约。
+    delegation: { exclusive: 'browser' },
     // list 只是看一眼，select / close 会换页或关页——按最坏的那种标注。
     risk: ['external', 'write'],
     description:

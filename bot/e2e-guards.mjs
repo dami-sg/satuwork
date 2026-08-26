@@ -70,7 +70,10 @@ const bots = {
 }
 
 const sessions = fakeSessions({ s1: 'b1', s2: 'b2', s3: 'b3', s4: 'b4', s5: 'b-不存在', s6: 'b6', s7: 'b7', s8: 'b1',
-  s8b: 'b8', s9: 'b9', s10: 'b10', s11: 'b11', s12: 'b12', s13: 'b13', s14: 'b14' })
+  s8b: 'b8', s9: 'b9', s10: 'b10', s11: 'b11', s12: 'b12', s13: 'b13', s14: 'b14',
+  // s6t 是 s6 派出去的一条子会话（见 docs/delegation.md）。**botId 和主会话是同一个**
+  // ——policy 的每一条判定都从会话根读 botId，子会话上写别的等于给它换了一颗 Bot。
+  s6t: 'b6' })
 
 const ctx = new Context()
 ctx.provide('logger', { warn() {}, info() {}, error() {} })
@@ -102,6 +105,16 @@ const browserSvc = {
   },
 }
 ctx.provide('browser', browserSvc)
+/**
+ * agents 服务的替身。策略和审批用它三个方法，而它们都是靠 `reflect.get('agents')` 取的
+ * ——**类型检查看不见这一处**（同上面 browser 那段）。
+ *
+ * `s6t` 是 `s6` 派出去的一条子任务，`leases` 空着：这一批里浏览器租给了别人。
+ */
+ctx.provide('agents', {
+  rootOf: (id) => (id === 's6t' ? 's6' : undefined),
+  taskOf: (id) => (id === 's6t' ? { taskId: 'tk-1', goal: '把这周的对账单发出去', leases: [] } : undefined),
+})
 ctx.provide('catalog', {
   serverOf: (name) => (name.startsWith('mcp_a_') ? 'srv-a' : name.startsWith('mcp_b_') ? 'srv-b' : undefined),
 })
@@ -112,13 +125,19 @@ await new Promise((r) => setTimeout(r, 50))
 const ran = {}
 /** 工具真正收到的那份参数。**「改过的内容有没有真的发出去」只能从这里看。** */
 const got = {}
-const tool = (name, risk) => {
+const tool = (name, risk, delegation = {}) => {
   ran[name] = 0
   ctx.tools.register({
     name,
     description: name,
     parameters: { type: 'object', properties: {} },
     ...(risk ? { risk } : {}),
+    /**
+     * 内置工具必须标（tools/index.ts 的启动断言）。多数探针工具跟委派没关系，全默认；
+     * 浏览器那几把要带上**真实的**标注（`exclusive: 'browser'`），否则「没租到就调不了」
+     * 那条断言测的是一把和线上不一样的工具——绿了也不说明什么。
+     */
+    delegation,
     execute: async (args) => {
       ran[name] += 1
       got[name] = args
@@ -140,9 +159,9 @@ tool('mystery')
 // 元工具那层壳：真正的工具名在参数里（见 gateway/src/lib/tool-search.ts）。
 tool('mcp_a_sw_run', ['external', 'write'])
 tool('mcp_a_send_email', ['external', 'write'])
-tool('browser_navigate', ['external', 'read'])
+tool('browser_navigate', ['external', 'read'], { exclusive: 'browser' })
 tool('browser_snapshot', ['read'])
-tool('browser_click', ['external', 'write'])
+tool('browser_click', ['external', 'write'], { exclusive: 'browser' })
 tool('browser_type', ['external', 'write'])
 tool('browser_press', ['external', 'write'])
 tool('browser_dialog', ['external', 'write'])
@@ -782,6 +801,70 @@ out.destructive = {
   普通删不算: des('rm tmp.txt'),
   ls不算: des('ls -la'),
 }
+/**
+ * ── 委派：子代理的确认、强制与话术（docs/delegation.md §6.1、§6.2、§7.1）────
+ *
+ * 这一组每一条坏了都不报错：卡片开在一条界面上没有入口的会话里（等于永远没人点，
+ * 五分钟后按拒绝收口）、子代理拿到了它不该有的手、或者被挡之后一直去调一把它没有的
+ * 工具把步数耗光。
+ */
+const delegation = {}
+{
+  const before = ran.mcp_b_send_mail
+  const pendingBefore = pendingOf('s6').length
+  // 子会话上发起一次要确认的调用。**先不 await**：它此刻正停在 pre-execute 里等。
+  const running = call('s6t', 'mcp_b_send_mail', { to: 'boss@corp.com', body: '对账单' })
+  await settle()
+  const onRoot = pendingOf('s6')
+  delegation.卡片开在主会话上 = onRoot.length === pendingBefore + 1
+  // 开在子会话上的卡片，人在界面上根本没有入口去点它。
+  delegation.子会话上不开卡片 = pendingOf('s6t').length === 0
+  const card = onRoot.at(-1)
+  delegation.卡片说清了出处 = Boolean(card && card.data.reason.includes('来自子任务《把这周的对账单发出去》'))
+  delegation.队列按主会话查得到 = ctx.policy.approvals.list('s6').length === 1
+  delegation.等的时候没跑 = ran.mcp_b_send_mail === before
+  // 用**主会话**的 id 点得动：界面那一跳带的就是主会话 id。
+  delegation.主会话id点得动 = ctx.policy.approvals.decide('s6', card.data.callId, 'approve', 'once') === 'ok'
+  const result = await running
+  delegation.批准后子代理那次真的跑了 = ran.mcp_b_send_mail === before + 1 && result.failed !== true
+}
+{
+  /**
+   * 「这一轮都批准」跨主子。名单记在主会话上，而子代理整个活在主代理这一轮里——
+   * 主代理批过的这一轮，子代理不该再问一遍。
+   */
+  const running = call('s6', 'mcp_b_send_mail', { to: 'turn@corp.com' })
+  await settle()
+  ctx.policy.approvals.decide('s6', pendingOf('s6').at(-1).data.callId, 'approve', 'turn')
+  await running
+  const before = pendingOf('s6').length
+  const fromTask = await call('s6t', 'mcp_b_send_mail', { to: 'again@corp.com' })
+  delegation.主会话批过这一轮子代理不再问 = pendingOf('s6').length === before && fromTask.failed !== true
+  // 子会话自己的 turn/end **不该**把主会话这一轮的名单清掉：那一条是子任务收口，不是这一轮收口。
+  ctx.emit('session/event', 's6t', { seq: 0, time: Date.now(), type: 'turn/end', data: { turn: 1, reason: 'completed' } })
+  await settle(10)
+  delegation.子任务收口不清主会话名单 = ctx.policy.approvals.grantedIn('s6').includes('mcp_b_send_mail')
+  // 主会话的 turn/end 才清。
+  ctx.emit('session/event', 's6', { seq: 0, time: Date.now(), type: 'turn/end', data: { turn: 2, reason: 'completed' } })
+  await settle(10)
+  delegation.主轮收口才清 = ctx.policy.approvals.grantedIn('s6').length === 0
+}
+{
+  // root-only：子代理面前没有人，转人工那把工具在子会话里调不了。
+  const r = await call('s6t', 'escalate_to_human', { reason: '卡住了', ask: '帮我看一眼' })
+  delegation.子代理调不了转人工 = r.failed === true && r.text.includes('只有主代理有')
+  delegation.拒绝的话给了出路 = r.text.includes('写进结论')
+  // 主会话上照旧能调——拦的是子会话，不是这把工具。
+  const ok = await call('s6', 'escalate_to_human', { reason: '卡住了', ask: '帮我看一眼' })
+  delegation.主代理照旧调得了 = ok.failed !== true
+}
+{
+  // exclusive：这一批里浏览器租给了别的子任务（leases 空）。
+  const r = await call('s6t', 'browser_navigate', { url: 'https://example.com' })
+  delegation.没租到浏览器就调不了 = r.failed === true && r.text.includes('browser')
+}
+out.delegation = delegation
+
 out.mcpRisk = {
   只读的查询: mcpToolRisk('只读', 'GMAIL_FETCH_EMAILS'),
   只读服务器上的发送: mcpToolRisk('只读', 'GMAIL_SEND_EMAIL'),

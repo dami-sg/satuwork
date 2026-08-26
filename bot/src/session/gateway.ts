@@ -353,6 +353,29 @@ export function apply(ctx: Context) {
     })
   })
 
+  /**
+   * 委派开出来的子会话**不进索引**。
+   *
+   * 控制面那张表回答的是「这个人有哪几条对话」，而一次子任务不是一条对话——它是某条
+   * 对话里的一次工具调用的内部过程。报上去的话，侧栏和会话列表里会冒出一堆标题为
+   * 「子任务：…」的行，而点进去看到的是一段没头没尾的执行记录。
+   *
+   * 判据是根事件的 `kind`，不是 id 前缀（理由见 session/types.ts）。
+   *
+   * **两头都要记。** `events()` 返回的是整条会话事件数组的一份拷贝，而一条长会话能有几万
+   * 条；只记「是子会话」的话，主会话每来一条要上报的事件都会重新拷一遍整条历史——而主会话
+   * 正是天天在长的那一条。会话的 kind 是根事件上的东西，一旦定下就不会变，缓存不会过期。
+   */
+  const sessionKind = new Map<string, boolean>()
+  const isTask = async (sessionId: string): Promise<boolean> => {
+    const known = sessionKind.get(sessionId)
+    if (known !== undefined) return known
+    const root = (await ctx.sessions.events(sessionId)).find((e) => e.type === 'session')
+    const task = (root?.data as { kind?: string } | undefined)?.kind === 'task'
+    sessionKind.set(sessionId, task)
+    return task
+  }
+
   ctx.on('session/event', (sessionId: string, event: SessionEvent) => {
     if (
       event.type === 'session' ||
@@ -360,7 +383,16 @@ export function apply(ctx: Context) {
       event.type === 'session/title' ||
       event.type === 'turn/end'
     ) {
-      void report(sessionId)
+      /**
+       * **catch 不能省。** 这是个浮在外面的 promise，而 Node 15 起未处理的拒绝会直接把
+       * 进程带走——一次读盘异常就能让整台席位在人说话说到一半时消失。上报失败远没有那么
+       * 严重：它本来就有重试队列。
+       */
+      void isTask(sessionId)
+        .then((task) => {
+          if (!task) void report(sessionId)
+        })
+        .catch((e: Error) => ctx.logger?.warn?.(`session index: 认不出 ${sessionId} 是不是子会话，这次不报：${e.message}`))
     }
     // turn/end 不再上报用量：那一份由 Gateway 代理侧记，见 OutboxItem 上的说明。
   })

@@ -16,6 +16,8 @@ export function apply(ctx: Context) {
   ctx.tools.register({
     name: 'now',
     risk: ['read'],
+    // 一句时间，跟归属没关系。
+    delegation: {},
     description: '返回当前日期与时间。需要知道“今天”“现在”时用它，不要凭猜测回答。',
     parameters: {
       type: 'object',
