@@ -53,14 +53,58 @@ export async function runWorkspaceFiles({ root, test, assert, log }) {
 
   await test('只读工具报出看到的文件，写只报产出', () => {
     // 没有这一条，界面就只能回去正则扫工具结果的文本猜路径——那正是这套设计要躲开的。
-    assert(r.refs.ls.includes('sub/note.md'), `ls → ${JSON.stringify(r.refs.ls)}`)
-    assert(r.refs.read.length === 1 && r.refs.read[0] === 'sub/note.md', `read → ${JSON.stringify(r.refs.read)}`)
-    assert(r.refs.grep.includes('sub/note.md'), `grep → ${JSON.stringify(r.refs.grep)}`)
-    assert(r.refs.find.includes('sub/note.md'), `find → ${JSON.stringify(r.refs.find)}`)
+    assert(r.refs.列文件.includes('sub/note.md'), `列文件 → ${JSON.stringify(r.refs.列文件)}`)
+    assert(r.refs.读.length === 1 && r.refs.读[0] === 'sub/note.md', `read_file → ${JSON.stringify(r.refs.读)}`)
+    assert(r.refs.搜内容.includes('sub/note.md'), `搜内容 → ${JSON.stringify(r.refs.搜内容)}`)
+    assert(r.refs.找文件.includes('sub/note.md'), `找文件 → ${JSON.stringify(r.refs.找文件)}`)
     // 目录不进 refs：那一屏点开的是预览，目录预览不了。
-    assert(!r.refs.ls.some((p) => p.endsWith('/deep')), `ls 把目录也报了：${JSON.stringify(r.refs.ls)}`)
-    assert(r.refs.写的是产出.includes('sub/new.txt'), `write → ${JSON.stringify(r.refs.写的是产出)}`)
-    assert(r.refs.写的不报refs, 'write 把产出又报了一遍 refs，界面会摆两次')
+    assert(!r.refs.列文件.some((p) => p.endsWith('/deep')), `目录也被报进 refs：${JSON.stringify(r.refs.列文件)}`)
+    assert(r.refs.写的是产出.includes('sub/new.txt'), `write_file → ${JSON.stringify(r.refs.写的是产出)}`)
+    assert(r.refs.写的不报refs, 'write_file 把产出又报了一遍 refs，界面会摆两次')
+  })
+
+  await test('隐藏项默认不列，点名才出来', () => {
+    // `ls` 一直是这个口径。工作区是员工的办公目录，.DS_Store 这类东西摆进结果里
+    // 只会把真正的文件挤下去。
+    assert(!r.refs.列文件.some((p) => p.includes('/.')), `隐藏项被列出来了：${JSON.stringify(r.refs.列文件)}`)
+    assert(r.refs.隐藏项要点名.includes('sub/.hidden'), `点名了也没列出来：${JSON.stringify(r.refs.隐藏项要点名)}`)
+  })
+
+  await test('搜索翻页：refs 只报真的摆出来了的那些文件', () => {
+    // 被 offset 整个翻过去的文件一行都没进正文，进了 refs 就是在正文底下摆一颗指向
+    // 「正文根本没提过的文件」的药丸——而 refs 存在的全部意义就是把正文里的文件名接上。
+    const bad = Object.entries(r.paging2).filter(([, v]) => v !== true).map(([k]) => k)
+    assert(!bad.length, `这几条不对：${bad.join('、')}（${JSON.stringify(r.paging2)}）`)
+  })
+
+  await test('read_file 分页：接着读的那个 offset 不许算错一位', () => {
+    // 大文件必然要分页，而分页的唯一出口是末尾那句话里的 offset。算错一位，模型要么
+    // 漏一行要么重复一行——两种都看不出来，它只会照着读下去。
+    assert(r.paging.首页最后一行 === '5|第 5 行', `limit 没生效：${r.paging.首页最后一行}`)
+    assert(r.paging.接着读的提示 === '…（还有 55 行，用 offset=6 接着读）', `提示不对：${r.paging.接着读的提示}`)
+    assert(r.paging.第二页第一行 === '6|第 6 行', `接着读接错了：${r.paging.第二页第一行}`)
+    assert(/超出文件长度/.test(r.paging.越界), `offset 越界没说清楚：${r.paging.越界}`)
+    // 压成一行的 JSON / 日志：那一行按字符截断，但行还在，后面的行照读。
+    assert(r.paging.超长单行不空, '超长单行读回来是空的')
+    assert(r.paging.超长单行被截断, '超长单行没截断，整份内容会冲掉上下文')
+    assert(r.paging.截断之后后面的行还在, '截断之后就不往下读了')
+  })
+
+  await test('file 工具集：行号格式、目录可见、旧名字有出路', () => {
+    // 行号格式是 patch 剥前缀的前提——它一变，模型从 read_file 里复制粘贴的 old_string
+    // 就再也剥不干净，而报出来的会是「没找到那段文本」。
+    assert(r.file.行号格式 === '1|# hi', `行号格式变了：${JSON.stringify(r.file.行号格式)}`)
+    assert(r.file.父目录自动建, 'write_file 没有自动创建父目录')
+    // `ls` 的那半个用途：这层底下有哪些目录。少了它，模型看不见空目录。
+    assert(r.file.目录看得见, 'search_files(target=files) 没有报出这一层的子目录')
+    assert(r.file.目录不是文件, '目录被当成结果条目列出来了，喂回 read_file 会失败')
+    assert(r.file.只列匹配的, 'glob 没起作用')
+    assert(r.file.按名字数 === 'sub/note.md: 1', `output_mode=count → ${r.file.按名字数}`)
+    assert(r.file.带上下文, 'context 没带出上下文行')
+    assert(r.file.目录不能读, 'read_file 读目录时没有指向 search_files')
+    // 历史里全是旧名字，模型会照着再调。失败文本里必须带着出路，否则它会原样重试到步数上限。
+    assert(/已经改名为 search_files/.test(r.file.旧名字有出路), `旧名字没给出路：${r.file.旧名字有出路}`)
+    assert(!/改名/.test(r.file.没注册的还是没注册), `不认识的工具被当成改名了：${r.file.没注册的还是没注册}`)
   })
 
   await test('路径逃不出工作区', () => {

@@ -6,7 +6,8 @@ import type { Context } from '@deepseek-ai/cordis'
  * 时间必须是工具而不是提示词里的一句话：进程可以跑上好几天，写进 system 的
  * 「今天是几号」当场就开始过期，而模型不会知道它拿到的是旧的。
  *
- * 干活的那套手（read / write / edit / ls / find / grep / bash）在 tools/workspace.ts。
+ * 干活的那套手：看文件改文件的四把（read_file / write_file / patch / search_files）在
+ * tools/file.ts，跑命令的那把（terminal）在 tools/terminal.ts。
  */
 export const name = 'satu-tools-builtin'
 export const inject = ['tools']

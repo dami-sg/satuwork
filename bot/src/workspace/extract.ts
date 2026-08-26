@@ -6,7 +6,7 @@ import { extname } from 'node:path'
  *
  * **在 read 的时候转，不在上传的时候转。** 一份 50 页的 PDF 转出来几万 token，上传即转
  * 等于每次对话都把它整个灌进上下文；而 `read` 本来就有 offset/limit，模型想读哪段读
- * 哪段。原文件也照旧留着，要用 bash 另做处理还有得用。
+ * 哪段。原文件也照旧留着，要用 terminal 另做处理还有得用。
  *
  * 三个库都是**动态 import**：它们加起来不小，而绝大多数会话一个文档都不会读。放在
  * 模块顶上会让每个 bot 进程的启动都为此付钱。
@@ -57,7 +57,7 @@ const MAX_SLIDES = 300
  * xlsx 再让 Bot read 一下，就能把这个席位的进程撑爆——而 MAX_PAGES / MAX_ROWS 是解析
  * 完才生效的，拦不住这一步。
  *
- * 超限不是「读不了」，只是「不给自动转」：原文件还在，模型仍可以用 bash 自己处理。
+ * 超限不是「读不了」，只是「不给自动转」：原文件还在，模型仍可以用 terminal 自己处理。
  */
 const MAX_DOC_BYTES = 25 * 1024 * 1024
 
@@ -92,7 +92,7 @@ export async function extractDocument(file: string, kind: DocKind): Promise<Extr
       text:
         `这个文件有 ${(info.size / 1024 / 1024).toFixed(1)} MB，超过了自动转文本的上限` +
         `（${MAX_DOC_BYTES / 1024 / 1024} MB），没有解析。\n` +
-        '文件本身还在，可以用 bash 里的命令行工具挑需要的部分出来。',
+        '文件本身还在，可以用 terminal 里的命令行工具挑需要的部分出来。',
       parts: 0,
       unit: '段',
       truncated: true,

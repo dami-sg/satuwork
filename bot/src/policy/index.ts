@@ -106,15 +106,16 @@ export class PolicyService extends Service {
    *
    * 三条判据，从严到宽：
    *
-   *  1. `bash` 单独看命令。它的 risk 是最坏情况的并集（写 + 毁 + 外联），照着并集
-   *     判的话每一条 `ls` 都要弹一张卡片——那不是收紧边界，那是让人学会闭眼点批准。
+   *  1. `terminal` 单独看命令。它的 risk 是最坏情况的并集（写 + 毁 + 外联），照着并集
+   *     判的话每一条 `git status` 都要弹一张卡片——那不是收紧边界，那是让人学会闭眼
+   *     点批准。
    *  2. 能不可逆地毁东西的，一律要。
-   *  3. **对外的写**要（发邮件、改远端记录、付款）。工作区里的 write / edit 不要：
-   *     那是 Bot 干活的常态，界面上那句「对外发送、改写数据或付款前先征求同意」
+   *  3. **对外的写**要（发邮件、改远端记录、付款）。工作区里的 write_file / patch
+   *     不要：那是 Bot 干活的常态，界面上那句「对外发送、改写数据或付款前先征求同意」
    *     说的也是对外那一侧。
    */
   needsApproval(call: ToolCall, risk: readonly string[]): string | null {
-    if (call.name === 'bash') {
+    if (call.name === 'terminal') {
       const hit = destructiveCommand(call.arguments)
       return hit ? `这条命令会不可逆地改动系统（${hit}）` : null
     }
@@ -127,7 +128,7 @@ export class PolicyService extends Service {
      */
     /**
      * 浏览器也单独看。`browser_click` 正好是 `external + write`，照下面那条判的结果是
-     * **每一次点击都弹一张卡片**——和 bash 那条是同一个道理，同一个后果。
+     * **每一次点击都弹一张卡片**——和 terminal 那条是同一个道理，同一个后果。
      */
     if (call.name.startsWith('browser_')) {
       return submitAction(call.name, call.arguments, this.actionContext(call))
@@ -402,7 +403,7 @@ export class PolicyService extends Service {
      * 单独跑。在这儿再判一次只会出现两份都得改的判据。
      */
     if (name.startsWith('browser_')) return { ok: true }
-    if (name === 'bash') {
+    if (name === 'terminal') {
       const hit = networkCommand(call.arguments)
       if (hit) return { ok: false, reason: `命令里的 ${hit} 会连到外部网络` }
       return { ok: true }
@@ -675,7 +676,7 @@ export function apply(ctx: Context) {
      * 事后补记。**挂 post-execute，不挂 pre-execute**：要看的是这次动作**已经**发出了
      * 什么请求，那在执行之前还不存在。
      *
-     * 只管浏览器：别的工具的写都在自己的协议里看得见（MCP 有工具名，bash 有命令行），
+     * 只管浏览器：别的工具的写都在自己的协议里看得见（MCP 有工具名，terminal 有命令行），
      * 只有网页上的一次点击是黑盒——点之前只知道按钮上印着什么，而按钮可以什么都不印。
      */
     ctx.on(
@@ -698,10 +699,10 @@ export function apply(ctx: Context) {
 /**
  * 这次调用会不会把参数**送出这台席位**。
  *
- * 和 `risk.includes('external')` 差在 `bash` 上：它那份 risk 是最坏情况的并集，照着
- * 判的话 `grep 13800138000 客户.txt` 也算外发——而那句命令从头到尾没离开工作区。
+ * 和 `risk.includes('external')` 差在 `terminal` 上：它那份 risk 是最坏情况的并集，
+ * 照着判的话 `grep 13800138000 客户.txt` 也算外发——而那句命令从头到尾没离开工作区。
  * 一次这样的误伤，用户学到的就是「把这个开关关掉」，比一开始就没有它更糟。
- * 所以 bash 看它到底联不联网。
+ * 所以 terminal 看它到底联不联网。
  */
 /** 取 navigate 的 url 参数。参数不是合法 JSON 时返回空——那次调用本来就会失败。 */
 function urlArgOf(raw: string): string {
@@ -718,7 +719,7 @@ function urlArgOf(raw: string): string {
 }
 
 function outboundOf(call: ToolCall, risk: readonly string[]): boolean {
-  if (call.name === 'bash') return Boolean(networkCommand(call.arguments))
+  if (call.name === 'terminal') return Boolean(networkCommand(call.arguments))
   return risk.includes('external')
 }
 

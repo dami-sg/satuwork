@@ -581,7 +581,7 @@ export function apply(ctx: Context, _config: Config = {}) {
    * **不用 multipart**：这条路只传一个文件，multipart 要么拉个解析依赖，要么自己写一个
    * 状态机去切 boundary——都是为了一个这里根本用不上的「多部分」语义付钱。
    *
-   * 文件落进工作区（`uploads/<sessionId>/`），返回相对路径。之后模型用 read/bash 读它，
+   * 文件落进工作区（`uploads/<sessionId>/`），返回相对路径。之后模型用 read_file 读它，
    * 浏览器用下面那条 GET 预览它——**同一份字节，没有第二处副本**。
    */
   ctx.server.post('/api/sessions/:id/files', async (req, res) => {

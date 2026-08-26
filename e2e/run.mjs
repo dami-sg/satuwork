@@ -28,6 +28,8 @@ import { runSessionStore } from './session-store.mjs'
 import { runLlmIdle } from './llm-idle.mjs'
 import { runReplaySlice } from './replay-slice.mjs'
 import { runWorkspaceFiles } from './workspace-files.mjs'
+import { runPatch } from './patch.mjs'
+import { runProcess } from './process.mjs'
 import { runDocExtract } from './doc-extract.mjs'
 import { runWebBot } from './web-bot.mjs'
 import { runVision } from './vision.mjs'
@@ -3189,6 +3191,8 @@ async function main() {
     await runLlmIdle({ root, test, assert, log })
     await runReplaySlice({ root, test, assert, log })
     await runWorkspaceFiles({ root, test, assert, log })
+    await runPatch({ root, test, assert, log })
+    await runProcess({ root, test, assert, log })
     await runDocExtract({ root, test, assert, log })
     await runWebBot({ root, test, assert, log })
     await runVision({ root, test, assert, log })

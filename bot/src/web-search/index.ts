@@ -31,7 +31,7 @@ export const CHUNK_CONCURRENCY = 4
 export const CHUNK_SUMMARY_MAX = 1_200
 /** 拒绝的红线。 */
 export const HARD_MAX = 1_500_000
-/** 一次调用多个 URL 时整体进上下文的量。五页各 6000 已经是 bash 输出上限的量级了。 */
+/** 一次调用多个 URL 时整体进上下文的量。五页各 6000 已经是 terminal 输出上限的量级了。 */
 export const TOTAL_MAX = 12_000
 
 const SUMMARY_TIMEOUT_MS = 120_000

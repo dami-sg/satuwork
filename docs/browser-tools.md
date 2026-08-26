@@ -401,13 +401,13 @@ CDP 口（`9222+N`）和管家的口，[guard/index.ts:14](../bot/src/guard/inde
 > **它不放开第 1 层**——打开了它，`http://127.0.0.1/` 照样被拦，松掉的只有「域名解析到
 > 内网」这一种。
 
-> 有人会说 Bot 已经有不受沙箱约束的 `bash`，出网这件事本来就拦不住。对，但 **bash 手里
+> 有人会说 Bot 已经有不受沙箱约束的 `terminal`，出网这件事本来就拦不住。对，但 **它手里
 > 没有员工的身份**。浏览器有。这是本文所有边界设计的出发点。
 
 ### 5.3 `pii`：照扫，不开口子
 
 `outboundOf()` 现在按 `risk.includes('external')` 判，`browser_navigate` / `click` /
-`type` 都会被扫参数。**这是对的，不给它开 bash 那样的口子**：往网页表单里填身份证号、
+`type` 都会被扫参数。**这是对的，不给它开 terminal 那样的口子**：往网页表单里填身份证号、
 把手机号塞进 URL 查询串，正是这条边界要拦的行为本身。
 
 代价是「帮我查一下 138xxxxxxxx 是谁」这类任务会被挡下——挡得对，那件事该由人自己做，
@@ -417,7 +417,7 @@ CDP 口（`9222+N`）和管家的口，[guard/index.ts:14](../bot/src/guard/inde
 
 `needsApproval()` 现在的规则是 `external && write` → 要确认。`browser_click` 正好是这个
 组合，照着判的结果是**每一次点击都弹一张卡片**——那不是收紧边界，那是让人学会闭眼点
-批准。这正是那段代码里给 `bash` 单开一条分支时写过的道理，`browser_*` 要照同一个办法办：
+批准。这正是那段代码里给 `terminal` 单开一条分支时写过的道理，`browser_*` 要照同一个办法办：
 
 `bot/src/policy/browser.ts` 的 `submitAction()` 和 `shell.ts` 的 `destructiveCommand` /
 `networkCommand` 并列，判据四条：
@@ -500,7 +500,7 @@ BotTemplate.browser = { on: boolean, sites: string[] }
 ## 7. 停止按钮必须真的能停
 
 [tools/index.ts](../bot/src/tools/index.ts) 顶上那段说得很清楚：跑得久的工具必须自己
-响应 `signal`。浏览器比 `bash` 更需要这条，也更难做对——bash 被掐掉最多是半截输出，
+响应 `signal`。浏览器比 `terminal` 更需要这条，也更难做对——命令被掐掉最多是半截输出，
 浏览器被掐掉可能停在「订单提交了一半」。
 
 - 每一把工具就是一次 CDP 往返，`signal` 一响立刻放弃等待。
