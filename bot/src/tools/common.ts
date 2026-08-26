@@ -1,3 +1,6 @@
+import type { Dirent } from 'node:fs'
+import { readdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { WorkspaceError } from '../workspace/index.ts'
 import type { ToolCall, ToolRisk, WorkspaceFile } from './index.ts'
@@ -60,4 +63,64 @@ export function registerTool(
       }
     },
   })
+}
+
+/**
+ * 遍历时跳过的目录。命中一次 node_modules 就没有下文了。
+ *
+ * **两个工具集共用一份。** `search_files` 靠它别把 node_modules 翻穿，`terminal` 靠它
+ * 别把一次 `pnpm install` 装出来的两万个文件当成「Bot 的产出」——两边跳的是同一批
+ * 东西，各写一份迟早会有一边漏。
+ */
+export const SKIPPED_DIRS = new Set([
+  'node_modules', '.git', '.svn', '.hg', 'dist', 'build', 'out',
+  '.next', '.nuxt', '.cache', '.turbo', 'coverage',
+  '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache', 'target',
+  // 命令输出的落盘目录（见 tools/terminal.ts）。那是过程痕迹，不是员工的文件。
+  '.satuwork',
+])
+
+/**
+ * 遍历预算。
+ *
+ * `truncated` 是**「真的还有东西没看」**，不是「left 归零」。两者差一个文件：`walkFiles`
+ * 是「要 yield 之前先减」，所以正好走满预算的那一趟会以 `left === 0` 干干净净地结束，
+ * 而调用方按 `left <= 0` 判截断就会把一份完整的结果当成残缺的丢掉。这个标记只在**还
+ * 有下一个条目要看却看不了**的时候才置。
+ */
+export interface WalkBudget {
+  left: number
+  truncated?: boolean
+}
+
+/**
+ * 递归列出普通文件。符号链接不跟——跟了会绕圈，也会绕出工作区。
+ *
+ * `hidden` 为假时以 `.` 开头的条目一律跳过。工作区是员工的办公目录，`.DS_Store`、
+ * `.env` 这类东西摆进结果里只会把真正的文件挤下去；要它们就把模式写成 `.env` 这样
+ * **以点开头**，那时这个开关自己会打开。
+ */
+export async function* walkFiles(dir: string, budget: WalkBudget, hidden: boolean): AsyncGenerator<string> {
+  let entries: Dirent[]
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (budget.left <= 0) {
+      budget.truncated = true
+      return
+    }
+    if (!hidden && entry.name.startsWith('.')) continue
+    const full = join(dir, entry.name)
+    if (entry.isSymbolicLink()) continue
+    if (entry.isDirectory()) {
+      if (SKIPPED_DIRS.has(entry.name)) continue
+      yield* walkFiles(full, budget, hidden)
+    } else if (entry.isFile()) {
+      budget.left -= 1
+      yield full
+    }
+  }
 }

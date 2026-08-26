@@ -97,6 +97,45 @@ out.foreground = {
   }
 }
 
+// ── 2.5 命令产出的文件要能被点开 ──────────────────────────────────────
+/**
+ * `write_file` 报得出自己写了哪个文件，`terminal` 只有一条 shell 命令——而模型照样
+ * 会用它造东西（跑脚本生成报表、curl 下附件）。产出不进 `files` 的话，界面上没有
+ * 药丸、点不开预览，用户只能听模型说一句「文件在工作区里」。
+ */
+{
+  const one = await call('terminal', { command: 'mkdir -p 产出 && printf "<h1>hi</h1>" > 产出/report.html' })
+  // 一条只读命令不该报出任何产出——扫描认的是 mtime，不是「这条命令跑过」。
+  const none = await call('terminal', { command: 'echo 只是看看' })
+  /**
+   * **别的写入方的地盘要跳掉。** `uploads/` 是用户从对话里传上来的附件，界面上早就挂
+   * 在那条用户消息底下了；一条跑二十秒的命令期间用户传了张发票，那张发票不该挂到这条
+   * 命令头上——还会跟着 details.files 进会话日志，重放一次错一次。
+   */
+  const foreign = await call('terminal', {
+    command: 'mkdir -p uploads/s-1 web browser && printf x > uploads/s-1/发票.pdf && printf x > web/抓回来的.md && printf y > 真产出.txt',
+  })
+  // 摆得下就一个不少。以前砍到五个，而且一声不吭——人会以为一共就那五个。
+  const many = await call('terminal', { command: 'mkdir -p 一批 && for i in $(seq 1 10); do echo x > 一批/g$i.txt; done' })
+  // 构建 / 安装 / 切分支那种批量改动：一个都不报，但要在文本里**明说**。
+  const bulk = await call('terminal', { command: 'mkdir -p 批量 && for i in $(seq 1 40); do echo x > 批量/f$i.txt; done' })
+  // 退出码非零、甚至被中止的命令同样可能已经写下半个文件，那时候人最想看的就是它。
+  const failed = await call('terminal', { command: 'printf half > 半截.txt; exit 3' })
+  out.produced = {
+    报了产出: (one.files ?? []).map((f) => f.path),
+    名字是文件名: (one.files ?? [])[0]?.name,
+    只读命令不报: !none.files,
+    别人的地盘不算我的: (foreign.files ?? []).map((f) => f.path),
+    十个全报: (many.files ?? []).length,
+    批量改动不报: !bulk.files,
+    批量改动说了一声: bulk.text.includes('个以上的文件'),
+    不该无缘无故说那句: !one.text.includes('个以上的文件'),
+    失败的命令也报: (failed.files ?? []).map((f) => f.path),
+    // 落盘的命令输出是过程痕迹（.satuwork 在 SKIPPED_DIRS 里），不该混进产出。
+    过程痕迹不报: !(one.files ?? []).some((f) => f.path.startsWith('.satuwork')),
+  }
+}
+
 // ── 3. 后台：起、poll、wait、kill ─────────────────────────────────────
 const t0bg = Date.now()
 const started = await call('terminal', { command: 'echo one; sleep 0.4; echo two; sleep 30', background: true })

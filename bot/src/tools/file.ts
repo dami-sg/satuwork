@@ -4,7 +4,7 @@ import { basename, dirname, join, relative, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { humanSize, looksBinary } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
-import { clip, fail, registerTool, type ToolOut } from './common.ts'
+import { clip, fail, registerTool, SKIPPED_DIRS, walkFiles, type ToolOut } from './common.ts'
 import { fuzzyReplace } from './fuzzy.ts'
 import type { WorkspaceFile } from './index.ts'
 
@@ -47,15 +47,6 @@ const MAX_SUBDIRS = 40
  */
 const MAX_REF_FILES = 60
 
-/** 遍历时跳过的目录。命中一次 node_modules 就没有下文了。 */
-const SKIPPED_DIRS = new Set([
-  'node_modules', '.git', '.svn', '.hg', 'dist', 'build', 'out',
-  '.next', '.nuxt', '.cache', '.turbo', 'coverage',
-  '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache', 'target',
-  // 命令输出的落盘目录（见 tools/terminal.ts）。那是过程痕迹，不是员工的文件。
-  '.satuwork',
-])
-
 /**
  * glob → 正则。支持 `**`（跨目录）、`*`、`?`。
  * 自带 glob 而不是拉个依赖：这三个元字符覆盖了模型实际会写的绝大多数模式。
@@ -93,35 +84,6 @@ function globMatcher(glob: string): (rel: string) => boolean {
   const re = globToRegExp(glob)
   const bare = !glob.includes('/')
   return (rel) => re.test(rel) || (bare && re.test(rel.split('/').pop() ?? rel))
-}
-
-/**
- * 递归列出普通文件。符号链接不跟——跟了会绕圈，也会绕出工作区。
- *
- * `hidden` 为假时以 `.` 开头的条目一律跳过。工作区是员工的办公目录，`.DS_Store`、
- * `.env` 这类东西摆进结果里只会把真正的文件挤下去；要它们就把模式写成 `.env` 这样
- * **以点开头**，那时这个开关自己会打开。
- */
-async function* walkFiles(dir: string, budget: { left: number }, hidden: boolean): AsyncGenerator<string> {
-  let entries: Dirent[]
-  try {
-    entries = await readdir(dir, { withFileTypes: true })
-  } catch {
-    return
-  }
-  for (const entry of entries) {
-    if (budget.left <= 0) return
-    if (!hidden && entry.name.startsWith('.')) continue
-    const full = join(dir, entry.name)
-    if (entry.isSymbolicLink()) continue
-    if (entry.isDirectory()) {
-      if (SKIPPED_DIRS.has(entry.name)) continue
-      yield* walkFiles(full, budget, hidden)
-    } else if (entry.isFile()) {
-      budget.left -= 1
-      yield full
-    }
-  }
 }
 
 /**

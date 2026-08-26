@@ -1,14 +1,14 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createWriteStream, type WriteStream } from 'node:fs'
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { StringDecoder } from 'node:string_decoder'
 import { humanSize, safeName } from '../workspace/index.ts'
 import { satuworkHome } from '../home.ts'
-import { fail, registerTool } from './common.ts'
-import type { ToolCall } from './index.ts'
+import { fail, registerTool, SKIPPED_DIRS, walkFiles, type WalkBudget } from './common.ts'
+import type { ToolCall, WorkspaceFile } from './index.ts'
 
 /**
  * terminal 工具集：`terminal` 跑命令，`process` 管它起在后台的那些。
@@ -48,6 +48,145 @@ const MAX_TIMEOUT = 600
 const OUT_DIR = '.satuwork/out'
 /** 落盘的输出留几天。不清的话，一年之后工作区里躺着几千个没人看的 .log。 */
 const OUT_TTL_MS = 3 * 24 * 3600_000
+
+/* ── 命令产出了什么 ────────────────────────────────────────────────────
+   `write_file` / `patch` 报得出自己写了哪个文件，`terminal` 报不出——它拿到的是一条
+   shell 命令，写没写文件只有文件系统知道。而模型**照样会用它造东西**：跑一个生成
+   报表的脚本、`curl -O` 下一个附件、`ffmpeg` 转一段音频。这些产出以前一个都不进
+   `ToolResult.files`，于是界面上没有药丸、点不开预览，模型只能在正文里写一句
+   「文件在工作区根目录，双击打开」——而用户手上根本没有那台机器的文件管理器。
+
+   所以命令跑完扫一遍工作区，按 mtime 认出这一条命令期间落地的文件。**扫描是唯一
+   不靠猜的一环**：解析命令行去猜重定向目标（`> a.html`、`-o b.pdf`）措辞一改就散架，
+   那正是 `files` 那个字段当初存在的理由。 */
+
+/**
+ * 别的工具的地盘。**在产出扫描里跳掉，和 SKIPPED_DIRS 一起。**
+ *
+ * 这三层目录里的文件都有自己的报出口：`uploads/` 是用户从对话里传上来的附件（界面上
+ * 早就挂在那条用户消息底下了），`web/` 是 `web_extract(save=true)` 落的原文，`browser/`
+ * 是浏览器工具的下载与过程截图——三把工具各自把它们报进了自己那次调用的 `files`。
+ *
+ * 不跳掉的话，一条 `sleep 20` 期间用户传了张发票，那张发票就会挂到 `sleep` 那颗药丸
+ * 底下，而且跟着 `details.files` 进会话日志，重放一次错一次。
+ *
+ * **只在工作区第一层跳。** 底下某个项目里叫 `web` 的目录是员工自己的东西，照扫。
+ */
+const FOREIGN_DIRS = new Set(['uploads', 'web', 'browser'])
+
+/**
+ * 改动数超过这个就一个都不报，并且**明说**。
+ *
+ * `pnpm install`、`git checkout`、一次构建，动辄改上百个文件——那是**过程**，不是
+ * 「Bot 产出了什么」，逐个摆出来会把真正的产出埋掉。但闷声不报也不行：一条真的生成了
+ * 三十份文件的命令，界面上一颗药丸都没有，和「这次什么都没产出」长得一模一样。所以
+ * 超限时往结果文本里加一句，让模型知道自己该开口说。
+ */
+const BULK_CHANGES = 24
+/**
+ * 扫描的遍历预算。
+ *
+ * 比 `search_files` 的两万小得多：那一把是模型点名要找东西，这一条是每次跑命令都白扫
+ * 一遍。`SKIPPED_DIRS` 已经把 node_modules / .git / dist 挡在外面，剩下的量级是员工
+ * 真正的文件，几千个到顶。
+ */
+const OUT_WALK_BUDGET = 4000
+/**
+ * 扫描的时间闸。
+ *
+ * 预算按**文件数**卡，可真正会卡住的是慢盘和网络挂载：四千次 stat 在本地盘上是几十
+ * 毫秒，在一个 NFS 上能是几秒——而这几秒加在**每一条命令**后面，包括那些什么都没写的。
+ * 到点就收手，宁可这一次不报。
+ */
+const OUT_SCAN_MS = 400
+/** stat 一批发多少个。串行发四千次是四千个来回；成批交给 libuv 的线程池快一个量级。 */
+const OUT_STAT_BATCH = 64
+
+/** 产出扫描的结果。`partial` 是「这一趟没看全」，`bulk` 是「改动太多，一个都不报」。 */
+interface Produced {
+  files: string[]
+  bulk: boolean
+  partial: boolean
+}
+
+/**
+ * 这条命令跑的这段时间里，工作区里哪些文件是新的或者被改过的。
+ *
+ * 判据是 mtime ≥ 命令起跑的时刻。起点在 `spawn` 之前取，而 `mtimeMs` 是文件系统按同
+ * 一个墙上时钟写的，所以命令写下的文件一定落在起点之后。
+ *
+ * **这不是一条能做到精确的判据，做不到的那部分要说清楚。** 文件系统只回答「这个文件
+ * 什么时候被改的」，不回答「谁改的」。同一个工作区在这段时间里还可能有别的写入方：
+ * 上一条 `background=true` 起的进程、同一个员工另一个席位上的 Bot（`/home/{用户}/work`
+ * 是共用的）。`FOREIGN_DIRS` 把**成系统的**那几个写入方（用户上传、网页抓取、浏览器
+ * 下载）整个排除掉了，剩下的两种在这一层拿不到任何信号——真要分得清，得是 fanotify /
+ * ptrace 那个层面的东西，不是一次 stat 能给的。
+ *
+ * **任何一步出错都当没扫到**：少一排药丸是遗憾，让一次正常的命令因为扫描失败而报错不是。
+ */
+async function producedSince(root: string, since: number): Promise<Produced> {
+  const none: Produced = { files: [], bulk: false, partial: false }
+  const budget: WalkBudget = { left: OUT_WALK_BUDGET }
+  const deadline = Date.now() + OUT_SCAN_MS
+  const cands: string[] = []
+  try {
+    /**
+     * 第一层自己走，因为 `FOREIGN_DIRS` 只在这一层生效——而且要在**下去之前**拦掉：
+     * `uploads/` 底下可能有几百个附件，扫完再扔等于白扫。
+     */
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      // 这一层也要认预算和表。**`walkFiles` 只管它自己那棵子树**——根底下直接躺着五千
+      // 个文件时，不在这儿拦就一个都拦不住，四千那道闸等于没写。
+      if (budget.left <= 0 || Date.now() > deadline) {
+        budget.truncated = true
+        break
+      }
+      if (entry.name.startsWith('.') || entry.isSymbolicLink()) continue
+      const full = join(root, entry.name)
+      if (entry.isDirectory()) {
+        if (SKIPPED_DIRS.has(entry.name) || FOREIGN_DIRS.has(entry.name)) continue
+        for await (const file of walkFiles(full, budget, false)) cands.push(file)
+      } else if (entry.isFile()) {
+        budget.left -= 1
+        cands.push(full)
+      }
+    }
+  } catch {
+    return none
+  }
+
+  const hits: { path: string; at: number }[] = []
+  // 成批 stat。串行 await 一次一个来回，四千个文件在慢盘上就是实打实的几秒。
+  for (let i = 0; i < cands.length; i += OUT_STAT_BATCH) {
+    const chunk = cands.slice(i, i + OUT_STAT_BATCH)
+    const infos = await Promise.all(chunk.map((f) => stat(f).catch(() => null)))
+    for (let j = 0; j < chunk.length; j++) {
+      const info = infos[j]
+      if (!info || info.mtimeMs < since) continue
+      hits.push({ path: chunk[j], at: info.mtimeMs })
+    }
+    // 一批一批地看表：**批内不看**，否则一次 stat 的抖动就能把整趟扫描判掉。
+    if (hits.length > BULK_CHANGES) return { files: [], bulk: true, partial: false }
+    if (Date.now() > deadline) return { files: [], bulk: false, partial: true }
+  }
+  /**
+   * 走不完就不报。
+   *
+   * 判据是 `budget.truncated`（还有下一个条目要看却看不了），不是 `left <= 0`——正好
+   * 走满预算的那一趟是**完整**的，按后者判会把一份好结果丢掉（见 WalkBudget 那段）。
+   */
+  if (budget.truncated) return { files: [], bulk: false, partial: true }
+  hits.sort((a, b) => b.at - a.at)
+  return { files: hits.map((h) => h.path), bulk: false, partial: false }
+}
+
+/**
+ * 「工作区太大，产出扫不动」只说一次。
+ *
+ * 说一次是为了让运维看得见——这个功能在这台席位上是**关着**的，而它关得悄无声息，
+ * 界面上和「这条命令确实没产出」一模一样。每条命令都喊一遍就成了刷屏，谁也不会读。
+ */
+let warnedPartial = false
 
 // ── 后台进程 ────────────────────────────────────────────────────────────
 
@@ -550,8 +689,35 @@ export function apply(ctx: Context, config: Config = {}) {
       }
 
       const seconds = Math.max(1, Math.min(Math.floor(timeout || defaultTimeout), MAX_TIMEOUT))
+      // 产出扫描的起点。**要在 spawn 之前取**：命令写下的文件 mtime 一定晚于这一刻。
+      const startedAt = Date.now()
       const r = await runForeground(command, dir, seconds * 1000, call?.signal)
       if (r.error) fail(`无法执行：${r.error}`)
+
+      /**
+       * 这条命令落地了什么。**超时、被中止、退出码非零的也扫**——它们同样可能已经写下
+       * 半个文件，而「跑到一半留下了什么」正是那几种情况下人最想看的东西。
+       */
+      const made = await producedSince(resolveIn(), startedAt)
+      const files: WorkspaceFile[] = made.files.map((full) => ({ path: show(full), name: basename(full) }))
+      if (made.partial && !warnedPartial) {
+        warnedPartial = true
+        ctx.logger?.warn?.(
+          `terminal: 工作区文件太多（超过 ${OUT_WALK_BUDGET} 个或者扫描超过 ${OUT_SCAN_MS}ms），` +
+            '命令产出的文件不再自动摆到界面上。这条只说一次。',
+        )
+      }
+      /**
+       * 改动太多的那次要**明说**。
+       *
+       * 一条真的生成了三十份文件的命令，界面上一颗药丸都没有，和「这次什么都没产出」
+       * 在屏幕上长得一模一样。模型是这条链路上唯一还能开口的一环，所以话说给它听。
+       * 走不完（`partial`）反过来**不说**：那是席位的状况，不是这条命令的结果，而它会
+       * 出现在**每一条**命令后面——那就成了背景噪音。
+       */
+      const bulk = made.bulk ? `\n（这条命令改动了 ${BULK_CHANGES} 个以上的文件，没有逐个列出。要给用户看具体某个，自己点名。）` : ''
+      // 空数组不带出去：`!r.files` 是「这次没产出」的判据，给个 [] 会让它变成真值。
+      const withFiles = (text: string) => (files.length ? { text: text + bulk, files } : text + bulk)
 
       const body = r.out.trim() || '（没有输出）'
       let cut = ''
@@ -569,13 +735,13 @@ export function apply(ctx: Context, config: Config = {}) {
       }
       // 退出码非零是**业务**结果，不是管道故障：模型要看到它并自己决定下一步。
       // 被中止要单独说：让模型知道这条命令没跑完，别拿半截输出当结论。
-      if (r.aborted) return `命令已被中止（用户点了停止）。已经产生的输出：\n${body}${cut}`
+      if (r.aborted) return withFiles(`命令已被中止（用户点了停止）。已经产生的输出：\n${body}${cut}`)
       if (r.timedOut) {
-        return `命令超时（${seconds} 秒）已被终止。跑得久的用 background=true。\n${body}${cut}`
+        return withFiles(`命令超时（${seconds} 秒）已被终止。跑得久的用 background=true。\n${body}${cut}`)
       }
-      if (r.code === 0) return `${body}${cut}`
+      if (r.code === 0) return withFiles(`${body}${cut}`)
       const how = r.code === null ? `被信号 ${r.signal} 终止` : `退出码 ${r.code}`
-      return `命令${how}。\n${body}${cut}`
+      return withFiles(`命令${how}。\n${body}${cut}`)
     },
   )
 
