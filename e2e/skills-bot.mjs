@@ -124,6 +124,32 @@ export async function runSkillsBot({ root, test, assert, log }) {
     assert(Array.isArray(r.createSent.pii), `写入要带 PII 扫描结果：${JSON.stringify(r.createSent)}`)
   })
 
+  await test('换版之后：上一版写下的缓存行不许把提示词和工具搞崩', () => {
+    /**
+     * 上一版的行没有 displayName / description / mode 这几个键，而首次目录同步之前
+     * 提示词和三把工具就已经在读它们了。
+     */
+    assert(!r.legacyRow.split.hasUndefined, `小标题里出现了 undefined：${JSON.stringify(r.legacyRow.split)}`)
+    // mode 缺省要落「常驻」：那些行本来就是全文进提示词的，换个默认值就是悄悄改行为。
+    assert(r.legacyRow.split.resident.includes('老口径'), `缺 mode 该落常驻：${JSON.stringify(r.legacyRow.split)}`)
+    assert(r.legacyRow.list.includes('老口径'), `skills_list 不该在老行上抛：${r.legacyRow.list}`)
+    assert(r.legacyRow.view.includes('一律用中文回复'), `skill_view 读不到老行：${r.legacyRow.view}`)
+  })
+
+  await test('早发车的那份目录不许剪掉刚写下的那条', () => {
+    /**
+     * 轮询每分钟一次、`pull()` 又有单飞去重：模型在那次请求**发出之后**写下一条 Skill，
+     * 那份不含它的响应落地时不能把它当成「已经被删掉的」剪掉——否则工具刚说完「下一轮
+     * 就在索引里」，下一轮却没有，模型会转头告诉用户没保存上。
+     */
+    assert(r.race.includes('id-fresh'), `刚写下的那条被早发车的目录剪掉了：${JSON.stringify(r.race)}`)
+    /**
+     * 反过来也要成立：**发车晚于**那次写入的目录里没有它，就是真的没了（管理员删的、
+     * 或者晋升搬走了），那一条必须剪掉——否则模型照着索引去读一份已经不存在的东西。
+     */
+    assert(!r.raceAfter.includes('id-stale'), `晚发车的目录里没有的，就该剪掉：${JSON.stringify(r.raceAfter)}`)
+  })
+
   await test('撞名照 Gateway 的原话说；公司目录里的改不动删不掉', () => {
     assert(r.clash.includes('用 update'), `撞名要指路：${r.clash}`)
     assert(r.updateCompany.includes('管理员'), `改公司目录要指路给管理员：${r.updateCompany}`)

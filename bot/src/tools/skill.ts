@@ -1,7 +1,7 @@
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { CachedSkill } from '../catalog/index.ts'
+import { cachedSkills, type CachedSkill } from '../catalog/index.ts'
 import { satuworkHome } from '../home.ts'
 import { gatewayToken, gatewayUrl } from '../llm/gateway.ts'
 import { scanPii } from '../policy/pii.ts'
@@ -94,8 +94,9 @@ async function callGateway<T>(method: string, path: string, body?: unknown): Pro
 }
 
 export function apply(ctx: Context) {
-  const col = () => ctx.storage.collection<CachedSkill>('skills')
-  const all = () => col().list().map((r) => r.value).filter((s) => s.enabled !== false)
+  // 换版之后缓存里可能是上一版写下的行（缺 displayName / description 这些键），
+  // 所以读缓存一律过 catalog 那份归一化，别在这儿直接摸字段。
+  const all = () => cachedSkills(ctx)
 
   /**
    * 名字 → 那条 Skill。

@@ -24,6 +24,7 @@ process.on('exit', () => {
 
 const { Context } = await import('@deepseek-ai/cordis')
 const { skillSplit } = await import('./src/agent/index.ts')
+const { cachedSkills } = await import('./src/catalog/index.ts')
 const { StorageService } = await import('./src/storage/index.ts')
 const { ToolService } = await import('./src/tools/index.ts')
 
@@ -212,6 +213,74 @@ out.updateCompany = (await call('skill_manage', { action: 'update', skill: '退�
 out.removeCompany = (await call('skill_manage', { action: 'remove', skill: '退款审核' })).text
 out.removeMine = (await call('skill_manage', { action: 'remove', skill: '周报工单导出' })).text
 out.deleted = seen.deleted
+
+
+// ── 3. 换版之后：缓存里是上一版写下的行 ────────────────────────────────
+
+/**
+ * 上一版的 `CachedSkill` 没有 displayName / description / mode / hasFiles / origin。
+ * 首次目录同步之前，提示词和三把工具就已经在读它们了——不补默认值的话，系统提示词里
+ * 会出现「## Skill: undefined」，`skills_list` 会在 `description.toLowerCase()` 上抛。
+ */
+col.put('id-old', { id: 'id-old', name: '老口径', body: '一律用中文回复。', tags: [], source: '手动编写', enabled: true, createdAt: 1, updatedAt: 1 })
+out.legacyRow = {
+  // 缺 mode 要落「常驻」：那些行本来就是全文进提示词的，换个默认值就是悄悄改行为。
+  split: (() => {
+    const sp = skillSplit(cachedSkills(ctx))
+    return { resident: sp.resident.map((x) => x.displayName), hasUndefined: sp.resident.some((x) => !x.displayName) }
+  })(),
+  list: (await call('skills_list', {})).text,
+  view: (await call('skill_view', { skill: '老口径' })).text,
+}
+col.delete('id-old')
+
+// ── 4. 竞态：早发车的那份目录不许剪掉刚写下的那条 ──────────────────────
+
+/**
+ * 轮询每分钟发一次 `/runtime/catalog`，而 `pull()` 有单飞去重。模型在那次请求**发出
+ * 之后**写下一条 Skill，等那份（不含新 Skill 的）响应落地时，剪枝会把它当成「目录里
+ * 已经没有的」删掉——而工具刚跟模型说完「从下一轮开始出现在你的索引里」。
+ */
+{
+  const { CatalogService } = await import('./src/catalog/index.ts')
+  let release = () => {}
+  const held = new Promise((r) => (release = r))
+  const cat = createServer(async (req, res) => {
+    if (req.url.startsWith('/runtime/catalog')) {
+      await held // 这一份的「发车时刻」在下面那次 noteSkill 之前
+      res.writeHead(200, { 'content-type': 'application/json' })
+      // 目录里只有公司那条，没有 Bot 刚写下的那条。
+      return res.end(JSON.stringify({ stamp: 's1', bots: [], skills: [{ id: 'id-company', name: '公司的' }], servers: [] }))
+    }
+    res.writeHead(404)
+    res.end('{}')
+  })
+  await new Promise((r) => cat.listen(0, '127.0.0.1', r))
+  const prevUrl = process.env.GATEWAY_URL
+  process.env.GATEWAY_URL = `http://127.0.0.1:${cat.address().port}`
+
+  const ctx2 = new Context()
+  await ctx2.plugin(StorageService, { path: join(home, 'race.db') })
+  ctx2.provide('roster', { list: () => [], get: () => undefined, pin: () => ({}), pruneExcept: () => {} })
+  await ctx2.plugin(ToolService)
+  await ctx2.plugin(CatalogService)
+  for (let i = 0; i < 100 && !ctx2.catalog; i++) await new Promise((r) => setTimeout(r, 20))
+
+  const pull = ctx2.catalog.pull() // 发车
+  await new Promise((r) => setTimeout(r, 30))
+  ctx2.catalog.noteSkill({ id: 'id-fresh', name: '刚记下的', mode: '按需', description: '刚写的' })
+  release()
+  await pull.catch(() => {})
+  out.race = ctx2.storage.collection('skills').list().map((r) => r.value.id).sort()
+
+  // 而**发车晚于**那次写入的下一份目录里没有它，就是真的被删了——那一条要剪掉。
+  ctx2.catalog.noteSkill({ id: 'id-stale', name: '早就删了的', mode: '按需' })
+  await new Promise((r) => setTimeout(r, 5))
+  await ctx2.catalog.pull().catch(() => {})
+  out.raceAfter = ctx2.storage.collection('skills').list().map((r) => r.value.id).sort()
+  cat.close()
+  if (prevUrl) process.env.GATEWAY_URL = prevUrl
+}
 
 server.close()
 console.log(`__RESULT__${JSON.stringify(out)}`)

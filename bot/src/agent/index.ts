@@ -12,7 +12,7 @@ import type {
 } from '../session/types.ts'
 import type { ReassignedItem, WorkspaceFile } from '../tools/index.ts'
 import { browserOf, type BotRecord } from '../registry/index.ts'
-import type { CachedSkill } from '../catalog/index.ts'
+import { cachedSkill, cachedSkills, type CachedSkill } from '../catalog/index.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -1841,14 +1841,15 @@ ${composed.skills}` : base, base, skills: composed.skills }
    * 它是纯函数（读同一份缓存、同一份环境变量），算两次的结果必然相同。
    */
   private skillsOf(bot: { skills?: string[] } | undefined): SkillSplit {
-    const col = this.ctx.storage.collection<CachedSkill>('skills')
     const ids = bot?.skills
+    /**
+     * **读缓存一律过 `cachedSkillOf`**：换版之后库里躺着的是上一版写下的行，那时还没有
+     * displayName / description / mode 这几个键，而下面这段和三把工具都在直接用它们。
+     */
     const picked =
       ids === undefined
-        ? col.list().map((r) => r.value).filter((s) => s.enabled !== false)
-        : ids
-            .map((id) => col.get(id))
-            .filter((s): s is CachedSkill => !!s && s.enabled !== false)
+        ? cachedSkills(this.ctx)
+        : ids.map((id) => cachedSkill(this.ctx, id)).filter((s): s is CachedSkill => !!s)
     /**
      * `off` 是退路：全部按常驻算，一把 skill 工具都不进表，也就是这套东西上线之前
      * 的样子。退路不能在同一次改动里一起删掉（docs/skills.md §12）。

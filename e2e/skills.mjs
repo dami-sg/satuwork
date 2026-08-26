@@ -9,11 +9,12 @@
  * 条 Skill，那三十次往返验的是同一件事。
  */
 import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 
 const PLATFORM_TOK = 'e2e-platform-skills'
 
-export async function runSkills({ gwRoot, test, req, start, waitHttp, assert, log }) {
+export async function runSkills({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = '/tmp/satuwork-e2e-skills'
   const GW_PORT = 18993
   const base = `http://127.0.0.1:${GW_PORT}`
@@ -327,6 +328,28 @@ export async function runSkills({ gwRoot, test, req, start, waitHttp, assert, lo
       assert(byBot, `审计里要分得出「Bot 自己写的」：${JSON.stringify(rows.slice(0, 4))}`)
       assert(byBot.detail.botId === botId, `要记下是哪颗 Bot：${JSON.stringify(byBot.detail)}`)
       assert(rows.some((x) => x.action === 'catalog.promote'), '晋升要落审计')
+    })
+
+    await test('界面：点开一条 ZIP Skill，包里的文件清单要真的列出来', async () => {
+      /**
+       * **清单只有单条详情才带**（列表那一屏几十条，每条再挂两百行路径就是几百 KB）。
+       * 弹窗要自己去补那一次请求——不补的话这一格永远是空的，而管理员点开它正是为了
+       * 核对包里有什么（docs/skills.md §13 第 3 条）。
+       */
+      const { loadApp, el } = await import('./ui-dom.mjs')
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base, token: adminTok })
+      await ui.boot()
+      ui.state.path = '/skills'
+      // 这一屏的数据平时由 loadSkills 拉，那个函数没导出来——直接用同一条接口喂进去，
+      // 验的是**点开之后补拉详情**那一步，不是列表怎么来的。
+      ui.state.skills = (await ui.api('GET', `/orgs/${orgId}/skills`)).skills
+      ui.render()
+      await ui.fire('click', el('button', { 'data-act': 'skill-edit', 'data-id': zipId }))
+      // 详情是点开之后补拉的，等它落地。
+      for (let i = 0; i < 50 && !ui.html().includes('references/'); i++) await new Promise((r) => setTimeout(r, 20))
+      const html = ui.html()
+      assert(html.includes('references/口径.md'), `弹窗里没有包内文件清单：${html.slice(0, 400)}`)
+      assert(html.includes('什么时候生效'), '弹窗里没有常驻 / 按需那一行')
     })
 
     await test('删掉 Bot，它攒下的私有档跟着走', async () => {

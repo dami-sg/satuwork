@@ -3182,7 +3182,7 @@ async function main() {
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
     await runConnectors({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runToolSearch({ root, gwRoot, test, req, start, waitHttp, assert, log })
-    await runSkills({ gwRoot, test, req, start, waitHttp, assert, log })
+    await runSkills({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runSkillsBot({ root, test, assert, log })
     await runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log })
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })

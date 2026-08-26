@@ -328,7 +328,12 @@ document.getElementById('app').addEventListener('click', async (e) => {
     const id = btn.getAttribute('data-id') || ''
     const name = btn.getAttribute('data-name') || ''
     const bot = state.chatBotId || chatBotIdOf(state.path)
-    if (!bot || !id) return
+    if (!id) return
+    if (!bot) {
+      // 静默 return 的话，人只会以为自己点漏了，然后反复点。
+      flash('err', t('这一屏认不出是哪颗 Bot，去 Skill 页面删它', "Can't tell which bot this is — delete it from the Skills page"))
+      return
+    }
     try {
       await api('DELETE', `/runtime/bots/${encodeURIComponent(bot)}/skills/${encodeURIComponent(id)}`)
       state.skillNoteGone = { ...(state.skillNoteGone || {}), [id]: true }
@@ -1778,6 +1783,24 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.skillDialog = { type: 'skill', item }
     state.skillForm = emptySkillForm(item)
     render()
+    /**
+     * **包里的文件清单只有单条详情才带**（列表那一屏几十条，每条再挂两百行路径就是
+     * 几百 KB）。所以弹窗先用列表那份开出来——人点了要立刻看见——再补一次详情把
+     * `files` 贴上去。
+     *
+     * 拉失败就当没有清单：那一格不显示，比一个转不完的圈好；正文和别的字段列表里都有。
+     */
+    const base = catalogBase()
+    if (!base) return
+    try {
+      const data = await api('GET', `${base}/skills/${encodeURIComponent(item.id)}`)
+      const cur = state.skillDialog
+      if (!cur || cur.type !== 'skill' || !cur.item || cur.item.id !== item.id) return
+      cur.item = { ...cur.item, ...(data.skill || {}) }
+      render()
+    } catch {
+      /* 没有清单就没有清单 */
+    }
     return
   }
   if (act === 'mcp-edit') {
