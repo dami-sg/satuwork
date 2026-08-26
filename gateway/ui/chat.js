@@ -5520,6 +5520,14 @@ const chatTodoOpen = new Map()
  */
 const chatTodoHidden = new Map()
 
+/**
+ * 已经给它算过「要不要一上来就收起来」的会话（见 paintChatTodos 里那一段）。
+ *
+ * 只活在这一次页面加载里——「重新加载对话」正是这条规则要认的那一刻，落 prefs 就把
+ * 它变成了一项永久设置。
+ */
+const chatTodoSeen = new Set()
+
 const todoSign = (items) => items.map((i) => `${i.id}:${i.status}:${i.task}`).join('|')
 
 /**
@@ -5554,13 +5562,32 @@ function paintChatTodos(folded) {
   // 空表不占位置。清单被清掉、或者这条会话压根没用过 todo，都走这一支。
   if (!items.length) return clearTodock(box)
   const sign = todoSign(items)
-  if (chatTodoHidden.get(sid) === sign) return clearTodock(box)
   const done = items.filter((i) => i.status === 'completed').length
   const running = items.find((i) => i.status === 'in_progress')
   const open = items.filter((i) => i.status === 'pending')
   // 抬头那句话：正在做哪一条 > 下一条该做什么 > 已经收口了。
   const now = running || open[0] || null
   const allDone = !running && !open.length
+  /**
+   * **收口了的那张表，重新加载之后不再摆出来。**
+   *
+   * 这块 dock 回答的是「这摊活做到哪儿了」。全部收口之后它已经答完了：再打开这一页
+   * 时，它顶掉的是输入框上面那行位置，而它能说的只有一句「昨天那件事做完了」——那句话
+   * 人上一次关掉页面之前就知道了。
+   *
+   * **只拦「第一次拿到」这一下**，所以盯着看的时候不受影响：最后一条打勾会让指纹变，
+   * 那一帧照样画出「已完成」，人看得见事情收口了。之后清单再变（模型新列一张、或者
+   * 某条被重新打开），指纹又变，它自己就回来——和 × 关掉那一张是同一套机制，这里只是
+   * 替人先按了一下。
+   *
+   * 记「这条会话认过了」而不是直接看指纹在不在表里：一张空表也走不到这儿（上面那道
+   * 闸），而 `chatTodoHidden` 里没有条目和「有条目但指纹不一样」是两件事。
+   */
+  if (!chatTodoSeen.has(sid)) {
+    chatTodoSeen.add(sid)
+    if (allDone) chatTodoHidden.set(sid, sign)
+  }
+  if (chatTodoHidden.get(sid) === sign) return clearTodock(box)
   const badge = running
     ? t('正在执行', 'Running')
     : allDone
