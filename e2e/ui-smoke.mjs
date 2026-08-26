@@ -616,6 +616,77 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(ui.machineDownBanner() === '', '字段缺席时弹了失联横幅')
     })
 
+    await test('按下停止：从按下到真停下来那一段，界面上必须有动静', async () => {
+      /**
+       * 这一条钉的是那次报障：点停止之后什么都不变——按钮还是那颗「停止」，输入框
+       * 底下还写着「正在思考」。而停止本来就不是当场生效的（界面 → Gateway → 席位 →
+       * `agent.abort()` → 手上那一步收尾 → `turn/end`），那一段里流上一个事件都不会来。
+       * 于是「已经在停了」和「点了没反应」在屏幕上长得一模一样，人只好反复点。
+       *
+       * 按钮那圈转的验不到（垫片里没有 CSS），能钉住的是它下面这两件事：**请求还在
+       * 路上时状态就已经变了**，以及那行小字这时候说的是什么。
+       */
+      let release = () => {}
+      const gate = new Promise((r) => (release = r))
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/abort')) {
+            await gate
+            return { ok: true, status: 200, text: async () => JSON.stringify({ aborted: true }) }
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-stop'
+      ui.state.chatStatus = 'thinking'
+
+      const pending = ui.abortChat()
+      await new Promise((r) => setTimeout(r, 0))
+      // 请求还卡在 gate 上——**这一刻**就得有痕迹，等它回来才改就已经晚了。
+      assert(ui.state.chatStopping === 's-stop', '按下去之后没有留下「已经收到」的痕迹')
+      const tip = ui.composerTip(true)
+      assert(tip.includes('正在停止'), `那行小字没改口：${tip}`)
+      assert(tip.includes('Bot'), `没说清停止要下发到 Bot 才生效：${tip}`)
+      assert(!tip.includes('正在思考'), `还写着「正在思考」——它已经在停了：${tip}`)
+
+      release()
+      await pending
+      // 席位收下了不等于停住了。这时候收掉转圈就是撒谎——`turn/end` 还没回来。
+      assert(ui.state.chatStopping === 's-stop', '请求一回来就把「正在停止」收了，可它还没停')
+
+      // 停久了改口：多半是卡在一个正跑着的工具上，把原因说出来，别让人对着一句
+      // 不动的「正在停止…」猜。
+      ui.state.chatStoppingAt = Date.now() - 20000
+      const slow = ui.composerTip(true)
+      assert(slow.includes('收尾'), `停了 20 秒还没换说法：${slow}`)
+      assert(/\d/.test(slow), `没有读秒，一行不动的字看着更像卡死了：${slow}`)
+
+      // 换到别的会话就不该再显示它：这一格记的是「哪条会话在停」。
+      ui.state.chatSessionId = 's-other'
+      assert(ui.composerTip(true).includes('正在思考'), '别的会话上也挂着「正在停止」')
+    })
+
+    await test('停止没送到：转圈要收掉，按钮得还能再按一次', async () => {
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/abort')) return { ok: false, status: 502, text: async () => JSON.stringify({ error: '席位没应答' }) }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      ui.state.chatSessionId = 's-fail'
+      ui.state.chatStatus = 'thinking'
+      await ui.abortChat()
+      assert(ui.state.chatStopping === '', '这一下根本没送到，却留下一颗一直转的按钮')
+      assert(String(ui.state.error || '').includes('没能中止'), `没说这一下白按了：${ui.state.error}`)
+      assert(ui.composerTip(true).includes('正在思考'), '那行小字还停在「正在停止」上')
+    })
+
     await test('空库 + 没有票 → 画「创建系统管理员」，不是登录页', async () => {
       const ui = await boot()
       const html = ui.html()

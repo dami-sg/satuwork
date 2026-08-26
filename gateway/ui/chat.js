@@ -1225,6 +1225,9 @@ async function loadChatPage() {
   // 命令选单和「正在压缩」那句提示都是**上一页**的事，跟着走会挂在一条不相干的会话上。
   state.cmdPick = null
   state.chatCmdBusy = ''
+  // 「正在停止」**不在这里清**。它记的是会话 id（见 state.js），换一页自然就不显示了；
+  // 而换走的那一条可能还在停——切回来时该看到它还在转，不该看到一颗又能按的停止键。
+  // 真停下来那一下由 paintChatChrome 收（turn/end 到了 status 就空了）。
   // 候选清空：换 Bot 之后连接没变，但换公司/换人之后就变了，重开一页重拉一次不亏。
   state.mentionOptions = null
   /**
@@ -3498,9 +3501,109 @@ function liveLamp(busy) {
   return ready ? { state: '1', text: t('在线') } : { state: '0', text: t('离线') }
 }
 
+/* ── 「正在停止」这一段 ────────────────────────────────────────────────
+   点下停止到这一轮真的停下来，中间隔着一整条链路：界面 → Gateway → 席位 →
+   bot 的 `agent.abort()` → 手上那一步收尾 → `turn/end` 回到流上。快则几百毫秒，
+   撞上一个正跑着的工具（十分钟上限）就是几秒到十几秒，而这期间流上一个事件都不会
+   来。以前这一段界面上一点动静都没有：按钮还是那颗「停止」，那行小字还写着「正在
+   思考」——点了和没点长得一模一样，于是人只能反复点。 */
+
+/** 这条会话停了多久了（毫秒）；没在停就是 null。 */
+function stopElapsed() {
+  if (!state.chatStopping || state.chatStopping !== state.chatSessionId) return null
+  return Math.max(0, Date.now() - (state.chatStoppingAt || 0))
+}
+
+function clearStopping() {
+  state.chatStopping = ''
+  state.chatStoppingAt = 0
+  ensureStopTick()
+}
+
+/**
+ * 停到第几秒该说什么。
+ *
+ * 前几秒只说「已经下发了」——绝大多数时候它就在这几秒里停下来了，多余的解释是噪音。
+ * 过了这道坎还没停，八成是卡在一个正跑着的工具上（中止信号递到了，但 bash 得自己
+ * 收尾）。那时候改口把原因说出来，比让人对着一句不动的「正在停止…」猜要好。
+ */
+const STOP_SLOW_MS = 6000
+
+function stopTipText(ms) {
+  const clock = ' · ' + elapsedText(ms)
+  return ms < STOP_SLOW_MS
+    ? t('正在停止…已经下发给 Bot，它收到才停得下来', 'Stopping… the request is on its way to the bot') + clock
+    : t('还在停…正在跑的那一步要等它自己收尾', 'Still stopping… the running step has to wind down first') + clock
+}
+
+/**
+ * 输入框底下那一行此刻该说什么。
+ *
+ * 抽出来单放，和上面的 liveLamp 同一个理由：写进 DOM 那一步在垫片里断言不了，而
+ * 「按下停止之后这行小字说了什么」正是这次要钉住的那句话。
+ */
+function composerTip(busy) {
+  const stopping = stopElapsed()
+  // 停止排在最前：它是人刚做的那个动作，压过「正在思考」——那句这会儿是错的，
+  // 它已经在停了。
+  if (stopping !== null) return stopTipText(stopping)
+  // `/compact` 要跑一次模型写摘要，几秒。这几秒里没有任何事件会经 SSE 过来——
+  // 不说一句的话，人只看到输入框被清空了，然后什么都没发生。
+  if (state.chatCmdBusy) return state.chatCmdBusy === 'compact' ? t('正在压缩上下文…') : t('正在处理…')
+  // 会话还没拿到（席位刚起来那几十秒）就直说。这一行是人在按发送之前唯一会看的地
+  // 方，而那期间按下去是发不出去的——不说的话就是「点了没反应」。
+  if (!state.chatSessionId) {
+    return sessionGaveUp ? t('实例还没接上，这会儿发不出去') : t('实例还在上线，接上之后就能发消息…')
+  }
+  return busy ? t('正在思考…（可以继续输入来打断）') : t('Enter 发送，Shift + Enter 换行')
+}
+
+function paintChatTip(busy) {
+  const tip = document.getElementById('chat-tip')
+  if (!tip) return
+  tip.textContent = composerTip(busy)
+  // 停止那一句要从灰字里抬出来一档，见 chat.css。别的时候这一行是背景信息，不该抢眼。
+  if (stopElapsed() !== null) tip.setAttribute('data-hint', 'stopping')
+  else tip.removeAttribute('data-hint')
+  ensureStopTick()
+}
+
+/**
+ * 停止期间的读秒心跳。
+ *
+ * 和 ensureClockTick 一样只在真有东西要走时才转：这一段里流上没有事件，没有这只
+ * 表的话那行字会僵在「· 0s」上——一个不动的读秒比没有读秒更像卡死了。
+ */
+let stopTimer = null
+function ensureStopTick() {
+  const on = stopElapsed() !== null
+  if (on && !stopTimer) stopTimer = setInterval(tickStop, 1000)
+  else if (!on && stopTimer) {
+    clearInterval(stopTimer)
+    stopTimer = null
+  }
+}
+
+function tickStop() {
+  const tip = document.getElementById('chat-tip')
+  // 停完了、或者人已经走开这一页了（走开时不会再有 paint 来收表），自己停掉。
+  if (stopElapsed() === null || !tip) {
+    clearInterval(stopTimer)
+    stopTimer = null
+    return
+  }
+  // status 用 state 上那一份：paintChat 每帧刚算过，这只表不该为了读一个秒数
+  // 再 fold 一遍整条会话。
+  tip.textContent = composerTip(Boolean(state.chatStatus))
+}
+
 /** 抬头的在线灯、输入区的提示和中止按钮——都不重绘整页，就地改。 */
 function paintChatChrome(folded) {
   const busy = Boolean(folded.status)
+  // 真停下来了（turn/end 到了，status 空了）就把「正在停止」那一格收掉。**只认这一
+  // 条会话**：切到别的 Bot 时那边本来就不忙，不该顺手把这边还没停完的状态抹掉。
+  if (!busy && state.chatStopping && state.chatStopping === state.chatSessionId) clearStopping()
+  const stopping = stopElapsed() !== null
   const live = document.getElementById('chat-live')
   if (live) {
     const lamp = liveLamp(busy)
@@ -3510,34 +3613,23 @@ function paintChatChrome(folded) {
   const meta = document.getElementById('chat-meta')
   if (meta) meta.textContent = chatMetaText(folded)
   paintChatTodos(folded)
-  const tip = document.getElementById('chat-tip')
-  // 会话还没拿到（席位刚起来那几十秒）就直说。这一行是人在按发送之前唯一会看的地
-  // 方，而那期间按下去是发不出去的——不说的话就是「点了没反应」。
-  if (tip) {
-    tip.textContent = state.chatCmdBusy
-      ? // `/compact` 要跑一次模型写摘要，几秒。这几秒里没有任何事件会经 SSE 过来——
-        // 不说一句的话，人只看到输入框被清空了，然后什么都没发生。
-        state.chatCmdBusy === 'compact'
-        ? t('正在压缩上下文…')
-        : t('正在处理…')
-      : !state.chatSessionId
-      ? sessionGaveUp
-        ? t('实例还没接上，这会儿发不出去')
-        : t('实例还在上线，接上之后就能发消息…')
-      : busy
-        ? t('正在思考…（可以继续输入来打断）')
-        : t('Enter 发送，Shift + Enter 换行')
-  }
+  paintChatTip(busy)
   const send = document.getElementById('chat-send')
-  if (send && send.getAttribute('data-state') !== (busy ? 'stop' : 'send')) {
+  // 三副面孔：发送 / 停止 / 正在停止。前两副是同一颗按钮的开与关，第三副是「这一下
+  // 已经收到了，正在下发」——它必须和「停止」长得不一样，不然人只能靠反复点来确认。
+  const face = stopping ? 'stopping' : busy ? 'stop' : 'send'
+  if (send && send.getAttribute('data-state') !== face) {
     // 停止态改成 type=button 并挂上 chat-abort：留着 submit 的话，点它会走发送。
     // 回车不受影响——那条路径仍是提交表单，也就是「边跑边补一句」，本来就该照发。
-    send.setAttribute('data-state', busy ? 'stop' : 'send')
+    send.setAttribute('data-state', face)
     send.type = busy ? 'button' : 'submit'
     send.innerHTML = busy ? ICON_STOP : ICON_SEND
-    const label = busy ? t('停止') : t('发送')
+    const label = stopping ? t('正在停止…', 'Stopping…') : busy ? t('停止') : t('发送')
     send.setAttribute('aria-label', label)
     send.title = label
+    // 正在停的时候禁掉：第二下什么也做不成（席位已经收到了），但按得下去就会让人
+    // 以为第一下没算数。转圈画在按钮外沿，见 chat.css 的 [data-state='stopping']。
+    send.disabled = stopping
     if (busy) send.setAttribute('data-act', 'chat-abort')
     else send.removeAttribute('data-act')
   }
@@ -5774,22 +5866,45 @@ async function sendChat() {
  * 以前是 `catch {}` 一把吞掉。三种完全不同的情况在界面上长得一模一样——请求没发出去、
  * 席位不认这条会话、这一轮其实早就结束了——都是「点了没反应」，连往哪儿查都给不出。
  *
- * **它止不住已经开跑的工具。** bot 那边 `agent.abort()` 掐的是模型那条流，而工具的
- * execute 拿不到这个信号（bot/src/agent/index.ts 的 bridgeTools 没接）。所以点在一颗
- * `bash·调用中` 上时，这里是成功的，画面却要等 bash 自己跑完——最长十分钟。这句如实
- * 说出来，别让人对着一个其实生效了的按钮反复点。
+ * **它不是当场生效的。** 这一下只是把中止下发出去：界面 → Gateway → 席位 →
+ * `agent.abort()`。信号现在会往下传给正在跑的工具（bot/src/agent/index.ts 的
+ * bridgeTools 接了 signal，terminal 收到就杀进程树），但收尾要时间，而且不是每种工具
+ * 都能当场收住——一个已经发出去的网络请求、浏览器里正走着的那一步，都得等它自己回来。
+ * 所以「按下」和「停住」之间永远有一段，`turn/end` 到了才算真停。
+ *
+ * 这一段以前界面上完全没有痕迹，于是它长得跟「点了没反应」一模一样。现在按下去当场
+ * 进 `chatStopping`：按钮转圈并禁掉，输入框底下那行字改口读秒（见 stopTipText）。
  */
 async function abortChat() {
   const sessionId = state.chatSessionId
   if (!sessionId) return
+  // 已经在停了：第二下什么也别做。按钮那会儿是 disabled 的，这里是键盘和竞态的第二道闩。
+  if (state.chatStopping === sessionId) return
   const stillRunning = Boolean(document.querySelector('.sw-toolchip[data-state="running"]'))
+  /**
+   * **先改界面，再发请求。** 这一下改的是「已经收到了」，不是「已经停了」——那两件
+   * 事之间隔着整条下发链路，而这期间流上一个事件都不会来。等请求回来再改的话，最先
+   * 那几百毫秒里屏幕纹丝不动，人得到的反馈是「点了没反应」。
+   */
+  state.chatStopping = sessionId
+  state.chatStoppingAt = Date.now()
+  paintChat()
   try {
     const r = await api('POST', '/runtime/sessions/' + encodeURIComponent(sessionId) + '/abort', {})
-    if (r && r.aborted === false) flash('err', t('这一轮已经结束了'))
-    else if (stillRunning) flash('ok', t('已中止；正在跑的那个工具要等它自己收尾'))
+    if (r && r.aborted === false) {
+      // 席位说这一轮本来就不在跑：转圈当场收掉，别让它对着一件没在发生的事转下去。
+      clearStopping()
+      flash('err', t('这一轮已经结束了', 'That turn had already finished.'))
+    } else if (stillRunning) {
+      flash('ok', t('已下发停止；正在跑的那个工具要等它自己收尾', 'Stop sent — the running tool has to wind down first.'))
+    } else {
+      flash('ok', t('已下发停止，等 Bot 收到就停', 'Stop sent — it takes effect once the bot receives it.'))
+    }
     render()
   } catch (err) {
-    flash('err', t('没能中止：') + (err && err.message ? err.message : ''))
+    // 没送到就把转圈收掉：这一下是白按的，得让按钮还能再按一次。
+    clearStopping()
+    flash('err', t('没能中止：', 'Could not stop: ') + (err && err.message ? err.message : ''))
     render()
   }
 }

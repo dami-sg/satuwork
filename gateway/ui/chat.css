@@ -373,6 +373,7 @@
 /* 发送 / 停止。圆形图标按钮——它是这一屏唯一的主操作，圆形加实心底色让它在一堆
    方角的输入框和文字按钮里一眼可辨，也不用为「发送」两个字留一块随语言变宽的位置。 */
 .sw-send {
+  position: relative;
   width: 34px;
   height: 34px;
   flex: none;
@@ -410,6 +411,43 @@
   box-shadow: inset 0 0 0 1px var(--muted-foreground);
 }
 .sw-send[data-state='stop']:active { background: var(--secondary); }
+/* 正在停止。
+ *
+ * **停止不是当场生效的**：按下去只是把中止下发出去，Bot 收到、把手上那一步收尾，
+ * `turn/end` 才回来（见 chat.js 的 abortChat）。中间快则几百毫秒，撞上一个正跑着的
+ * 工具就是十几秒——这一段以前按钮一点变化都没有，人只能靠反复点来确认自己点上了。
+ *
+ * 转圈画在按钮**外沿**（::after 一圈环），图标留在原地只是淡下去：动的是「这件事
+ * 正在发生」，而不是又变成了另一个能按的动作。禁用态不改底色——一颗突然变灰的按钮
+ * 读起来像「不能用」，这里要说的是「已经收下了，等着」。 */
+.sw-send[data-state='stopping'] {
+  background: var(--secondary);
+  color: var(--muted-foreground);
+  box-shadow: inset 0 0 0 1px var(--border);
+  cursor: default;
+}
+.sw-send[data-state='stopping']::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  bottom: -3px;
+  left: -3px;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  border-top-color: var(--color-accent-500);
+  animation: sw-spin 700ms linear infinite;
+}
+.sw-send[data-state='stopping'] svg { animation: sw-pulse 1.4s ease-in-out infinite; }
+/* 动效敏感的人：环留着（它标着「正在进行」，位置和含义都还在），只是不转。 */
+@media (prefers-reduced-motion: reduce) {
+  .sw-send[data-state='stopping']::after {
+    animation: none;
+    border-color: var(--border);
+    border-top-color: var(--color-accent-500);
+  }
+  .sw-send[data-state='stopping'] svg { animation: none; opacity: 0.6; }
+}
 
 /* 工具痕迹的悬浮窗。挂在 body 上，位置由 placeToolPop 算（见 chat.js）。 */
 .sw-toolpop {
@@ -602,6 +640,18 @@
   color: var(--muted-foreground);
 }
 .sw-composer-tip .sw-spacer { flex: 1; }
+/* 正在停止的那一句。这一行平时是灰的背景信息（「Enter 发送」之类），而这一句是人刚
+   做的那个动作的回执——抬一档到正文色，加一个不晃眼的呼吸，人的余光才接得住它。
+   读秒本身就在动（见 chat.js 的 tickStop），所以这里不再加任何位移。 */
+#chat-tip[data-hint='stopping'] {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  animation: sw-fade 1.6s ease-in-out infinite;
+}
+@keyframes sw-fade { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+@media (prefers-reduced-motion: reduce) {
+  #chat-tip[data-hint='stopping'] { animation: none; }
+}
 /* ── 上下文占比。药丸长在提示行右端，浮层从它头顶展开 ──────────────────
    为什么往上开：输入框已经贴着窗口底边，往下没有地方；而且往上开的话，浮层盖住的是
    消息流最下面那几行——刚读过的内容，比盖住输入框和发送键代价小。 */
