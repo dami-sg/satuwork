@@ -100,6 +100,21 @@ export interface SessionEventMap {
     origin: SessionOrigin
     /** origin 不是 local 时，Gateway 上的定义 id。M1 用不到。 */
     remoteId?: string
+    /**
+     * `task` = 一次委派开出来的子会话（见 docs/delegation.md）。缺省按 `main` 读——
+     * 老日志里的全是主会话。
+     *
+     * **这是事实源，id 前缀不是。** 子会话的文件名确实以 `t-` 开头，那只是给运维
+     * `ls` 一眼分得开；拿前缀做判断，它迟早会和这个字段分叉。
+     */
+    kind?: 'main' | 'task'
+    /**
+     * 谁开的。只有 `kind === 'task'` 有。
+     *
+     * 三样都要：`sessionId` 是「回到哪条主会话」（审批卡片、history_* 重绑、后台进程
+     * 改挂全靠它），`callId` 是「哪一次 delegate_task」，`taskId` 是「那一批里的哪一条」。
+     */
+    parent?: { sessionId: string; callId: string; taskId: string }
   }
   'session/title': { title: string }
 
@@ -345,6 +360,65 @@ export interface SessionEventMap {
     /** 改动这张表的那次工具调用。 */
     callId: string
     items: { id: string; task: string; status: 'pending' | 'in_progress' | 'completed' | 'cancelled' }[]
+  }
+
+  /**
+   * 一次**委派**的状态（见 docs/delegation.md §12.2）。
+   *
+   * 和 `tool/call` / `tool/result` 分开，因为它们回答的是两个问题：那两条是「模型调了
+   * 一把叫 delegate_task 的工具，拿回一段文本」，这一条是**界面上的一张卡**——而卡片
+   * 必须能从日志重建：刷新页面、换标签页、断线重连之后，一次还在跑的委派不能就此消失。
+   *
+   * 同一个 `id` 会来多条（`running` → 终态），界面按 id 认，取最后一条。读法和
+   * `tool/approval` / `human/handoff` 是同一套。
+   *
+   * 加一种事件不是破坏性变更（同 `session/compact` 的理由），所以不动
+   * SESSION_FORMAT_VERSION。退化方向：老席位读到它当没看见，那次委派在界面上只剩一次
+   * 普通的工具调用——**少一张卡，不丢正文**（结论在 tool/result 里）。
+   */
+  'agent/task': {
+    /** 这一条委派。同一个 id 会来多条，取最后一条。 */
+    id: string
+    /** 开出这一批的那次工具调用。一批 N 条共用同一个 callId。 */
+    callId: string
+    /** 跑在哪条子会话上。界面上「看过程」点开的就是它。 */
+    child: string
+    /**
+     * 一批里的第几条，从 0 开始。
+     *
+     * **结果按它排序，不按谁先跑完。** 模型下一句会说「第一件事的结论是…」，而完成
+     * 顺序是随机的——谁先跑完谁排前面，等于让它每次都指错。
+     */
+    index: number
+    /** 原样的 goal。卡片上那一行标题。 */
+    goal: string
+    /** `lost` = 进程重启，这一条的死活没人知道。写成 failed 是在编。 */
+    state: 'running' | 'done' | 'capped' | 'timeout' | 'failed' | 'aborted' | 'lost'
+    /** 结论。`done` 是全文；别的态放它停下来之前最后说的那段。 */
+    summary?: string
+    /** 它产出的文件，路径相对工作区根。界面照 tool/result 那套渲染。 */
+    files?: { path: string; name: string }[]
+    steps?: number
+    toolCalls?: number
+    /** 这一条花了多少。子会话的 assistant/message 累加出来的，不新增记账路径。 */
+    usage?: Usage
+    /**
+     * 这一条实际跑在哪个模型上。
+     *
+     * **role 和 provider/id 都要留。** 只记 role 的话，平台没钉 utility 那段时间里的
+     * 委派会显示成「按便宜的跑」，而它其实回落到了主模型上——账单和这行字对不上，
+     * 而对不上的那几天恰恰是要查的那几天。
+     */
+    model?: {
+      role: 'daily' | 'utility'
+      provider: string
+      id: string
+      /** 主代理选这一档时给的理由（见 §8.3）。降过级就写降级后那一档的实情。 */
+      reason?: string
+      /** 降过级：写了 utility 却没给理由，或平台没钉 utility。人要看得出这一档不是主代理选的。 */
+      downgraded?: boolean
+    }
+    at: number
   }
 
   'tool/call': { turn: number; step: number; callId: string; name: string; arguments: string }

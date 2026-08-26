@@ -139,6 +139,7 @@ export function apply(ctx: Context) {
   tool(
     {
       name: 'read_file',
+      delegation: {},
       risk: ['read'],
       description:
         '读取工作区里的一个文本文件，按行返回，输出格式是 `行号|内容`。终端里的 cat / head / tail 用它代替。' +
@@ -223,6 +224,7 @@ export function apply(ctx: Context) {
   tool(
     {
       name: 'write_file',
+      delegation: {},
       risk: ['write'],
       description:
         '把内容整体写入一个文件，已存在就覆盖，父目录自动创建。终端里的 echo / cat heredoc 用它代替。' +
@@ -270,6 +272,7 @@ export function apply(ctx: Context) {
   tool(
     {
       name: 'patch',
+      delegation: {},
       risk: ['write'],
       description:
         '把文件里的一段文本替换成另一段。终端里的 sed / awk 用它代替。' +
@@ -325,6 +328,7 @@ export function apply(ctx: Context) {
   tool(
     {
       name: 'search_files',
+      delegation: {},
       risk: ['read'],
       description:
         '搜文件内容，或者按名字找文件。终端里的 grep / rg / find / ls 用它代替。\n' +

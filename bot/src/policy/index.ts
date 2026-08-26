@@ -1,6 +1,6 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { browserOf, guardsOf, type BotRecord } from '../registry/index.ts'
-import type { ToolCall, ToolResult } from '../tools/index.ts'
+import { agentsOf, type ToolCall, type ToolResult } from '../tools/index.ts'
 import { ApprovalGate, type Verdict } from './approvals.ts'
 import { formOf, unwrapCall } from './forms.ts'
 import { type ActionContext, blockedHost, hostOf, siteAllowed, submitAction } from './browser.ts'
@@ -434,9 +434,17 @@ export class PolicyService extends Service {
     this.blocks.set(call.sessionId, hits)
     let tail = ''
     if (hits >= PolicyService.ESCALATE_AFTER) {
-      tail =
-        `\n\n这一轮已经被挡下 ${hits} 次了。别再换写法重试——这件事需要人来处理：` +
-        `调用 escalate_to_human 说明卡在哪儿，然后停下来等人接手。`
+      /**
+       * **子会话里这句话是死路**：子代理没有 escalate_to_human（它面前没有人，见
+       * docs/delegation.md §3）。照原话劝下去，它只会去调一把不存在的工具，然后把剩下
+       * 的步数耗在这上面。
+       */
+      const inTask = !!agentsOf(this.ctx)?.taskOf?.(call.sessionId)
+      tail = inTask
+        ? `\n\n这一轮已经被挡下 ${hits} 次了。别再换写法重试——你是子代理，问不了人：` +
+          `现在停下来，把卡在哪儿、已经排除了什么写进结论交回去，由主代理去处理。`
+        : `\n\n这一轮已经被挡下 ${hits} 次了。别再换写法重试——这件事需要人来处理：` +
+          `调用 escalate_to_human 说明卡在哪儿，然后停下来等人接手。`
       await this.record({
         sessionId: call.sessionId,
         botId: bot?.id ?? '',
@@ -501,6 +509,12 @@ export function apply(ctx: Context) {
      */
     ctx.tools.register({
       name: 'escalate_to_human',
+      /**
+       * 子代理面前没有人（docs/delegation.md §3 口径三）。一张单要挂在人看得见的会话上，
+       * 而子会话在侧栏里没有位置；就算开出来，人处理完交还时那条子会话早就收口了，没有
+       * 任何一轮能消化它。子代理卡住的出路是把卡在哪儿写进结论交回去。
+       */
+      delegation: { mode: 'root-only' },
       risk: ['read'],
       description:
         '把这件事转给人处理。满足公司规定的转人工条件、或者你连着被行为边界挡下、没法在权限内推进时调用它。' +
@@ -580,6 +594,38 @@ export function apply(ctx: Context) {
         // 「边界挡下了」，而它其实只是名字打错了。
         if (!ctx.tools.has(call.name)) return next()
 
+        /**
+         * 子代理的两道**强制**（见 docs/delegation.md §6.1、§7.1）。
+         *
+         * 排在最前，而且**按标注判、不按工具名判**：写成 `if (name === 'delegate_task')`
+         * 的话，第二把 root-only 的工具出现时没有任何东西会提醒你这里也要改。
+         *
+         * 「不给 schema」不是强制，是遮掩：模型硬报一个没在表里的名字照样调得通。所以
+         * 拒绝必须来自这里的短路——tools/index.ts 开头那段注释写的就是这件事。
+         */
+        const task = agentsOf(ctx)?.taskOf?.(call.sessionId)
+        if (task) {
+          const d = ctx.tools.delegationOf(call.name)
+          if (d.mode === 'root-only') {
+            return {
+              text:
+                `${call.name} 只有主代理有，子任务里调不了。` +
+                (call.name === 'delegate_task'
+                  ? '委派的深度是 1：要拆得更细，把它写进你的结论，由主代理再派一次。'
+                  : '需要人拍板的事，把卡在哪儿写进结论交回去，由主代理去问人。'),
+              failed: true,
+            }
+          }
+          if (d.exclusive && !task.leases.includes(d.exclusive)) {
+            return {
+              text:
+                `${call.name} 要占「${d.exclusive}」，而这一批委派里它租给了别的子任务——` +
+                '一台席位只有一份（同一颗浏览器、同一块员工正看着的屏）。这一条用别的路子做，或者把它写进结论。',
+              failed: true,
+            }
+          }
+        }
+
         const bot = await ctx.policy.botOf(call.sessionId)
         const guards = ctx.policy.guardsOf(bot)
         const risk = ctx.tools.riskOf(call.name)
@@ -642,8 +688,15 @@ export function apply(ctx: Context) {
           if (why) {
             // 问过就记一笔：事后审计只补记**没问过**的那些（见 noteWrites）。
             ctx.policy.markAsked(call.callId)
+            /**
+             * 子代理发起的确认，卡片上要说清出处。
+             *
+             * 不写的话，人看到的是一次凭空出现的发信确认——而他刚才只说了一句「帮我把
+             * 这周的活收个尾」，中间隔着一次他没看见的委派。
+             */
+            const why2 = task ? `来自子任务《${task.goal.slice(0, 24)}》：${why}` : why
             // 表单在**席位这边**算：剥元工具的壳、认字段、定哪几格能改，全在 forms.ts。
-            const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why, formOf(call))
+            const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why2, formOf(call))
             await ctx.policy.record({
               sessionId: call.sessionId,
               botId: bot?.id ?? '',
@@ -654,13 +707,15 @@ export function apply(ctx: Context) {
               // **靠这句话才看得出这次为什么没弹卡片。** 「本会话都批准」之后的每一次
               // 放行，日志上都只是一条 approved；不写清楚出处，事后翻记录的人会以为
               // 有人一次次点过头。
+              // 出处（`来自子任务《…》`）跟着进审计。卡片上说了、留档里不说的话，事后
+              // 翻记录的人看到的是一次凭空出现的发信确认——而那正是最该问出处的一种。
               reason: viaGrant
-                ? `${why}（这一轮此前已批准同一把工具）`
+                ? `${why2}（这一轮此前已批准同一把工具）`
                 : viaBlock
-                  ? `${why}（这一轮此前已拒绝同一把工具，没有再问）`
+                  ? `${why2}（这一轮此前已拒绝同一把工具，没有再问）`
                   : edited?.length
-                    ? `${why}（批准时改过：${edited.join('、')}）`
-                    : why,
+                    ? `${why2}（批准时改过：${edited.join('、')}）`
+                    : why2,
               at: Date.now(),
             })
             if (verdict !== 'approved') return blockedByUser(verdict, why, viaBlock)

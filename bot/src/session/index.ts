@@ -34,6 +34,10 @@ export interface CreateSession {
   origin?: SessionOrigin
   remoteId?: string
   title?: string
+  /** `task` = 一次委派开出来的子会话（见 docs/delegation.md）。默认 `main`。 */
+  kind?: 'main' | 'task'
+  /** 谁开的。`kind === 'task'` 时必须给。 */
+  parent?: { sessionId: string; callId: string; taskId: string }
 }
 
 interface SessionState {
@@ -74,8 +78,15 @@ export class SessionService extends Service {
 
   async create(opts: CreateSession): Promise<string> {
     if (!opts.botId) throw new Error('sessions: 创建会话必须带 botId')
+    if (opts.kind === 'task' && !opts.parent) throw new Error('sessions: 子会话必须带 parent')
     await mkdir(this.root, { recursive: true })
-    const id = `s-${randomUUID()}`
+    /**
+     * 子会话用 `t-` 前缀。
+     *
+     * **只为运维时 `ls` 一眼分得开**，代码里不许拿它做判断——事实源是根事件的 `kind`
+     * （见 session/types.ts）。两个判据并存的话，它们迟早会分叉。
+     */
+    const id = `${opts.kind === 'task' ? 't' : 's'}-${randomUUID()}`
     const state: SessionState = { id, events: [], seq: 0, file: join(this.root, `${id}.jsonl`) }
     this.cache.set(id, state)
     await this.append(id, 'session', {
@@ -86,6 +97,7 @@ export class SessionService extends Service {
       botId: opts.botId,
       origin: opts.origin ?? 'local',
       ...(opts.remoteId ? { remoteId: opts.remoteId } : {}),
+      ...(opts.kind === 'task' ? { kind: 'task' as const, parent: opts.parent } : {}),
     })
     return id
   }
@@ -114,8 +126,20 @@ export class SessionService extends Service {
     return after ? state.events.filter((e) => e.seq > after) : state.events.slice()
   }
 
-  /** 会话列表，按创建时间倒序。标题取 session/title，没有就回落到根记录。 */
-  async list(): Promise<{ id: string; title: string; createdAt: number; botId?: string }[]> {
+  /**
+   * 会话列表，按创建时间倒序。标题取 session/title，没有就回落到根记录。
+   *
+   * **默认不含子会话。** 委派开出来的那些（`kind: 'task'`）不是「这个人的对话」，
+   * 而这个列表的每一个调用方都是在问那个问题：侧栏画什么、认领哪条长会话
+   * （registry 的 ensureSession）、往控制面报哪些索引。混进去的后果最狠的一条是认领
+   * ——列表按创建时间**倒序**，子会话永远比主会话新，于是席位重装、名册行上的
+   * sessionId 丢了的那一刻，`mine[0]` 认回来的是半年前某次委派的现场。
+   *
+   * 要连子会话一起看（调试、清理）传 `{ tasks: true }`。
+   */
+  async list(opts: { tasks?: boolean } = {}): Promise<
+    { id: string; title: string; createdAt: number; botId?: string; kind?: 'main' | 'task' }[]
+  > {
     if (!existsSync(this.root)) return []
     const files = (await readdir(this.root)).filter((f) => f.endsWith('.jsonl'))
     const rows = await Promise.all(
@@ -125,7 +149,14 @@ export class SessionService extends Service {
         const root = events.find((e) => e.type === 'session')
         if (!root) return null
         const titled = [...events].reverse().find((e) => e.type === 'session/title')
-        const data = root.data as { title?: string; createdAt: number; botId?: string; agentId?: string }
+        const data = root.data as {
+          title?: string
+          createdAt: number
+          botId?: string
+          agentId?: string
+          kind?: 'main' | 'task'
+        }
+        if (data.kind === 'task' && !opts.tasks) return null
         return {
           id,
           title:
@@ -134,6 +165,7 @@ export class SessionService extends Service {
             '新会话',
           createdAt: data.createdAt,
           botId: data.botId ?? data.agentId,
+          ...(data.kind ? { kind: data.kind } : {}),
         }
       }),
     )

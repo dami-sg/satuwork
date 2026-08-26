@@ -574,6 +574,24 @@ function fold(events, live) {
         hit.shot = data.shot && typeof data.shot.path === 'string' && data.shot.path ? data.shot : null
       }
       if (assistant) assistant.endTime = at
+    } else if (type === 'agent/task') {
+      /**
+       * 一次委派（见 docs/delegation.md）。**挂在助手那一块上**，理由和确认卡一字不差：
+       * 另起一块会把卡片插进正在跑的这一轮中间，而 `tool/result` 按 callId 认药丸，
+       * 认不回去就会把一次成功的调用标成失败。
+       *
+       * 同一个 id 会来多条（running → 终态），**取最后一条**。读法和 tool/approval、
+       * human/handoff 是同一套。
+       */
+      if (!assistant) {
+        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        blocks.push(assistant)
+      }
+      const list = assistant.tasks || (assistant.tasks = [])
+      const prev = list.find((x) => x.id === data.id)
+      if (prev) Object.assign(prev, data)
+      else list.push({ ...data })
+      assistant.endTime = at
     } else if (type === 'tool/approval') {
       /**
        * 高风险确认。**挂在助手那一块上，不另起一块。**
@@ -3090,7 +3108,193 @@ function updateRow(el, b, streaming, since) {
       }
     }
   }
+  /**
+   * 委派卡。摆在最底下——它是这一轮里最重的一块，而它上面那颗 delegate_task 药丸只说
+   * 得出「调用中」。
+   *
+   * 签名里**必须带状态和步数**：一次委派从 running 到 done 是同一个 id，只按 id 比的话
+   * 卡片不会重画，人盯着的那几分钟里它一动不动——而这正是同步委派最难受的那几分钟
+   * （见 docs/delegation.md §13）。
+   */
+  /**
+   * **按 callId 分组，一批一张卡。**
+   *
+   * 同一轮里派两批不是边角情况——§8.6 推荐的就是「撞顶了就原样再派一次」。全丢进一个数组
+   * 按 index 排的话，两批会交错成 0,0,1,1,2，每行的位置也不再对得上模型手上那个
+   * `[n/总数]` 的编号。
+   */
+  const groups = []
+  for (const task of b.tasks || []) {
+    const key = task.callId || task.id
+    let g = groups.find((x) => x.key === key)
+    if (!g) groups.push((g = { key, rows: [] }))
+    g.rows.push(task)
+  }
+  for (const g of groups) g.rows.sort((x, y) => (x.index || 0) - (y.index || 0))
+  const tks = groups.flatMap((g) => g.rows)
+  let tkbox = bubble.querySelector('.sw-tasks')
+  if (tks.length && !tkbox) {
+    tkbox = document.createElement('div')
+    tkbox.className = 'sw-tasks'
+    bubble.appendChild(tkbox)
+  }
+  if (tkbox) {
+    const tSig = tks
+      .map((x) => x.id + ':' + x.state + ':' + (x.steps || 0) + ':' + (state.taskOpen?.[x.id] ? '1' : '0') + ':' + traceSig(x.child))
+      .join('|')
+    if (tkbox.getAttribute('data-sig') !== tSig) {
+      tkbox.setAttribute('data-sig', tSig)
+      tkbox.innerHTML = groups.map((g) => taskGroupHtml(g.rows)).join('')
+      tkbox.hidden = !tks.length
+    }
+  }
+
   paintRowTime(el, b, streaming, since)
+}
+
+/** 子会话全文取到哪一步了。进签名，否则「加载中 → 有内容」那一下不会重画。 */
+function traceSig(child) {
+  const tr = state.taskTrace?.[child]
+  return !tr ? '-' : tr.loading ? 'l' : tr.error ? 'e' : String((tr.events || []).length)
+}
+
+const TASK_STATE_TEXT = {
+  running: ['进行中', 'running'],
+  done: ['完成', 'done'],
+  capped: ['到步数上限', 'step cap'],
+  timeout: ['超时', 'timed out'],
+  failed: ['失败', 'failed'],
+  aborted: ['已停止', 'stopped'],
+  lost: ['状态未知', 'unknown'],
+}
+
+/** 一批委派画成一张卡，每条一行。 */
+function taskGroupHtml(tasks) {
+  const head =
+    tasks.length > 1
+      ? `<div class="sw-task-head">${esc(t(`派出去 ${tasks.length} 件事`, `${tasks.length} delegated tasks`))}</div>`
+      : ''
+  return `<div class="sw-task-card">${head}${tasks.map(taskRowHtml).join('')}</div>`
+}
+
+function taskRowHtml(task) {
+  const st = TASK_STATE_TEXT[task.state] || TASK_STATE_TEXT.running
+  const open = Boolean(state.taskOpen?.[task.id])
+  const m = task.model || {}
+  /**
+   * 档位后面跟着那句理由。**这是档位可不可审的全部**：光一个 utility，人判不出选得对
+   * 不对，只能等它跑砸；配上「格式定死、漏一行一眼能看见」，当场就判得出来。
+   *
+   * 降过级的要标出来（写了 utility 却没给理由，或者平台没钉 utility）——不标的话，人会
+   * 以为那一档是主代理自己选的。
+   */
+  const tier = m.role
+    ? `<span class="sw-task-tier" data-role="${esc(m.role)}">${esc(m.role)}</span>` +
+      (m.downgraded ? `<span class="sw-task-down">${esc(t('已降档', 'downgraded'))}</span>` : '') +
+      (m.reason ? `<span class="sw-task-why">${esc(m.reason)}</span>` : '')
+    : ''
+  const meta = [
+    task.steps ? t(`${task.steps} 步`, `${task.steps} steps`) : '',
+    task.usage && task.usage.cost ? '$' + Number(task.usage.cost).toFixed(4) : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  return (
+    `<div class="sw-task-row" data-state="${esc(task.state)}">` +
+    `<button type="button" class="sw-task-line" data-act="chat-task-toggle" data-id="${esc(task.id)}" data-child="${esc(task.child || '')}">` +
+    `<span class="sw-task-dot" data-state="${esc(task.state)}" aria-hidden="true"></span>` +
+    `<span class="sw-task-goal">${esc(task.goal || '')}</span>` +
+    `<span class="sw-task-state">${esc(t(st[0], st[1]))}</span>` +
+    (meta ? `<span class="sw-task-meta">${esc(meta)}</span>` : '') +
+    '</button>' +
+    `<div class="sw-task-tier-row">${tier}</div>` +
+    (open ? taskDetailHtml(task) : '') +
+    '</div>'
+  )
+}
+
+function taskDetailHtml(task) {
+  const summary = task.summary
+    ? `<div class="sw-task-summary">${window.satuMd ? window.satuMd(task.summary) : esc(task.summary)}</div>`
+    : `<p class="sw-task-empty">${esc(t('还没有结论', 'No conclusion yet'))}</p>`
+  const files = (task.files || []).length
+    ? `<div class="sw-task-files">${task.files.map(fileChipHtml).join('')}</div>`
+    : ''
+  return `<div class="sw-task-detail">${summary}${files}${taskTraceHtml(task)}</div>`
+}
+
+/**
+ * 「看过程」。**取的是子会话的全文，而它经主会话授权**——子会话不进控制面的会话索引
+ * （它不是「这个人的一条对话」），按 id 直取会换回一个 503（见 gateway 那条 tasks 路由）。
+ */
+function taskTraceHtml(task) {
+  const tr = state.taskTrace?.[task.child]
+  if (!tr) {
+    return (
+      `<button type="button" class="satu-linkbtn sw-task-trace-btn" data-act="chat-task-trace" data-child="${esc(task.child || '')}">` +
+      `${esc(t('看过程', 'View the run'))}</button>`
+    )
+  }
+  if (tr.loading) return `<p class="sw-task-empty">${esc(t('正在取…', 'Loading…'))}</p>`
+  /**
+   * 取失败要**留一条退路**。席位重启那几秒里点一下就会走到这儿，而按钮已经被这行字换掉
+   * ——不把它摆回来的话，除了刷新整页没有第二条路。
+   */
+  if (tr.error) {
+    return (
+      `<p class="sw-task-empty sw-task-err">${esc(tr.error)}</p>` +
+      `<button type="button" class="satu-linkbtn sw-task-trace-btn" data-act="chat-task-trace" data-child="${esc(task.child || '')}">` +
+      `${esc(t('重试', 'Retry'))}</button>`
+    )
+  }
+  const rows = (tr.events || []).map(traceLineHtml).filter(Boolean)
+  if (!rows.length) return `<p class="sw-task-empty">${esc(t('没有留下过程', 'Nothing recorded'))}</p>`
+  return `<div class="sw-task-trace">${rows.join('')}</div>`
+}
+
+/** 过程里的一行。**只画三种**：它说的话、它调的工具、工具回了什么（截断）。 */
+function traceLineHtml(ev) {
+  const d = ev.data || {}
+  if (ev.type === 'assistant/message') {
+    const text = messageText(d.message)
+    return text ? `<div class="sw-trace-say">${esc(text)}</div>` : ''
+  }
+  if (ev.type === 'tool/call') {
+    return `<div class="sw-trace-tool"><b>${esc(d.name || '')}</b> <span>${esc(String(d.arguments || '').slice(0, 160))}</span></div>`
+  }
+  if (ev.type === 'tool/result') {
+    const text = String(d.text || '').slice(0, 240)
+    return `<div class="sw-trace-out"${d.failed ? ' data-failed="1"' : ''}>${esc(text)}</div>`
+  }
+  return ''
+}
+
+/**
+ * 取一次子会话全文。存进 state 之后由 render 自己画。
+ *
+ * 只取一次：过程是**已经结束**的东西（委派是同步的，卡片摊开时那一条早收口了），
+ * 没有「刷新一下看看新的」这回事。
+ */
+async function loadTaskTrace(child) {
+  if (!child) return
+  const sessionId = state.chatSessionId
+  if (!sessionId) return
+  state.taskTrace = state.taskTrace || {}
+  // 取过一次就不再取——过程是**已经结束**的东西。但失败那次不算「取过」，见上面那颗重试。
+  const had = state.taskTrace[child]
+  if (had && !had.error) return
+  state.taskTrace[child] = { loading: true, events: [], error: '' }
+  render()
+  try {
+    const data = await api(
+      'GET',
+      `/runtime/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(child)}/history?turns=50`,
+    )
+    state.taskTrace[child] = { loading: false, events: data.events || [], error: '' }
+  } catch (e) {
+    state.taskTrace[child] = { loading: false, events: [], error: e.message || String(e) }
+  }
+  render()
 }
 
 /**

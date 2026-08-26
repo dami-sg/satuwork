@@ -3,7 +3,7 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { WorkspaceError } from '../workspace/index.ts'
-import type { ToolCall, ToolRisk, WorkspaceFile } from './index.ts'
+import type { ReassignedItem, ToolCall, ToolDelegation, ToolRisk, WorkspaceFile } from './index.ts'
 
 /**
  * 工作区那几把工具共用的一点东西：业务失败怎么表达、结果长什么样、怎么注册。
@@ -33,6 +33,10 @@ export interface ToolDef {
   description: string
   parameters: Record<string, unknown>
   risk?: ToolRisk[]
+  /** 见 tools/index.ts 的 ToolDelegation。**内置工具必须写**，register 会拦。 */
+  delegation?: ToolDelegation
+  /** 见 tools/index.ts。标了 `retains` 就必须实现它。 */
+  reassign?(from: string, to: string): ReassignedItem[] | Promise<ReassignedItem[]>
 }
 
 /**

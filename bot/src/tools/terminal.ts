@@ -8,7 +8,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { humanSize, safeName } from '../workspace/index.ts'
 import { satuworkHome } from '../home.ts'
 import { fail, registerTool, SKIPPED_DIRS, walkFiles, type WalkBudget } from './common.ts'
-import type { ToolCall, WorkspaceFile } from './index.ts'
+import type { ReassignedItem, ToolCall, WorkspaceFile } from './index.ts'
 
 /**
  * terminal 工具集：`terminal` 跑命令，`process` 管它起在后台的那些。
@@ -363,6 +363,29 @@ export function apply(ctx: Context, config: Config = {}) {
   const procs = new Map<string, Proc>()
 
   /**
+   * 把一条会话名下**还活着**的后台进程改挂到另一条。子代理收口时由 ToolService 调
+   * （见 tools/index.ts 的 reassign，以及 docs/delegation.md §7.3）。
+   *
+   * **只动记账那一行，不碰进程本身。** 它的 cwd 在共享工作区里，换个主人不影响它在跑
+   * 什么；而杀掉的话，「委派去把开发服务器起起来」这件事整个做不成——那是委派最自然的
+   * 用法之一。更隐蔽的一层：杀的动作发生在结论回来之前，主代理会拿到「服务已启动」的
+   * 结论，去用，发现没有。
+   *
+   * **已经结束的不移交**（`endedAt` 有值）：它的输出早就在子会话里了，移交过去只会让
+   * 主代理的 `process` 列表里多一堆历史。
+   */
+  const handOver = (from: string, to: string): ReassignedItem[] => {
+    const moved: ReassignedItem[] = []
+    for (const p of procs.values()) {
+      if (p.sessionId !== from || p.endedAt) continue
+      p.sessionId = to
+      moved.push({ id: p.id, label: p.command })
+    }
+    if (moved.length) ctx.logger?.info?.(`terminal: ${moved.length} 个后台进程从 ${from} 改挂到 ${to}`)
+    return moved
+  }
+
+  /**
    * 后台进程的日志落在 `$SATUWORK_HOME/proc/`，**不在工作区**。
    *
    * 和前台那份截断全文（OUT_DIR）正相反：那一份是模型要自己 `read_file` 的，这一份
@@ -438,14 +461,32 @@ export function apply(ctx: Context, config: Config = {}) {
       const agents = (ctx as unknown as { reflect?: { get?: (n: string) => unknown } }).reflect?.get?.('agents') as
         | {
             isRunning?: (id: string) => boolean
+            rootOf?: (id: string) => string | undefined
             steer?: (id: string, text: string, images: never[], source: unknown) => Promise<boolean>
             send?: (id: string, text: string, images: never[], mentions: never[], source: unknown) => Promise<void>
           }
         | undefined
       if (!agents) throw new Error('agents 服务没起来')
       const source = { kind: 'plugin', plugin: 'process' }
+      /**
+       * **steer 那一跳一个字都不能改。** 子代理还在跑时，进程结束的通知就该插进**它
+       * 自己**那一轮——它才是起这个进程的人，它在等这个结果。改投主会话的话，主代理会
+       * 收到一条关于它没起过的命令的通知，而真正在等的那个子代理什么都没等到。
+       */
       if (agents.isRunning?.(p.sessionId) && (await agents.steer?.(p.sessionId, text, [], source))) return
-      await agents.send?.(p.sessionId, text, [], [], source)
+      /**
+       * 接不住了：**投给它的主人**。
+       *
+       * 不走 rootOf 的话，这一句会在一条没有任何人看着的子会话上 `send` 出全新的一轮
+       * ——真跑、真调工具、真花钱，而产出没有任何一条路回到人手上。
+       *
+       * 绝大多数情况这条回退根本不会触发：子代理收口时已经把进程改挂到主会话了
+       * （reassign），那时 `p.sessionId` 本来就是主会话。留着它是为了那个窄窗口——
+       * 收口和移交之间，进程恰好在这几毫秒里结束。子会话没有主人时 rootOf 回落成它
+       * 自己，也就是今天的行为。见 docs/delegation.md §7.3。
+       */
+      const to = agents.rootOf?.(p.sessionId) ?? p.sessionId
+      await agents.send?.(to, text, [], [], source)
     } catch (e) {
       ctx.logger?.warn?.(`terminal: ${p.id} 的结束通知没能进会话：${(e as Error).message}`)
     }
@@ -615,6 +656,12 @@ export function apply(ctx: Context, config: Config = {}) {
     {
       name: 'terminal',
       /**
+       * `background=true` 起的进程按 sessionId 记账，而子会话一收口就没人看得见、
+       * 也没人杀得掉了。收口时改挂主会话，见下面的 reassign 和 docs/delegation.md §7.3。
+       */
+      delegation: { retains: true },
+      reassign: (from, to) => handOver(from, to),
+      /**
        * **三样都占。** 一条命令能写文件、能 rm -rf、也能 curl 出去——它是这台席位上
        * 唯一一把「什么都做得到」的工具，标成只写就等于给所有边界开了条暗路。
        *
@@ -751,6 +798,12 @@ export function apply(ctx: Context, config: Config = {}) {
     ctx,
     {
       name: 'process',
+      /**
+       * **不标 retains。** 留下东西的是 `terminal`，`process` 只是在管它起的那几个；
+       * 两把都标的话移交会跑两遍（第二遍必然空手），而空跑一遍的代价是以后没人说得清
+       * 到底是谁在移交。
+       */
+      delegation: {},
       /**
        * **不要审批。** 后台进程会不会干坏事，在 `terminal` 起它的那一刻就已经按同一条
        * 命令扫过一遍了；`process` 只是在管自己起的那几个。再判一次的结果是每一次 poll

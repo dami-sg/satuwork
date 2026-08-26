@@ -207,6 +207,14 @@ export function apply(ctx: Context) {
     {
       name: 'todo',
       /**
+       * **不标 rebind**，尽管它按 sessionId 存东西。
+       *
+       * 清单属于**这次执行**，不属于这场对话：子代理是一次独立的执行，它当然该有自己的
+       * 一份。标上 rebind 的话，子代理一开工就把主代理的清单整份覆盖掉（这里是整表替换），
+       * 人正看着的那块 dock 当场变成子任务的步骤。见 docs/delegation.md §6.1。
+       */
+      delegation: {},
+      /**
        * 它确实改了会落盘的状态，所以是 `write` 而不是 `read`——风险标注宁可往严了写
        * （见 tools/index.ts 的 UNKNOWN_RISK）。这不会带来一张确认卡片：要人拍板的是
        * 「对外的写」和「能不可逆毁东西的」，工作区内的写本来就是干活的常态

@@ -1581,3 +1581,105 @@
 .sw-rt-spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
   border-top-color: var(--muted-foreground); animation: sw-spin 700ms linear infinite; }
 @media (prefers-reduced-motion: reduce) { .sw-rt-spin { animation: none; } }
+
+
+/* ── 委派卡（docs/delegation.md §13）───────────────────────────────
+   摆在气泡最底下：它是这一轮里最重的一块，而上面那颗 delegate_task 药丸只说得出
+   「调用中」。行是可点的——摊开才有结论和过程，多数时候人只看状态那一眼。 */
+.sw-tasks { margin-top: var(--space-2); }
+.sw-task-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--muted);
+  overflow: hidden;
+}
+.sw-task-head {
+  padding: var(--space-2) var(--space-3);
+  font-size: 12px;
+  color: var(--muted-foreground);
+  border-bottom: 1px solid var(--border);
+}
+.sw-task-row + .sw-task-row { border-top: 1px solid var(--border); }
+.sw-task-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  color: var(--foreground);
+  font: inherit;
+}
+.sw-task-line:hover { background: var(--accent); }
+.sw-task-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--muted-foreground);
+}
+.sw-task-dot[data-state='running'] { background: var(--color-accent-600); animation: sw-task-pulse 1.4s ease-in-out infinite; }
+.sw-task-dot[data-state='done'] { background: #16a34a; }
+.sw-task-dot[data-state='failed'],
+.sw-task-dot[data-state='timeout'] { background: var(--color-accent-800); }
+.sw-task-dot[data-state='lost'] { background: transparent; box-shadow: inset 0 0 0 2px var(--muted-foreground); }
+@keyframes sw-task-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.sw-task-goal { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-task-state,
+.sw-task-meta { flex: none; font-size: 12px; color: var(--muted-foreground); }
+.sw-task-tier-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-2) calc(var(--space-3) + 16px);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.sw-task-tier {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--background);
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, monospace);
+}
+/* 降过级的要看得出来：不标的话人会以为那一档是主代理自己选的。 */
+.sw-task-down { color: var(--color-accent-800); }
+.sw-task-why { color: var(--muted-foreground); overflow-wrap: anywhere; }
+.sw-task-detail {
+  padding: 0 var(--space-3) var(--space-3) calc(var(--space-3) + 16px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.sw-task-summary { overflow-wrap: anywhere; }
+.sw-task-files { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.sw-task-empty { margin: 0; font-size: 12px; color: var(--muted-foreground); }
+.sw-task-err { color: var(--color-accent-800); }
+.sw-task-trace-btn { align-self: flex-start; font-size: 12px; }
+/* 过程是一屏可能很长的东西：给它自己的滚动条，别把对话顶下去。 */
+.sw-task-trace {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+  padding: var(--space-2);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sw-trace-say { overflow-wrap: anywhere; }
+.sw-trace-tool { font-family: var(--font-mono, monospace); color: var(--muted-foreground); overflow-wrap: anywhere; }
+.sw-trace-out {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+  border-left: 2px solid var(--border);
+  padding-left: var(--space-2);
+}
+.sw-trace-out[data-failed='1'] { border-left-color: var(--color-accent-800); }

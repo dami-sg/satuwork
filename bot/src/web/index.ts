@@ -205,6 +205,37 @@ export function apply(ctx: Context, _config: Config = {}) {
   })
 
   /**
+   * 一次委派的子会话全文（见 docs/delegation.md）。
+   *
+   * **为什么不直接走上面那条 `/api/sessions/:child/history`：** 子会话不进控制面的会话
+   * 索引（它不是「这个人的一条对话」，是某条对话里一次工具调用的内部过程），而 Gateway
+   * 的授权正是查那张索引——按 id 直取会换回一个 503，而那个 503 长得像「席位掉线了」。
+   *
+   * 所以它经**主会话**的授权取：路径上的 `:id` 是主会话（Gateway 认得它），`:child` 是
+   * 子会话，而这里要**核对父子关系**——不核对的话，这条路等于「拿任意一个 id 就能读这台
+   * 席位上任意一条会话」。
+   */
+  ctx.server.get('/api/sessions/:id/tasks/:child/history', async (req, res) => {
+    const turns = Math.min(50, Math.max(1, Number(req.query.get('turns') ?? 50)))
+    const before = Number(req.query.get('before') ?? 0)
+    try {
+      const events = await ctx.sessions.events(req.params.child)
+      const root = events.find((e) => e.type === 'session')?.data as
+        | { kind?: string; parent?: { sessionId?: string } }
+        | undefined
+      if (root?.kind !== 'task' || root.parent?.sessionId !== req.params.id) {
+        res.status = 404
+        res.json({ error: '这条子会话不属于该会话' })
+        return
+      }
+      res.json(historySlice(events, { turns, before: before > 0 ? before : undefined }))
+    } catch (e) {
+      res.status = 404
+      res.json({ error: (e as Error).message })
+    }
+  })
+
+  /**
    * 发消息。三岔，不是两岔：
    *
    * | 情况 | 走法 |

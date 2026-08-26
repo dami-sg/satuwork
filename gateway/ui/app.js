@@ -302,6 +302,20 @@ document.getElementById('app').addEventListener('click', async (e) => {
     await decideApproval(btn.getAttribute('data-call'), 'deny', btn.getAttribute('data-scope') || 'once')
     return
   }
+  if (act === 'chat-task-toggle') {
+    // 再点一次收起。一批委派里每条各自开合——三条同时摊开，卡片会长到看不见对话。
+    const id = btn.getAttribute('data-id') || ''
+    state.taskOpen = state.taskOpen || {}
+    if (state.taskOpen[id]) delete state.taskOpen[id]
+    else state.taskOpen[id] = true
+    render()
+    return
+  }
+  if (act === 'chat-task-trace') {
+    // 摊开时**不**顺带把过程也拉下来：那是一跳打到席位的请求，而多数时候人只想看结论。
+    await loadTaskTrace(btn.getAttribute('data-child'))
+    return
+  }
   if (act === 'chat-handoff-claim') {
     await actOnHandoff(btn.getAttribute('data-id'), 'claim')
     return
