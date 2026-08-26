@@ -114,6 +114,18 @@ ctx.provide('browser', browserSvc)
 ctx.provide('agents', {
   rootOf: (id) => (id === 's6t' ? 's6' : undefined),
   taskOf: (id) => (id === 's6t' ? { taskId: 'tk-1', goal: '把这周的对账单发出去', leases: [] } : undefined),
+  // 下面三样是 delegate_task 真跑起来要用的。它在这个探针里只是**被边界看一眼**的对象
+  // ——真的委派怎么跑在 bot/e2e-delegate.mjs 里，这儿只关心「有没有被拦」。
+  quiesced: () => false,
+  maxSteps: 120,
+  async runTask(parent, callId, spec) {
+    return {
+      index: spec.index, taskId: 'tk-probe', child: 't-probe', goal: spec.goal, state: 'done',
+      summary: '探针不真跑', files: [], steps: 1, toolCalls: 0,
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0 },
+      model: { role: spec.modelRole, provider: 'p', id: 'm' }, handedOver: [], ms: 1,
+    }
+  },
 })
 ctx.provide('catalog', {
   serverOf: (name) => (name.startsWith('mcp_a_') ? 'srv-a' : name.startsWith('mcp_b_') ? 'srv-b' : undefined),
@@ -170,6 +182,15 @@ ctx.plugin(StorageService, { path: join(mkdtempSync(join(tmpdir(), 'satuwork-gua
 await new Promise((r) => setTimeout(r, 50))
 ctx.plugin(handoff)
 ctx.plugin(policy)
+/**
+ * **真的那把 `delegate_task`**，不是探针自己捏一把同名的。
+ *
+ * 这一组要钉的正是它**声明的 risk**——捏一把出来就等于把要测的东西自己写了一遍，
+ * 线上那份怎么标都测不出来。上线当天就是这里出的事：标成 `write + external` 之后，
+ * 开着 no-external 的 Bot 一次都派不出去。
+ */
+const delegateTool = await import('./src/tools/delegate.ts')
+ctx.plugin(delegateTool)
 await new Promise((r) => setTimeout(r, 80))
 
 let seq = 0
@@ -864,6 +885,30 @@ const delegation = {}
   delegation.没租到浏览器就调不了 = r.failed === true && r.text.includes('browser')
 }
 out.delegation = delegation
+
+/**
+ * ── 委派这把工具本身不该被边界拦 ────────────────────────────────
+ *
+ * `delegate_task` **不出席位**：开一条会话、在本机跑一个循环。真正会发出去的是子代理的
+ * 那些调用，而它们每一次都单独过同一条管道（上面 delegation 那一组钉的就是这个）。把风险
+ * 叠在包装器上不是多一层保护，是把同一件事算两遍——而算错的那一遍拦的是所有人。
+ */
+{
+  const one = JSON.stringify({
+    tasks: [{ goal: '读一遍日志', context: '找出昨晚失败的原因', model_reason: '机械活', model_role: 'utility' }],
+  })
+  // b1 开着 no-external。标成 external 的话这里会回一句「不在已授权的名单里」。
+  const ext = await ctx.tools.execute({ callId: `c${++seq}`, name: 'delegate_task', arguments: one, sessionId: 's1' })
+  // b6 开着 high-risk。标成 external + write 的话每一次委派都要人点头。
+  const cardsBefore = pendingOf('s6').length
+  const hi = await ctx.tools.execute({ callId: `c${++seq}`, name: 'delegate_task', arguments: one, sessionId: 's6' })
+  out.delegateRisk = {
+    外发闸不拦它: !ext.text.includes('行为边界'),
+    外发闸下跑得起来: ext.failed !== true,
+    不弹确认卡: pendingOf('s6').length === cardsBefore,
+    高风险闸下跑得起来: hi.failed !== true,
+  }
+}
 
 out.mcpRisk = {
   只读的查询: mcpToolRisk('只读', 'GMAIL_FETCH_EMAILS'),

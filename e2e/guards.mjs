@@ -258,6 +258,17 @@ export async function runGuards({ root, test, assert, log }) {
     assert(d.主轮收口才清, '主轮收口之后放行名单还在——那就是永久通行证')
   })
 
+  await test('delegate_task 本身不该被边界拦：它不出席位', () => {
+    const d = r.delegateRisk
+    /**
+     * 上线当天就是这儿出的事：标成 external + write 之后，开着「不碰未授权外部系统」
+     * 的 Bot **一次都派不出去**，而拒绝话术还把人引去模版里加授权——那儿根本没有它。
+     */
+    assert(d.外发闸不拦它 && d.外发闸下跑得起来, 'delegate_task 被外发闸挡住了')
+    // 「读一遍日志找原因」这种纯只读的委派也弹卡，就是把同一件事算了两遍。
+    assert(d.不弹确认卡 && d.高风险闸下跑得起来, '每一次委派都要人点一下头')
+  })
+
   await test('子代理拿不到的两类工具：转人工，和没租到的浏览器', () => {
     const d = r.delegation
     // 子代理面前没有人：一张单开在子会话上没人看得见，人处理完交还时那条会话早收口了。
