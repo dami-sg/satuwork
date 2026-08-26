@@ -359,9 +359,12 @@ frontmatter 在 Gateway 侧解析，解析结果进 `publicSkill`，**不改 `bo
 改为**用到才拉**：
 
 ```
-GET /runtime/skills/:skillId/files            → [{ path, bytes }]
-GET /runtime/skills/:skillId/files/*          → 文件内容
+GET /runtime/skills/:skillId/files?botId=…            → [{ path, bytes }]
+GET /runtime/skills/:skillId/file?botId=…&path=…      → 那个文件的内容
 ```
+
+**路径走 query，不走路径段。** 这个 router 按段数精确匹配（[http.ts:71](../gateway/src/http.ts:71)
+的 `match`），拼不出 `files/*` 那一段通配；而包里的路径带 `/`。
 
 席位侧缓存在 `$SATUWORK_HOME/skills/<skillId>/`，**按 `updatedAt` 作键**：目录同步回来的
 `updatedAt` 比缓存新就重拉。缓存被删了也无所谓——它只是缓存。
@@ -499,10 +502,13 @@ model token 那条线上（多的那一两轮往返），账本里看得见。
 | `SATUWORK_SKILL_VIEW_MAX_CHARS` | 40000 | `skill_view` 单次返回的上限，超了截断并写明截了多少 |
 | `SATUWORK_SKILL_SEARCH_LIMIT` | 10 | `skills_list` 默认返回条数 |
 | `SATUWORK_SKILL_SEARCH_MAX_LIMIT` | 20 | 硬上限，模型传再大也压到这个数 |
-| `SATUWORK_SKILL_SELF_MAX` | 30 | 一颗 Bot 的私有档条数上限（§7） |
-| `SATUWORK_SKILL_SELF_BODY_MAX` | 8000 | 模型写的单条正文字符上限 |
+| `GATEWAY_SEAT_SKILL_MAX` | 30 | 一颗 Bot 的私有档条数上限（§7）。**在 Gateway 上**，见下 |
+| `GATEWAY_SEAT_SKILL_BODY_MAX` | 8000 | 模型写的单条正文字符上限。同上 |
 | `SATUWORK_SKILL_FILES_CACHE_MAX` | 64 MB | 席位上 skill 文件缓存的总量封顶，按 `updatedAt` 淘汰 |
 | `SATUWORK_SKILL_TOOLS` | `auto` | `auto` 按 §5 分档；`off` 退回今天的行为（全部 `常驻`、不注册任何 skill 工具） |
+
+那两条 `GATEWAY_*` 是**写入那一侧**的判据，所以不在席位上：两边各写一份上限，迟早一边
+说存下了、另一边说满了。模型看到的那句「7/30」也是 Gateway 回过去的。
 
 `off` 那一档要**保留**——它是这套东西出问题时的退路，退路不能在同一次改动里一起删掉。
 `skill_manage` 另有一道开关，在 Bot 模版上（界面里的勾选框），不是环境变量：它是管理员
@@ -541,9 +547,14 @@ model token 那条线上（多的那一两轮往返），账本里看得见。
 **Gateway**
 
 - `lib/catalog.ts`：frontmatter 解析、重名去重、`mode` 字段、`publicSkill` 输出这几样
-- `routes/catalog.ts`：`newSkillDefinition` / `applySkillPatch` 收下 `mode`
+- `routes/catalog.ts`：`newSkillDefinition` / `applySkillPatch` 收下 `mode`；清单里带上
+  私有档（`listSkills`）；`POST …/skills/:id/promote` 晋升；DELETE 也认私有档；单条详情
+  多带一份包内文件清单
+- `lib/catalog.ts`：模版上新增 `selfSkills`（「让它自己记 Skill」，**默认开**，§7）
 - `routes/runtime.ts`：新增 `GET /runtime/skills/:id/files`、`GET /runtime/skills/:id/files/*`；
-  新增 `POST /runtime/skills`、`PATCH`、`DELETE`（私有档，从 token + `botId` 定身份）
+  新增 `POST /runtime/skills`、`PATCH`、`DELETE`（私有档，从 token + `botId` 定身份）；
+  另有一条 `DELETE /runtime/bots/:botId/skills/:skillId` 给**人**用——对话里那张卡上的
+  「删掉」走它，成员账号进不了 `/orgs/:id/skills/*`
 - `db.ts` + `db/migrations/0017-seat-skills.ts`：`catalog_items` 加 `botId` 列；新增
   `skillsFor(companyId, accountId, botId)`，可见性判在 where 里（§7）
 - 目录指纹 `catalogStamp` 要把私有档算进去，否则 Bot 自己写完不会自己看见
@@ -558,13 +569,15 @@ model token 那条线上（多的那一两轮往返），账本里看得见。
   [file-terminal-tools.md](./file-terminal-tools.md) 那两把来；三把都要写 `delegation`
   标注，不写进程起不来（§9）
 - `session/types.ts`：新增 `skill/saved` 事件（§13 第 5 条）
+- `registry/index.ts`：`BotRecord.selfSkills`（模版上那个开关，缺字段按开算）
 - 工具表：`skills_list` 只在第 1 档注册（§5）；`skill_manage` 标 `mode: 'root-only'`（§9）
 
 **文档**
 
 - `context-assembly.md` §2 那张表的最后一行要改（它现在写的是「body 全文」）
-- `session-event-field-map.md` 加一行 `skill/saved`——新事件不登记，导出和跨版本重放那
-  两条路上它就是个没人认识的类型
+- 新事件 `skill/saved` 登记在 [session/types.ts](../bot/src/session/types.ts) 上，照
+  `todo/list` 那条的写法带上「为什么存在、退化成什么样」。
+  **不进 `session-event-field-map.md`**——那份是 dsh 日志格式的逆向记录，不是我们的事件表
 - `README.md` 加一节「技能」，指到本文——README 现在没提 Skill，而它是管理员第一眼看的地方
 
 ---
@@ -600,24 +613,36 @@ model token 那条线上（多的那一两轮往返），账本里看得见。
 
 ## 16. 里程碑
 
-1. **Gateway：frontmatter + 重名去重 + mode + 文件下发接口。** 席位不动，`/runtime/catalog`
-   多带几个字段，老席位读进去即丢，没有影响
-2. **Bot：`skill_view` + 两档索引。** 这一步做完，按需加载就成立了；`mode` 全是常驻，
-   所以**行为仍然一个字没变**——它只是把能力铺好了
-3. **界面：`mode` 开关 + 文件清单 + description 提示。** 管理员从这一步开始能真的把
-   Skill 改成按需
-4. **私有档：`skill_manage` + 晋升按钮 + 审计。** 最大的一块，也是最该最后做的——前三步
-   出问题只影响读，这一步出问题会往目录里写脏东西
+1. ~~**Gateway：frontmatter + 重名去重 + mode + 文件下发接口。**~~ 已落地：
+   [lib/catalog.ts](../gateway/src/lib/catalog.ts)（`skillFrontmatter` / `skillDisplayNames` /
+   `skillModeOf` / `skillFiles`，`publicSkill` 多发 `mode` / `description` / `hasFiles` /
+   `displayName`）+ [routes/runtime.ts](../gateway/src/routes/runtime.ts)（按 Bot 取 Skill、
+   包文件两条、私有档三条写）
+2. ~~**Bot：`skill_view` + 两档索引。**~~ 已落地：`skillSplit`
+   （[agent/index.ts](../bot/src/agent/index.ts)，纯函数，`composeSystem` 和
+   `toolSchemasFor` 共用一份判断）+ [tools/skill.ts](../bot/src/tools/skill.ts)
+3. ~~**界面：`mode` 开关 + 文件清单 + description 提示。**~~ 已落地：编辑弹窗多一行
+   「什么时候生效」，卡片上带档位药丸，按需档没写说明会当场标出来
+4. ~~**私有档：`skill_manage` + 晋升按钮 + 审计。**~~ 已落地：`scope='user'` + `botId`
+   （迁移 `0017-seat-skills`），Skill 页面上「Bot 自己写的」那一栏，对话里那张
+   `skill/saved` 卡，审计 detail 里 `by: 'bot'`
 5. **评测。** 拿一份真实的公司 Skill 集（十几条，含两个 ZIP 包），量「用户一句话 → 模型
    打开了正确的那条」的命中率，deepseek / claude 各跑一遍。**这一步不做不算做完**，理由
    见 §17 风险 1
 
-测试：`e2e/skills-tools.mjs`（Gateway 侧：frontmatter、重名冲突、文件接口、私有档的
-可见性与越权、审计条目）+ `bot/e2e-skills.mjs`（席位侧：两档分档、`skill_view` 截断、
-搜不到时的话术、`skill_manage` 改不动公司目录、写完这一轮索引里没有 / 下一轮有、撞名被拒、模型给的 `mode` 被忽略、缓存按 `updatedAt` 失效）。
-两个套件都要在 [e2e/run.mjs](../e2e/run.mjs) 里 `import` 进去才会跑——照
-`runDelegate` / `runPatch` 那几行的样子加。跑法：`node e2e/run.mjs`
-（先 `docker compose up -d postgres`）。
+测试（都已落地，`node e2e/run.mjs`，先 `docker compose up -d postgres`）：
+
+- [e2e/skills.mjs](../e2e/skills.mjs) 十三条，Gateway 侧：frontmatter 赢过正文首段、
+  存量读成常驻而新建默认按需、重名带序号、包文件不随目录下发而是按需拉、私有档落
+  `scope='user'`、指纹跟着私有档变、私有档不跨 Bot、撞名与写满、模型改不动公司目录、
+  晋升是搬不是拷、主人删得掉别人删不掉、管理员也删得掉、审计分得出人和 Bot、模版开关下发
+- [e2e/skills-bot.mjs](../e2e/skills-bot.mjs) 十条（探针 [bot/e2e-skills.mjs](../bot/e2e-skills.mjs)），
+  席位侧：两档分档（**中文索引那一条正是在钉估长口径**）、risk 与 `root-only` 标注、
+  找不到 / 搜不到的话术、包文件按需拉且拉过就缓存、写成功要说「下一轮才看得见」、
+  那张 `skill/saved` 卡
+
+**`bot/e2e-mounted.mjs` 的工具名单也要跟着加三个**——那份名单是「少一把工具而所有信号
+都是绿的」这类事故的唯一防线。
 
 ---
 

@@ -452,6 +452,40 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   })
 
   /**
+   * 员工自己删掉一条「Bot 记下的方法」。
+   *
+   * **和上面那条 DELETE 不是同一条路**：那条认席位票（模型自己删），这条认登录票
+   * （人在对话里按了「删掉」）。分开是因为成员账号根本进不了 `/orgs/:id/skills/*`
+   * ——那套是管理员的目录页，而看见这张卡的恰恰是这颗 Bot 的主人（docs/skills.md §13）。
+   */
+  router.delete('/runtime/bots/:botId/skills/:skillId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    const bots = await db.botsFor(companyId, account.id)
+    if (!bots.some((b) => b.id === req.params.botId)) throw new HttpError(404, '没有这个 Bot')
+    const item = await db.catalog(req.params.skillId)
+    if (
+      !item ||
+      item.kind !== 'skill' ||
+      item.scope !== 'user' ||
+      item.accountId !== account.id ||
+      item.botId !== req.params.botId
+    ) {
+      throw new HttpError(404, '没有这个 Skill')
+    }
+    await db.deleteCatalog(item.id)
+    if (item.companyId) {
+      await db.audit({
+        companyId: item.companyId,
+        accountId: account.id,
+        action: 'catalog.delete',
+        detail: { kind: 'skill', id: item.id, scope: 'seat', botId: item.botId, name: item.name },
+      })
+    }
+    json(res, 200, { deleted: true, id: item.id, name: item.name })
+  })
+
+  /**
    * 包里的文件。**不随目录下发**：那条路每分钟被探针摸一次、整份下发，把 5 MB 的包
    * 塞进去等于给每一次目录同步加一个数量级，而绝大多数轮次里没有任何 Skill 被打开。
    */

@@ -56,6 +56,18 @@ GATEWAY_DATABASE_URL=... node gateway/scripts/backfill-charges.mjs --dry-run
 
 模型、时区口径、为什么调度器在 Gateway 而不在席位，见 [docs/routines.md](docs/routines.md)。
 
+## 技能
+
+公司写好的做事方法挂在 Bot 上。以前每一条的正文都全量压在系统提示词里、每一轮都在；
+现在分两档：**常驻**的照旧（口径、语气这类每次都要成立的规矩），**按需**的只在提示词里
+留一行「名字 + 一句话」，Bot 判断要用时自己 `skill_view` 展开——ZIP 包里的参考资料和
+脚本也是这时候才拉到席位上。
+
+跑完一件事，它还可以把方法记下来（`skill_manage`）：只有这颗 Bot 用得上，在 Skill 页面
+的「Bot 自己写的」那一栏里看得到、删得掉、也可以一键转成公司 Skill。
+
+分档口径、私有档为什么落在 Gateway、边界与计费见 [docs/skills.md](docs/skills.md)。
+
 ## 上下文
 
 一个 Bot 一条长会话，只增不减，而每一轮都把历史重建成一次模型请求。顶到窗口七成就在轮末

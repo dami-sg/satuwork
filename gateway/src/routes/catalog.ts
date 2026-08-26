@@ -2,7 +2,7 @@
  * Bot / Skill / MCP 的定义构造，以及平台与公司两套 CRUD——它们共用同一个工厂。
  */
 import type { RouteCtx } from './ctx.ts'
-import { COMPANY_BOT_ICONS, CatalogOwner, skillDisplayNames, skillModeOf, escalateToOf, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botBrowserOf, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
+import { COMPANY_BOT_ICONS, CatalogOwner, skillDisplayNames, skillFiles, skillModeOf, escalateToOf, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botBrowserOf, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
 import { HttpError, type Req, type Router, json } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { kindOf, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
@@ -450,7 +450,20 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       // 读详情用 visibleItem：列表给的是「全局 ∪ 本公司」，详情却只认本公司的话，
       // 点开自己列表里那条平台发布的 Skill 会得到一句「没有这个 Skill」。写路径下面
       // 两条仍然走 ownedItem——全局项能看不能改，和 Bot 那条路一致。
-      json(res, 200, { skill: publicSkill(await visibleItem(owner, req.params.skillId, 'skill', '没有这个 Skill')) })
+      /**
+       * 详情多带一份**包里的文件清单**（路径 + 字节数，不带正文）。
+       *
+       * 列表那一屏不带它：一屏几十条 Skill，每条再挂一份两百行的清单，翻一次目录页
+       * 就是几百 KB。而详情是点开一条才拉的，那时管理员正想核对包里到底有什么——
+       * 这些文件现在真的会下发到席位、被模型读到。
+       */
+      const item = await visibleItem(owner, req.params.skillId, 'skill', '没有这个 Skill')
+      json(res, 200, {
+        skill: {
+          ...publicSkill(item),
+          files: skillFiles(item).map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.text) })),
+        },
+      })
     })
 
     router.patch(`${s.base}/skills/:skillId`, async (req, res) => {
@@ -466,9 +479,23 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
 
     router.delete(`${s.base}/skills/:skillId`, async (req, res) => {
       const { account, owner } = await s.write(req)
-      const item = await ownedItem(owner, req.params.skillId, 'skill', '没有这个 Skill')
+      /**
+       * 管理员也删得掉「Bot 自己写的」那一档。
+       *
+       * `ownedItem` 只认本公司的 `company` 项，而私有档是 `user` 项——不放这一条，
+       * 界面上那颗「删掉」按钮就是个 404。能看见却处理不了，比看不见更糟：它把一条
+       * 「这颗 Bot 学歪了」的线索变成一次死路（docs/skills.md §7）。
+       */
+      const seat =
+        owner.scope === 'company' ? await db.catalog(req.params.skillId) : undefined
+      const isSeat = seat?.kind === 'skill' && seat.scope === 'user' && seat.companyId === owner.companyId
+      const item = isSeat ? seat! : await ownedItem(owner, req.params.skillId, 'skill', '没有这个 Skill')
       await db.deleteCatalog(item.id)
-      await auditCatalog(owner, account.id, 'catalog.delete', { kind: 'skill', id: item.id })
+      await auditCatalog(owner, account.id, 'catalog.delete', {
+        kind: 'skill',
+        id: item.id,
+        ...(isSeat ? { scope: 'seat', botId: item.botId, name: item.name } : {}),
+      })
       json(res, 200, { deleted: true, id: item.id })
     })
 

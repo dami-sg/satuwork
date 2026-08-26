@@ -401,6 +401,7 @@ function capabilityPanel(a, opts, ro) {
       <span class="satu-panel-title" style="margin-top: var(--space-2);">${t('可用 MCP 服务器')}</span>
       <div style="display: flex; flex-wrap: wrap; gap: 6px;">${chips(names(a.mcps, opts.mcps))}</div>
       ${browserBlock(a, true)}
+      ${selfSkillsBlock(a, true)}
     </div>`
   }
   return `<div class="satu-panel">
@@ -410,7 +411,29 @@ function capabilityPanel(a, opts, ro) {
     ${botPicks('mcps', opts.mcps, a.mcps, t('没有可选项'))}
     <span style="font-size: 12px; color: var(--muted-foreground);">${t('未勾选的能力，Agent 在任务中不可调用。')}</span>
     ${browserBlock(a, false)}
+    ${selfSkillsBlock(a, false)}
   </div>`
+}
+
+
+/**
+ * 「让它自己记 Skill」。
+ *
+ * 摆在**能力**里，和浏览器同一格——它是「要不要放开」，不是「要不要收紧」。和浏览器
+ * 不同的是它**默认开**：写下的东西绑在这一颗 Bot 上、进不了公司目录、每次写都落审计、
+ * 这一屏一键能删，代价比「装完是哑的」小得多（见 docs/skills.md §7）。
+ */
+function selfSkillsBlock(a, ro) {
+  const on = a.selfSkills !== false
+  return botToggle(
+    t('让它自己记 Skill', 'Let it write its own skills'),
+    t(
+      '跑完一件事，它可以把方法记下来，下次直接用。记下的只有这颗 Bot 用得上，在这一屏的「Bot 自己写的」里看得到、删得掉。',
+      'After finishing a task it can note the method down and reuse it. Only this bot sees them; you can review or delete them under "Written by the bot".',
+    ),
+    on,
+    ro ? '' : 'bot-self-skills',
+  )
 }
 
 /**
@@ -761,6 +784,11 @@ function emptySkillForm(item) {
     source: item?.source || '手动编写',
     enabled: item ? item.enabled !== false : true,
     fileName: item?.fileName || '',
+    /**
+     * 常驻还是按需。**新建默认按需，打开一条老的显示它自己那一档**——存量都是常驻，
+     * 那是它们建起来时唯一的行为，改默认值等于趁人不注意改行为。
+     */
+    mode: item?.mode === '常驻' ? '常驻' : item ? item.mode || '常驻' : '按需',
   }
 }
 
@@ -867,19 +895,33 @@ function skillCard(skill) {
   const ro = readOnlyItem(skill)
   const tags = (skill.tags || []).map((tag) => `<span class="tag tag-neutral" style="font-size: 11px; padding: 2px 8px;">${esc(tag)}</span>`).join('')
   const steps = skill.steps ? `<span>${t(`${esc(String(skill.steps))} 个步骤`, `${esc(String(skill.steps))} steps`)}</span>` : ''
+  /**
+   * 常驻 / 按需要在卡片上一眼看得见：这两档的行为差别很大（一个每轮都在，一个要模型
+   * 自己去展开），而它在弹窗里，不点开根本不知道。
+   */
+  const onDemand = skill.mode !== '常驻'
+  const modeTag = `<span class="tag ${onDemand ? 'tag-neutral' : 'tag-accent-2'}" style="font-size: 11px;">${onDemand ? t('按需') : t('常驻')}</span>`
+  /**
+   * **按需档没写说明就是废的**：提示词里只有这一句，模型据此决定要不要展开正文。
+   * 常驻档没有这个问题（正文本来就在），所以只对按需档提示。
+   */
+  const noDesc = onDemand && !skill.description
+  const fileTag = skill.fileCount ? `<span>${t(`${esc(String(skill.fileCount))} 个文件`, `${esc(String(skill.fileCount))} files`)}</span>` : ''
   return `<div class="satu-card">
     <div style="display: flex; align-items: flex-start; gap: var(--space-3);">
       <span class="satu-providermark" style="background: var(--color-accent-100); color: var(--color-accent-800);">${svg(SKILL_ICON, 16)}</span>
       <div style="flex: 1; min-width: 0;">
-        <div class="satu-name">${esc(skill.name)}${ro ? ` <span class="tag tag-accent-2" style="font-size: 11px;">${t('全局')}</span>` : ''}</div>
+        <div class="satu-name">${esc(skill.displayName || skill.name)}${ro ? ` <span class="tag tag-accent-2" style="font-size: 11px;">${t('全局')}</span>` : ''} ${modeTag}</div>
         <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px;">${tags}</div>
       </div>
       <button type="button" class="satu-switch" aria-pressed="${String(skill.enabled !== false)}" aria-label="${esc(t('启用'))}" data-act="skill-toggle" data-id="${esc(skill.id)}" ${ro ? 'disabled title="' + esc(t('全局 Skill 由系统管理员维护')) + '"' : ''}><span></span></button>
     </div>
-    <p class="satu-desc">${esc(skill.summary || t('（还没写正文）'))}</p>
+    <p class="satu-desc">${esc(skill.description || skill.summary || t('（还没写正文）'))}</p>
+    ${noDesc ? `<div style="font-size: 12px; color: var(--color-accent-800);">${t('这条是按需的，但没有一句说明——模型看不出它是干什么的，多半不会展开它。在正文开头写一句，或用 frontmatter 的 description。')}</div>` : ''}
     <div style="height: 1px; background: var(--color-divider);"></div>
     <div class="satu-meta">
       ${steps}
+      ${fileTag}
       <span>${esc(skill.source || t('手动编写'))}</span>
       <span>${t(`更新于 ${esc(dayISO(skill.updatedAt))}`, `Updated ${esc(dayISO(skill.updatedAt))}`)}</span>
     </div>
@@ -960,6 +1002,49 @@ function skillDialogView() {
       </div>`
     : ''
   const sourceRow = skill ? '' : pickRow(t('创建方式'), SKILL_SOURCES, f.source, 'skill-source')
+  /**
+   * 常驻 / 按需。
+   *
+   * 说明写成人话：常驻的每一轮都占着上下文，所以「要短」；按需的靠那一句说明被选中，
+   * 所以「说清什么时候用它」。这两句是这一屏上最要紧的两行文案——选错档的代价，一边
+   * 是每轮多付钱，一边是这条 Skill 根本没被用上。
+   */
+  const modeRow = pickRow(
+    t('什么时候生效'),
+    [
+      { key: '常驻', label: t('每一轮都带着') },
+      { key: '按需', label: t('用到才展开') },
+    ],
+    f.mode === '常驻' ? '常驻' : '按需',
+    'skill-mode',
+    f.mode === '常驻'
+      ? t('正文每一轮都进系统提示词。适合口径、语气这类每次都要成立的规矩——要写短。')
+      : t('提示词里只留名字和第一句说明，模型判断要用时自己展开正文。适合流程、清单、带文件的包。第一句话要说清什么时候用它。'),
+  )
+  /**
+   * 已存下来的 ZIP 包里有什么。
+   *
+   * 以前这一屏只显示「12 个文件」——而现在这些文件真的会下发到席位、被模型读到，
+   * 管理员得能核对包里到底是什么。清单来自单条详情（`files`），列表那一屏不带它。
+   */
+  const saved = Array.isArray(skill?.files) ? skill.files : []
+  const fileList = saved.length
+    ? `<div class="field">
+        <label>${t(`包里的文件（${saved.length} 个）`, `Files in the package (${saved.length})`)}</label>
+        <div class="satu-filetree" style="max-height: 168px;">
+          ${saved
+            .map(
+              (f2) => `<div class="satu-fileitem" style="cursor: default;">
+                <span class="satu-fileicon">${svg(FILE_ICON, 13)}</span>
+                <span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(f2.path)}</span>
+                <span style="margin-left: auto; font-size: 11.5px; color: var(--muted-foreground);">${esc(kbOf(f2.bytes || 0))}</span>
+              </div>`,
+            )
+            .join('')}
+        </div>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${t('Bot 用 skill_view 按名字读它们，不会一次全塞进上下文。')}</span>
+      </div>`
+    : ''
   const err = state.skillError
     ? `<div style="font-size: 13px; color: var(--color-accent-800); background: var(--color-accent-100); border-radius: var(--radius-sm); padding: 10px var(--space-3);">${esc(state.skillError)}</div>`
     : ''
@@ -982,6 +1067,8 @@ function skillDialogView() {
       ${sourceRow}
       ${uploadBlock}
       ${bodyField}
+      ${modeRow}
+      ${fileList}
       ${skillTagPicker(known, f.tags || [])}
       ${skillEnableRow(f.enabled)}
       ${err}
@@ -1049,6 +1136,47 @@ function serverDialogView() {
   </div>`
 }
 
+
+/**
+ * 「Bot 自己写的」那一档。
+ *
+ * 单独一栏而不是混进上面的网格：它们不是管理员写的东西，能做的事也不一样（转成公司
+ * Skill、或者删掉，改不了正文）。默认折叠但**带条数角标**——平时不占地方，攒出东西
+ * 来的时候一眼看得见。
+ */
+function seatSkillRow(skill, botName) {
+  const pii = Array.isArray(skill.pii) && skill.pii.length
+    ? `<span class="tag tag-accent-2" style="font-size: 11px;">${t(`可能含${esc(skill.pii.join('、'))}`, `may contain ${esc(skill.pii.join(', '))}`)}</span>`
+    : ''
+  return `<div class="satu-toolrow" style="grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto auto;">
+    <div style="min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+      <span style="font-weight: 600; font-size: 14px;">${esc(skill.displayName || skill.name)} ${pii}</span>
+      <span style="font-size: 12px; color: var(--muted-foreground);">${esc(botName || t('某颗 Bot'))} · ${esc(dayISO(skill.updatedAt))}</span>
+    </div>
+    <span style="font-size: 13px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${esc(skill.description || skill.summary || t('（没写说明）'))}</span>
+    <button type="button" class="btn btn-secondary" style="flex: none;" data-act="skill-promote" data-id="${esc(skill.id)}">${t('转成公司 Skill')}</button>
+    <button type="button" class="satu-linkbtn" style="color: var(--color-accent-800);" data-act="skill-seat-delete" data-id="${esc(skill.id)}">${t('删掉')}</button>
+  </div>`
+}
+
+function seatSkillsBlock(seat, bots) {
+  if (!seat.length) return ''
+  const open = state.seatSkillsOpen === true
+  const nameOf = (id) => (bots || []).find((b) => b.id === id)?.name || ''
+  return `<div style="display: flex; flex-direction: column; gap: var(--space-3);">
+    <button type="button" class="satu-linkbtn" style="display: flex; align-items: center; gap: var(--space-2); font-size: 15px; font-weight: 600;" data-act="seat-skills-toggle">
+      ${t('Bot 自己写的')} <span class="tag tag-neutral" style="font-size: 11px;">${seat.length}</span>
+      <span style="font-size: 12px; color: var(--muted-foreground); font-weight: 400;">${open ? t('收起') : t('展开')}</span>
+    </button>
+    ${
+      open
+        ? `<div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">${seat.map((x) => seatSkillRow(x, nameOf(x.botId))).join('')}</div>
+           <span style="font-size: 12px; color: var(--muted-foreground);">${t('这些是 Bot 在对话里自己记下的做法：只有记下它的那颗 Bot 用得上，进不了公司目录。要给全公司用，点「转成公司 Skill」。')}</span>`
+        : ''
+    }
+  </div>`
+}
+
 function skillsPage() {
   /**
    * **tab 存的是键，不是译文。**
@@ -1076,9 +1204,13 @@ function skillsPage() {
     : ''
   let body
   if (isSkill) {
-    body = skills.length
-      ? `<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--space-4);">${skills.map(skillCard).join('')}</div>`
+    // 「Bot 自己写的」不混进上面那片网格：它们不是同一种东西，能做的事也不一样。
+    const owned = skills.filter((x) => x.origin !== 'seat')
+    const seat = skills.filter((x) => x.origin === 'seat')
+    const grid = owned.length
+      ? `<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--space-4);">${owned.map(skillCard).join('')}</div>`
       : skillEmpty(t('还没有 Skill'), t('点右上角新建一个：手动写，或导入一份 SKILL.md。'))
+    body = `<div style="display: flex; flex-direction: column; gap: var(--space-6);">${grid}${seatSkillsBlock(seat, state.bots)}</div>`
   } else {
     const rows = servers
       .map(

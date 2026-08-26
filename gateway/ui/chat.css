@@ -1637,6 +1637,22 @@
    摆在气泡最底下：它是这一轮里最重的一块，而上面那颗 delegate_task 药丸只说得出
    「调用中」。行是可点的——摊开才有结论和过程，多数时候人只看状态那一眼。 */
 .sw-tasks { margin-top: var(--space-2); }
+
+/* Bot 给自己记下一条方法时的那张小卡（docs/skills.md §13）。刻意做得比委派卡轻：
+   它是这一轮的一个副作用，不该盖过人正在读的正文。 */
+.sw-skillnotes { margin-top: var(--space-2); display: flex; flex-direction: column; gap: 4px; }
+.sw-skillnote {
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+  padding: 6px 10px; font-size: 12.5px;
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--card);
+}
+.sw-skillnote-name { font-weight: 600; }
+.sw-skillnote-verb { color: var(--muted-foreground); }
+.sw-skillnote-act {
+  margin-left: auto; padding: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; color: var(--color-accent-800);
+}
+.sw-skillnote-act + .sw-skillnote-act { margin-left: 0; }
 .sw-task-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);

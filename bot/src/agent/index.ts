@@ -180,6 +180,41 @@ const SKILL_INDEX_HEAD = [
   '要用哪条，就用 `skill_view("名字")` 把它展开——名字照抄，不要缩写或改写。',
 ].join('\n')
 
+export interface SkillSplit {
+  /** 正文全文进提示词的那些。 */
+  resident: CachedSkill[]
+  /** 只进索引的那些。 */
+  onDemand: CachedSkill[]
+  /** 提示词里那一段索引（可能是完整清单，也可能只有一行摘要）。 */
+  index: string
+  /** 索引装不下，这一轮要把 `skills_list` 放进工具表。 */
+  listTool: boolean
+}
+
+/**
+ * 挂上的 Skill 分成**常驻**和**按需**两摞，外加按需那摞的索引。
+ *
+ * 纯函数：同一份输入必然得到同一份输出。`composeSystem` 和 `toolSchemasFor` 各调一次
+ * ——两处各判一次分档的话，会出现「提示词说去用 `skills_list`、工具表里却没有它」这种
+ * 自相矛盾的一轮。
+ */
+export function skillSplit(picked: CachedSkill[]): SkillSplit {
+  const resident = picked.filter((s) => s.mode !== '按需')
+  const onDemand = picked.filter((s) => s.mode === '按需')
+  if (!onDemand.length) return { resident, onDemand, index: '', listTool: false }
+  const lines = onDemand.map((s) => `- ${s.displayName}：${s.description || '（这条没写说明）'}`)
+  const full = `${SKILL_INDEX_HEAD}\n\n${lines.join('\n')}`
+  /**
+   * **用 estTokens 估，不是 `chars / 3`。**
+   *
+   * Skill 的名字和说明基本都是中文，而 estTokens 里 CJK 是一字一 token、其余才按
+   * 3.6 字符算。照 `chars / 3` 估一份中文索引会低估到三分之一，分档线当场失效。
+   */
+  if (estTokens(full) <= SKILL_INDEX_MAX_TOKENS) return { resident, onDemand, index: full, listTool: false }
+  const brief = `${SKILL_INDEX_HEAD}\n\n这台席位有 ${onDemand.length} 条 Skill，清单太长装不下。用 \`skills_list("关键词")\` 找，再用 \`skill_view("名字")\` 展开。`
+  return { resident, onDemand, index: brief, listTool: true }
+}
+
 const DEFAULT_MAX_STEPS = 120
 
 /**
@@ -1805,13 +1840,7 @@ ${composed.skills}` : base, base, skills: composed.skills }
    * 会出现「提示词说去用 `skills_list`、工具表里却没有它」这种自相矛盾的一轮。
    * 它是纯函数（读同一份缓存、同一份环境变量），算两次的结果必然相同。
    */
-  private skillsOf(bot: { skills?: string[] } | undefined): {
-    resident: CachedSkill[]
-    onDemand: CachedSkill[]
-    index: string
-    /** 索引装不下，这一轮要把 `skills_list` 放进工具表。 */
-    listTool: boolean
-  } {
+  private skillsOf(bot: { skills?: string[] } | undefined): SkillSplit {
     const col = this.ctx.storage.collection<CachedSkill>('skills')
     const ids = bot?.skills
     const picked =
@@ -1827,20 +1856,7 @@ ${composed.skills}` : base, base, skills: composed.skills }
     if ((process.env.SATUWORK_SKILL_TOOLS || 'auto').trim() === 'off') {
       return { resident: picked, onDemand: [], index: '', listTool: false }
     }
-    const resident = picked.filter((s) => s.mode !== '按需')
-    const onDemand = picked.filter((s) => s.mode === '按需')
-    if (!onDemand.length) return { resident, onDemand, index: '', listTool: false }
-    const lines = onDemand.map((s) => `- ${s.displayName}：${s.description || '（这条没写说明）'}`)
-    const full = `${SKILL_INDEX_HEAD}\n\n${lines.join('\n')}`
-    /**
-     * **用 estTokens 估，不是 `chars / 3`。**
-     *
-     * Skill 的名字和说明基本都是中文，而 estTokens 里 CJK 是一字一 token、其余才按
-     * 3.6 字符算。照 `chars / 3` 估一份中文索引会低估到三分之一，分档线当场失效。
-     */
-    if (estTokens(full) <= SKILL_INDEX_MAX_TOKENS) return { resident, onDemand, index: full, listTool: false }
-    const brief = `${SKILL_INDEX_HEAD}\n\n这台席位有 ${onDemand.length} 条 Skill，清单太长装不下。用 \`skills_list("关键词")\` 找，再用 \`skill_view("名字")\` 展开。`
-    return { resident, onDemand, index: brief, listTool: true }
+    return skillSplit(picked)
   }
 
   /**

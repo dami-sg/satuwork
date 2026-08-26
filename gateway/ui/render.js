@@ -1754,6 +1754,7 @@ async function submitSkill(e) {
     tags: f.tags,
     enabled: f.enabled,
     source: f.source,
+    mode: f.mode,
     fileName: (state.skillFile && state.skillFile.name) || f.fileName,
   }
   if (f.source === 'ZIP 包' && state.skillEntries && window.satuUnzip) {

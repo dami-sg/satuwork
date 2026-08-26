@@ -592,6 +592,24 @@ function fold(events, live) {
       if (prev) Object.assign(prev, data)
       else list.push({ ...data })
       assistant.endTime = at
+    } else if (type === 'skill/saved') {
+      /**
+       * Bot 给自己记下了一条 Skill（docs/skills.md §13）。**挂在助手那一块上**，理由
+       * 和委派卡、确认卡一字不差：另起一块会把它插进正在跑的这一轮中间，而
+       * `tool/result` 按 callId 认药丸，认不回去就会把一次成功的调用标成失败。
+       *
+       * 这是员工唯一一次**在事情发生的当下**看见它改了自己——事后去 Skill 页面翻，
+       * 那一屏没人会没事去看。
+       */
+      if (!assistant) {
+        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        blocks.push(assistant)
+      }
+      const notes = assistant.skillNotes || (assistant.skillNotes = [])
+      const seen = notes.find((x) => x.callId === data.callId)
+      if (seen) Object.assign(seen, data)
+      else notes.push({ ...data })
+      assistant.endTime = at
     } else if (type === 'tool/approval') {
       /**
        * 高风险确认。**挂在助手那一块上，不另起一块。**
@@ -3152,7 +3170,54 @@ function updateRow(el, b, streaming, since) {
     }
   }
 
+  /**
+   * 「记下了一条方法」那张小卡。摆在委派卡下面——它是这一轮的一个副作用，不是主线。
+   *
+   * 删掉那颗按钮直接打公司目录那条删除接口（管理员也删得掉私有档，见
+   * routes/catalog.ts）。删完把这张卡标成已删，不去重拉整条会话：那条 Skill 已经不在
+   * 了，而这一块讲的是「当时发生了什么」。
+   */
+  const notes = b.skillNotes || []
+  let nbox = bubble.querySelector('.sw-skillnotes')
+  if (notes.length && !nbox) {
+    nbox = document.createElement('div')
+    nbox.className = 'sw-skillnotes'
+    bubble.appendChild(nbox)
+  }
+  if (nbox) {
+    const nSig = notes.map((x) => x.id + ':' + x.action + ':' + (state.skillNoteGone?.[x.id] ? 'x' : '-')).join('|')
+    if (nbox.getAttribute('data-sig') !== nSig) {
+      nbox.setAttribute('data-sig', nSig)
+      nbox.innerHTML = notes.map(skillNoteHtml).join('')
+    }
+  }
+
   paintRowTime(el, b, streaming, since)
+}
+
+const SKILL_NOTE_VERB = { create: ['记下了一条方法', 'noted a method'], update: ['改了自己记的方法', 'updated its own method'], remove: ['删掉了自己记的方法', 'deleted its own method'] }
+
+function skillNoteHtml(note) {
+  const gone = state.skillNoteGone?.[note.id] || note.action === 'remove'
+  const verb = SKILL_NOTE_VERB[note.action] || SKILL_NOTE_VERB.create
+  const count = typeof note.used === 'number' && typeof note.max === 'number' ? ` · ${note.used}/${note.max}` : ''
+  return `<div class="sw-skillnote">
+    <span class="sw-skillnote-name">${esc(note.name || '')}</span>
+    <span class="sw-skillnote-verb">${esc(t(verb[0], verb[1]))}${esc(count)}</span>
+    ${
+      gone
+        ? `<span class="sw-skillnote-verb">${esc(t('已删掉', 'deleted'))}</span>`
+        : /**
+           * 「看看」只给管得着目录的人（管理员 / owner）。成员点进 /skills 会落在一屏
+           * 拉不到数据的页面上——那比没有这颗按钮更糟。
+           *
+           * 「删掉」人人都有：它走的是「这颗 Bot 的主人删自己那条」那条路
+           * （`/runtime/bots/:botId/skills/:id`），不是管理员的目录接口。
+           */
+          `${catalogBase() ? `<button type="button" class="sw-skillnote-act" data-act="go" data-href="/skills">${esc(t('看看', 'view'))}</button>` : ''}
+           <button type="button" class="sw-skillnote-act" data-act="chat-skill-delete" data-id="${esc(note.id)}" data-name="${esc(note.name || '')}">${esc(t('删掉', 'delete'))}</button>`
+    }
+  </div>`
 }
 
 /** 子会话全文取到哪一步了。进签名，否则「加载中 → 有内容」那一下不会重画。 */
