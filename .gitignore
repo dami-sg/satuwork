@@ -2,6 +2,9 @@ node_modules/
 *.log
 .DS_Store
 .env
+# 备份也要挡住。`.env` 这一条只挡住原名——而备份的名字（.env.bak-<时间戳>）是
+# 手滑最容易留下的那一种，它带着平台 token 和数据库连接串，一个 `git add -A` 就上去了。
+.env.bak-*
 
 # 运行时数据，不进版本库
 .satuwork/
