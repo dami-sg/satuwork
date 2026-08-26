@@ -1288,7 +1288,29 @@ export class AgentService extends Service {
       this.ctx.tools.has('browser_snapshot') ||
       this.ctx.tools.schemas().some((t) => t.name.startsWith('mcp_'))
     const cite = linked ? `\n\n${linkOutBlock()}` : ''
-    const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}${web}${escalate}${cite}`
+    /**
+     * 「产出的文件点得开」这一段，只在手上真有会往工作区里落文件的工具时才加。
+     *
+     * **闸要按「谁会报 `files`」开，不是按「谁像是在写文件」。** 界面认的是
+     * `ToolResult.files` 这个字段，不是工具名，而报这个字段的有五条路：`write_file` /
+     * `patch` 自己报；`terminal` 跑完扫一遍 mtime 认出来的那些也报（tools/terminal.ts
+     * 的 `producedSince`）；`web_extract(save=true)` 把网页原文落进 `web/` 之后报；
+     * 浏览器工具把下载报进 `takeDownloads()`。
+     *
+     * 后两条一开始漏了，而漏掉的正是最该有这段话的那种 Bot：一个只挂了
+     * `web_search` + `web_extract` 的调研 Bot，抓回来的 `.md` 在界面上明明是能点开的
+     * 药丸，模型却还在回答里写「文件保存在工作区的 web/ 目录，自己打开看」。
+     *
+     * 一把都没挂上时不加：那是在教模型用一条它走不到的路。
+     */
+    const makes =
+      this.ctx.tools.has('write_file') ||
+      this.ctx.tools.has('patch') ||
+      this.ctx.tools.has('terminal') ||
+      this.ctx.tools.has('web_extract') ||
+      this.ctx.tools.has('browser_snapshot')
+    const outFiles = makes ? `\n\n${fileOutBlock()}` : ''
+    const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}${web}${escalate}${cite}${outFiles}`
     const col = this.ctx.storage.collection<{ id: string; name: string; body: string; enabled?: boolean }>('skills')
     const ids = bot?.skills
     const picked =
@@ -2214,6 +2236,38 @@ function linkOutBlock(): string {
     '地址原样抄，一个字符都不要改、不要缩短。**手上没有地址的那一条就只写文字**，不要照着规律拼一个看起来对的：',
     '拼出来的地址点下去是 404，而人会以为是自己这边的问题，比不给链接更坏。',
     '正文里已经写成链接的东西，末尾不必再列一遍「参考链接」。',
+  ].join('\n')
+}
+
+/**
+ * 产出的文件在界面上长什么样。
+ *
+ * **不说这一句的代价**：模型辛辛苦苦生成了一个 HTML 图表页，然后在回答里写
+ * 「文件已生成：eth_price_10y.html（工作区根目录，双击即可在浏览器打开）」——而用户
+ * 面前只有一个网页上的对话框，既没有那台席位机器的文件管理器，也没有可以双击的桌面。
+ * 那句话在对面读起来就是「东西做好了，但你拿不到」。
+ *
+ * 而路其实一直是通的：工具报出来的产出（`ToolResult.files`）在对话里就是一颗能点开的
+ * 药丸，点一下弹出预览——网页在一个不带任何 allow-* 的 sandbox iframe 里渲染，Markdown
+ * 走同一套排版，图片、PDF、Office 文档也都直接看得了（gateway/ui/chat.js 的
+ * `openPreview`）。模型不知道这条路存在，于是绕过它去教用户操作文件系统。
+ *
+ * **「写成行内代码」不是排版讲究，是接口。** 界面只把正文里 `` `完整路径` `` 这种整段
+ * 相等的行内代码换成药丸（chat.js 的 `mentionedFiles` / `inlineFileChips`），不做模糊
+ * 匹配——拿正则扫散文猜路径措辞一改就散架。所以这句话必须写死到这个程度。
+ */
+function fileOutBlock(): string {
+  return [
+    '## 你产出的文件',
+    '你落在工作区里的文件，在用户那边是对话里**一颗能点开的药丸**：点一下就地弹出预览，网页、Markdown、图片、PDF、Word/Excel/PPT 都直接看得了。',
+    '这是自动的，你不用做什么——工具报出来的产出会摆在那条消息底下。',
+    '',
+    '正文里提到某个文件时，把**相对工作区根目录的完整路径写成行内代码**：`报表/二季度.html`。',
+    '界面会把它就地换成那颗药丸，人就在你说这句话的地方点开。路径要和真实路径一字不差，差一个字就换不成，只剩一段灰底的文字。',
+    '',
+    '**不要教用户去文件系统里找它**：「在工作区根目录」「双击打开」「用浏览器打开这个文件」「路径是 /home/…」这类话一句都不要写。',
+    '用户面前是网页上的这段对话，那边没有这台席位机器的文件管理器，也没有可以双击的桌面——那样说等于「东西做好了，但你拿不到」。',
+    '同样也不要把整份文件的内容贴进回答来代替它：一份长报告贴进对话只会把回答本身埋掉，而预览就在那颗药丸上。',
   ].join('\n')
 }
 

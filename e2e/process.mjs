@@ -58,6 +58,43 @@ export async function runProcess({ root, test, assert, log }) {
     assert(!bad.length, `这几条不对：${bad.join('、')}`)
   })
 
+  await test('命令产出的文件点得开', () => {
+    // 模型用 terminal 造出来的东西（跑脚本生成的报表、curl 下来的附件）以前一颗药丸
+    // 都没有：`write_file` 报得出自己写了哪个文件，一条 shell 命令报不出。于是用户
+    // 只能听它说一句「文件在工作区里」——而用户手上根本没有那台机器的文件管理器。
+    assert(r.produced.报了产出.includes('产出/report.html'), `没报出产出：${JSON.stringify(r.produced.报了产出)}`)
+    assert(r.produced.名字是文件名 === 'report.html', `name 不是文件名：${r.produced.名字是文件名}`)
+    // 判据是 mtime，不是「跑过一条命令」——一次 `echo` 不该在界面上摆出一排药丸。
+    assert(r.produced.只读命令不报, '只读命令也报出了产出')
+    // 跑到一半失败的命令留下了什么，恰恰是那时候人最想看的。
+    assert(r.produced.失败的命令也报.includes('半截.txt'), `失败的命令没报产出：${JSON.stringify(r.produced.失败的命令也报)}`)
+    assert(r.produced.过程痕迹不报, '.satuwork 里的过程痕迹混进了产出')
+  })
+
+  await test('产出扫描认的是 mtime，所以别的写入方要先排除掉', () => {
+    /**
+     * 文件系统只回答「这个文件什么时候被改的」，不回答「谁改的」。同一个工作区里成系统
+     * 的另外几个写入方——用户上传（uploads/）、网页抓取（web/）、浏览器下载（browser/）
+     * ——各自已经把文件报进了自己那次调用，混进来就是张冠李戴：一条跑二十秒的命令期间
+     * 用户传了张发票，发票会挂到那条命令底下，还跟着 details.files 进会话日志。
+     */
+    const got = r.produced.别人的地盘不算我的
+    assert(got.includes('真产出.txt'), `自己写的那个反而没报：${JSON.stringify(got)}`)
+    assert(!got.some((p) => p.startsWith('uploads/')), `用户传的附件被算成了命令产出：${JSON.stringify(got)}`)
+    assert(!got.some((p) => p.startsWith('web/')), `web_extract 落的原文被算成了命令产出：${JSON.stringify(got)}`)
+  })
+
+  await test('摆不下的不闷声吞掉', () => {
+    // 以前砍到五个，一声不吭。一条生成十份分章报告的命令，人看到五颗药丸会以为一共
+    // 就这五个——而这个仓库在过程截图和「读过的文件」两处都明写着不许这么干。
+    assert(r.produced.十个全报 === 10, `十个只报了 ${r.produced.十个全报} 个`)
+    // 一次安装 / 构建 / 切分支能改上百个文件，那是过程不是产出，一个都不摆。
+    assert(r.produced.批量改动不报, '批量改动也摆了药丸')
+    // 但**要说一声**：一颗药丸都没有，和「这次什么都没产出」在屏幕上一模一样。
+    assert(r.produced.批量改动说了一声, '批量改动闷声吞掉了，模型无从知道')
+    assert(r.produced.不该无缘无故说那句, '正常的一次产出也带上了「改动太多」那句话')
+  })
+
   await test('后台：立刻返回，poll 只给新输出', () => {
     assert(!all(r.background).length, `起后台不对：${all(r.background).join('、')}`)
     // poll 再给一遍旧输出的话，模型会以为那一步又跑了一次。

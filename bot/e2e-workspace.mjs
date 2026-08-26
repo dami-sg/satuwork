@@ -13,6 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { WorkspaceService, contentTypeOf, safeName } from './src/workspace/index.ts'
 import { ToolService } from './src/tools/index.ts'
 import * as fileTools from './src/tools/file.ts'
+import { walkFiles } from './src/tools/common.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'satu-ws-'))
 const ctx = new Context()
@@ -242,6 +243,34 @@ out.paging = {
   超长单行不空: wide.startsWith('1|xxx'),
   超长单行被截断: wide.includes('已截断，共 400000 字符'),
   截断之后后面的行还在: wide.includes('2|second'),
+}
+
+// ── 遍历预算：走满 ≠ 走不完 ───────────────────────────────────────────
+/**
+ * `walkFiles` 是「要 yield 之前先减」，所以正好走满预算的那一趟会以 `left === 0`
+ * **干干净净地结束**。调用方要是按 `left <= 0` 判「这趟没走完」，就会把一份完整的
+ * 结果当成残缺的丢掉——差一个文件，而且是静默的：terminal 的产出扫描正是靠这个判据
+ * 决定报不报，判错了整个功能在那种大小的工作区上永远不出声。
+ */
+{
+  const walkRoot = join(root, 'walk')
+  mkdirSync(walkRoot, { recursive: true })
+  for (let i = 1; i <= 5; i++) writeFileSync(join(walkRoot, `w${i}.txt`), 'x')
+  const run = async (left) => {
+    const budget = { left }
+    const seen = []
+    for await (const f of walkFiles(walkRoot, budget, false)) seen.push(f)
+    return { got: seen.length, truncated: budget.truncated === true, left: budget.left }
+  }
+  const exact = await run(5)
+  const short = await run(3)
+  const roomy = await run(50)
+  out.walkBudget = {
+    正好走满不算截断: exact.got === 5 && !exact.truncated,
+    正好走满也确实归零: exact.left === 0,
+    真没走完才算截断: short.got === 3 && short.truncated,
+    预算有富余不算截断: roomy.got === 5 && !roomy.truncated,
+  }
 }
 
 console.log('__RESULT__' + JSON.stringify(out))

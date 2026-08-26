@@ -32,7 +32,7 @@ agent.prompt(…)                            这一轮那句话，单独送（�
 
 ---
 
-## 2. systemPrompt：五段，顺序固定
+## 2. systemPrompt：七段，顺序固定
 
 `composeSystem` 拼出来的，从上到下：
 
@@ -42,10 +42,17 @@ agent.prompt(…)                            这一轮那句话，单独送（�
 | `runtimeBlock()` | 硬编码。讲清 `[时间]` 前缀这个约定 | 总是 |
 | `webContentBlock()` | 硬编码。给 `<web_content>` / `<page_content>` 下定义 | 挂了 `web_extract` **或** `browser_snapshot` |
 | `escalateBlock(rule)` | 模版的 `escalate` 字段，**原样引用不改写** | 有规则**且**挂了 `escalate_to_human` |
+| `linkOutBlock()` | 硬编码。列举东西时每条都要写成 markdown 链接 | 挂了 `web_search` / `web_extract` / `browser_snapshot` / 任一 `mcp_*` |
+| `fileOutBlock()` | 硬编码。产出的文件在界面上是一颗点得开的药丸，别教用户去文件系统里找 | 挂了 `write_file` / `patch` / `terminal` / `web_extract` / `browser_snapshot`——即**会报 `ToolResult.files` 的那五条路** |
 | Skill 正文 | `skills` 集合，`## Skill: 名字` + body **全文** | `bot.skills` 未定义 = 本机所有启用的；空数组 = 不加 |
 
-三段硬编码的都是**条件加载**，理由是同一条：没有那把工具时，那几行是在教模型防一种它
+四段硬编码的都是**条件加载**，理由是同一条：没有那把工具时，那几行是在教模型防一种它
 遇不到的东西 / 用一把它没有的工具，纯占上下文。
+
+> `fileOutBlock()` 也是为一次线上现场加的：Bot 生成了一个 HTML 图表页，然后在回答里写
+> 「文件已生成：`eth_price_10y.html`（工作区根目录，双击即可在浏览器打开）」——而用户
+> 面前只有一个网页上的对话框，既没有那台席位机器的文件管理器，也没有可以双击的桌面。
+> 路一直是通的（产出会变成一颗点得开的药丸），模型不知道它存在而已。
 
 还有一段**只属于这一轮、不落盘**的：`@` 了某把连接、而它的工具一个都没挂上时，
 追加 `mentionGapBlock`。不落盘是因为落盘的是结构（谁被点名了），重放时工具表可能已经
@@ -329,7 +336,7 @@ chip 报的是实测总量，会明显比"该压了没压"的判断更早见红�
 | 干什么 | 在哪 |
 |---|---|
 | 一轮的总装配 | `runTurn`（[agent/index.ts](../bot/src/agent/index.ts)） |
-| 系统提示词 | `composeSystem` / `runtimeBlock` / `webContentBlock` / `escalateBlock` / `mentionGapBlock` |
+| 系统提示词 | `composeSystem` / `runtimeBlock` / `webContentBlock` / `escalateBlock` / `linkOutBlock` / `fileOutBlock` / `mentionGapBlock` |
 | 工具表 | `toolSchemasFor`，执行期包装在 `bridgeTools` |
 | 事件 → 消息 | `toAgentMessages`（导出，e2e 直接测它） |
 | 图片 | `userContentFor` / `loadImage` / `stale` / `IMAGE_CACHE` / `MAX_LIVE_IMAGES` |

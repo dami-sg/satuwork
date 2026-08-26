@@ -2484,6 +2484,19 @@ function readMoreHtml(n) {
 }
 
 /**
+ * 一条消息底下最多摆几颗**产出**药丸。
+ *
+ * 比读过的那一档宽一点：产出是这一轮的成果，人来就是找它的。但也得有个数——一条命令
+ * 生成二十份分章报告，二十颗药丸能占掉三行，把回答本身挤出屏幕。
+ */
+const MAX_OUT_CHIPS = 8
+
+/** 没摆下的产出。**不闷声吞掉**——摆八颗然后什么也不说，人会以为一共就这八个。 */
+function outMoreHtml(n) {
+  return `<span class="sw-chip sw-stepmore">${esc(t('还有 N 个产出文件，在右栏「工作区文件」里', 'N more files produced — see Workspace files in the side pane').replace('N', String(n)))}</span>`
+}
+
+/**
  * 一条消息渲染完之后，把里面的文件接上。
  *
  * 两件事一起做，按 Markdown 块逐块来并留个记号：`syncMd` 只重画签名变了的那一块，
@@ -2798,6 +2811,23 @@ function syncMd(host, text, streaming) {
  * `since` 是这一轮开始的时刻（fold 的 statusAt），读秒从它起算。
  */
 function updateRow(el, b, streaming, since) {
+  /**
+   * 头像会不会动。**这一行是「它还在干活」在屏幕上唯一常驻的信号。**
+   *
+   * 三点省略号只在**还没吐字**的那一段有（一开口就地变成正文），气泡下面的读秒是一行
+   * 小灰字。可一轮真正花时间的活（读十几个网页、跑几条命令）恰恰是**已经写了几段字、
+   * 后面还在接着跑**的那种——那时候屏幕上除了那个每秒 +1 的数字，没有任何东西在动，
+   * 人分不出「它还在跑」和「它答完了就这样」。头像是这条消息的身份，一直在，让它呼吸。
+   *
+   * 属性变了才写：updateRow 每帧都跑，无条件 setAttribute 会让 CSS 动画从头开始，
+   * 呼吸变成一顿一顿的抽搐。
+   */
+  const working = Boolean(streaming) && b.kind === 'assistant'
+  if (working !== (el.getAttribute('data-live') === '1')) {
+    if (working) el.setAttribute('data-live', '1')
+    else el.removeAttribute('data-live')
+  }
+
   const bubble = el.querySelector('.sw-bubble')
   const md = bubble.querySelector('.sw-md')
   const chips = bubble.querySelector('.sw-chips')
@@ -2895,8 +2925,10 @@ function updateRow(el, b, streaming, since) {
   const waiting = apps.filter((a) => a.state === 'pending' && !approvalDead(a))
   const settled = apps.filter((a) => !waiting.includes(a))
 
-  // 底下只留没被正文点过名的。
+  // 底下只留没被正文点过名的。摆不下的收成一行，不闷声截断（见 outMoreHtml）。
   const rest = outs.filter((f) => !inlined.has(f.path))
+  const shownOuts = rest.slice(0, MAX_OUT_CHIPS)
+  const moreOuts = rest.length - shownOuts.length
   /**
    * 读过、但正文里一个字也没提到的那些（见 readFiles）。
    *
@@ -2915,7 +2947,9 @@ function updateRow(el, b, streaming, since) {
   const sig =
     tools.map((x) => x.name + (x.result == null ? '·' : x.failed ? '!' : '=')).join('|') +
     '#' +
-    rest.map((f) => f.path).join('|') +
+    shownOuts.map((f) => f.path).join('|') +
+    '+' +
+    moreOuts +
     '#' +
     shownReads.map((f) => f.path).join('|') +
     '+' +
@@ -2926,7 +2960,8 @@ function updateRow(el, b, streaming, since) {
     chips.setAttribute('data-sig', sig)
     chips.innerHTML =
       tools.map(chipHtml).join('') +
-      rest.map(fileChipHtml).join('') +
+      shownOuts.map(fileChipHtml).join('') +
+      (moreOuts > 0 ? outMoreHtml(moreOuts) : '') +
       shownReads.map(readChipHtml).join('') +
       (moreReads > 0 ? readMoreHtml(moreReads) : '') +
       settled.map((a, i) => approvalChipHtml(a, tools.length + i)).join('')

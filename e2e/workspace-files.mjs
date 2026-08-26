@@ -90,6 +90,17 @@ export async function runWorkspaceFiles({ root, test, assert, log }) {
     assert(r.paging.截断之后后面的行还在, '截断之后就不往下读了')
   })
 
+  await test('遍历预算：走满不等于走不完', () => {
+    /**
+     * `walkFiles` 是「要 yield 之前先减」，所以正好走满预算的那一趟以 `left === 0`
+     * 干干净净地结束。按 `left <= 0` 判「没走完」会把一份完整的结果丢掉——差一个文件，
+     * 而且是静默的：terminal 的产出扫描就是靠这个判据决定报不报，判错了这个功能在那种
+     * 大小的工作区上永远不出声，而屏幕上跟「这条命令确实没产出」一模一样。
+     */
+    const bad = Object.entries(r.walkBudget).filter(([, v]) => v !== true).map(([k]) => k)
+    assert(!bad.length, `这几条不对：${bad.join('、')}`)
+  })
+
   await test('file 工具集：行号格式、目录可见、旧名字有出路', () => {
     // 行号格式是 patch 剥前缀的前提——它一变，模型从 read_file 里复制粘贴的 old_string
     // 就再也剥不干净，而报出来的会是「没找到那段文本」。
