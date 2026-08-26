@@ -537,8 +537,9 @@ model token 那条线上（多的那一两轮往返），账本里看得见。
    （[chat.js:713](../gateway/ui/chat.js:713) 那个 `todo/list` 挨着）。**不许让界面去扫
    工具结果的文本**——那段文本是写给模型的散文，措辞一改就扫不出来，这条道理在
    `ToolResult.files` 的注释里已经写死了
-6. `GET /me/skills/:id` 的响应里加 `mode`、`hasFiles`、重名序号，**界面不许自己按正文长度
-   去推常驻还是按需**——推的那一刻就跟后端分叉了
+6. `GET /orgs/:id/skills/:skillId` 的响应里加 `mode`、`hasFiles`、`displayName`（重名
+   序号）和包内文件清单，**界面不许自己按正文长度去推常驻还是按需**——推的那一刻就跟
+   后端分叉了
 
 ---
 

@@ -28,7 +28,7 @@ export const inject = ['tools', 'storage', 'catalog', 'sessions']
 /** 单次返回的上限。喂回模型的东西必须有界，理由同 tools/file.ts 那一排上限。 */
 const VIEW_MAX_CHARS = Math.max(2000, Math.trunc(Number(process.env.SATUWORK_SKILL_VIEW_MAX_CHARS) || 40_000))
 const SEARCH_LIMIT = Math.max(1, Math.trunc(Number(process.env.SATUWORK_SKILL_SEARCH_LIMIT) || 10))
-const SEARCH_MAX_LIMIT = 20
+const SEARCH_MAX_LIMIT = Math.max(1, Math.trunc(Number(process.env.SATUWORK_SKILL_SEARCH_MAX_LIMIT) || 20))
 
 /**
  * 席位上 skill 包文件缓存的总量封顶。
