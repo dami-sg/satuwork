@@ -33,6 +33,7 @@ import { runWebBot } from './web-bot.mjs'
 import { runVision } from './vision.mjs'
 import { runTurnImages } from './turn-images.mjs'
 import { runMentions } from './mentions.mjs'
+import { runRoutineModel } from './routine-model.mjs'
 import { runHistoryTime } from './history-time.mjs'
 import { runCompact } from './compact.mjs'
 import { runGatewayUrl } from './gateway-url.mjs'
@@ -3193,6 +3194,7 @@ async function main() {
     await runVision({ root, test, assert, log })
     await runTurnImages({ root, test, assert, log })
     await runMentions({ root, test, assert, log })
+    await runRoutineModel({ root, test, assert, log })
     await runHistoryTime({ root, test, assert, log })
     await runCompact({ root, test, assert, log })
     await runGatewayUrl({ root, test, assert, log })

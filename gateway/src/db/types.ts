@@ -977,6 +977,24 @@ export interface RoutineSchedule {
 
 export type RoutineTrigger = RoutineSchedule
 
+/**
+ * 这一条到点了用哪个模型跑。
+ *
+ * - `utility` —— 平台钉的 utility 模型。**默认就是它**：定时任务是「一天一次、没人
+ *   在等着看」的活，而它每天都跑；把它压在便宜的那一档上，省下来的是每个人、每条
+ *   任务、每一天的一份 token。
+ * - `daily` —— **不覆盖**，跟这个 Bot 平时聊天用的那个模型走（那个模型本身没指定时
+ *   才回落到平台的日常模型，见 lib/catalog.ts 的 defaultBotModel）。写「跟平时一样」
+ *   而不是「钉到平台日常模型」，是因为管理员给某颗 Bot 单独挑过模型的话，那句挑选
+ *   同样该在定时任务里作数——人选这一档要的就是「和我自己问它时一模一样」。
+ */
+export type RoutineModelRole = 'daily' | 'utility'
+
+/** 认不出来的一律当 utility——这个字段只有两种值，而默认那一档是省钱的那个。 */
+export function parseRoutineModelRole(v: unknown): RoutineModelRole {
+  return String(v ?? '') === 'daily' ? 'daily' : 'utility'
+}
+
 export interface Routine {
   id: string
   botId: string
@@ -986,6 +1004,8 @@ export interface Routine {
   instruction: string
   active: boolean
   triggers: RoutineTrigger[]
+  /** 用哪个模型跑。默认 utility——理由见 RoutineModelRole。 */
+  modelRole: RoutineModelRole
   /** 下一次什么时候跑。null = 不排（停用、没触发器、或者算不出来）。 */
   nextRunAt: number | null
   /**

@@ -254,7 +254,18 @@ export async function runRoutine(db: Db, routine: Routine, trigger: RoutineRunTr
       const reader = await openEvents(link, sessionId, afterSeq, ac)
       const posted = (await seatJson(link, `/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: 'POST',
-        body: { text: routine.instruction },
+        /**
+         * **发的是角色名，不是 provider + model。**
+         *
+         * 席位手上已经有平台钉的那两个角色（目录里下发的 `models.{daily,utility}`），
+         * 让它自己去查一次就够了。反过来把具体那一对从这里发过去，等于给 `/messages`
+         * 开了一个「这一轮用哪个模型」的入口——那条路浏览器也走得通，于是任何人都能
+         * 绕开管理员放开的白名单点一个模型。角色名只有两种值，绕不出什么去。
+         *
+         * `daily` 这一档故意**不发**任何东西：它的意思是「跟这个 Bot 平时一样」，
+         * 而那正是席位不带覆盖时的行为。
+         */
+        body: { text: routine.instruction, ...(routine.modelRole === 'utility' ? { modelRole: 'utility' } : {}) },
       })) as { steered?: boolean } | null
       // `steered` = 插进了正在跑的那一轮，等的就是那一轮的收口；否则我们会另起一轮。
       const kind = await readTurnEnd(reader, !posted?.steered)

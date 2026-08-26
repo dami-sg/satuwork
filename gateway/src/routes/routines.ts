@@ -11,7 +11,7 @@ import { bodyOf, strField } from '../lib/validate.ts'
 import { requireUser } from '../lib/guards.ts'
 import { visibleBotOf } from '../lib/runtime.ts'
 import { companyMachineOf } from '../deploy.ts'
-import { canonicalTimezone, parseRoutineTriggers, ROUTINE_MAX_TRIGGERS, type Account, type Db, type Routine, type RoutineRun } from '../db.ts'
+import { canonicalTimezone, parseRoutineTriggers, ROUTINE_MAX_TRIGGERS, type Account, type Db, type Routine, type RoutineModelRole, type RoutineRun } from '../db.ts'
 import { nextRunAtOf } from '../lib/schedule.ts'
 import { runRoutine } from '../routines.ts'
 
@@ -50,6 +50,7 @@ function publicRoutine(routine: Routine, lastRun?: RoutineRun) {
     instruction: routine.instruction,
     active: routine.active,
     triggers: routine.triggers,
+    modelRole: routine.modelRole,
     nextRunAt: routine.nextRunAt,
     // 列表里那一行也要能显示「上一次红了」。为此单查一条，不是把十条全带上。
     lastRun: lastRun ? publicRun(lastRun) : null,
@@ -98,6 +99,20 @@ function triggersOf(raw: unknown, tz: string) {
   return parsed
 }
 
+/**
+ * 用哪个模型跑。**只认 `daily` 和 `utility`，别的一律 400。**
+ *
+ * 库里那份 `parseRoutineModelRole` 认不出来就当 utility——读库那一路没人接得住异常，
+ * 一条脏数据不该让整个列表打不开。而人刚在界面上选的那一下不能这么办：把一个拼错的
+ * 值静静地存成 utility，接口回 200、界面上写着「日常模型」，跑起来却是另一个。
+ */
+function modelRoleOf(raw: unknown): RoutineModelRole | undefined {
+  if (raw === undefined) return undefined
+  const v = String(raw ?? '')
+  if (v !== 'daily' && v !== 'utility') throw new HttpError(400, 'modelRole 只能是 daily 或 utility')
+  return v
+}
+
 export function attachRoutines(router: Router, ctx: RouteCtx) {
   const { db, keys } = ctx
 
@@ -124,6 +139,7 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
       name: strField(body, 'name', false).slice(0, MAX_NAME),
       instruction: strField(body, 'instruction', false).slice(0, MAX_INSTRUCTION),
       triggers,
+      modelRole: modelRoleOf(body.modelRole),
       nextRunAt: nextRunAtOf({ active: true, triggers }),
     })
     await db.audit({
@@ -158,6 +174,8 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
     if (body.name !== undefined) patch.name = strField(body, 'name', false).slice(0, MAX_NAME)
     if (body.instruction !== undefined) patch.instruction = strField(body, 'instruction', false).slice(0, MAX_INSTRUCTION)
     if (body.active !== undefined) patch.active = body.active === true
+    const modelRole = modelRoleOf(body.modelRole)
+    if (modelRole !== undefined) patch.modelRole = modelRole
     const triggers = triggersOf(body.triggers, tz)
     if (triggers !== undefined) patch.triggers = triggers
     if (patch.active !== undefined || patch.triggers !== undefined) {

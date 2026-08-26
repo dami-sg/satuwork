@@ -180,10 +180,37 @@ function routineDetailPanel() {
       </div>
       ${routine.active && routine.nextRunAt ? `<p class="sw-rt-next">${t('下一次')} ${esc(rtRunTime(routine.nextRunAt, rtTzOf(routine)))}</p>` : ''}
     </div>
+    ${routineModelField(routine)}
     <div class="field">
       <label>${t('运行记录')}</label>
       ${runs.length ? `<ul class="sw-rt-runs">${runs.map((r) => routineRunRow(r, routine)).join('')}</ul>` : `<p class="sw-rt-none">${t('还没跑过')}</p>`}
     </div>
+  </div>`
+}
+
+/**
+ * 用哪个模型跑。
+ *
+ * **默认是 utility，而且这一行就明说它省 token**：定时任务一天跑一次、跑的时候没人
+ * 在看，却按聊天那一档的价钱算——这个选择器存在的全部理由就是那笔钱。不写清楚的话，
+ * 人只会看见两个模型名字，然后按「哪个听起来厉害」来选。
+ *
+ * 另一档写的是「和聊天一样」而不是模型名：它的意思正是**不覆盖**——管理员给这颗 Bot
+ * 单独挑过模型的话，那一份挑选在这里照样作数（见 Gateway 的 RoutineModelRole）。
+ */
+function routineModelField(routine) {
+  const role = routine.modelRole === 'daily' ? 'daily' : 'utility'
+  const opt = (v, label) => `<option value="${v}" ${role === v ? 'selected' : ''}>${esc(label)}</option>`
+  return `<div class="field">
+    <label for="routine-model">${t('用哪个模型')}</label>
+    <select class="input" id="routine-model" data-routine-field="modelRole">
+      ${opt('utility', t('Utility 模型（省 token）'))}${opt('daily', t('日常模型（和聊天时一样）'))}
+    </select>
+    <p class="sw-rt-none">${
+      role === 'utility'
+        ? t('它自己跑的时候没人在等，用便宜的那一档。要它做难一点的活，换成日常模型。')
+        : t('和你自己问它时用的是同一个模型。每天都跑的活，utility 那一档省得多。')
+    }</p>
   </div>`
 }
 
