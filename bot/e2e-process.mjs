@@ -6,7 +6,7 @@
  * 用 `kill(pid, 0)` 去问操作系统，不看我们自己那本账。
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -134,6 +134,66 @@ out.foreground = {
     // 落盘的命令输出是过程痕迹（.satuwork 在 SKIPPED_DIRS 里），不该混进产出。
     过程痕迹不报: !(one.files ?? []).some((f) => f.path.startsWith('.satuwork')),
   }
+}
+
+// ── 2.6 连着跑：早于这条命令的写入，不许算到它头上 ─────────────────────
+/**
+ * 判据比的是 `mtimeMs`，所以**地板出自哪个钟**是这件事的全部。取自 `Date.now()` 就对
+ * 不上：它向下取整到毫秒而 `mtimeMs` 带小数，同一毫秒里前者恒小于后者，窗口于是往回
+ * 张开将近一毫秒——早于这条命令的写入成了它的产出，界面上多一颗不属于这次调用的药丸，
+ * 还跟着 details.files 进会话日志。
+ *
+ * 上面 2.5 每种情况只跑一次，而这条窗口只有半毫秒宽：**两次写入隔得越近才越容易撞上**，
+ * 隔一次工作区扫描就已经十次里中不了一次。所以这一段做两件事——把工作区先扫干净（扫描
+ * 越快，两条命令挨得越紧），并且每轮在只读命令**紧挨着**从探针这边写一个文件：那是
+ * 「同一个工作区里的另一个写入方」，也是这条不变量真正要挡的东西，而且它和下一条命令
+ * 之间只隔着几行 JS，撞不撞得上不再看运气。
+ *
+ * 两个方向一起数：多报是窗口往回开了，**少报是地板抬过了头**——「往后挪一毫秒」那种
+ * 凑数改法就是拿这一头换那一头，在时间戳粗一格的文件系统上会把命令头几毫秒里真写下
+ * 的文件丢掉。两头都钉住，省得下次又换回去。
+ */
+{
+  const 轮数 = 20
+  // 2.5 留下的几十个文件会让每次扫描慢上一截，而这一段要的正是「两条命令挨得紧」。
+  // 那些断言的结果早就取进 out 了，文件本身没人再看。
+  for (const d of ['产出', '一批', '批量', 'uploads', 'web', 'browser', '真产出.txt', '半截.txt']) {
+    rmSync(join(root, d), { recursive: true, force: true })
+  }
+  const 连跑 = { 轮数, 早先的写入泄漏: 0, 十个变多: 0, 十个变少: 0, 单个没报: 0, 样本: [] }
+  for (let i = 0; i < 轮数; i++) {
+    const one = await call('terminal', { command: 'mkdir -p 连跑 && printf x > 连跑/a.txt' })
+    const oneFiles = (one.files ?? []).map((f) => f.path)
+    if (!oneFiles.includes('连跑/a.txt')) {
+      连跑.单个没报++
+      连跑.样本.push(`#${i} 自己写的没报：${JSON.stringify(oneFiles)}`)
+    }
+    // **紧挨着**落一个不属于任何命令的文件，再跑一条只读的。地板要是往回开了，这个
+    // 文件就会挂到那条 `echo` 头上——真实场景里它是用户上传、是另一个席位、是上一条
+    // 命令的最后一次写入。
+    writeFileSync(join(root, '连跑', '外来.txt'), 'x')
+    const none = await call('terminal', { command: 'echo 只是看看' })
+    if (none.files) {
+      连跑.早先的写入泄漏++
+      连跑.样本.push(`#${i} 只读命令报出了：${JSON.stringify(none.files.map((f) => f.path))}`)
+    }
+    // 再紧跟一条写十个的：十一个是把早先那个算了进来，九个是自己的丢了。
+    const many = await call('terminal', { command: 'mkdir -p 连跑批 && for k in $(seq 1 10); do echo x > 连跑批/g$k.txt; done' })
+    const manyFiles = (many.files ?? []).map((f) => f.path)
+    if (manyFiles.length > 10) {
+      连跑.十个变多++
+      连跑.样本.push(`#${i} 十个变成 ${manyFiles.length}，多出来的：${JSON.stringify(manyFiles.filter((f) => !f.startsWith('连跑批/')))}`)
+    } else if (manyFiles.length < 10) {
+      连跑.十个变少++
+      连跑.样本.push(`#${i} 十个变成 ${manyFiles.length}：${JSON.stringify(manyFiles)}`)
+    }
+    // 每轮扫干净：两百多个文件留在那儿，后面每一次扫描都要多走一遍。
+    rmSync(join(root, '连跑'), { recursive: true, force: true })
+    rmSync(join(root, '连跑批'), { recursive: true, force: true })
+  }
+  // 样本只留前几条：全泄漏时报错信息不该是一屏路径。
+  连跑.样本 = 连跑.样本.slice(0, 5)
+  out.连跑 = 连跑
 }
 
 // ── 3. 后台：起、poll、wait、kill ─────────────────────────────────────
