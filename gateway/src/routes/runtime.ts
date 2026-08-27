@@ -73,9 +73,30 @@ function catalogStamp(
    * （docs/skills.md §7、docs/memory.md §5）。
    */
   memories = '0:0',
+  /**
+   * 这颗 Bot 在哪几块板上（见 docs/kanban.md §10.1）。
+   *
+   * **不能省，而且是这个洞的第四次。** 板和成员都不在 `catalog_items` 里：人把一颗 Bot
+   * 加进板，上面那几样一个字节都不会变——探针一直判「没变」，席位永远不重拉，于是
+   * `kanban_*` 那几把工具**永远不出现**，直到有人重新部署这个席位；而界面上那次「加进
+   * 板」明明回了成功。前三次是连接器、模型角色、记忆，注释就在上面。
+   */
+  boards = '0:0',
 ): string {
   const toolsAt = tools.reduce((n, i) => Math.max(n, i.updatedAt), 0)
-  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}:${models}:${memories}`
+  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}:${models}:${memories}:${boards}`
+}
+
+/**
+ * 板那一截压成一小段。
+ *
+ * 算的是**板本身的 updatedAt 和条数**：改名、改 brief、加成员、退出一块板，四种都要
+ * 让它变。加成员时 `addBoardMember` 不动 `boards.updatedAt`，所以条数那一半是必须的
+ * ——只看时间的话，「加进一块新板」这件最要紧的事反而看不出来。
+ */
+function boardStamp(list: { board: { updatedAt: number }; role: string }[]): string {
+  const at = list.reduce((n, b) => Math.max(n, b.board.updatedAt), 0)
+  return `${at}:${list.length}`
 }
 
 /** 两个模型角色压成一小段，进指纹用。 */
@@ -168,6 +189,11 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const skills = await db.skillsFor(companyId, account.id, botId || null)
     const servers = await db.visibleCatalog('mcp', companyId)
     /**
+     * 这颗 Bot 所在的板。**没带 botId 的调用（脚本、老席位）拿到空**：板是按 Bot 认
+     * 成员的，不知道是谁就没有答案——同上面那条 Skill 的口径。
+     */
+    const boards = botId ? await db.boardsForBot(account.id, botId) : []
+    /**
      * **这颗 Bot 读得到的全部记忆**，四层一次取齐（`memoriesFor` 的 where 里带着层和
      * 归属，别人的一条都进不来）。
      *
@@ -231,7 +257,16 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         await connectorStampOf(db, account.id, companyId),
         modelStamp(settings),
         memoryStamp(memories),
+        boardStamp(boards),
       ),
+      /**
+       * 这颗 Bot 在哪几块板上。**席位据此决定注不注册 `kanban_*` 那几把工具**——
+       * 「这颗 Bot 是某块板的成员」这句话的事实源在 Gateway 的 board_members，而决定
+       * 注不注册的是席位，中间只有这一条路（docs/kanban.md §10.1）。
+       *
+       * `role` 一起下来，`kanban_list` 在席位本地就答得出「板上有谁、各干什么」。
+       */
+      boards: boards.map(({ board, role }) => ({ id: board.id, name: board.name, brief: board.brief, role })),
       /**
        * 连接器绑账号、不绑 Bot：合成出来的那几条挂到**每一颗** Bot 的 `mcps` 上。
        * 席位那边 `toolSchemasFor()` 照现有逻辑按 `mcps` 过滤，一行都不用改。
@@ -300,6 +335,8 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     ]
     /** 记忆同理，而且它连 `catalog_items` 都不在——不算进去就永远同步不下来。 */
     const memories = companyId ? await db.memoriesFor(companyId, account.id, botId || null) : []
+    /** 板同理，而且后果更硬：那几把工具会**整组不出现**（docs/kanban.md §10.1）。 */
+    const boards = botId ? await db.boardsForBot(account.id, botId) : []
     json(res, 200, {
       templateVersion: version,
       stamp: catalogStamp(
@@ -309,6 +346,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         await connectorStampOf(db, account.id, companyId),
         modelStamp(await db.platformSettings()),
         memoryStamp(memories),
+        boardStamp(boards),
       ),
     })
   })

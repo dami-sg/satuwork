@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, Board, BoardMember, Card, CardComment, CardRun, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseCardBlockedKind, parseCardNotify, parseCardRunStatus, parseCardState, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -564,4 +564,99 @@ export function handoffOf(r: Row): Handoff {
 export function toPg(text: string): string {
   let i = 0
   return text.replace(/\?/g, () => `$${++i}`)
+}
+
+// ── 多 Bot 看板 ────────────────────────────────────────────────────────────
+
+export function boardOf(r: Row): Board {
+  return {
+    id: str(r.id),
+    accountId: str(r.accountId),
+    companyId: str(r.companyId),
+    name: str(r.name),
+    brief: str(r.brief),
+    archived: Boolean(r.archived),
+    createdAt: num(r.createdAt),
+    updatedAt: num(r.updatedAt),
+  }
+}
+
+export function boardMemberOf(r: Row): BoardMember {
+  return {
+    boardId: str(r.boardId),
+    botId: str(r.botId),
+    role: str(r.role),
+    addedAt: num(r.addedAt),
+  }
+}
+
+/**
+ * 一张卡。
+ *
+ * `state` / `blockedKind` / `notify` / `modelRole` 全走 parse 而不是 `as`：读库这一路
+ * 没人接得住异常，一条脏数据不该让整块板打不开（同 routineOf 那条）。真正要拦住写错值
+ * 的地方在路由上——那里一律 400。
+ */
+export function cardOf(r: Row): Card {
+  return {
+    id: str(r.id),
+    boardId: str(r.boardId),
+    accountId: str(r.accountId),
+    companyId: str(r.companyId),
+    title: str(r.title),
+    body: str(r.body),
+    assigneeBotId: strOrNull(r.assigneeBotId),
+    state: parseCardState(r.state),
+    priority: num(r.priority),
+    createdByBotId: strOrNull(r.createdByBotId),
+    modelRole: parseRoutineModelRole(r.modelRole),
+    modelReason: str(r.modelReason),
+    modelDowngraded: Boolean(r.modelDowngraded),
+    needsBrowser: Boolean(r.needsBrowser),
+    maxSteps: num(r.maxSteps),
+    notify: parseCardNotify(r.notify),
+    sessionId: strOrNull(r.sessionId),
+    heartbeatAt: numOrNull(r.heartbeatAt),
+    attempt: num(r.attempt),
+    reopens: num(r.reopens),
+    retryAfter: numOrNull(r.retryAfter),
+    summary: str(r.summary),
+    metadata: r.metadata == null ? null : (jsonOf(r.metadata) as Record<string, unknown>),
+    blockedKind: parseCardBlockedKind(r.blockedKind),
+    blockedReason: str(r.blockedReason),
+    dedupeKey: strOrNull(r.dedupeKey),
+    createdAt: num(r.createdAt),
+    startedAt: numOrNull(r.startedAt),
+    endedAt: numOrNull(r.endedAt),
+    updatedAt: num(r.updatedAt),
+  }
+}
+
+export function cardCommentOf(r: Row): CardComment {
+  return {
+    id: str(r.id),
+    cardId: str(r.cardId),
+    kind: str(r.kind) === 'system' ? 'system' : 'comment',
+    authorAccountId: strOrNull(r.authorAccountId),
+    authorBotId: strOrNull(r.authorBotId),
+    body: str(r.body),
+    createdAt: num(r.createdAt),
+  }
+}
+
+export function cardRunOf(r: Row): CardRun {
+  return {
+    id: str(r.id),
+    cardId: str(r.cardId),
+    attempt: num(r.attempt),
+    sessionId: strOrNull(r.sessionId),
+    botId: str(r.botId),
+    machineId: strOrNull(r.machineId),
+    status: parseCardRunStatus(r.status),
+    steps: numOrNull(r.steps),
+    toolCalls: numOrNull(r.toolCalls),
+    error: strOrNull(r.error),
+    startedAt: num(r.startedAt),
+    endedAt: numOrNull(r.endedAt),
+  }
 }
