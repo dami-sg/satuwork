@@ -642,6 +642,41 @@ function botDetailPage() {
  * 副本，人改完却不生效（服务端不收），比不摆更糟。所以底座在下面**只读**地列出来，
  * 旁边写清楚它归谁管。
  */
+/**
+ * 「Bot 记下的事实」——**自己建的那一屏上的**。
+ *
+ * **摆在这儿，不是摆在公司模版那一屏上。** 记忆的那几个开关（记哪几类、留多久、注入
+ * 上限）确实是模版的，但**条目本身是这一颗 Bot 攒下来的数据**，跟着人走。摆到模版页
+ * 去，管理员看到的是一份跟他无关的清单，而这颗 Bot 的主人——唯一会想删掉某一条的人
+ * ——在自己这一屏上根本找不到它。
+ *
+ * 第一版就是这么错的：`memoryPanel` 只挂在模版页和公司 Bot 详情页上，而这两处都不拉
+ * 每颗 Bot 的记忆，于是「已存记忆」在**任何一屏上都看不到**。e2e 验了接口、探针验了
+ * 挑选、ui-dom 验了文件能装载，没有一处会因为「这张列表压根没进任何一个页面」而变红。
+ *
+ * 和上面那几块只读的「继承自公司模版」不同：这一块**是能动的**（删、钉住、管理员还能
+ * 推给全公司），所以传 `ro = false`。
+ */
+function myMemories(a) {
+  // 没拉到就整块不画（同 storedMemories 的口径）：空列表和"还没拉过"不能长得一样。
+  if (!Array.isArray(a.memories)) return ''
+  const off = a.memoryOn
+    ? ''
+    : `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t(
+        '公司模版里「长期记忆」当前是关着的，下面这些留着但不会进对话。',
+        'Long-term memory is off in the company template — these are kept but do not enter conversations.',
+      )}</p>`
+  return `<div class="satu-panel">
+    <span class="satu-panel-title">${t('它记下的事实')}</span>
+    <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t(
+      '跨对话有效的一句话事实。它自己在对话里记，你在这儿删得掉。记哪几类、留多久由公司模版定。',
+      'Single-sentence facts that carry across conversations. It records them itself; you can delete them here. Which kinds and how long are set by the company template.',
+    )}</p>
+    ${off}
+    ${storedMemories(a, false)}
+  </div>`
+}
+
 function myBotPage(bot, a) {
   const tplVersion = bot.templateVersion || state.template?.version || 1
   const opts = state.botOptions || { skills: [], mcps: [] }
@@ -697,6 +732,7 @@ function myBotPage(bot, a) {
         </div>
         ${guardsPanel(base, true)}
         ${capabilityPanel(base, opts, true)}
+        ${myMemories(a)}
 
         ${flashes()}
         <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);">
