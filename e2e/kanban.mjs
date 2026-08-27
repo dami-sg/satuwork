@@ -275,6 +275,102 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
       assert(again.status === 409, `再撤一次该 409，实际 ${again.status}`)
     })
 
+    await test('模型那一组：走 /runtime + 席位票，botId 验归属', async () => {
+      const seat = (method, path, body) => req(base, method, `/runtime/kanban${path}`, { token: seatTok, body })
+      const q = `?botId=${encodeURIComponent(designBot)}`
+
+      const list = await seat('GET', `/boards${q}`)
+      assert(list.status === 200, `list ${list.status} ${list.text}`)
+      const board = list.json.boards.find((b) => b.id === boardId)
+      assert(board, `该看得见这块板：${list.text}`)
+      // 一把工具答完三个问题：有哪些板、板上有谁、板上有什么卡。模型只有这一条路问路。
+      assert(board.members.length === 2 && board.members.some((m) => m.role === '出图'), `成员要带出去：${list.text}`)
+      assert(Array.isArray(board.cards), `卡要带出去：${list.text}`)
+      // 收口的不列：模型要的是「现在还有什么活」，一屏历史只会挤掉那几条。
+      assert(!board.cards.some((c) => c.state === 'cancelled'), `撤销的不该列出来：${list.text}`)
+
+      // **请求体是模型拼的**：一个编出来的 botId 不该换来别人的板。
+      const stolen = await req(base, 'GET', `/runtime/kanban/boards?botId=${encodeURIComponent(otherBot)}`, { token: seatTok })
+      assert(stolen.status === 404, `拿别人的 botId 该 404，实际 ${stolen.status} ${stolen.text}`)
+    })
+
+    await test('模型建卡：一次一块板，assignee 只能从名单里挑', async () => {
+      const seat = (path, body) => req(base, 'POST', `/runtime/kanban${path}?botId=${encodeURIComponent(designBot)}`, { token: seatTok, body })
+
+      const made = await seat('/cards', {
+        board: boardId,
+        cards: [
+          { title: '出三张主图', assignee: designBot, body: '尺寸见 brief', model_reason: '格式定死了', model_role: 'utility' },
+          { title: '审一遍文案', assignee: writeBot, body: '看有没有夸大', model_reason: '要判断算不算夸大', model_role: 'daily' },
+        ],
+      })
+      assert(made.status === 201, `create ${made.status} ${made.text}`)
+      assert(made.json.cards.length === 2, `该建出两张：${made.text}`)
+      assert(made.json.cards[0].createdByBotId === designBot, `要记下是谁建的：${made.text}`)
+
+      const outsider = await seat('/cards', {
+        board: boardId,
+        cards: [{ title: '给别人', assignee: otherBot, model_reason: 'x', model_role: 'daily' }],
+      })
+      assert(outsider.status === 400 && outsider.text.includes(writeBot), `派到名单外该被拒并列出名单：${outsider.text}`)
+    })
+
+    await test('在好几块板上就必须点名往哪块建', async () => {
+      const second = (await req(base, 'POST', '/kanban/boards', { token: meTok, body: { name: '另一摊事' } })).json.board
+      await req(base, 'POST', `/kanban/boards/${second.id}/members`, { token: meTok, body: { botId: designBot } })
+      const r = await req(base, 'POST', `/runtime/kanban/cards?botId=${encodeURIComponent(designBot)}`, {
+        token: seatTok,
+        body: { cards: [{ title: '不知道往哪建', assignee: designBot, model_reason: 'x', model_role: 'daily' }] },
+      })
+      // 主会话里没有「当前这块板」这个东西：人上一句在聊别的，下一句说「派给设计 Bot」。
+      assert(r.status === 400 && r.text.includes(second.id), `该逼它点名并列出板：${r.status} ${r.text}`)
+      await req(base, 'DELETE', `/kanban/boards/${second.id}`, { token: meTok })
+    })
+
+    await test('同一次调用里两张一样的：合并成一张，把卡号回给它', async () => {
+      /**
+       * 模型换个措辞又撞一次是常态，而板上出现三张一模一样的卡，人会把三张都派出去。
+       * 唯一索引是唯一原子的那个：一次调用里的五张同一毫秒落库，先查后插拦不住自己。
+       */
+      const r = await req(base, 'POST', `/runtime/kanban/cards?botId=${encodeURIComponent(designBot)}`, {
+        token: seatTok,
+        body: {
+          board: boardId,
+          cards: [
+            { title: '把报价页抓一份', assignee: designBot, model_reason: '抓取', model_role: 'utility' },
+            { title: '把报价页抓一份 ', assignee: designBot, model_reason: '抓取', model_role: 'utility' },
+          ],
+        },
+      })
+      assert(r.status === 201, `create ${r.status} ${r.text}`)
+      assert(r.json.cards[0].id === r.json.cards[1].id, `该是同一张：${r.text}`)
+      assert(r.json.merged.length === 1, `合并的要报出来，不然模型以为自己建了两张：${r.text}`)
+    })
+
+    await test('模型建依赖和留言：不跨板、不成圈，时间线上留得下', async () => {
+      const q = `?botId=${encodeURIComponent(designBot)}`
+      const mk = async (title) =>
+        (await req(base, 'POST', `/runtime/kanban/cards${q}`, {
+          token: seatTok,
+          body: { board: boardId, cards: [{ title, assignee: designBot, model_reason: 'x', model_role: 'daily' }] },
+        })).json.cards[0]
+      const first = await mk('先做的')
+      const then = await mk('后做的')
+
+      const linked = await req(base, 'POST', `/runtime/kanban/cards/${then.id}/links${q}`, { token: seatTok, body: { parentId: first.id } })
+      assert(linked.status === 201, `link ${linked.status} ${linked.text}`)
+      const cycle = await req(base, 'POST', `/runtime/kanban/cards/${first.id}/links${q}`, { token: seatTok, body: { parentId: then.id } })
+      assert(cycle.status === 400, `成圈该被拒，实际 ${cycle.status} ${cycle.text}`)
+
+      const said = await req(base, 'POST', `/runtime/kanban/cards/${then.id}/comments${q}`, {
+        token: seatTok,
+        body: { body: '第三家要登录，跳过' },
+      })
+      assert(said.status === 201, `comment ${said.status} ${said.text}`)
+      const seen = await req(base, 'GET', `/kanban/cards/${then.id}`, { token: meTok })
+      assert(seen.json.timeline.some((t) => t.authorBotId === designBot && t.body.includes('登录')), `人也该看得见：${seen.text}`)
+    })
+
     await test('删板：卡跟着走，别人删不掉', async () => {
       const board = (await req(base, 'POST', '/kanban/boards', { token: meTok, body: { name: '待删' } })).json.board
       const card = (await req(base, 'POST', `/kanban/boards/${board.id}/cards`, { token: meTok, body: { title: '一张' } })).json.card

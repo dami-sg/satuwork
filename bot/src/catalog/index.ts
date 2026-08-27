@@ -289,6 +289,18 @@ export class CatalogService extends Service {
    * 网页提取的摘要走 utility——廉价、大批量、不面对用户，正是它的定义。
    */
   models: { daily: ModelRole; utility: ModelRole } = { daily: EMPTY_ROLE, utility: EMPTY_ROLE }
+
+  /**
+   * 这颗 Bot 在哪几块板上（见 docs/kanban.md §10.1）。
+   *
+   * **Gateway 一直在发**（`/runtime/catalog` 的 `boards`），这边不声明就读进来即丢——
+   * 和上面 `guards`、`memory` 那两段注释说的是同一个坑：人在界面上把 Bot 加进板、接口
+   * 也回了成功，而席位上那几把 `kanban_*` 工具**整组不出现**。
+   *
+   * 存在内存里就够，不落 storage：它是「注不注册这几把工具」的判据，而工具表本来就是
+   * 每次组请求现算的；进程重启会重拉一次目录。
+   */
+  boards: { id: string; name: string; brief: string; role: string }[] = []
   /** 上一次拉到的公司模版版本号。给 /api/runtime/status 看，也用来打日志。 */
   templateVersion = 0
   /** 上一次探针给的指纹。变了才重拉整份目录。 */
@@ -423,6 +435,7 @@ export class CatalogService extends Service {
       servers?: RemoteServer[]
       models?: { daily?: ModelRole; utility?: ModelRole }
       memories?: Partial<CachedMemory>[]
+      boards?: { id?: string; name?: string; brief?: string; role?: string }[]
     }
     // **发车时刻要在 fetch 之前取**：豁免的判据就是「这份响应比那次写入更旧」。
     const startedAt = Date.now()
@@ -461,6 +474,10 @@ export class CatalogService extends Service {
       (m): m is Partial<CachedMemory> & { id: string } => typeof m?.id === 'string' && !!m.id,
     )
     this.syncMemories(memories, { since: startedAt })
+    /** 没有 id 的当场丢掉：下游拿它去建卡，一个空 id 只会换回一句 400。 */
+    this.boards = (Array.isArray(body.boards) ? body.boards : [])
+      .filter((b): b is { id: string } & typeof b => typeof b?.id === 'string' && !!b.id)
+      .map((b) => ({ id: b.id, name: String(b.name ?? ''), brief: String(b.brief ?? ''), role: String(b.role ?? '') }))
     this.syncServers(Array.isArray(body.servers) ? body.servers : [])
     const pinned = this.pinBots(this.remoteBots)
     await this.connectMcp()

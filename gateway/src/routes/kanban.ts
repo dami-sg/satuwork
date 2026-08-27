@@ -12,7 +12,7 @@
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
-import { requireUser } from '../lib/guards.ts'
+import { requireSeatOnly, requireUser } from '../lib/guards.ts'
 import {
   BOARD_BRIEF_MAX,
   BOARD_NAME_MAX,
@@ -29,8 +29,10 @@ import {
   resolveModelRole,
 } from '../lib/kanban.ts'
 import {
+  CARD_CREATE_MAX,
   CARD_MAX_STEPS,
   CARD_REOPEN_LIMIT,
+  type Account,
   type Board,
   type BoardMember,
   type Card,
@@ -461,4 +463,196 @@ async function hasPath(db: Db, from: string, to: string): Promise<boolean> {
     }
   }
   return false
+}
+
+/**
+ * 模型那一组：`kanban_*` 工具的落点。
+ *
+ * **走 `/runtime/*` + 席位那把 runtime 票 + `?botId=`，不走 `/internal`。** 这一条照抄
+ * 私有档 Skill 和长期记忆刚趟出来的那条路，判据是「谁在说话」：这里说话的是模型（一次
+ * 工具调用），而 `/internal` 那一组是**席位的运行面**在汇报（收口、心跳），和「这条会话
+ * 结束了」「这次用了多少 token」同一类。混成一组的话，模型有一天就能自己报一句「这张卡
+ * 跑完了」。
+ *
+ * **botId 从 query 取，而且服务端验它真是这个账号的**（`seatBotOf`）。理由和 memory.md
+ * §5 那句一字不差：请求体是模型拼的——不验的话，一个编出来的 botId 就能拿别人的 Bot
+ * 身份往板上建卡。`board` 同理：验它属于这个账号，并且这颗 Bot 在它的成员名单里。
+ */
+export function attachKanbanRuntime(router: Router, ctx: RouteCtx) {
+  const { db } = ctx
+
+  /** 这次调用钉的是哪颗 Bot，并且确认它真是这个账号的。 */
+  async function seatBotOf(req: Parameters<Parameters<Router['get']>[1]>[0], account: Account): Promise<string> {
+    const botId = (req.query.get('botId') || '').trim()
+    if (!botId) throw new HttpError(400, '要带 botId')
+    const bots = await db.botsFor(account.role === 'owner' ? null : account.companyId, account.id)
+    if (!bots.some((b) => b.id === botId)) throw new HttpError(404, '没有这个 Bot')
+    return botId
+  }
+
+  /**
+   * 这次要往哪块板上做事。
+   *
+   * 一个人可以有好几块板，一颗 Bot 可以同时在其中几块上，而**主会话里没有「当前这块板」
+   * 这个东西**——人上一句在聊别的，下一句说「派给设计 Bot」，谁也说不出他指的是哪块。
+   * 所以模型必须点名；只在一块板上时替它省掉这一步（那时没有歧义）。
+   */
+  async function boardFor(account: Account, botId: string, want: string) {
+    const mine = await db.boardsForBot(account.id, botId)
+    if (!mine.length) throw new HttpError(400, '这颗 Bot 还没有被加进任何一块板，建不了卡')
+    const id = (want || '').trim()
+    if (!id) {
+      if (mine.length === 1) return mine[0].board
+      const list = mine.map((m) => `${m.board.id}（${m.board.name}）`).join('、')
+      throw new HttpError(400, `你在好几块板上，要点名往哪一块建：${list}`)
+    }
+    const hit = mine.find((m) => m.board.id === id)
+    if (!hit) {
+      const list = mine.map((m) => `${m.board.id}（${m.board.name}）`).join('、')
+      throw new HttpError(400, `你不在这块板上。你能用的是：${list}`)
+    }
+    return hit.board
+  }
+
+  /** 这颗 Bot 够得着的一张卡：必须在它所在的某块板上。 */
+  async function cardFor(account: Account, botId: string, cardId: string): Promise<Card> {
+    const card = await db.card((cardId || '').trim())
+    if (!card || card.accountId !== account.id) throw new HttpError(404, '没有这张卡')
+    await boardFor(account, botId, card.boardId)
+    return card
+  }
+
+  /**
+   * `kanban_list`：这颗 Bot 所在的板、板上有谁、板上有什么卡。
+   *
+   * **一把工具答完三个问题**，因为模型只有这一条路可以问路：不给成员名单，它挑 assignee
+   * 只能按名字猜；不给板 id，它下一步建卡不知道往哪块建。
+   */
+  router.get('/runtime/kanban/boards', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const botId = await seatBotOf(req, account)
+    const mine = await db.boardsForBot(account.id, botId)
+    const bots = await db.botsFor(account.companyId, account.id)
+    const nameOf = new Map(bots.map((b) => [b.id, b.name]))
+    const out = await Promise.all(
+      mine.map(async ({ board, role }) => ({
+        id: board.id,
+        name: board.name,
+        brief: board.brief,
+        myRole: role,
+        members: (await db.boardMembers(board.id)).map((m) => publicMember(m, nameOf.get(m.botId))),
+        // 已经收口的不列：模型要的是「现在还有什么活」，一屏历史只会挤掉那几条。
+        cards: (await db.cardsOf(board.id)).filter((c) => c.state !== 'archived' && c.state !== 'cancelled').map(publicCard),
+      })),
+    )
+    json(res, 200, { boards: out })
+  })
+
+  /** `kanban_show`：一张卡的全部——正文、父卡的结论、评论。 */
+  router.get('/runtime/kanban/cards/:id', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const botId = await seatBotOf(req, account)
+    const card = await cardFor(account, botId, req.params.id)
+    json(res, 200, {
+      card: publicCard(card),
+      parents: (await db.cardParents(card.id)).map(publicCard),
+      children: (await db.cardChildren(card.id)).map(publicCard),
+      timeline: (await db.cardComments(card.id)).map(publicComment),
+    })
+  })
+
+  /**
+   * `kanban_create`：一次最多 CARD_CREATE_MAX 张，**整次调用一块板**。
+   *
+   * 允许一次调用里的几张卡散到不同板上，只会让模型有机会把一条流水线拆到两块板上，而
+   * 依赖不跨板——那条链子当场断掉。
+   */
+  router.post('/runtime/kanban/cards', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const botId = await seatBotOf(req, account)
+    const body = bodyOf(req)
+    const board = await boardFor(account, botId, strField(body, 'board', false))
+    const raw = Array.isArray(body.cards) ? body.cards : null
+    if (!raw) throw new HttpError(400, 'cards 必须是数组——只有这一种形状，单张也写成一个元素')
+    if (!raw.length) throw new HttpError(400, 'cards 是空的')
+    if (raw.length > CARD_CREATE_MAX) throw new HttpError(400, `一次最多 ${CARD_CREATE_MAX} 张，拆成两次`)
+
+    const out: ReturnType<typeof publicCard>[] = []
+    const merged: string[] = []
+    for (const item of raw as Record<string, unknown>[]) {
+      const title = strField(item, 'title').slice(0, CARD_TITLE_MAX)
+      const assignee = strField(item, 'assignee', false)
+      if (!assignee) throw new HttpError(400, `《${title}》没写 assignee：这张卡要交给谁？`)
+      await assertBoardMember(db, board, assignee)
+      const parents = Array.isArray(item.parents) ? item.parents.map((p) => String(p)) : []
+      for (const pid of parents) {
+        const parent = await db.card(pid)
+        if (!parent || parent.boardId !== board.id) throw new HttpError(400, `父卡 ${pid} 不在这块板上`)
+      }
+      const model = resolveModelRole(item.model_role, strField(item, 'model_reason', false))
+      const key = dedupeKeyOf(botId, title)
+      const card = await db.insertCard({
+        boardId: board.id,
+        accountId: board.accountId,
+        companyId: board.companyId,
+        title,
+        body: strField(item, 'body', false).slice(0, CARD_BODY_MAX),
+        assigneeBotId: assignee,
+        state: initialCardState(parents.length),
+        createdByBotId: botId,
+        needsBrowser: item.needs_browser === true,
+        maxSteps: Math.max(1, Math.trunc(Number(item.max_steps) || CARD_MAX_STEPS)),
+        dedupeKey: key,
+        ...model,
+      })
+      if (!card) {
+        /**
+         * 指纹撞上了：**合并进已有那张，把它的卡号回给模型**，不是报错。
+         *
+         * 模型换个措辞又撞一次是常态（同 handoff 的去重），而板上出现三张一模一样的卡，
+         * 人会把三张都派出去。
+         */
+        const had = key ? await db.cardByDedupe(board.id, key) : undefined
+        if (had) {
+          merged.push(had.id)
+          out.push(publicCard(had))
+          continue
+        }
+        throw new HttpError(409, `《${title}》建不出来`)
+      }
+      for (const pid of parents) await db.linkCards(pid, card.id)
+      await sysLine(db, card.id, `${botId} 建了这张卡`)
+      out.push(publicCard(card))
+    }
+    json(res, 201, { cards: out, merged })
+  })
+
+  /** `kanban_link`：加一条依赖。不跨板、不成圈——判据和人那一组是同一套。 */
+  router.post('/runtime/kanban/cards/:id/links', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const botId = await seatBotOf(req, account)
+    const child = await cardFor(account, botId, req.params.id)
+    const parent = await cardFor(account, botId, strField(bodyOf(req), 'parentId'))
+    if (parent.id === child.id) throw new HttpError(400, '一张卡不能依赖自己')
+    if (parent.boardId !== child.boardId) throw new HttpError(400, '依赖不能跨板')
+    if (await hasPath(db, child.id, parent.id)) throw new HttpError(400, '这条依赖会绕成一个圈')
+    await db.linkCards(parent.id, child.id)
+    if (child.state === 'ready' && parent.state !== 'done') await db.updateCard(child.id, { state: 'todo' })
+    await sysLine(db, child.id, `${botId} 加了依赖：要等《${parent.title}》`)
+    json(res, 201, { linked: true })
+  })
+
+  /** `kanban_comment`：往时间线上留一句。Bot 之间说话，人也看得见。 */
+  router.post('/runtime/kanban/cards/:id/comments', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const botId = await seatBotOf(req, account)
+    const card = await cardFor(account, botId, req.params.id)
+    const comment = await db.insertCardComment({
+      cardId: card.id,
+      kind: 'comment',
+      authorBotId: botId,
+      body: strField(bodyOf(req), 'body').slice(0, CARD_COMMENT_MAX),
+    })
+    json(res, 201, { comment: publicComment(comment) })
+  })
 }

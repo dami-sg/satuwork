@@ -79,6 +79,11 @@
 # 写完之后也要让目录立刻把新的那条拉回来。为什么正文不再全量进提示词见 docs/skills.md。
 - name: './src/tools/skill.ts'
 
+# 看板：kanban_list / kanban_create / kanban_link / kanban_comment（见 docs/kanban.md）。
+# **同样排在 catalog 后面**：这颗 Bot 在哪几块板上是目录下发的，而「不在任何板上就一把
+# 都不注册」正是拿它判的——排在前面的话，它读到的永远是空的，工具永远不出现。
+- name: './src/tools/kanban.ts'
+
 # 长期记忆：memory_write / memory_list（见 docs/memory.md）。
 # **同样排在 catalog 后面**，理由一字不差：读的是目录同步下来的那份缓存，写完也要
 # 让目录立刻把新的那条拉回来。它和 Skill 的分工是「事实 vs 方法」，不是两个档位。

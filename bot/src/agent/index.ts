@@ -2080,11 +2080,23 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
      */
     const memoryOff =
       (process.env.SATUWORK_MEMORY_TOOLS || 'auto').trim() === 'off' || !memoryOf(bot as BotRecord | undefined).on
+    /**
+     * 不在任何板上，看板那几把一起从表里下来（见 docs/kanban.md §10.1）。
+     *
+     * 判据是目录下发的 `boards`——**每一轮现算**，所以人刚在界面上把它加进板，下一轮
+     * 就有了（`catalogStamp` 把板算进去了，探针一分钟内会重拉）。
+     *
+     * 同上面那三层：**只是遮掩，不是强制**。真正的拒绝在 Gateway 那侧（不在任何板上时
+     * 建卡回 400）。但这一层不能省——留着它，一个没挂板的 Bot 会看见四把它每次都被拒的
+     * 工具，然后一遍遍去试。
+     */
+    const noBoards = !catalog.boards.length
     const picked = all.filter(
       (t) =>
         (!t.name.startsWith('mcp_') || mcpNames.has(t.name)) &&
         (browserOn || !t.name.startsWith('browser_')) &&
         (!memoryOff || !t.name.startsWith('memory_')) &&
+        (!noBoards || !t.name.startsWith('kanban_')) &&
         skillTool(t.name),
     )
     if (!mentioned.length) return picked
