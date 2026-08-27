@@ -14,9 +14,13 @@ const runProbe = (root) => sharedProbe(root, 'bot/e2e-delegate.mjs', { timeout: 
  * `assert` 要从外面传进来：`test(name, fn)` 调 `fn()` 时不带参数，写成 `(assert) => …`
  * 的话每一条都会以 `assert is not a function` 收场——十四条断言全红，而红的原因和被测
  * 的东西一点关系都没有。
+ *
+ * 回的是**一串还没跑的函数**，不是一串已经在跑的 promise。直接 `.map(test(…))` 的话
+ * 这一组会一次全部起跑，眼下断言体是同步的，微任务恰好按插入顺序排，看着还是顺的；
+ * 哪天有人往断言体里加一个 await，行号就开始乱窜，而套件本身一声不响。
  */
 const each = (test, assert, group, obj) =>
-  Object.entries(obj).map(([k, v]) => test(`${group}：${k}`, () => assert(v === true, `${k} 不成立`)))
+  Object.entries(obj).map(([k, v]) => () => test(`${group}：${k}`, () => assert(v === true, `${k} 不成立`)))
 
 export async function runDelegate({ root, test, assert, log }) {
   log('\n# delegate')
@@ -36,8 +40,8 @@ export async function runDelegate({ root, test, assert, log }) {
     assert(r.batch.跑之前先报running, '没有先写一条 running——界面上那张卡就永远等不到')
   })
 
-  for (const t of each(test, assert, '档位', r.model)) await t
-  for (const t of each(test, assert, '隔离', r.isolation)) await t
+  for (const t of each(test, assert, '档位', r.model)) await t()
+  for (const t of each(test, assert, '隔离', r.isolation)) await t()
 
   await test('子代理留下的东西移交给主代理，而且在结论里点名', () => {
     assert(r.retains.移交跑了, 'retains 的工具没被调到 reassign——子代理留下的会成孤儿')
