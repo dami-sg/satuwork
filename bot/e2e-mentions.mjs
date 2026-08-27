@@ -55,6 +55,15 @@ class FakeCatalog extends Service {
     this.ctx.tools.register({ name, description: name, parameters: { type: 'object', properties: {} }, execute: async () => ({ text: 'ok' }) })
     return true
   }
+  /**
+   * 这颗 Bot 在哪几块板上（docs/kanban.md §10.1）。
+   *
+   * **假目录也要有它**：`toolSchemasFor` 拿它判「看板那几把进不进表」，缺了这一格
+   * 整张工具表当场抛错——表现是这个探针里**每一把工具都不见了**，而报出来的是一句
+   * 和看板毫不相干的话。
+   */
+  boards = []
+
   get servers() {
     return Object.keys(this.tools).map((id) => ({ id, name: id, kind: 'HTTP', enabled: true, connected: true, tools: this.tools[id] }))
   }
