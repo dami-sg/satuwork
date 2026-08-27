@@ -1773,12 +1773,26 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       // 这一条测的是**另外半边**：真管家进程收到 removed 之后到底做不做事。两边各自
       // 看着都对、合起来不通，是这类握手最常见的坏法。
       const machineId = await machineIdOf(req, gwBase, ownerTok, orgId)
+
+      /**
+       * **先确认它此刻还在。**
+       *
+       * 下面那条断言只看「文件在不在」，而「不在」有两个原因：管家真的注销了，或者
+       * 它压根就没被写出来 / 早被别的东西端了。少了这一句，后一种情况下「清掉了」
+       * 照样绿，红的会变成后面那条回执——现场于是长成「管家清了配对却没发注销回执」，
+       * 而回执在 standDown 里排在 `rmSync(statePath())` **之前**，这个组合按管家的
+       * 代码根本不可能出现。查的人会一路去翻 standDown 里那段顺序，翻不出东西来。
+       *
+       * 拿它当前置条件写，这一类现场当场红在这里，而且消息直说是现场不对。
+       */
+      const stateFile = join(MGR_HOME, 'manager.json')
+      assert(existsSync(stateFile), `移除之前 ${stateFile} 就已经没了——现场被别的东西动过，后面的断言都不作数`)
+
       const del = await req(gwBase, 'DELETE', `/platform/machines/${machineId}`, { token: ownerTok })
       assert(del.status === 200, `移除 ${del.status} ${del.text}`)
       assert(del.json.pending === true, `管家在线，该等它收信，实际 pending=${del.json.pending}`)
 
       // 管家最多 30 秒一轮心跳，给它两轮的余量。
-      const stateFile = join(MGR_HOME, 'manager.json')
       let cleared = false
       for (let i = 0; i < 140; i++) {
         if (!existsSync(stateFile)) {
