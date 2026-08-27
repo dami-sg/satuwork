@@ -333,6 +333,18 @@ export interface BotTemplate {
   guards: Record<string, boolean>
   browser: BotBrowser
   memory: BotMemory
+  /**
+   * 让 Bot 自己记 Skill（`skill_manage`）。
+   *
+   * **默认开，和浏览器那个开关方向相反**，理由是两者的代价差着一个量级：浏览器握着
+   * 员工本人的登录态，一次误开就是以他的名义做了一件事；而这里写下的东西绑在这一颗
+   * Bot 上、进不了公司目录、每一次写都落审计、界面上一键能删。默认关的代价则很实在
+   * ——这套东西装完是哑的，而没人会去点一个自己没听说过的开关。
+   *
+   * 关掉时 `skill_manage` 不进席位的工具表（bot/src/agent 的 toolSchemasFor），
+   * `skill_view` / `skills_list` 不受影响：读公司写好的方法和自己记东西是两件事。
+   */
+  selfSkills: boolean
   skills: string[]
   mcps: string[]
   updatedAt: number
@@ -365,6 +377,7 @@ export function defaultBotTemplate(now = Date.now()): BotTemplate {
     guards: { ...DEFAULT_BOT_GUARDS },
     browser: { ...DEFAULT_BOT_BROWSER, sites: [] },
     memory: { ...DEFAULT_BOT_MEMORY, kinds: [...DEFAULT_BOT_MEMORY.kinds] },
+    selfSkills: true,
     skills: [],
     mcps: [],
     updatedAt: now,
@@ -385,6 +398,7 @@ export function botTemplateOf(item: CatalogItem | undefined): BotTemplate {
     guards: botGuardsOf(def.guards),
     browser: botBrowserOf(def.browser),
     memory: botMemoryOf(def.memory),
+    selfSkills: def.selfSkills !== false,
     skills: idList(def.skills),
     mcps: idList(def.mcps),
     updatedAt: typeof def.updatedAt === 'number' ? def.updatedAt : item.updatedAt,
@@ -452,6 +466,7 @@ export async function applyTemplatePatch(db: Db, companyId: string, cur: BotTemp
     guards: body.guards !== undefined ? botGuardsOf(body.guards, cur.guards) : cur.guards,
     browser: body.browser !== undefined ? botBrowserOf(body.browser, cur.browser) : cur.browser,
     memory: body.memory !== undefined ? botMemoryOf(body.memory, cur.memory) : cur.memory,
+    selfSkills: typeof body.selfSkills === 'boolean' ? body.selfSkills : cur.selfSkills,
     skills: Array.isArray(body.skills) ? await assignedIds(db, owner, 'skill', body.skills) : cur.skills,
     mcps: Array.isArray(body.mcps) ? await assignedIds(db, owner, 'mcp', body.mcps) : cur.mcps,
     updatedAt: Date.now(),
@@ -498,6 +513,7 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
       guards: template.guards,
       browser: template.browser,
       memory: template.memory,
+      selfSkills: template.selfSkills,
       icon: botIconOf(def.icon, 'company'),
       provider: pinned.provider,
       model: pinned.model,
@@ -533,6 +549,7 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
     guards: botGuardsOf(def.guards),
     browser: botBrowserOf(def.browser),
     memory: botMemoryOf(def.memory),
+    selfSkills: def.selfSkills !== false,
     icon: botIconOf(def.icon, item.scope),
     provider: pinned.provider,
     model: pinned.model,
@@ -655,7 +672,112 @@ export function envOf(v: unknown): Record<string, string> {
   return out
 }
 
-export function publicSkill(item: CatalogItem) {
+
+/**
+ * 一条 Skill 是**每一轮都在**，还是**用到才展开**。
+ *
+ *  - `常驻`：正文全文进系统提示词，就是这套东西之前的样子。口径、语气、每一轮都成立
+ *    的规矩选它——模型不会想到「我该去查一下有没有关于语气的 skill」
+ *  - `按需`：提示词里只有「名字 — 一句话」，正文由模型调 `skill_view` 取
+ *
+ * **存量一律 `常驻`**（`skillModeOf` 的 fallback 由调用方给）：改之前挂着的每一条，
+ * 改之后行为一个字不变。新建的默认 `按需`。这一条不许省成「按体量自动分」——那意味着
+ * 管理员某天把正文写长了一点，Bot 的行为就静悄悄地变了。
+ */
+export const SKILL_MODES = ['常驻', '按需'] as const
+export type SkillMode = (typeof SKILL_MODES)[number]
+
+export function skillModeOf(v: unknown, fallback: SkillMode): SkillMode {
+  const raw = trimStr(v)
+  return (SKILL_MODES as readonly string[]).includes(raw) ? (raw as SkillMode) : fallback
+}
+
+/**
+ * 正文开头那段 `---` 之间的 `key: value`。
+ *
+ * **不引 YAML 库**：这里只认一层扁平的键值对（`name` / `description` / `mode`），而
+ * 一个完整的 YAML 解析器会把「正文里恰好有一行冒号」变成一次解析失败——那时该做的是
+ * 把这段当正文，不是把整条 Skill 判死。
+ *
+ * 不是以 `---` 开头就当没有 frontmatter，原样返回空表。**正文不动**：存的、显示的、
+ * 发下去的都是连 frontmatter 一起的那一份，拆成两份存意味着管理员在编辑框里改一个字，
+ * 两份就开始分叉。
+ */
+export function skillFrontmatter(body: string): Record<string, string> {
+  if (!body.startsWith('---')) return {}
+  const lines = body.split('\n')
+  if (lines[0].trim() !== '---') return {}
+  const out: Record<string, string> = {}
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (line.trim() === '---') return out
+    const at = line.indexOf(':')
+    if (at <= 0) continue
+    const key = line.slice(0, at).trim()
+    let val = line.slice(at + 1).trim()
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1)
+    }
+    if (key) out[key] = val
+  }
+  // 没有收尾的 `---`：那就不是 frontmatter，是正文里的一条分割线。
+  return {}
+}
+
+/** 一条 Skill 的 description 最多这么长。索引每一轮都在前缀里，长了就是每轮都在付。 */
+export const MAX_SKILL_DESCRIPTION = 200
+
+/**
+ * 索引里那一句话。**按需档里，它是模型决定「要不要点开这条」的唯一依据。**
+ *
+ * frontmatter 的 `description` 优先，没有就退回 `summaryOf`（正文第一段没被列表符号
+ * 占住的话）。两个都空就是空——界面据此提示管理员补一句（那比我们瞎编一句好）。
+ */
+export function skillDescriptionOf(body: string): string {
+  const meta = skillFrontmatter(body)
+  const desc = trimStr(meta.description) || summaryOf(body)
+  return desc.length > MAX_SKILL_DESCRIPTION ? `${desc.slice(0, MAX_SKILL_DESCRIPTION)}…` : desc
+}
+
+/**
+ * 重名怎么办：靠后的那条显示成「退款审核（2）」。
+ *
+ * **模型是拿名字去 `skill_view` 的**（不做拼音 slug：公司的 Skill 名字绝大多数是中文，
+ * 按「非字母数字换 `-`」归一化只剩一根空横线，而硬造一个拼音 slug 等于在「模型看见的
+ * 名字」和「它要传的参数」之间插一层不一致）。所以重名必须在**下发之前**就分开。
+ *
+ * 定序是固定的：公司 > 全局 > 私有档，同一档按 createdAt、再按 id。顺序一变，同一条
+ * Skill 在两次同步之间就换了名字，而模型手上那份历史里记的还是旧的。
+ */
+const SCOPE_RANK: Record<string, number> = { company: 0, global: 1, user: 2 }
+
+export function skillDisplayNames(items: CatalogItem[]): Map<string, string> {
+  const sorted = [...items].sort((a, b) => {
+    const r = (SCOPE_RANK[a.scope] ?? 9) - (SCOPE_RANK[b.scope] ?? 9)
+    if (r) return r
+    if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+  })
+  const seen = new Map<string, number>()
+  const out = new Map<string, string>()
+  for (const item of sorted) {
+    const n = (seen.get(item.name) ?? 0) + 1
+    seen.set(item.name, n)
+    out.set(item.id, n === 1 ? item.name : `${item.name}（${n}）`)
+  }
+  return out
+}
+
+/** ZIP 包解出来的那些文件。非 ZIP 的 Skill 恒为空。 */
+export function skillFiles(item: CatalogItem): { path: string; text: string }[] {
+  const def = asDef(item.definition)
+  if (def.source !== 'ZIP 包' || !Array.isArray(def.files)) return []
+  return (def.files as { path?: unknown; text?: unknown }[])
+    .filter((f) => typeof f?.path === 'string' && typeof f?.text === 'string')
+    .map((f) => ({ path: String(f.path), text: String(f.text) }))
+}
+
+export function publicSkill(item: CatalogItem, displayName?: string) {
   const def = asDef(item.definition)
   const body = typeof def.body === 'string' ? def.body : ''
   const source: SkillSource =
@@ -664,29 +786,44 @@ export function publicSkill(item: CatalogItem) {
   const fileName = trimStr(def.fileName)
   const createdAt = typeof def.createdAt === 'number' ? def.createdAt : item.createdAt
   const updatedAt = typeof def.updatedAt === 'number' ? def.updatedAt : item.updatedAt
+  const files = skillFiles(item)
   const base = {
     id: item.id,
     name: item.name,
-    // 全局项在公司侧是只读的，界面靠这个字段决定给不给编辑入口。
-    origin: item.scope === 'global' ? ('global' as const) : ('company' as const),
+    /**
+     * 模型拿去 `skill_view` 的那个名字。重名时带序号，见 skillDisplayNames。
+     *
+     * 调用方没给就退回 `name`——单条详情那条路上没有「一整份清单」可比，而那时也
+     * 没人要用它去调工具。
+     */
+    displayName: displayName ?? item.name,
+    /**
+     * 全局项在公司侧是只读的，界面靠这个字段决定给不给编辑入口。
+     * `seat` 是 Bot 自己写下的那一档：员工能看能删，但它不在公司目录里。
+     */
+    origin:
+      item.scope === 'global' ? ('global' as const) : item.scope === 'user' ? ('seat' as const) : ('company' as const),
+    ...(item.botId ? { botId: item.botId } : {}),
     body,
     tags,
     source,
     ...(fileName ? { fileName } : {}),
     enabled: def.enabled !== false,
+    // 存量没有这个字段：它们是在「全文常驻」那个年代建的，落 `常驻` 才叫行为不变。
+    mode: skillModeOf(def.mode, '常驻'),
+    description: skillDescriptionOf(body),
+    hasFiles: files.length > 0,
+    ...(Array.isArray(def.pii) && def.pii.length ? { pii: def.pii.map(String) } : {}),
     createdAt,
     updatedAt,
     steps: stepsOf(body),
     summary: summaryOf(body),
   }
   if (source !== 'ZIP 包') return base
-  const files = Array.isArray(def.files)
-    ? (def.files as { path?: unknown; text?: unknown }[]).filter((f) => typeof f?.path === 'string' && typeof f?.text === 'string')
-    : []
   return {
     ...base,
     fileCount: files.length,
-    bytes: files.reduce((n, f) => n + Buffer.byteLength(String(f.text)), 0),
+    bytes: files.reduce((n, f) => n + Buffer.byteLength(f.text), 0),
   }
 }
 

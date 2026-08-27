@@ -2383,6 +2383,14 @@ export class Db {
       for (const g of rows.map(groupOf)) {
         await this.updateGroup(g.id, { agents: g.agents.filter((a) => a !== botId) })
       }
+      /**
+       * **它自己攒下的那些 Skill 跟着走。**
+       *
+       * 私有档只对这一颗 Bot 有意义（`skillsFor` 的 where 里带着 botId）。Bot 没了还
+       * 留着，它们就成了谁也看不见、谁也删不掉的行——界面上那一栏按 botId 认主人，
+       * 认不出来就不显示。列上没有外键正是为了这一刻：该做的是一起删掉，不是拒绝删 Bot。
+       */
+      await this.run('delete from catalog_items where kind = \'skill\' and scope = \'user\' and "botId" = ?', [botId])
       await this.run('delete from catalog_items where id = ? and kind = \'bot\'', [botId])
     })
   }
@@ -2450,6 +2458,8 @@ export class Db {
     companyId: string | null
     /** 只有 `scope: 'user'` 用得上：这条归谁。别的层级传不传都存 null。 */
     accountId?: string | null
+    /** 只有私有档 Skill 用得上：这条归哪颗 Bot。见 CatalogItem.botId。 */
+    botId?: string | null
     name: string
     definition?: unknown
   }): Promise<CatalogItem> {
@@ -2460,14 +2470,15 @@ export class Db {
       scope: input.scope,
       companyId: input.scope === 'global' ? null : input.companyId,
       accountId: input.scope === 'user' ? (input.accountId ?? null) : null,
+      botId: input.scope === 'user' ? (input.botId ?? null) : null,
       name: input.name,
       definition: input.definition ?? {},
       createdAt: now,
       updatedAt: now,
     }
     await this.run(
-      'insert into catalog_items (id, kind, scope, "companyId", "accountId", name, definition, "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?)',
-      [row.id, row.kind, row.scope, row.companyId, row.accountId, row.name, JSON.stringify(row.definition), row.createdAt, row.updatedAt],
+      'insert into catalog_items (id, kind, scope, "companyId", "accountId", "botId", name, definition, "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?,?)',
+      [row.id, row.kind, row.scope, row.companyId, row.accountId, row.botId, row.name, JSON.stringify(row.definition), row.createdAt, row.updatedAt],
     )
     return row
   }
@@ -2485,6 +2496,71 @@ export class Db {
     const rows = await this.many(
       "select * from catalog_items where kind = ? and (scope = 'global' or (scope = 'company' and \"companyId\" = ?)) order by scope, name",
       [kind, companyId],
+    )
+    return rows.map(catalogOf)
+  }
+
+  /**
+   * 这颗 Bot 看得见的 Skill：全局 ∪ 本公司 ∪ **它自己攒下的那些**。
+   *
+   * 别的 Bot 的私有档一律不在里面——这条线由这里的 where 保证，而不是靠每个调用点
+   * 自己过滤（同 botsFor：在应用层 filter 一次就够漏一次，而漏的表现是「别人的 Bot
+   * 学到的东西出现在我这儿」）。
+   *
+   * `botId` 传空就只回全局 ∪ 公司那两档：席位没钉 botId 的时候不该看见任何私有档，
+   * 而不是看见这个账号名下所有 Bot 的。
+   */
+  async skillsFor(companyId: string | null, accountId: string, botId: string | null): Promise<CatalogItem[]> {
+    if (!companyId) {
+      const rows = await this.many("select * from catalog_items where kind = 'skill' and scope = 'global' order by name")
+      return rows.map(catalogOf)
+    }
+    if (!botId) return await this.visibleCatalog('skill', companyId)
+    const rows = await this.many(
+      `select * from catalog_items where kind = 'skill' and (
+         scope = 'global'
+         or (scope = 'company' and "companyId" = ?)
+         or (scope = 'user' and "accountId" = ? and "botId" = ?)
+       ) order by scope, name`,
+      [companyId, accountId, botId],
+    )
+    return rows.map(catalogOf)
+  }
+
+  /**
+   * 把一条私有档转成公司 Skill：换 scope，丢掉主人和 botId。
+   *
+   * **是搬，不是拷。** 拷一份的话，Bot 手上那条还在，它会继续改它自己那份，而公司里
+   * 的人看着的是另一份——同一个名字两条正文，谁也不知道哪条在生效。
+   */
+  async promoteSkill(id: string): Promise<CatalogItem> {
+    const cur = await this.catalog(id)
+    if (!cur) throw new Error('目录项不存在')
+    const updatedAt = Date.now()
+    await this.run(
+      `update catalog_items set scope = 'company', "accountId" = null, "botId" = null, "updatedAt" = ?
+       where id = ?`,
+      [updatedAt, id],
+    )
+    return { ...cur, scope: 'company', accountId: null, botId: null, updatedAt }
+  }
+
+  /** 这家公司里全部的私有档，不分主人。界面上「Bot 自己写的」那一栏读它。 */
+  async companySeatSkills(companyId: string): Promise<CatalogItem[]> {
+    const rows = await this.many(
+      `select * from catalog_items where kind = 'skill' and scope = 'user' and "companyId" = ?
+       order by "updatedAt" desc`,
+      [companyId],
+    )
+    return rows.map(catalogOf)
+  }
+
+  /** 这颗 Bot 的私有档，只有它自己那一档。界面上那一栏和条数上限都读它。 */
+  async seatSkills(accountId: string, botId: string): Promise<CatalogItem[]> {
+    const rows = await this.many(
+      `select * from catalog_items where kind = 'skill' and scope = 'user'
+         and "accountId" = ? and "botId" = ? order by "updatedAt" desc`,
+      [accountId, botId],
     )
     return rows.map(catalogOf)
   }

@@ -59,6 +59,8 @@ import { runMigrate } from './migrate.mjs'
 import { runGlobalCatalog } from './global-catalog.mjs'
 import { runConnectors } from './connectors.mjs'
 import { runToolSearch } from './tool-search.mjs'
+import { runSkills } from './skills.mjs'
+import { runSkillsBot } from './skills-bot.mjs'
 import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
@@ -3180,6 +3182,8 @@ async function main() {
     await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
     await runConnectors({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runToolSearch({ root, gwRoot, test, req, start, waitHttp, assert, log })
+    await runSkills({ root, gwRoot, test, req, start, waitHttp, assert, log })
+    await runSkillsBot({ root, test, assert, log })
     await runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log })
     await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
     await runManagerConfirm({ root, test, assert, log })

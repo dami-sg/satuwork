@@ -117,6 +117,13 @@ async function runConfirm() {
       await loadSkills()
       render()
       return
+    } else if (c.kind === 'promote-skill') {
+      const base = catalogBase()
+      await api('POST', `${base}/skills/${encodeURIComponent(c.id)}/promote`)
+      await loadSkills()
+      flash('ok', '已转成公司 Skill')
+      render()
+      return
     } else if (c.kind === 'delete-mcp') {
       const base = catalogBase()
       await api('DELETE', `${base}/mcp-servers/${encodeURIComponent(c.id)}`)
@@ -308,6 +315,32 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.taskOpen = state.taskOpen || {}
     if (state.taskOpen[id]) delete state.taskOpen[id]
     else state.taskOpen[id] = true
+    render()
+    return
+  }
+  if (act === 'chat-skill-delete') {
+    /**
+     * 把 Bot 刚记下的那条删掉，就在对话里。
+     *
+     * 走公司目录那条删除接口（管理员也删得掉私有档）。删完只把这张卡标成「已删掉」，
+     * **不重拉整条会话**——那条 Skill 已经不在了，而这一块讲的是当时发生了什么。
+     */
+    const id = btn.getAttribute('data-id') || ''
+    const name = btn.getAttribute('data-name') || ''
+    const bot = state.chatBotId || chatBotIdOf(state.path)
+    if (!id) return
+    if (!bot) {
+      // 静默 return 的话，人只会以为自己点漏了，然后反复点。
+      flash('err', t('这一屏认不出是哪颗 Bot，去 Skill 页面删它', "Can't tell which bot this is — delete it from the Skills page"))
+      return
+    }
+    try {
+      await api('DELETE', `/runtime/bots/${encodeURIComponent(bot)}/skills/${encodeURIComponent(id)}`)
+      state.skillNoteGone = { ...(state.skillNoteGone || {}), [id]: true }
+      flash('ok', t(`已删掉「${name}」`, `Deleted "${name}"`))
+    } catch (err) {
+      flash('err', err.message)
+    }
     render()
     return
   }
@@ -769,6 +802,8 @@ document.getElementById('app').addEventListener('click', async (e) => {
         mcps: a.mcps,
         guards: Object.fromEntries((a.guards || []).map((g) => [g.id, !!g.on])),
         browser: { on: !!a.browserOn, sites: sitesOf(a.browserSites) },
+        // 「让它自己记 Skill」长在模版上，所以只有这一份要发；每颗 Bot 那一屏是只读的。
+        selfSkills: a.selfSkills !== false,
         memory: { on: a.memoryOn, scope: a.scope, kinds: a.kinds, ttl: a.ttl, cap: a.cap, confirm: a.confirmOn, pii: a.piiOn },
       })
       state.template = data.template
@@ -966,6 +1001,13 @@ document.getElementById('app').addEventListener('click', async (e) => {
     const d = editingDraft()
     if (!d) return
     setEditingDraft({ ...d, browserOn: !d.browserOn })
+    render()
+    return
+  }
+  if (act === 'bot-self-skills') {
+    const d = editingDraft()
+    if (!d) return
+    setEditingDraft({ ...d, selfSkills: d.selfSkills === false })
     render()
     return
   }
@@ -1741,6 +1783,24 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.skillDialog = { type: 'skill', item }
     state.skillForm = emptySkillForm(item)
     render()
+    /**
+     * **包里的文件清单只有单条详情才带**（列表那一屏几十条，每条再挂两百行路径就是
+     * 几百 KB）。所以弹窗先用列表那份开出来——人点了要立刻看见——再补一次详情把
+     * `files` 贴上去。
+     *
+     * 拉失败就当没有清单：那一格不显示，比一个转不完的圈好；正文和别的字段列表里都有。
+     */
+    const base = catalogBase()
+    if (!base) return
+    try {
+      const data = await api('GET', `${base}/skills/${encodeURIComponent(item.id)}`)
+      const cur = state.skillDialog
+      if (!cur || cur.type !== 'skill' || !cur.item || cur.item.id !== item.id) return
+      cur.item = { ...cur.item, ...(data.skill || {}) }
+      render()
+    } catch {
+      /* 没有清单就没有清单 */
+    }
     return
   }
   if (act === 'mcp-edit') {
@@ -1757,6 +1817,49 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.skillForm.source = btn.getAttribute('data-value')
     state.skillFile = null
     state.skillEntries = null
+    render()
+    return
+  }
+  if (act === 'seat-skills-toggle') {
+    state.seatSkillsOpen = state.seatSkillsOpen !== true
+    render()
+    return
+  }
+  if (act === 'skill-promote') {
+    const id = btn.getAttribute('data-id')
+    const item = (state.skills || []).find((x) => x.id === id)
+    state.confirm = {
+      title: t('转成公司 Skill？'),
+      body: t(
+        `「${item ? item.displayName || item.name : ''}」会从「Bot 自己写的」搬进公司目录：全公司的 Bot 都能用，也只有你们能再改它。`,
+        'It moves out of the bot\'s own notes into the company catalog: every bot can use it, and only admins can edit it from then on.',
+      ),
+      label: '转过去',
+      kind: 'promote-skill',
+      id,
+    }
+    render()
+    return
+  }
+  if (act === 'skill-seat-delete') {
+    const id = btn.getAttribute('data-id')
+    const item = (state.skills || []).find((x) => x.id === id)
+    state.confirm = {
+      title: t('删掉这条？'),
+      body: t(
+        `「${item ? item.displayName || item.name : ''}」是 Bot 自己记下的做法，删掉之后它不会再照着做。`,
+        'This is something the bot noted down itself; after deleting it will no longer follow it.',
+      ),
+      label: '删掉',
+      kind: 'delete-skill',
+      id,
+    }
+    render()
+    return
+  }
+  if (act === 'skill-mode') {
+    syncSkillForm()
+    state.skillForm.mode = btn.getAttribute('data-value')
     render()
     return
   }

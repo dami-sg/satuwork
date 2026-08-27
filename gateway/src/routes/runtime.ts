@@ -3,13 +3,13 @@
  */
 import type { ServerResponse } from 'node:http'
 import type { RouteCtx } from './ctx.ts'
-import { HttpError, bearer, json, type Router } from '../http.ts'
+import { HttpError, bearer, json, type Req, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
 import { KIND, bodyOf, deployOptsOf, strField } from '../lib/validate.ts'
 import type { Account, CatalogItem } from '../db.ts'
 import { deploySeat, publicSeatRuntime, purgeBot } from '../deploy.ts'
 import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
-import { LEGACY_BOT_ICONS, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer } from '../lib/catalog.ts'
+import { LEGACY_BOT_ICONS, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer, skillDisplayNames, skillFiles, tagsOf, trimStr } from '../lib/catalog.ts'
 import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
 import { WebToolError } from '../web-tools.ts'
 import { runExtract, runSearch } from '../web-service.ts'
@@ -148,7 +148,14 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       bots = [hit]
     }
     const { pinned, tpl } = await botContext(db, companyId)
-    const skills = await db.visibleCatalog('skill', companyId)
+    /**
+     * **按这颗 Bot 取 Skill**，不是按公司取。
+     *
+     * 差别是私有档那一截：`skillsFor` 的 where 里带着 (accountId, botId)，别的 Bot
+     * 攒下的方法一条都进不来（docs/skills.md §7）。没带 botId 的调用（脚本、老席位）
+     * 退回「全局 ∪ 公司」，看不见任何私有档——那时也没人知道该给谁的。
+     */
+    const skills = await db.skillsFor(companyId, account.id, botId || null)
     const servers = await db.visibleCatalog('mcp', companyId)
 
     /**
@@ -213,7 +220,15 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         const pub = publicBot(b, pinned, tpl)
         return { ...pub, mcps: [...pub.mcps, ...synthIds] }
       }),
-      skills: skills.map(publicSkill),
+      /**
+       * 重名序号在这里算：模型是拿**名字**去 `skill_view` 的，两条「退款审核」下发到
+       * 席位上，它调哪一条都可能对、也都可能错。序号跟着这一份清单一起走，席位不自己算
+       * ——两边各算一次，迟早在某个 Unicode 边界上分叉（docs/skills.md §5）。
+       */
+      skills: (() => {
+        const names = skillDisplayNames(skills)
+        return skills.map((i) => publicSkill(i, names.get(i.id)))
+      })(),
       servers: [...servers.map(runtimeServer), ...synth],
     })
   })
@@ -253,8 +268,13 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
      */
     const sane = Number.isInteger(have) && have > 0 && have <= 2147483647
     if (botId && sane) await db.noteSeatTemplate(account.id, botId, have)
+    /**
+     * **私有档必须算进指纹。** 不算的话，Bot 用 `skill_manage` 写完一条，每分钟这次
+     * 探针都判「没变」，那条 Skill 永远不会出现在它的索引里——而工具明明回了成功。
+     * 这是那种「哪一处看起来都对」的故障（docs/skills.md §7）。
+     */
     const tools = [
-      ...(await db.visibleCatalog('skill', companyId)),
+      ...(await db.skillsFor(companyId, account.id, botId || null)),
       ...(await db.visibleCatalog('mcp', companyId)),
     ]
     json(res, 200, {
@@ -267,6 +287,239 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         modelStamp(await db.platformSettings()),
       ),
     })
+  })
+
+
+  // ── 私有档 Skill：Bot 在会话里自己记下来的方法 ────────────────────────
+  //
+  // 读走 /runtime/catalog（和公司的那些一起下发），这里只有**写**，外加包文件的按需
+  // 拉取。整套的理由见 docs/skills.md §7、§8。
+
+  /**
+   * 一颗 Bot 最多攒几条私有档，单条正文最多多长。
+   *
+   * **判据只在这一侧。** 席位那把工具不自己判上限——两边各写一份，迟早一边说存下了、
+   * 另一边说满了。模型看到的那句「7/30」也是这里回过去的。
+   */
+  const SEAT_SKILL_MAX = Math.max(1, Math.trunc(Number(process.env.GATEWAY_SEAT_SKILL_MAX) || 30))
+  const SEAT_SKILL_BODY_MAX = Math.max(500, Math.trunc(Number(process.env.GATEWAY_SEAT_SKILL_BODY_MAX) || 8000))
+  const SEAT_SKILL_NAME_MAX = 40
+
+  /** 这次请求钉的是哪颗 Bot，并且确认它真是这个账号的。 */
+  async function seatBotOf(req: Req, account: Account): Promise<string> {
+    const botId = (req.query.get('botId') || '').trim()
+    if (!botId) throw new HttpError(400, '要带 botId')
+    const bots = await db.botsFor(account.role === 'owner' ? null : account.companyId, account.id)
+    if (!bots.some((b) => b.id === botId)) throw new HttpError(404, '没有这个 Bot')
+    return botId
+  }
+
+  /** 出去的那一份：重名序号按**这颗 Bot 看得见的全部**算，和目录下发的口径一致。 */
+  async function seatSkillOut(account: Account, companyId: string | null, botId: string, item: CatalogItem) {
+    const all = await db.skillsFor(companyId, account.id, botId)
+    const names = skillDisplayNames(all.some((i) => i.id === item.id) ? all : [...all, item])
+    const seat = all.filter((i) => i.scope === 'user')
+    return { skill: publicSkill(item, names.get(item.id)), used: seat.length, max: SEAT_SKILL_MAX }
+  }
+
+  /**
+   * 新建一条私有档。
+   *
+   * **同名不自动加序号。** 撞了就回 409 并把现有正文带回去，让模型自己决定是 `update`
+   * 还是换个名字——自动加序号的结果是攒出「周报流程（2）」「（3）」，三条都半对，而
+   * 索引在提示词前缀里，三条每一轮都要付一次（docs/skills.md §7）。
+   */
+  router.post('/runtime/skills', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    if (!companyId) throw new HttpError(400, '这个账号不属于任何公司，写不了私有档')
+    const botId = await seatBotOf(req, account)
+    const body = bodyOf(req)
+    const name = trimStr(body.name)
+    if (!name) throw new HttpError(400, 'Skill 要有名字')
+    if (name.length > SEAT_SKILL_NAME_MAX) throw new HttpError(400, `名字最多 ${SEAT_SKILL_NAME_MAX} 个字`)
+    const text = typeof body.body === 'string' ? body.body.trim() : ''
+    if (!text) throw new HttpError(400, 'Skill 要有正文')
+    if (text.length > SEAT_SKILL_BODY_MAX) throw new HttpError(400, `正文最多 ${SEAT_SKILL_BODY_MAX} 个字符，写短一点`)
+
+    const visible = await db.skillsFor(companyId, account.id, botId)
+    const clash = visible.find((i) => i.name === name)
+    if (clash) {
+      throw new HttpError(409, `已经有一条「${name}」了。要改它就用 update，确实是另一件事就换个名字。`)
+    }
+    const mine = visible.filter((i) => i.scope === 'user')
+    if (mine.length >= SEAT_SKILL_MAX) {
+      throw new HttpError(409, `你自己写的 Skill 已经有 ${mine.length} 条（上限 ${SEAT_SKILL_MAX}）。先删掉用不上的那些。`)
+    }
+
+    const now = Date.now()
+    const item = await db.insertCatalog({
+      kind: 'skill',
+      scope: 'user',
+      companyId,
+      accountId: account.id,
+      botId,
+      name,
+      definition: {
+        body: text,
+        tags: tagsOf(body.tags),
+        source: '手动编写',
+        enabled: true,
+        /**
+         * **模型写的一律按需。** `mode` 这个参数它给不了：常驻直接改这颗 Bot 之后
+         * 每一轮的行为、还占着提示词前缀，那是管理员点的，不是模型给自己开的。
+         */
+        mode: '按需',
+        // 席位扫出来的 PII 类型，**只存不判**：判据那一份在席位上（policy/pii.ts），
+        // 抄第二份就会分叉。界面拿它标红给管理员看。
+        ...(Array.isArray(body.pii) && body.pii.length ? { pii: body.pii.map(String).slice(0, 8) } : {}),
+        createdAt: now,
+        updatedAt: now,
+      },
+    })
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'catalog.create',
+      detail: { kind: 'skill', id: item.id, scope: 'seat', botId, by: 'bot', name },
+    })
+    json(res, 201, await seatSkillOut(account, companyId, botId, item))
+  })
+
+  /** 这条私有档必须是**这颗 Bot 自己的**。公司目录和全局目录的，模型读得到、改不动。 */
+  async function ownSeatSkill(id: string, account: Account, botId: string): Promise<CatalogItem> {
+    const item = await db.catalog(id)
+    if (!item || item.kind !== 'skill') throw new HttpError(404, '没有这个 Skill')
+    if (item.scope !== 'user' || item.accountId !== account.id || item.botId !== botId) {
+      throw new HttpError(403, `「${item.name}」不是你自己写的那一档，改不了。要改得请管理员在 Skill 页面上改。`)
+    }
+    return item
+  }
+
+  router.patch('/runtime/skills/:skillId', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    if (!companyId) throw new HttpError(400, '这个账号不属于任何公司，写不了私有档')
+    const botId = await seatBotOf(req, account)
+    const item = await ownSeatSkill(req.params.skillId, account, botId)
+    const body = bodyOf(req)
+    const def = { ...(item.definition as Record<string, unknown>) }
+    if (typeof body.body === 'string') {
+      const text = body.body.trim()
+      if (!text) throw new HttpError(400, 'Skill 要有正文')
+      if (text.length > SEAT_SKILL_BODY_MAX) throw new HttpError(400, `正文最多 ${SEAT_SKILL_BODY_MAX} 个字符，写短一点`)
+      def.body = text
+    }
+    if (Array.isArray(body.tags)) def.tags = tagsOf(body.tags)
+    if (Array.isArray(body.pii)) def.pii = body.pii.map(String).slice(0, 8)
+    // mode 收不下：改成常驻是人的动作（同 create）。
+    def.mode = '按需'
+    def.updatedAt = Date.now()
+    let name = item.name
+    if (typeof body.name === 'string' && trimStr(body.name)) {
+      name = trimStr(body.name)
+      if (name.length > SEAT_SKILL_NAME_MAX) throw new HttpError(400, `名字最多 ${SEAT_SKILL_NAME_MAX} 个字`)
+      const visible = await db.skillsFor(companyId, account.id, botId)
+      if (visible.some((i) => i.name === name && i.id !== item.id)) {
+        throw new HttpError(409, `已经有一条「${name}」了，换个名字。`)
+      }
+    }
+    const next = await db.updateCatalog(item.id, { name, definition: def })
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'catalog.update',
+      detail: { kind: 'skill', id: item.id, scope: 'seat', botId, by: 'bot', name },
+    })
+    json(res, 200, await seatSkillOut(account, companyId, botId, next))
+  })
+
+  router.delete('/runtime/skills/:skillId', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    if (!companyId) throw new HttpError(400, '这个账号不属于任何公司，写不了私有档')
+    const botId = await seatBotOf(req, account)
+    const item = await ownSeatSkill(req.params.skillId, account, botId)
+    await db.deleteCatalog(item.id)
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'catalog.delete',
+      detail: { kind: 'skill', id: item.id, scope: 'seat', botId, by: 'bot', name: item.name },
+    })
+    const left = (await db.skillsFor(companyId, account.id, botId)).filter((i) => i.scope === 'user')
+    json(res, 200, { deleted: true, id: item.id, name: item.name, used: left.length, max: SEAT_SKILL_MAX })
+  })
+
+  /**
+   * 员工自己删掉一条「Bot 记下的方法」。
+   *
+   * **和上面那条 DELETE 不是同一条路**：那条认席位票（模型自己删），这条认登录票
+   * （人在对话里按了「删掉」）。分开是因为成员账号根本进不了 `/orgs/:id/skills/*`
+   * ——那套是管理员的目录页，而看见这张卡的恰恰是这颗 Bot 的主人（docs/skills.md §13）。
+   */
+  router.delete('/runtime/bots/:botId/skills/:skillId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    const bots = await db.botsFor(companyId, account.id)
+    if (!bots.some((b) => b.id === req.params.botId)) throw new HttpError(404, '没有这个 Bot')
+    const item = await db.catalog(req.params.skillId)
+    if (
+      !item ||
+      item.kind !== 'skill' ||
+      item.scope !== 'user' ||
+      item.accountId !== account.id ||
+      item.botId !== req.params.botId
+    ) {
+      throw new HttpError(404, '没有这个 Skill')
+    }
+    await db.deleteCatalog(item.id)
+    if (item.companyId) {
+      await db.audit({
+        companyId: item.companyId,
+        accountId: account.id,
+        action: 'catalog.delete',
+        detail: { kind: 'skill', id: item.id, scope: 'seat', botId: item.botId, name: item.name },
+      })
+    }
+    json(res, 200, { deleted: true, id: item.id, name: item.name })
+  })
+
+  /**
+   * 包里的文件。**不随目录下发**：那条路每分钟被探针摸一次、整份下发，把 5 MB 的包
+   * 塞进去等于给每一次目录同步加一个数量级，而绝大多数轮次里没有任何 Skill 被打开。
+   */
+  async function viewableSkill(req: Req, account: Account): Promise<CatalogItem> {
+    const companyId = account.role === 'owner' ? null : account.companyId
+    const botId = (req.query.get('botId') || '').trim()
+    const all = await db.skillsFor(companyId, account.id, botId || null)
+    const item = all.find((i) => i.id === req.params.skillId)
+    if (!item) throw new HttpError(404, '没有这个 Skill')
+    return item
+  }
+
+  router.get('/runtime/skills/:skillId/files', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const item = await viewableSkill(req, account)
+    json(res, 200, {
+      id: item.id,
+      updatedAt: item.updatedAt,
+      files: skillFiles(item).map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.text) })),
+    })
+  })
+
+  /**
+   * 一个文件的内容。路径走 query 而不是路径段——包里的路径带 `/`，而这个 router 按
+   * 段数精确匹配（http.ts 的 match），拼不出通配那一段。
+   */
+  router.get('/runtime/skills/:skillId/file', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const item = await viewableSkill(req, account)
+    const path = (req.query.get('path') || '').trim()
+    if (!path) throw new HttpError(400, '要带 path')
+    const hit = skillFiles(item).find((f) => f.path === path)
+    if (!hit) throw new HttpError(404, `这条 Skill 的包里没有 ${path}`)
+    json(res, 200, { id: item.id, path: hit.path, text: hit.text, updatedAt: item.updatedAt })
   })
 
   // ── 网页工具。密钥在平台，所以抓取也在这里做完，席位只拿结果。 ─────────

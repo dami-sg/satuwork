@@ -424,6 +424,7 @@ export function catalogOf(r: Row): CatalogItem {
     scope: str(r.scope) as Scope,
     companyId: strOrNull(r.companyId),
     accountId: strOrNull(r.accountId),
+    botId: strOrNull(r.botId),
     name: str(r.name),
     definition: jsonOf(r.definition),
     createdAt: num(r.createdAt),

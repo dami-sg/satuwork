@@ -36,9 +36,15 @@ function runProbe(root) {
   })
 }
 
-/** 把一组「断言名 → 真假」逐条报出来。名字就是断言，红的时候不用回头翻代码。 */
-const each = (test, group, obj) =>
-  Object.entries(obj).map(([k, v]) => test(`${group}：${k}`, (assert) => assert(v === true, `${k} 不成立`)))
+/**
+ * 把一组「断言名 → 真假」逐条报出来。名字就是断言，红的时候不用回头翻代码。
+ *
+ * `assert` 要从外面传进来：`test(name, fn)` 调 `fn()` 时不带参数，写成 `(assert) => …`
+ * 的话每一条都会以 `assert is not a function` 收场——十四条断言全红，而红的原因和被测
+ * 的东西一点关系都没有。
+ */
+const each = (test, assert, group, obj) =>
+  Object.entries(obj).map(([k, v]) => test(`${group}：${k}`, () => assert(v === true, `${k} 不成立`)))
 
 export async function runDelegate({ root, test, assert, log }) {
   log('\n# delegate')
@@ -58,8 +64,8 @@ export async function runDelegate({ root, test, assert, log }) {
     assert(r.batch.跑之前先报running, '没有先写一条 running——界面上那张卡就永远等不到')
   })
 
-  for (const t of each(test, '档位', r.model)) await t
-  for (const t of each(test, '隔离', r.isolation)) await t
+  for (const t of each(test, assert, '档位', r.model)) await t
+  for (const t of each(test, assert, '隔离', r.isolation)) await t
 
   await test('子代理留下的东西移交给主代理，而且在结论里点名', () => {
     assert(r.retains.移交跑了, 'retains 的工具没被调到 reassign——子代理留下的会成孤儿')

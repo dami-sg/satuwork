@@ -42,6 +42,13 @@ export interface BotRecord {
    * 工具；「老 Gateway 没下发」在这里的正确读法是「这家公司还没开过它」。
    */
   browser?: BotBrowser
+  /**
+   * 让它自己记 Skill（`skill_manage` 进不进工具表）。**缺字段按开算**。
+   *
+   * 和 browser 那条相反：老 Gateway 不发这个字段时，正确的读法是「这家公司没关过它」
+   * ——模版上它默认就是开的（gateway/src/lib/catalog.ts 的 defaultBotTemplate）。
+   */
+  selfSkills?: boolean
   /** 什么情况下该转人工。模版上的一段自由文本，进系统提示词，也是硬触发的说明。 */
   escalate?: string
   /** 这份底座是模版的第几版。排错时回答「这台跟上了没有」。 */
@@ -209,6 +216,7 @@ export class AgentRegistry extends Service {
     mcps?: string[]
     guards?: Record<string, boolean>
     browser?: BotBrowser
+    selfSkills?: boolean
     escalate?: string
     templateVersion?: number
   }): BotRecord {
@@ -237,6 +245,7 @@ export class AgentRegistry extends Service {
       // 同上：没下发就沿用上一次同步到的那份。一次「字段暂时没了」不该表现成
       // 浏览器能力被悄悄关掉——那会让一个跑了一半的任务在下一次调用时突然被拦。
       browser: input.browser ?? current?.browser,
+      selfSkills: typeof input.selfSkills === 'boolean' ? input.selfSkills : current?.selfSkills,
       escalate: typeof input.escalate === 'string' ? input.escalate : current?.escalate,
       templateVersion:
         typeof input.templateVersion === 'number' ? input.templateVersion : current?.templateVersion,
