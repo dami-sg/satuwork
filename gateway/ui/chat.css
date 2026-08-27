@@ -100,6 +100,28 @@
    .gw-chat-main 上的话会落到输入区后面去。 */
 .sw-threadwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
+/* ── 内容的最大宽度 ────────────────────────────────────────────────────
+   消息流和输入区共用同一条宽度上限，并且居中。宽屏上不设上限的话，一行正文会被
+   拉到一千几百像素，眼睛扫到行尾再跳回下一行的行首就容易串行；输入框同时也被拉
+   成横贯整屏的一条，人刚发出去的那句在屏幕中间，正在写的那句在屏幕两端，视线要
+   横着走一整屏才对得上。两处用同一个值，气泡和输入框才在同一条竖直轴上。
+
+   上限加在**里面的内容**上，不加在 .sw-thread / .sw-composer 这两个外壳上：
+   外壳继续占满，滚动条才照旧贴着窗口右沿（把上限加在滚动容器自己身上，滚动条会
+   跟着缩到内容边上去）；左右的最小留白也还是外壳那份 padding 在给，窄屏上内容
+   贴边的问题不会因为这条上限冒出来。 */
+.gw-chat { --sw-chat-max: 920px; }
+.sw-thread > *,
+.sw-composer > * {
+  /* border-box 不能省：这一层里有自带边框和内边距的（输入框那个盒子、底下那行提示），
+     content-box 下 width: 100% 是算在**内容**上的，边框和 padding 再往外加，于是窄屏上
+     它比外壳的可用宽度还宽一圈，右边直接顶出去。 */
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--sw-chat-max);
+  margin-inline: auto;
+}
+
 /* ── 消息流 ────────────────────────────────────────────────────────── */
 .sw-thread {
   flex: 1;
@@ -116,7 +138,7 @@
 .sw-daydiv {
   display: flex;
   justify-content: center;
-  margin: var(--space-1) 0;
+  margin-block: var(--space-1);
   font-size: 12px;
   color: var(--muted-foreground);
 }
@@ -130,7 +152,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin: var(--space-3) 0;
+  margin-block: var(--space-3);
   color: var(--muted-foreground);
   font-size: 12px;
 }
