@@ -110,14 +110,65 @@ interface Produced {
 }
 
 /**
+ * 哨兵最多重写几次，等文件系统的钟往前走一格。每次之间歇一毫秒。
+ *
+ * 十六次是给「钟停了」留的兜底，不是常态：ext4 / APFS 上第一次重写就变大，Debian 那种
+ * 一个 tick 4ms 的 coarse 时钟也就四五次。走不动就回落，不在这儿死等。
+ */
+const MARK_SPINS = 16
+
+/**
+ * 产出扫描的时间地板：**问文件系统的钟，别问 `Date.now()`。**
+ *
+ * 判据比的是 `mtimeMs`——文件系统写下的那个时间。地板要是取自 `Date.now()`，两个钟就
+ * 得对得上，而它们对不上，两个方向各错一次：
+ *
+ * - `Date.now()` 向下取整到毫秒，`mtimeMs` 带小数，同一毫秒里前者恒小于后者。窗口于是
+ *   往回张开将近一毫秒，把**上一条命令**刚写下的文件算成这一条的产出（探针连着跑六十
+ *   轮，泄漏三十二轮）。
+ * - Linux 的文件时间戳取自 coarse 时钟，一个 tick 才更新一次（Debian 上 4ms），
+ *   `mtimeMs` 可以比真正的写入时刻**早**好几毫秒——这一条命令头几毫秒里真写下的文件，
+ *   盖上的是一个比起点还早的戳。
+ *
+ * 起点往后挪一格能挡住第一种，挡不住第二种，而且正是拿第二种换来的。哨兵两种都不用管：
+ * 它的 mtime 就是文件系统自己说的「此刻」，和被扫的那些文件出自同一个钟——工作区挂在
+ * NFS 上、时间戳来自服务器时也照样成立。
+ *
+ * **要等到这个钟真的往前走一格。** 只写一次的话，上一条命令的文件可能和哨兵同处一个
+ * tick，`>=` 判据下照旧漏进来。写到 mtime 严格变大为止，地板就严格大于此前所有文件的
+ * mtime，而这条命令之后写下的一律不小于它——两头都不含糊，也不必牺牲头一毫秒。
+ *
+ * 哨兵落在 `.satuwork/` 底下（在 `SKIPPED_DIRS` 里，而且第一层就跳点开头的条目），扫描
+ * 看不见它；用完就删。**写不进去不算故障**：回落到 `Date.now() + 1`，宁可少报一颗药丸，
+ * 也不为一个哨兵让命令跑不成。
+ */
+async function scanFloor(root: string): Promise<number> {
+  const dir = join(root, '.satuwork')
+  const mark = join(dir, `mark-${randomBytes(6).toString('hex')}`)
+  try {
+    await mkdir(dir, { recursive: true })
+    await writeFile(mark, '')
+    const t0 = (await stat(mark)).mtimeMs
+    for (let i = 0; i < MARK_SPINS; i++) {
+      await writeFile(mark, '')
+      const at = (await stat(mark)).mtimeMs
+      if (at > t0) return at
+      await new Promise((r) => setTimeout(r, 1))
+    }
+    // 十几毫秒里这个钟一格没动过。不该发生，真发生了就按「宁可少报」那一边取整。
+    return t0 + 1
+  } catch {
+    return Date.now() + 1
+  } finally {
+    await unlink(mark).catch(() => {})
+  }
+}
+
+/**
  * 这条命令跑的这段时间里，工作区里哪些文件是新的或者被改过的。
  *
- * 判据是 mtime ≥ 命令起跑的时刻。起点在 `spawn` 之前取，而 `mtimeMs` 是文件系统按同
- * 一个墙上时钟写的，所以命令写下的文件一定落在起点之后。
- *
- * **起点要往后挪一毫秒**（见 `startedAt` 那一行）。`Date.now()` 往下取整，`mtimeMs`
- * 带小数，同一毫秒里前者恒小于后者——不挪的话这条窗口会往回张开将近一毫秒，把**上一次
- * 工具调用**刚写下的文件算成这一条的产出。
+ * 判据是 mtime ≥ 命令起跑的时刻。起点在 `spawn` 之前取，而且**取自文件系统自己的钟**
+ * ——落一个哨兵文件、拿它的 mtime 当地板，见 `scanFloor`。
  *
  * **这不是一条能做到精确的判据，做不到的那部分要说清楚。** 文件系统只回答「这个文件
  * 什么时候被改的」，不回答「谁改的」。同一个工作区在这段时间里还可能有别的写入方：
@@ -743,13 +794,9 @@ export function apply(ctx: Context, config: Config = {}) {
       /**
        * 产出扫描的起点。**要在 spawn 之前取**：命令写下的文件 mtime 一定晚于这一刻。
        *
-       * `+ 1` 不是保险余量，是对齐两种时钟：`Date.now()` 往下取整到毫秒，而 `mtimeMs`
-       * 带小数，同一毫秒内写下的文件永远满足 `mtimeMs >= Date.now()`。上一条命令的最后
-       * 一次写入和这里只隔着一次很快的扫描，落在同一毫秒里是常事——于是它那个文件被算
-       * 进这一条的产出，界面上多出一颗不属于这次调用的药丸，还跟着 details.files 进会话
-       * 日志。起一个 shell 再写文件远不止一毫秒，挪这一格不会漏掉真产出。
+       * 这一刻由一个哨兵文件给出，不是 `Date.now()`——那两个钟对不上，理由在 `scanFloor`。
        */
-      const startedAt = Date.now() + 1
+      const startedAt = await scanFloor(resolveIn())
       const r = await runForeground(command, dir, seconds * 1000, call?.signal)
       if (r.error) fail(`无法执行：${r.error}`)
 
