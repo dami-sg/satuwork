@@ -9,6 +9,8 @@
  * 往返验的是同一件事。
  */
 import { rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { loadApp } from './ui-dom.mjs'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
 
@@ -356,6 +358,41 @@ export async function runMemory({ root, gwRoot, test, req, start, waitHttp, asse
       const left = (await catalog(otherBotId)).memories.map((m) => m.text)
       assert(left.includes('他在杭州办公'), `self 层该留下：${JSON.stringify(left)}`)
       assert(!left.includes('他姓赵，叫他赵工'), `bot 层该跟着 Bot 走：${JSON.stringify(left)}`)
+    })
+    await test('界面：「它记下的事实」那一块真的进得了自己那颗 Bot 的设置页', () => {
+      /**
+       * **这一条盯的是「这张列表有没有进任何一个页面」。**
+       *
+       * 第一版就栽在这儿：`memoryPanel` 只挂在公司模版页和公司 Bot 详情页上，而那两处
+       * 都不拉每颗 Bot 的记忆——于是「已存记忆」在**任何一屏上都看不到**。接口是通的、
+       * 挑选逻辑是对的、文件也装载得起来，没有一处会因此变红，只有人打开那一屏才发现
+       * 底下什么都没有。
+       *
+       * 所以这里**真的把那一屏渲染出来**，按人看得见的字去找。
+       */
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base })
+      ui.state.template = { version: 4, prompt: 'soul', skills: [], mcps: [] }
+      ui.state.botOptions = { skills: [], mcps: [] }
+      const bot = { id: 'b1', name: '我的助手', scope: 'user', origin: 'company', templateVersion: 4 }
+      const draft = {
+        name: '我的助手', description: '', icon: 'bot', enabled: true, extraPrompt: '', greeting: '',
+        guards: [], memoryOn: true, scope: '所属分组', kinds: ['偏好', '事实'], ttl: '90 天', cap: 20,
+        confirmOn: true, piiOn: true, memoryUsed: 1, memoryMax: 40,
+        memories: [{ id: 'm1', layer: 'self', kind: '偏好', text: '发邮件时提醒抄送法务', by: 'agent', pii: [], pinned: false, expiresAt: Date.now() + 86_400_000 }],
+      }
+      const html = ui.myBotPage(bot, draft)
+      assert(html.includes('它记下的事实'), '自己那颗 Bot 的设置页上没有记忆那一块')
+      assert(html.includes('发邮件时提醒抄送法务'), `正文没渲染出来`)
+      assert(html.includes('所有 Bot'), 'self 层该标出「所有 Bot」')
+      // 这一块是**能动的**，不像上面那几块「继承自公司模版」是只读的。
+      assert(html.includes('bot-mem-del') && html.includes('bot-mem-pin'), '删除 / 钉住按钮不在')
+      assert(html.includes('1 / 40'), '用量该写成「存了多少 / 存得下多少」')
+      // 删完要等一次目录探针，不说的话人会以为「删除没用」。
+      assert(html.includes('一分钟'), '少了「改动最多一分钟后生效」那句')
+      // 没拉到记忆时整块不画：空列表和「还没拉过」不能长得一样（模版页就属于后者）。
+      assert(!ui.myBotPage(bot, { ...draft, memories: undefined }).includes('它记下的事实'), '没拉到记忆时不该画这一块')
+      // 开关关着时条目仍要列出来——人得删得掉遗留的那些。
+      assert(ui.myBotPage(bot, { ...draft, memoryOn: false }).includes('不会进对话'), '开关关着时该说清这些不进对话')
     })
   } finally {
     gw.kill('SIGTERM')
