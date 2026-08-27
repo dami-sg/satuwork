@@ -49,6 +49,12 @@ export interface BotRecord {
    * ——模版上它默认就是开的（gateway/src/lib/catalog.ts 的 defaultBotTemplate）。
    */
   selfSkills?: boolean
+  /**
+   * 记忆策略。**缺字段按 Gateway 的出厂默认算**（见 memoryOf），不按关算——
+   * 「目录里这个字段暂时没了」表现成记忆被静静关掉的话，症状是模型突然什么都不记了，
+   * 而每一处看起来都对。
+   */
+  memory?: BotMemory
   /** 什么情况下该转人工。模版上的一段自由文本，进系统提示词，也是硬触发的说明。 */
   escalate?: string
   /** 这份底座是模版的第几版。排错时回答「这台跟上了没有」。 */
@@ -68,6 +74,24 @@ export interface BotBrowser {
 
 /** 出厂值：关着，一条站点都没有。 */
 export const DEFAULT_BROWSER: BotBrowser = { on: false, sites: [] }
+
+/**
+ * 记忆策略。和 Gateway 的 `BotMemory` 是同一个形状（gateway/src/lib/catalog.ts），
+ * 改一边就要改另一边——两个包各自打包，中间没有共享类型。
+ *
+ * 席位只用得上其中三样：`on`（两把工具进不进表）、`cap` / `scope` / `kinds`（注入时
+ * 挑哪几条）、`pii` / `confirm`（写入前扫不扫、拦不拦）。`ttl` 是 Gateway 算到期时间
+ * 用的，这边不碰——**算两遍就会分叉**。
+ */
+export interface BotMemory {
+  on: boolean
+  scope: string
+  kinds: string[]
+  ttl: string
+  cap: number
+  confirm: boolean
+  pii: boolean
+}
 
 /**
  * 这个 Bot 的浏览器能力。**认不出来一律按关算。**
@@ -95,6 +119,42 @@ export function guardsOf(bot: { guards?: Record<string, boolean> } | undefined):
     }
   }
   return out
+}
+
+/**
+ * 记忆策略的出厂值。**和 Gateway 的 `DEFAULT_BOT_MEMORY` 是同一套键、同一组默认。**
+ *
+ * 缺字段一律按「Gateway 那边的默认」算，不按最严算——这份东西的缺字段几乎只出现在
+ * 「老 Gateway 还没发这个字段」那一种情形，而那时它的真实状态就是出厂默认。
+ */
+export const DEFAULT_MEMORY: BotMemory = {
+  on: true,
+  scope: '所属分组',
+  kinds: ['偏好', '事实'],
+  ttl: '90 天',
+  cap: 20,
+  confirm: true,
+  pii: true,
+}
+
+/**
+ * 这个 Bot 的记忆策略。
+ *
+ * 同 `guardsOf`：**缺字段沿用默认，不当成「关掉了」**。一次「目录里这个字段暂时没了」
+ * 表现成记忆被静静关掉的话，症状是模型突然什么都不记了，而每一处看起来都对。
+ */
+export function memoryOf(bot: { memory?: Partial<BotMemory> } | undefined): BotMemory {
+  const raw = bot?.memory
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_MEMORY, kinds: [...DEFAULT_MEMORY.kinds] }
+  return {
+    on: typeof raw.on === 'boolean' ? raw.on : DEFAULT_MEMORY.on,
+    scope: typeof raw.scope === 'string' && raw.scope ? raw.scope : DEFAULT_MEMORY.scope,
+    kinds: Array.isArray(raw.kinds) ? raw.kinds.filter((k): k is string => typeof k === 'string') : [...DEFAULT_MEMORY.kinds],
+    ttl: typeof raw.ttl === 'string' && raw.ttl ? raw.ttl : DEFAULT_MEMORY.ttl,
+    cap: Number.isFinite(Number(raw.cap)) && Number(raw.cap) > 0 ? Math.trunc(Number(raw.cap)) : DEFAULT_MEMORY.cap,
+    confirm: typeof raw.confirm === 'boolean' ? raw.confirm : DEFAULT_MEMORY.confirm,
+    pii: typeof raw.pii === 'boolean' ? raw.pii : DEFAULT_MEMORY.pii,
+  }
 }
 
 const ICONS = new Set(['bot', 'chat', 'chart', 'pen', 'deal', 'code'])
@@ -217,6 +277,7 @@ export class AgentRegistry extends Service {
     guards?: Record<string, boolean>
     browser?: BotBrowser
     selfSkills?: boolean
+    memory?: BotMemory
     escalate?: string
     templateVersion?: number
   }): BotRecord {
@@ -245,6 +306,8 @@ export class AgentRegistry extends Service {
       // 同上：没下发就沿用上一次同步到的那份。一次「字段暂时没了」不该表现成
       // 浏览器能力被悄悄关掉——那会让一个跑了一半的任务在下一次调用时突然被拦。
       browser: input.browser ?? current?.browser,
+      // 同上：没下发就沿用上一次同步到的那份。缺字段不该表现成「记忆被关掉了」。
+      memory: input.memory ?? current?.memory,
       selfSkills: typeof input.selfSkills === 'boolean' ? input.selfSkills : current?.selfSkills,
       escalate: typeof input.escalate === 'string' ? input.escalate : current?.escalate,
       templateVersion:

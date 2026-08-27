@@ -211,7 +211,7 @@ export interface SessionEventMap {
      *
      * 老日志没有这个字段——界面会退回只报总量，不编一个分段出来。
      */
-    sections?: { system: number; skills: number; builtinTools: number; mcpTools: number }
+    sections?: { system: number; skills: number; builtinTools: number; mcpTools: number; memory?: number }
   }
 
   'user/message': { message: Message; source: MessageSource }
@@ -234,10 +234,15 @@ export interface SessionEventMap {
     /** 工具名。审计里「拦了什么」就靠它，别指望事后从 callId 反查。 */
     name: string
     /**
-     * 哪条边界表的态。三条开关之外还有两个：`escalate`（转人工，不是开关），
-     * `browser`（浏览器那道谁都关不掉的硬黑名单）。分开记才看得出**是不是开关挡的**。
+     * 哪条边界表的态。三条开关之外还有三个：`escalate`（转人工，不是开关），
+     * `browser`（浏览器那道谁都关不掉的硬黑名单），`memory`（记忆那一块里「写入前
+     * 需用户确认」那个独立的勾）。分开记才看得出**是不是开关挡的**。
+     *
+     * **加一个新值就要同时改 `gateway/src/routes/internal.ts` 的 `GUARD_IDS`**：那是
+     * 一张白名单，认不出来的一律 400，而席位的 outbox 没有重试上限——漏改的表现是
+     * 拦截照样发生、审计里一条都没有，外加一行永远重发的队列。
      */
-    guard: 'high-risk' | 'pii' | 'no-external' | 'escalate' | 'browser'
+    guard: 'high-risk' | 'pii' | 'no-external' | 'escalate' | 'browser' | 'memory'
     /**
      * `noted` 是**事后**记的一笔，不是一次表态：动作已经跑完了，只是它引发了写请求
      * 而当时没有弹过卡片。提交判据是启发式（一个只有图标的删除按钮就没有名字），
@@ -384,6 +389,37 @@ export interface SessionEventMap {
     name: string
     action: 'create' | 'update' | 'remove'
     /** 这颗 Bot 自己记下的还剩几条，以及上限。界面上那句「7/30」。 */
+    used?: number
+    max?: number
+  }
+
+  /**
+   * Bot 记下（或改掉、删掉）了一条长期记忆（见 docs/memory.md §9）。
+   *
+   * 存在的理由和 `skill/saved` 一字不差，只是更急一档：**员工要在事情发生的当下看见
+   * 它**。一条记忆此后每一轮都摆在提示词里影响回答，而事后去 Bot 设置里翻等于没有
+   * ——那一屏没人会没事去看。
+   *
+   * **不靠界面去扫工具结果的文本**：那段文本是写给模型的散文，措辞一改就扫不出来
+   * （同 `ToolResult.files` 那条注释里的道理）。写下它的那把工具直接报出来。
+   *
+   * **开了「写入前需用户确认」的 Bot 不落这一条**：审批卡刚刚才摆在那儿、人亲手点的
+   * 批准，紧接着再来一张「已保存」是同一件事说两遍。记忆的写入频率比 Skill 高得多，
+   * 两张卡叠着刷会把对话挤成流水账。
+   *
+   * **不进模型上下文**（toAgentMessages 只认三种 role），所以它的全部代价是 JSONL 里
+   * 多一行。加一种事件不是破坏性变更，不动 SESSION_FORMAT_VERSION：老界面读到不认识
+   * 的 type 会跳过，退化成「少一张卡」——工具结果里那句「已记下」还在。
+   */
+  'memory/saved': {
+    /** 写下它的那次工具调用。 */
+    callId: string
+    /** 库里的 id。界面拿它去删。 */
+    id: string
+    /** 正文。**删掉的那条也带着**——不然卡片上只剩一个 id，人不知道刚没了什么。 */
+    text: string
+    action: 'add' | 'replace' | 'remove'
+    /** 这颗 Bot 自己记的还剩几条，以及上限。界面上那句「18/40」。 */
     used?: number
     max?: number
   }

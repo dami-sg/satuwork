@@ -76,6 +76,18 @@ GATEWAY_DATABASE_URL=... node gateway/scripts/backfill-charges.mjs --dry-run
 装配路径（提示词、工具表、消息重建、压缩、几处会让它失效的地方）见
 [docs/context-assembly.md](docs/context-assembly.md)。
 
+## 记忆
+
+一个 Bot 记得住跨对话的事实：怎么称呼这位员工、报表放在哪儿、这家客户的联系人是谁。
+它自己在对话里记（`memory_write`），存在 Gateway，每一轮摆在系统提示词的最末尾。
+
+**记的是事实，不是方法**——一段有步骤的流程走 Skill 那条路（`skill_manage`），
+判据是"要不要展开"。四层（这颗 Bot / 这个人 / 分组 / 全公司）里模型只写得了下面两层，
+上面两层要管理员在界面上推上去：那两层会逐字进入本公司每个人的提示词。
+
+策略在 Bot 模版里（记哪几类、留多久、每轮摆几条、写前要不要确认、记不记敏感信息），
+口径和为什么长这样见 [docs/memory.md](docs/memory.md)。
+
 ## 检查
 
 ```bash

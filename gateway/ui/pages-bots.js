@@ -481,6 +481,96 @@ function browserBlock(a, ro) {
     )}</span>`
 }
 
+/**
+ * 「已存记忆」那一格。
+ *
+ * 这一格原来是**写死的空列表**——正文一行常量「没有已存记忆」，计数读一个恒定的空
+ * 数组。开关全在，底下什么都没有（docs/memory.md 开头）。
+ *
+ * 三件事必须在这一屏上说清楚：
+ *
+ * - **哪些是它自己记的、哪些是管理员设的。** 上面两层（分组 / 全公司）在这儿只读——
+ *   它们确实在影响这颗 Bot，藏起来的话「它怎么知道这件事的」就没有出处；
+ * - **哪些已经过期。** 到期只是不再进上下文，条目还在，可以捞回来；
+ * - **删掉之后要等一会儿。** 席位按目录探针同步，最多一分钟。不说的话，人删完立刻
+ *   去对话里试、看见它还记得，得到的结论是「删除没用」（§12 ③）。
+ */
+function storedMemories(a, ro) {
+  /**
+   * **没拉过记忆就整格不画。**
+   *
+   * 这一格是 per-Bot 的东西，而 `memoryPanel` 还挂在公司 Bot 模版那一屏上（那儿没有
+   * 「哪一颗 Bot」可言），owner 那条详情路径也不拉它。垫一个空数组画出来的话，人看到
+   * 的是一句斩钉截铁的「还没有记下任何事实」加一句「改动一分钟后生效」——两句都是假的。
+   */
+  if (!Array.isArray(a.memories)) return ''
+  const items = a.memories
+  const now = Date.now()
+  const dead = (m) => !m.pinned && m.expiresAt != null && m.expiresAt <= now
+  const live = items.filter((m) => !dead(m))
+  const gone = items.filter(dead)
+  const used = a.memoryUsed ?? live.filter((m) => m.layer === 'bot' || m.layer === 'self').length
+  const max = a.memoryMax || 0
+  const count = max ? `${used} / ${max}` : `${used}`
+  const row = (m, expired) => {
+    const mine = m.layer === 'bot' || m.layer === 'self'
+    const tags = [
+      `<span class="tag tag-neutral" style="font-size: 11px;">${esc(t(m.kind))}</span>`,
+      m.layer === 'self'
+        ? `<span class="tag tag-neutral" style="font-size: 11px;">${esc(t('所有 Bot', 'all bots'))}</span>`
+        : '',
+      m.layer === 'group' || m.layer === 'company'
+        ? `<span class="tag tag-neutral" style="font-size: 11px;">${esc(t(m.layer === 'group' ? '分组' : '全公司', m.layer === 'group' ? 'group' : 'company'))}</span>`
+        : '',
+      m.pinned ? `<span class="tag tag-neutral" style="font-size: 11px;">${esc(t('钉住', 'pinned'))}</span>` : '',
+      // 席位扫出来的敏感类型。**标红给人看，不在这边重判**——判据那一份在席位上。
+      (m.pii || []).length
+        ? `<span class="tag tag-danger" style="font-size: 11px;">${esc((m.pii || []).join('、'))}</span>`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' ')
+    /**
+     * 「推给全公司」**只给管理员**，而且只给 `self` 那一层。
+     *
+     * 那一层的一条推上去之后会逐字进入本公司每个人的系统提示词——这不是一条设置，
+     * 是一次对所有人的广播（docs/memory.md §12 ⑤）。所以它和私有档 Skill 的「晋升」
+     * 一样是人的决定，而且是管理员的决定；模型自己碰不到那两层。
+     */
+    const canLift = !ro && mine && m.layer === 'self' && isAdmin()
+    const acts = ro || !mine
+      ? `<span style="font-size: 12px; color: var(--muted-foreground);">${esc(t('管理员设的，这里改不了', 'set by an admin — read-only here'))}</span>`
+      : `${expired ? `<button type="button" class="sw-skillnote-act" data-act="bot-mem-renew" data-id="${esc(m.id)}">${esc(t('续期', 'renew'))}</button>` : `<button type="button" class="sw-skillnote-act" data-act="bot-mem-pin" data-id="${esc(m.id)}">${esc(m.pinned ? t('取消钉住', 'unpin') : t('钉住', 'pin'))}</button>`}
+         ${canLift ? `<button type="button" class="sw-skillnote-act" data-act="bot-mem-lift" data-id="${esc(m.id)}">${esc(t('推给全公司', 'share company-wide'))}</button>` : ''}
+         <button type="button" class="sw-skillnote-act" data-act="bot-mem-del" data-id="${esc(m.id)}">${esc(t('删掉', 'delete'))}</button>`
+    return `<div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); padding: 8px 0; border-top: 1px solid var(--border);">
+      <div style="min-width: 0;">
+        <div style="font-size: 13px; ${expired ? 'color: var(--muted-foreground); text-decoration: line-through;' : ''}">${esc(m.text || '')}</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">${tags}</div>
+      </div>
+      <div style="display: flex; gap: 6px; flex: none;">${acts}</div>
+    </div>`
+  }
+  const body = live.length
+    ? live.map((m) => row(m, false)).join('')
+    : `<div style="padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted-foreground);">${t('还没有记下任何事实')}</div>`
+  const expiredBlock = gone.length
+    ? `<div style="margin-top: 4px; padding-top: 4px;">
+        <div style="font-size: 12px; color: var(--muted-foreground);">${t(`已过期 ${gone.length} 条 · 不再进上下文，但没有删掉`, `${gone.length} expired · no longer injected, not deleted`)}</div>
+        ${gone.map((m) => row(m, true)).join('')}
+      </div>`
+    : ''
+  return `<div style="display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-md);">
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);">
+      <span style="font-size: 13.5px; font-weight: 600;">${t('已存记忆')}</span>
+      <span style="font-size: 12px; color: var(--muted-foreground);">${esc(count)}</span>
+    </div>
+    ${body}
+    ${expiredBlock}
+    <span style="font-size: 12px; color: var(--muted-foreground);">${t('改动最多一分钟后在对话里生效。', 'Changes take effect in conversations within a minute.')}</span>
+  </div>`
+}
+
 function memoryPanel(a, ro) {
   const scopePills = MEMORY_SCOPES.map(
     (sc) =>
@@ -498,6 +588,12 @@ function memoryPanel(a, ro) {
           <label>${t('记录哪些内容')}</label>
           ${/* id 保持中文原串（存的是它），只翻显示的 label；botPicks 也喂用户数据，不能整体翻。 */ ''}
           ${botPicks('kinds', MEMORY_KINDS.map((k) => ({ id: k, name: t(k) })), a.kinds, '', ro)}
+          ${/**
+             * 「流程」那一格和另外三个不是一回事：另外三个决定「这一类能不能存进记忆」,
+             * 它决定「撞上一段流程时说哪一句话」——流程根本不进记忆，它进 Skill
+             * （docs/memory.md §1、§6）。不写这一句，管理员会以为勾上它就能记流程。
+             */ ''}
+          <span style="font-size: 12px; color: var(--muted-foreground);">${t('记忆放的是一句话说得完的事实。「流程」勾上时，它撞见一段有步骤的流程会改去记成 Skill，而不是塞进记忆。', 'Memories hold single-sentence facts. With "process" checked, a multi-step procedure is saved as a Skill instead of squeezed into a memory.')}</span>
         </div>
         <div class="satu-agentpair">
           <div class="field">
@@ -512,19 +608,18 @@ function memoryPanel(a, ro) {
         </div>
         ${botToggle(t('写入前需用户确认'), t('Agent 提议记住某条信息时先征求同意'), a.confirmOn, ro ? '' : 'bot-confirm')}
         ${botToggle(t('不记录敏感信息'), t('手机号、证件号、银行卡等自动跳过'), a.piiOn, ro ? '' : 'bot-pii')}
-        <div style="display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-md);">
-          <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);">
-            <span style="font-size: 13.5px; font-weight: 600;">${t('已存记忆')}</span>
-            <span style="font-size: 12px; color: var(--muted-foreground);">${t(`${(a.memories || []).length} 条`, `${(a.memories || []).length} items`)}</span>
-          </div>
-          <div style="padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted-foreground);">${t('没有已存记忆')}</div>
-        </div>
+        ${storedMemories(a, ro)}
       </div>`
     : ''
   return `<div class="satu-panel">
     <span class="satu-panel-title">${t('记忆')}</span>
     <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('决定这个 Agent 能记住什么、记多久，以及记忆如何参与后续对话。')}</p>
-    ${botToggle(t('启用长期记忆'), t('关闭后每次对话都从空白上下文开始'), a.memoryOn, ro ? '' : 'bot-memory')}
+    ${/**
+       * 副文案原来写的是「关闭后每次对话都从空白上下文开始」——**那是错的**：会话照旧
+       * 只增不减，压缩照旧跑，关掉记忆只是不再有提示词末尾那一段。照着那句话理解，
+       * 人会以为这是个「清空聊天」的开关（docs/memory.md §6）。
+       */ ''}
+    ${botToggle(t('启用长期记忆'), t('关闭后它不再记住跨对话的事实；已存的保留，随时可以再打开'), a.memoryOn, ro ? '' : 'bot-memory')}
     ${body}
   </div>`
 }

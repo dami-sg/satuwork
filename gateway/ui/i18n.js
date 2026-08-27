@@ -399,6 +399,7 @@ window.SATU_I18N = {
   口令重置链接: 'Password reset link',
   '例如：客服组': 'e.g. Support team',
   没有已存记忆: 'No stored memories',
+  还没有记下任何事实: 'Nothing remembered yet',
   每日工作摘要: 'Daily digest',
   密钥不能为空: 'API key cannot be empty',
   启用长期记忆: 'Enable long-term memory',
@@ -685,7 +686,11 @@ window.SATU_I18N = {
   定时任务执行失败时发送站内通知: 'Notify in-app when a scheduled task fails',
   '平台账号与各公司管理员、员工。': 'Platform accounts plus every company admin and member.',
   有任务需要人工确认时立即通知我: 'Notify me the moment a task needs sign-off',
+  // 那句「每次对话都从空白上下文开始」是错的（会话照旧只增不减），已经换掉；
+  // 这一行留着是因为老浏览器缓存里的 pages-bots.js 还在查它。
   关闭后每次对话都从空白上下文开始: 'When off, every conversation starts with a blank context',
+  '关闭后它不再记住跨对话的事实；已存的保留，随时可以再打开':
+    'When off it stops remembering facts across conversations; what it already stored is kept and comes back when you turn this on again',
   '进入控制台，管理你的 AI 员工': 'Enter the console and manage your AI staff',
   手机号证件号银行卡等自动跳过: 'Phone numbers, IDs and cards are skipped',
   '手机号、证件号、银行卡等自动跳过': 'Phone numbers, ID numbers and bank cards are skipped automatically',

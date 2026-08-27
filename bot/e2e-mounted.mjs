@@ -50,6 +50,7 @@ const TOOLS = [
   'history_read', 'history_search',
   'todo', 'delegate_task',
   'skill_view', 'skills_list', 'skill_manage',
+  'memory_write', 'memory_list',
   'escalate_to_human',
   'browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_press',
   'browser_dialog', 'browser_back', 'browser_scroll', 'browser_read', 'browser_wait_for',

@@ -1,5 +1,5 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { browserOf, guardsOf, type BotRecord } from '../registry/index.ts'
+import { browserOf, guardsOf, memoryOf, type BotRecord } from '../registry/index.ts'
 import { agentsOf, type ToolCall, type ToolResult } from '../tools/index.ts'
 import { ApprovalGate, type Verdict } from './approvals.ts'
 import { formOf, unwrapCall } from './forms.ts'
@@ -26,7 +26,12 @@ declare module '@deepseek-ai/cordis' {
  * 非 http 协议）。混进这个联合是为了让它走同一条上报路，同时在审计里和三条开关分得开
  * ——见 gateway/src/routes/internal.ts 的 GUARD_IDS。
  */
-export type GuardId = 'high-risk' | 'pii' | 'no-external' | 'browser'
+/**
+ * `memory` 不是模版上那三个开关之一——它对应的是记忆那一块里「写入前需用户确认」
+ * 那个独立的勾。放进同一个联合里，是因为**留档的形状必须一样**：审计页按 guard 分
+ * 组，一次因为记忆而弹的确认，和一次因为高风险而弹的确认，在事后要一样查得到。
+ */
+export type GuardId = 'high-risk' | 'pii' | 'no-external' | 'browser' | 'memory'
 
 export interface PolicyDecision {
   sessionId: string
@@ -680,6 +685,72 @@ export function apply(ctx: Context) {
               `参数里有${kinds.join('、')}，按公司边界不外发`,
               '把它去掉再试；确实需要带上的话，请用户自己去做这一步，或者请管理员在 Bot 模版里放开这条。',
             )
+          }
+        }
+
+        /**
+         * 记忆写入的确认。**不走下面 high-risk 那条判据**，两个原因：
+         *
+         * 1. 那条要 `external + write`，而 `memory_write` 不带 `external`——带了的话，
+         *    「关掉外发」的 Bot 连自己的记忆都写不进去（同 skill_manage）；
+         * 2. 它在界面上是一个**独立的勾**（「写入前需用户确认」），不是风险面的推论。
+         *    管理员把 high-risk 关掉、把这个开着，就该是这个意思。
+         *
+         * **只拦 add / replace，不拦 remove。** 界面上那句副文案写的是「Agent 提议
+         * 记住某条信息时先征求同意」——记住。删一条本来就会在对话里出一张卡，人看得见；
+         * 为它再弹一次确认，换来的是一个学会闭眼点批准的用户。
+         */
+        if (call.name === 'memory_write') {
+          const mem = memoryOf(bot)
+          const args = unwrapCall(call).args
+          const op = String(args.op ?? '')
+          /**
+           * **敏感信息这一道要排在确认前面。**
+           *
+           * 理由和上面 `guards.pii` 那一段一字不差：一次注定要被拦的调用，不该先把人
+           * 叫来点一次头。摆在后面的话，人读完卡片、点了批准，工具才回一句「这条里有
+           * 手机号，没记」——那次点击白花了，而且他会以为是自己批错了什么。
+           *
+           * **判据只有这一处**（`scanPii`，同 policy/pii.ts）。工具那边照旧扫一遍，
+           * 但那一次是**报给 Gateway 存档**用的（只存不判），不是拿来拒绝的。
+           *
+           * `memory_write` 不带 `external` 位（否则外发闸一关，Bot 连自己的记忆都写不
+           * 进去），所以上面 `outboundOf` 那道闸够不着它——这一道得单独挂。
+           */
+          if (mem.pii && (op === 'add' || op === 'replace')) {
+            const kinds = scanPii(String(args.text ?? ''))
+            if (kinds.length) {
+              return await ctx.policy.deny(
+                call,
+                bot,
+                'pii',
+                `要记下的这句里有${kinds.join('、')}，这个 Bot 不记敏感信息`,
+                '去掉它再记，或者换个说法——比如「他的手机号在通讯录里」。',
+              )
+            }
+          }
+          if (mem.confirm && (op === 'add' || op === 'replace')) {
+            const why = op === 'add' ? '它要记下一条跨对话的事实' : '它要改掉一条已经记下的事实'
+            ctx.policy.markAsked(call.callId)
+            const why2 = task ? `来自子任务《${task.goal.slice(0, 24)}》：${why}` : why
+            const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why2, formOf(call))
+            await ctx.policy.record({
+              sessionId: call.sessionId,
+              botId: bot?.id ?? '',
+              callId: call.callId,
+              tool: call.name,
+              guard: 'memory',
+              outcome: verdict === 'approved' ? 'approved' : verdict === 'timeout' ? 'timeout' : 'denied',
+              reason: viaGrant
+                ? `${why2}（这一轮此前已批准同一把工具）`
+                : viaBlock
+                  ? `${why2}（这一轮此前已拒绝同一把工具，没有再问）`
+                  : edited?.length
+                    ? `${why2}（批准时改过：${edited.join('、')}）`
+                    : why2,
+              at: Date.now(),
+            })
+            if (verdict !== 'approved') return blockedByUser(verdict, why, viaBlock)
           }
         }
 

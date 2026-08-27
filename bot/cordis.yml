@@ -79,6 +79,11 @@
 # 写完之后也要让目录立刻把新的那条拉回来。为什么正文不再全量进提示词见 docs/skills.md。
 - name: './src/tools/skill.ts'
 
+# 长期记忆：memory_write / memory_list（见 docs/memory.md）。
+# **同样排在 catalog 后面**，理由一字不差：读的是目录同步下来的那份缓存，写完也要
+# 让目录立刻把新的那条拉回来。它和 Skill 的分工是「事实 vs 方法」，不是两个档位。
+- name: './src/tools/memory.ts'
+
 # 转人工的交接单：状态、落盘、交还（见 docs/handoff.md）。
 # 单独一个插件而不是塞进 policy：policy 跑在工具执行的关键路径上，而交接单要活过重启、
 # 要被 web 路由直接读写，两件事的生命周期不一样。

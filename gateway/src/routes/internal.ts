@@ -17,12 +17,18 @@ import { notify } from '../handoff-sweep.ts'
 /**
  * 席位报上来的 guard / outcome 只认这两张表里的值。
  *
- * 和 `gateway/src/lib/catalog.ts` 的 BOT_GUARD_IDS 是同一套键，外加 `escalate` 和
- * `browser`——转人工不是一条开关，浏览器那道硬黑名单也不是（它谁都关不掉），但两者
- * 都和那三条走同一条上报路。分开记是为了让翻审计的人看得出**是不是开关挡的**：
- * 一条 `no-external` 的记录管理员可以去把开关关掉，一条 `browser` 的关不掉。
+ * 和 `gateway/src/lib/catalog.ts` 的 BOT_GUARD_IDS 是同一套键，外加 `escalate`、
+ * `browser`、`memory`——转人工不是一条开关，浏览器那道硬黑名单也不是（它谁都关不掉），
+ * 记忆那个「写入前需用户确认」是记忆面板上的独立勾，也不在那三条里；但它们都和那三条
+ * 走同一条上报路。分开记是为了让翻审计的人看得出**是不是开关挡的**：一条 `no-external`
+ * 的记录管理员可以去把开关关掉，一条 `browser` 的关不掉。
+ *
+ * **这张表必须跟着 bot/src/policy/index.ts 的 `GuardId` 一起改。** 漏了的话，席位那边
+ * 拦得好好的，报上来一律 400——而席位的 outbox **没有重试上限**（session/gateway.ts 的
+ * `flushOutbox` 只累加 attempts，从不丢弃），于是每一次拦截都变成一行永远重发的队列，
+ * 审计里却一条记录都没有。「只拦不报」正是这条上报路存在的理由要防的事。
  */
-const GUARD_IDS = new Set(['high-risk', 'pii', 'no-external', 'escalate', 'browser'])
+const GUARD_IDS = new Set(['high-risk', 'pii', 'no-external', 'escalate', 'browser', 'memory'])
 // `noted` 是事后补记的一笔（动作跑完了才发现它发出了写请求，而当时没弹过卡片），
 // 不是一次表态。混在同一张表里上报，但看审计的人要分得出来。
 const GUARD_OUTCOMES = new Set(['blocked', 'approved', 'denied', 'timeout', 'redacted', 'escalated', 'noted'])
