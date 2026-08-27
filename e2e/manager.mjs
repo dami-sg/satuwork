@@ -14,6 +14,10 @@ import { connect } from 'node:net'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
+
+/** 这一套自己的 schema。写死名字会被别的 worktree 的 e2e 清掉（见 pg.mjs 的 schemaOf）。 */
+const SCHEMA = schemaOf('e2e_manager')
 import { freePorts } from './ports.mjs'
 import { publishRelease } from './release.mjs'
 import { closeServer } from './probe.mjs'
@@ -106,8 +110,8 @@ function wsHandshake(port, path, cookie) {
 }
 
 export async function runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-manager-gw'
-  const MGR_HOME = '/tmp/satuwork-e2e-manager-etc'
+  const GW_HOME = tmpOf('satuwork-e2e-manager-gw')
+  const MGR_HOME = tmpOf('satuwork-e2e-manager-etc')
   const [GW_PORT, MGR_PORT, BOT_PORT, NOVNC_PORT] = await freePorts(4)
   const gwBase = `http://127.0.0.1:${GW_PORT}`
   const mgrBase = `http://127.0.0.1:${MGR_PORT}`
@@ -129,7 +133,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
       GATEWAY_DATABASE_URL: PG_URL,
-      GATEWAY_PG_SCHEMA: 'e2e_manager',
+      GATEWAY_PG_SCHEMA: SCHEMA,
       GATEWAY_PG_RESET: '1',
       GATEWAY_PORT: String(GW_PORT),
       GATEWAY_PUBLIC_URL: gwBase,
@@ -917,7 +921,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         return r.json.machines.find((c) => c.machine.id === fake)
       }
       try {
-        await client.query('set search_path to e2e_manager')
+        await client.query(`set search_path to ${SCHEMA}`)
         await client.query(
           `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token)
            values ($1, 'http://10.0.0.99:8443', $2, $3, $3, $3, 1, 10, 'smt_e2e-link-probe')`,
@@ -1117,7 +1121,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       const fake = '00000000-0000-4000-8000-0000000000fe'
       const fakeTok = 'smt_e2e-telemetry-probe'
       try {
-        await client.query('set search_path to e2e_manager')
+        await client.query(`set search_path to ${SCHEMA}`)
         await client.query(
           `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token)
            values ($1, 'http://10.0.0.98:8443', $2, $3, $3, $3, 2, 10, $4)`,
@@ -1238,7 +1242,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       const minutesOf = async () =>
         (await client.query('select * from machine_metric_minutes where "machineId" = $1', [fake])).rows
       try {
-        await client.query('set search_path to e2e_manager')
+        await client.query(`set search_path to ${SCHEMA}`)
         await client.query(
           `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token)
            values ($1, 'http://10.0.0.97:8443', $2, $3, $3, $3, 2, 10, $4)`,
@@ -1316,6 +1320,11 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         // **归档写失败不该拖垮心跳。** 心跳是对这台机器唯一的下行通道（升级、时区、
         // 日志上限都搭在响应里），一个「少记一笔曲线」的毛病不该把它们一起停掉。
         // 把表改名模拟写失败——比造盘满容易，而对那条 insert 来说是同一种失败。
+        //
+        // 这一段会让 Gateway 打出一句 `relation "machine_metric_minutes" does not exist`。
+        // **那是这条用例故意造的**，不是毛病——先说一声，否则每轮 e2e 的日志里都躺着
+        // 一条看起来很像事故的红字，而查的人会以为「同一张表有的语句看得见、有的看不见」。
+        log('  （下面这句 relation ... does not exist 是这条用例故意造出来的）')
         await client.query('alter table machine_metric_minutes rename to machine_metric_minutes_hidden')
         try {
           const hb = await req(gwBase, 'POST', `/internal/machines/${fake}/heartbeat`, { token: fakeTok, body: beat() })
@@ -1683,7 +1692,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         await client.connect()
         const doomed = '00000000-0000-4000-8000-0000000000de'
         try {
-          await client.query('set search_path to e2e_manager')
+          await client.query(`set search_path to ${SCHEMA}`)
           await client.query(
             `insert into machines (id, host, "companyId", "lastHeartbeatAt", "createdAt", "pairedAt", protocol, "maxAccounts", token)
              values ($1, 'http://10.0.0.77:8443', $2, $3, $3, $3, 1, 10, 'smt_e2e-doomed')`,
@@ -1797,7 +1806,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       const client = new pg.Client({ connectionString: PG_URL })
       await client.connect()
       try {
-        await client.query('set search_path to e2e_manager')
+        await client.query(`set search_path to ${SCHEMA}`)
         let rows = 1
         for (let i = 0; i < 20; i++) {
           rows = (await client.query('select 1 from machines where id = $1', [machineId])).rowCount

@@ -6,6 +6,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { createCompany } from './org.mjs'
 import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
@@ -70,8 +71,8 @@ async function readSse(url, { token, timeout = 8000, until } = {}) {
 }
 
 export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHttp, assert, log, treeHas }) {
-  const GW_HOME = '/tmp/satuwork-e2e-chat-gw'
-  const BOT_HOME = '/tmp/satuwork-e2e-chat-bot'
+  const GW_HOME = tmpOf('satuwork-e2e-chat-gw')
+  const BOT_HOME = tmpOf('satuwork-e2e-chat-bot')
   const [GW_PORT, BOT_PORT, STUB_PORT] = await freePorts(3)
   const MACHINE_TOK = 'e2e-chat-machine'
   const PLATFORM_TOK = 'e2e-chat-platform'
@@ -92,7 +93,7 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       env: {
         SATUWORK_GATEWAY_HOME: GW_HOME,
         GATEWAY_DATABASE_URL: PG_URL,
-        GATEWAY_PG_SCHEMA: 'e2e_chat',
+        GATEWAY_PG_SCHEMA: schemaOf('e2e_chat'),
         GATEWAY_PG_RESET: '1',
         GATEWAY_HOST: '127.0.0.1',
         GATEWAY_PORT: String(GW_PORT),

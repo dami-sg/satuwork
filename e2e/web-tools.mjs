@@ -12,16 +12,17 @@
 import { rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePort } from './ports.mjs'
 import { runProbe as sharedProbe } from './probe.mjs'
 
 /** SSRF 闸跑在 gateway/e2e-web-guard.mjs 里——那几个函数是纯的，起一整套服务没必要。 */
 const runGuardProbe = (gwRoot) => sharedProbe(gwRoot, 'e2e-web-guard.mjs')
 
-const SCHEMA = 'e2e_webtools'
+const SCHEMA = schemaOf('e2e_webtools')
 
 export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-webtools'
+  const GW_HOME = tmpOf('satuwork-e2e-webtools')
   const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 

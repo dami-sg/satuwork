@@ -14,6 +14,7 @@ import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { createCompany } from './org.mjs'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { el, fakeSse } from './ui-dom.mjs'
 import { readFileSync } from 'node:fs'
 import { freePort } from './ports.mjs'
@@ -21,7 +22,7 @@ import { freePort } from './ports.mjs'
 const APP = 'gateway/ui/app.js'
 
 export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-ui-gw'
+  const GW_HOME = tmpOf('satuwork-e2e-ui-gw')
   const GW_PORT = await freePort()
   const gwBase = `http://127.0.0.1:${GW_PORT}`
   const appPath = join(root, APP)
@@ -34,7 +35,7 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
       GATEWAY_DATABASE_URL: PG_URL,
-      GATEWAY_PG_SCHEMA: 'e2e_ui',
+      GATEWAY_PG_SCHEMA: schemaOf('e2e_ui'),
       GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(GW_PORT),

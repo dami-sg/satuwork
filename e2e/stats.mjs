@@ -14,12 +14,13 @@
 import { rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePort } from './ports.mjs'
 
-const SCHEMA = 'e2e_stats'
+const SCHEMA = schemaOf('e2e_stats')
 
 export async function runStats({ gwRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-stats'
+  const GW_HOME = tmpOf('satuwork-e2e-stats')
   const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 

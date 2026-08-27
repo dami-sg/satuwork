@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs'
-import { Db, databaseUrl } from './db.ts'
+import { Db, SchemaBusyError, databaseUrl } from './db.ts'
 import { hashPassword, loadKeys } from './crypto.ts'
 import { Router, listen } from './http.ts'
 import { gatewayHome } from './home.ts'
@@ -40,7 +40,9 @@ try {
    * 安不安全？只打一条报错的话，人得自己连进库去 `select * from schema_migrations`，
    * 而那时候进程正在起停循环里刷屏。
    */
-  const state = await db.migrations().catch(() => null)
+  // 「schema 被别人占着」不是迁移失败：库一个字都没动，打「库停在哪一号」只会
+  // 把人往迁移那边引。那条错自己已经说清了该干什么。
+  const state = e instanceof SchemaBusyError ? null : await db.migrations().catch(() => null)
   if (state) {
     console.error(
       `satuwork-gateway: 迁移失败。库停在 ${state.current ?? '（一条都没跑过）'}，` +

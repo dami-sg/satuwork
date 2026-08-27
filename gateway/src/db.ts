@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
@@ -15,6 +15,24 @@ export * from './db/rows.ts'
 
 const { Pool } = pg
 type PoolClient = pg.PoolClient
+
+/**
+ * 「这个 schema 归谁用」的 advisory lock 键。
+ *
+ * 和 db/migrate.ts 里那把**不是同一把**：那把只护住迁移那几秒，拿完就放；这把是
+ * 占用标记，进程活多久握多久。盐不同，两者不会互相阻塞。
+ */
+function claimKey(schema: string): number {
+  const h = createHash('sha256').update('satuwork-schema-claim:' + schema).digest()
+  // 同 migrate.ts：只取 31 位，省得跨语言对不上符号位。
+  return h.readUInt32BE(0) & 0x7fffffff
+}
+
+/**
+ * 「这个 schema 上还有别人在跑」。单拎一个类型出来，是为了让 index.ts 分得清它和
+ * 真正的迁移失败——那条路会先打一句「库停在哪一号」，对这个错来说是句误导。
+ */
+export class SchemaBusyError extends Error {}
 
 /** schema 名只允许普通标识符：它要拼进 SQL，不能走参数。 */
 export function safeSchema(name: string): string {
@@ -56,18 +74,24 @@ const LEDGER_BY_REF = '(select "refId", sum("amountMicros") as micros from usage
 export class Db {
   private pool: pg.Pool
   private schema: string
+  private url: string
+  /** 认领这个 schema 的那条连接。只有清库模式才有，见 claimSchema。 */
+  private claim: pg.Client | null = null
   /** 事务期间把 client 放这儿，`db.tx(() => db.xxx())` 里的每条语句才走同一个连接。 */
   private txClient = new AsyncLocalStorage<PoolClient>()
 
   constructor(opts: DbOptions | string) {
     const o = typeof opts === 'string' ? { url: opts } : opts
     this.schema = safeSchema(o.schema || process.env.GATEWAY_PG_SCHEMA || 'public')
+    this.url = o.url
     // search_path 走连接启动参数，不走 connect 事件里补一条 `set`——后者不等它跑完
     // 就可能先发业务查询，是条竞态。
     this.pool = new Pool({
       connectionString: o.url,
       max: 10,
       options: `-c search_path=${this.schema}`,
+      // 库那侧看得见是谁连的。撞车时报错要指名道姓，靠的就是它（见 claimSchema）。
+      application_name: `satuwork-gateway[${this.schema}]`,
     })
     this.pool.on('error', (e) => {
       console.error(`satuwork-gateway: 连接池错误 ${e.message}`)
@@ -107,6 +131,7 @@ export class Db {
       // e2e 每轮要干净的库。**只对非 public schema 生效**——生产跑在 public 上，
       // 这个开关碰不到它。
       if (process.env.GATEWAY_PG_RESET === '1') {
+        await this.claimSchema()
         await this.pool.query(`drop schema if exists "${this.schema}" cascade`)
       }
       await this.pool.query(`create schema if not exists "${this.schema}"`)
@@ -117,6 +142,67 @@ export class Db {
       return await migrate(client, this.schema)
     } finally {
       client.release()
+    }
+  }
+
+  /**
+   * 清库之前先认领这个 schema：**别的 Gateway 正用着的，一个字都不许动。**
+   *
+   * 出过一次，查了七轮才找出来。两份 e2e 同时在跑（两个 worktree、或者上一轮被
+   * Ctrl-C 掉之后残留的进程），套件的 schema 名是写死的，于是后起的那个进程一句
+   * `drop schema cascade` 把前一个正在服务的库端了。前一个进程活得好好的，只是从
+   * 那一刻起：
+   *
+   * - 表在**重建的窗口里**查不到 → `relation "xxx" does not exist`；
+   * - 重建完了，行是新的、id 是新的 → 手上那张 JWT 对应的账号「不存在」，此后每一
+   *   条请求 401，而日志里没有任何一句提到有人清过库。
+   *
+   * 两种表现都指不回真正的原因，人只会去怀疑连接池、search_path、OID 缓存。所以这
+   * 里换成一把**会话级 advisory lock，握到进程结束**：拿不到就说明有人在用，当场
+   * 停机并且报出对面是谁（pid / application_name / 起始时间），而不是把它的数据抹掉。
+   *
+   * 只在清库模式下拿。生产（public schema）根本走不到这条路，不设 `GATEWAY_PG_RESET`
+   * 的 e2e 套件（migrate）也不受影响——那些进程本来就不做破坏性动作。
+   *
+   * 短暂重试几秒：同一个 schema 上「杀掉旧的、立刻起新的」是 e2e 每一轮的常态，
+   * 而 PG 回收上一条连接的锁需要一点时间，不等这几秒会把正常的重启也报成撞车。
+   */
+  private async claimSchema(): Promise<void> {
+    const key = claimKey(this.schema)
+    const client = new pg.Client({
+      connectionString: this.url,
+      application_name: `satuwork-gateway[${this.schema}]`,
+    })
+    await client.connect()
+    try {
+      const deadline = Date.now() + 5000
+      for (;;) {
+        const got = await client.query<{ ok: boolean }>('select pg_try_advisory_lock($1) as ok', [key])
+        if (got.rows[0]?.ok) {
+          // 拿到了就一直握着——这条连接在 close() 里才断（进程被杀时由 PG 自己回收）。
+          this.claim = client
+          return
+        }
+        if (Date.now() >= deadline) break
+        await new Promise((r) => setTimeout(r, 200))
+      }
+      // classid/objid 是那个 bigint 的高低 32 位；claimKey 只有 31 位，所以 classid 恒为 0。
+      const who = await client.query<{ pid: number; application_name: string; client_addr: string | null; backend_start: Date }>(
+        `select a.pid, a.application_name, host(a.client_addr) as client_addr, a.backend_start
+           from pg_locks l join pg_stat_activity a on a.pid = l.pid
+          where l.locktype = 'advisory' and l.classid = 0 and l.objid = $1 and l.granted`,
+        [key],
+      )
+      const holders = who.rows
+        .map((r) => `pid ${r.pid}（${r.application_name || '未署名'}${r.client_addr ? ` @ ${r.client_addr}` : ''}，起于 ${r.backend_start.toISOString()}）`)
+        .join('；')
+      throw new SchemaBusyError(
+        `schema ${this.schema} 上还有 Gateway 在跑，拒绝 GATEWAY_PG_RESET 清库：${holders || '（对面已经不在 pg_stat_activity 里了）'}。\n` +
+          '多半是两份 e2e 同时在跑（两个 worktree），或者上一轮被 Ctrl-C 之后残留了进程。' +
+          '先把对面停掉，或者用 GATEWAY_PG_SCHEMA 换一个 schema 名。',
+      )
+    } finally {
+      if (this.claim !== client) await client.end().catch(() => {})
     }
   }
 
@@ -132,6 +218,11 @@ export class Db {
   }
 
   async close(): Promise<void> {
+    // 认领连接先断：它不像池子那样空闲就回收，留着会吊住事件循环，进程停在
+    // 「端口不听了、人还没退出」那个最坏的状态上（见 index.ts 的 shutdown）。
+    const claim = this.claim
+    this.claim = null
+    if (claim) await claim.end().catch(() => {})
     await this.pool.end()
   }
 

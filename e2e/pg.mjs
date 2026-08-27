@@ -4,6 +4,9 @@
  * 每个 Gateway 实例一个 schema（GATEWAY_PG_SCHEMA），起来时带 GATEWAY_PG_RESET=1
  * 把自己那份 drop 掉重建——各套用例互不干扰，也不用各自准备一个库。
  *
+ * schema 名一律走 isolate.mjs 的 schemaOf，别写死：写死的名字会被别的 worktree 的
+ * e2e 清掉。
+ *
  *   docker compose up -d postgres
  */
 export const PG_URL =
