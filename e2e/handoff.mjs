@@ -12,7 +12,7 @@
  * 席位这一头是个**假席位**：一个小 HTTP 服务，按席位的接口形状回话。真席位那一侧
  * 由探针盖住了，这里要验的是 Gateway 够不够得着它、以及够不着时会怎样。
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createServer as createTls } from 'node:https'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -23,38 +23,13 @@ import { createCompany } from './org.mjs'
 import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
 import { freePort } from './ports.mjs'
+import { runProbe as sharedProbe, closeServer } from './probe.mjs'
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-handoff.mjs')], {
-      cwd: join(root, 'bot'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error('探针 30 秒没跑完'))
-    }, 30000)
-    child.on('error', reject)
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-handoff.mjs', { timeout: 30_000 })
 
 const all = (obj) => Object.entries(obj).filter(([, v]) => v !== true).map(([k]) => k)
 
@@ -260,7 +235,7 @@ export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, ass
   })
 
   try {
-    await waitHttp(gwBase + '/health', gw, 'handoff gateway')
+    await waitHttp(gwBase + '/health', { child: gw, what: 'handoff gateway' })
 
     const reg = await createCompany(req, gwBase, {
       ownerEmail: 'owner@handoff.test',
@@ -558,17 +533,14 @@ export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, ass
     await test('席位不在线：交接动作如实报 503，不假装成功', async () => {
       const gone = 'h-offline-' + Date.now()
       await report({ id: gone, state: 'open', reason: 'x', ask: 'y', createdAt: Date.now(), updatedAt: Date.now() })
-      await new Promise((resolve) => seat.server.close(resolve))
+      await closeServer(seat.server, '席位替身')
       const r = await req(gwBase, 'POST', `/runtime/handoffs/${gone}/claim`, { token: adminTok })
       assert(r.status === 503, `席位掉线时 ${r.status} ${r.text}`)
     })
   } finally {
-    try {
-      seat.server.close()
-    } catch {}
-    try {
-      hook.server.close()
-    } catch {}
+    gw.kill()
+    await closeServer(seat.server, '席位替身')
+    await closeServer(hook.server, '催办回调替身')
     if (tls) rmSync(tls.dir, { recursive: true, force: true })
     rmSync(GW_HOME, { recursive: true, force: true })
   }

@@ -42,7 +42,7 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       GATEWAY_SEED_OWNER: '0',
     },
   })
-  await waitHttp(`${gwBase}/health`, gw, 'ui gateway')
+  await waitHttp(`${gwBase}/health`, { child: gw, what: 'ui gateway' })
 
   const { loadApp } = await import('./ui-dom.mjs')
   const boot = async (token) => {
@@ -3355,6 +3355,7 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(html.includes('&lt;img'), '没走转义')
     })
   } finally {
+    gw.kill()
     try {
       rmSync(GW_HOME, { recursive: true, force: true })
     } catch {}

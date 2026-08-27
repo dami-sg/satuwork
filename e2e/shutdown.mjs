@@ -52,7 +52,7 @@ export async function runShutdown({ gwRoot, test, start, waitHttp, assert, log }
       GATEWAY_SEED_OWNER: '0',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'shutdown gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'shutdown gateway' })
 
   await test('手上还挂着一条没走完的连接时，SIGTERM 也要真的退出', async () => {
     /**

@@ -126,7 +126,7 @@ export async function runConnectors({ root, gwRoot, test, req, start, waitHttp, 
       CONNECTOR_UPSTREAM_TIMEOUT_MS: '1500',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'connectors gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'connectors gateway' })
 
   let owner = ''
   let adminTok = ''

@@ -15,6 +15,7 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { freePort } from './ports.mjs'
+import { closeServer } from './probe.mjs'
 
 const SCHEMA = 'e2e_billing'
 const MODEL = 'anthropic/claude-haiku-4-5'
@@ -82,7 +83,7 @@ export async function runBilling({ gwRoot, test, req, start, waitHttp, assert, l
       E2E_STUB_WEB: '1',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'billing gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'billing gateway' })
 
   const require = createRequire(`${gwRoot}/package.json`)
   const pg = require('pg')
@@ -613,10 +614,11 @@ export async function runBilling({ gwRoot, test, req, start, waitHttp, assert, l
       assert(denied.status === 403, `公司管理员 ${denied.status}`)
     })
   } finally {
+    gw.kill()
     try {
       await client.end()
     } catch {}
-    upstream.server.close()
+    await closeServer(upstream.server, '上游替身')
     try {
       rmSync(GW_HOME, { recursive: true, force: true })
     } catch {}

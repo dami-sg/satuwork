@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { freePorts } from './ports.mjs'
 import { publishRelease } from './release.mjs'
+import { closeServer } from './probe.mjs'
 
 /**
  * 起一个假 bot。记下每次请求的头和路径，供断言。
@@ -116,12 +117,14 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
   rmSync(MGR_HOME, { recursive: true, force: true })
   log('\n# manager')
 
+  // 真管家在 try 里才起得来（要先拿到配对码），但收尾在 finally——先占个名字。
+  let mgr
   const bot = fakeBot()
   const novnc = fakeBot()
   await listenOn(bot.server, BOT_PORT)
   await listenOn(novnc.server, NOVNC_PORT)
 
-  start('manager-gw', ['--import', 'tsx', join(gwRoot, 'src/index.ts')], {
+  const gw = start('manager-gw', ['--import', 'tsx', join(gwRoot, 'src/index.ts')], {
     cwd: gwRoot,
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
@@ -182,7 +185,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
     })
 
     // 管家先起来再配对：Gateway 收到配对请求会立刻回拨一次 /health。
-    start('manager', ['--import', 'tsx', join(managerRoot, 'bin/satuwork-manager.mjs')], {
+    mgr = start('manager', ['--import', 'tsx', join(managerRoot, 'bin/satuwork-manager.mjs')], {
       cwd: managerRoot,
       env: {
         SATUWORK_MANAGER_HOME: MGR_HOME,
@@ -416,8 +419,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         assert(again.json.seat.botVersion === '0.1.3-e2e', `版本没换：${again.json.seat.botVersion}`)
       } finally {
         await req(mgrBase, 'DELETE', '/seats/seat-old', { token: machineTok })
-        stub.closeAllConnections?.()
-        await new Promise((ok) => stub.close(() => ok()))
+        await closeServer(stub, '老席位替身')
         bot.quiesce.length = 0
         bot.quiesce.push(...saved)
       }
@@ -829,8 +831,7 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
           (left.json.seats || []).length === 0,
           `席位没从名册里拆掉，后面的用例会莫名其妙地坏：${JSON.stringify(left.json.seats)}`,
         )
-        seatBot.server.closeAllConnections?.()
-        await new Promise((r) => seatBot.server.close(() => r()))
+        await closeServer(seatBot.server, '席位替身')
       }
     })
 
@@ -1809,8 +1810,10 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       }
     })
   } finally {
-    bot.server.close()
-    novnc.server.close()
+    gw.kill()
+    mgr?.kill()
+    await closeServer(bot.server, 'bot 替身')
+    await closeServer(novnc.server, 'noVNC 替身')
     rmSync(GW_HOME, { recursive: true, force: true })
     rmSync(MGR_HOME, { recursive: true, force: true })
   }

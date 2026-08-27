@@ -6,31 +6,11 @@
  * 端口和内存活到下次重启，而所有别的信号都是绿的——所以每一条「杀掉了」都是拿
  * `kill(pid, 0)` 问操作系统问出来的，不是读我们自己那本账。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-process.mjs')], {
-      cwd: join(root, 'bot'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+// 比默认那档宽：这一份真起进程、真等后台任务收口。但要**留在用例那道闸以内**，
+// 否则两边同时到点，报出来的是笼统的「用例卡住」而不是探针自己那句。
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-process.mjs', { timeout: 90_000 })
 
 const all = (obj) => Object.entries(obj).filter(([, v]) => v !== true).map(([k, v]) => `${k}=${JSON.stringify(v)}`)
 
@@ -87,7 +67,7 @@ export async function runProcess({ root, test, assert, log }) {
   await test('摆不下的不闷声吞掉', () => {
     // 以前砍到五个，一声不吭。一条生成十份分章报告的命令，人看到五颗药丸会以为一共
     // 就这五个——而这个仓库在过程截图和「读过的文件」两处都明写着不许这么干。
-    assert(r.produced.十个全报 === 10, `十个只报了 ${r.produced.十个全报} 个`)
+    assert(r.produced.十个全报.length === 10, `十个报成了 ${r.produced.十个全报.length} 个：${JSON.stringify(r.produced.十个全报)}`)
     // 一次安装 / 构建 / 切分支能改上百个文件，那是过程不是产出，一个都不摆。
     assert(r.produced.批量改动不报, '批量改动也摆了药丸')
     // 但**要说一声**：一颗药丸都没有，和「这次什么都没产出」在屏幕上一模一样。

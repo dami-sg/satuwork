@@ -9,32 +9,14 @@
  * 2. **金额是写行那一刻的快照**，改价不能追溯改动旧行。
  * 3. **密钥不回显**，配置接口只报「配没配」。
  */
-import { spawn } from 'node:child_process'
 import { rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { freePort } from './ports.mjs'
+import { runProbe as sharedProbe } from './probe.mjs'
 
 /** SSRF 闸跑在 gateway/e2e-web-guard.mjs 里——那几个函数是纯的，起一整套服务没必要。 */
-function runGuardProbe(gwRoot) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(gwRoot, 'e2e-web-guard.mjs')], {
-      cwd: gwRoot,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`SSRF 探针退出 ${code}\n${err || out}`))
-      resolve(JSON.parse(line.slice('__RESULT__'.length)))
-    })
-  })
-}
+const runGuardProbe = (gwRoot) => sharedProbe(gwRoot, 'e2e-web-guard.mjs')
 
 const SCHEMA = 'e2e_webtools'
 
@@ -60,7 +42,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       E2E_STUB_WEB: '1',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'web-tools gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'web-tools gateway' })
 
   const require = createRequire(`${gwRoot}/package.json`)
   const pg = require('pg')
@@ -448,6 +430,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(r.status === 401, `席位口收了登录票：${r.status}`)
     })
   } finally {
+    gw.kill()
     await client.end().catch(() => {})
   }
 }

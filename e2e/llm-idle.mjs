@@ -5,41 +5,12 @@
  * 听着、systemd 说 active，只是那一轮永远不结束，界面永远挂着「正在处理」。没有测试
  * 守着，它下次回来也一样查不出来。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
 // 比 gateway.ts 里那个防呆下限（1 秒）高一点，否则被夹上去，测的就不是自己设的值了。
 const IDLE_MS = 1200
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-llm-idle.mjs')], {
-      cwd: join(root, 'bot'),
-      env: { ...process.env, SATUWORK_LLM_IDLE_MS: String(IDLE_MS) },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    // 探针挂住就是这次要防的那个 bug 本身——不能让它把整套 e2e 一起拖死。
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error('探针没能在 30 秒内跑完——流没有自己收口，正是这条测试要防的'))
-    }, 30000)
-    child.on('error', reject)
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-llm-idle.mjs', { env: { SATUWORK_LLM_IDLE_MS: String(IDLE_MS) }, timeout: 30_000 })
 
 export async function runLlmIdle({ root, test, assert, log }) {
   log('\n# llm-idle')

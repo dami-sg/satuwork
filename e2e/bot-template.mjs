@@ -34,7 +34,7 @@ export async function runBotTemplate({ gwRoot, test, req, start, waitHttp, asser
       GATEWAY_MAX_USER_BOTS: '2',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'tpl gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'tpl gateway' })
 
   let owner = ''
   let orgId = ''

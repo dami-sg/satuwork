@@ -8,12 +8,12 @@
  * `schema_migrations`。如果那种库上来就被当成空库、或者干脆报错停机，这套机制
  * 就是负收益——它要解决的正是这个场景。
  */
-import { spawn } from 'node:child_process'
 import { readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { freePort } from './ports.mjs'
+import { runProbe as sharedProbe } from './probe.mjs'
 
 const SCHEMA = 'e2e_migrate'
 const GW_HOME = '/tmp/satuwork-e2e-migrate'
@@ -46,29 +46,7 @@ function initialSql(gwRoot) {
 }
 
 /** 跑一个要 tsx 的探针，把它 `__RESULT__` 那一行解出来。 */
-function runProbe(gwRoot, file) {
-  return new Promise((ok, bad) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(gwRoot, file)], {
-      cwd: gwRoot,
-      env: { ...process.env, E2E_DATABASE_URL: PG_URL },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', bad)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return bad(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        ok(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        bad(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (gwRoot, file) => sharedProbe(gwRoot, file, { env: { E2E_DATABASE_URL: PG_URL } })
 
 function waitExit(child, ms = 20000) {
   return new Promise((ok, bad) => {

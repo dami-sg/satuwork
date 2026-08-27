@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { createCompany } from './org.mjs'
 import { freePort } from './ports.mjs'
+import { closeServer } from './probe.mjs'
 
 /** 按 7 字节一刀切，几乎必然把 3 字节的汉字切断。 */
 function sseChunks(frames) {
@@ -117,7 +118,7 @@ export async function runLlmUsage({ gwRoot, test, req, start, waitHttp, assert, 
       OPENAI_API_KEY: 'fake-openai-key',
     },
   })
-  await waitHttp(`${gwBase}/health`, gw, 'usage gateway')
+  await waitHttp(`${gwBase}/health`, { child: gw, what: 'usage gateway' })
 
   try {
     const reg = await createCompany(req, gwBase, {
@@ -272,7 +273,8 @@ export async function runLlmUsage({ gwRoot, test, req, start, waitHttp, assert, 
       assert(gone[0].count === 1, `离职人数应为 1，实际 ${gone[0].count}`)
     })
   } finally {
-    await new Promise((r) => upstream.server.close(r))
+    gw.kill()
+    await closeServer(upstream.server, '上游替身')
     try {
       rmSync(GW_HOME, { recursive: true, force: true })
     } catch {}

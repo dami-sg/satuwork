@@ -8,31 +8,9 @@
  *  - **话术**。找不到、搜不到、改不动公司目录，这三种回答都必须带一条可执行的下一步。
  *    写成一句干巴巴的失败，模型就会转头告诉用户做不到：空结果在它眼里等于「不存在」。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-skills.mjs')], {
-      cwd: join(root, 'bot'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-skills.mjs')
 
 export async function runSkillsBot({ root, test, assert, log }) {
   log('\n# skills-bot')

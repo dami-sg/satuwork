@@ -4,37 +4,9 @@
  * 为什么值得单开一个套件：这套东西**坏了大半都不报错**。子会话混进侧栏、档位降级没生效、
  * 子代理留下的后台进程成了孤儿、重启后那张卡永远转着——每一种的表现都是「看起来还行」。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-delegate.mjs')], {
-      cwd: join(root, 'bot'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    // 委派挂住的样子就是探针跑不完——墙钟那道闸失灵正是这条测试要防的一种。
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error('探针没能在 60 秒内跑完——某条子任务没有收口'))
-    }, 60000)
-    child.on('error', reject)
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-delegate.mjs', { timeout: 60_000 })
 
 /**
  * 把一组「断言名 → 真假」逐条报出来。名字就是断言，红的时候不用回头翻代码。

@@ -38,7 +38,7 @@ export async function runSkills({ root, gwRoot, test, req, start, waitHttp, asse
       GATEWAY_SEAT_SKILL_MAX: '3',
     },
   })
-  await waitHttp(`${base}/health`)
+  await waitHttp(`${base}/health`, { child: gw, what: 'skills gateway' })
 
   let owner = ''
   let adminTok = ''

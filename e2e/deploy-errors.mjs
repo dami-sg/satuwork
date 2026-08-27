@@ -5,30 +5,9 @@
  * 而真正的原因——脚本在哪一步、退出码多少——一个字都没有。两处叠在一起造成的：管家把
  * 退出码藏在只在两流皆空时才用的兜底里，Gateway 又在 JSON.parse 之前把响应体砍到 400 字。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'manager/e2e-deploy-errors.mjs')], {
-      cwd: join(root, 'manager'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) {
-        reject(new Error(`探针退出 ${code}\n${err || out}`))
-        return
-      }
-      resolve(JSON.parse(line.slice('__RESULT__'.length)))
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'manager/e2e-deploy-errors.mjs')
 
 export async function runDeployErrors({ root, test, assert, log }) {
   log('\n# deploy-errors')

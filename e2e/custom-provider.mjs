@@ -53,7 +53,7 @@ export async function runCustomProvider({ gwRoot, test, req, start, waitHttp, as
       GATEWAY_SEED_OWNER: '0',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'custom gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'custom gateway' })
 
   const model = {
     id: 'my-model', name: 'My Model', contextWindow: 65536, maxTokens: 4096,
@@ -222,6 +222,7 @@ export async function runCustomProvider({ gwRoot, test, req, start, waitHttp, as
       assert(create.status === 403, `admin 建成了 ${create.status}`)
     })
   } finally {
+    gw.kill()
     upstream.close()
     try {
       rmSync(GW_HOME, { recursive: true, force: true })

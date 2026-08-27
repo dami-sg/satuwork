@@ -6,30 +6,9 @@
  * 空的），界面上始终没有这台机器。两处叠在一起造成的：管家看见本地已有 manager.json
  * 就直接说「已配对」、配对码看都不看，而装机脚本判成功的唯一依据又是那个文件在不在。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'manager/e2e-pairing.mjs')], {
-      cwd: join(root, 'manager'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) {
-        reject(new Error(`探针退出 ${code}\n${err || out}`))
-        return
-      }
-      resolve(JSON.parse(line.slice('__RESULT__'.length)))
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'manager/e2e-pairing.mjs')
 
 export async function runPairing({ root, test, assert, log }) {
   log('\n# pairing')

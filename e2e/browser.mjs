@@ -12,39 +12,9 @@
  *
  * 机器上没有 Chrome 就跳过。没有浏览器的机器上硬失败，只会让人学会忽略这个套件。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-browser.mjs')], {
-      cwd: join(root, 'bot'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    // 比 guards 那份宽：这里要真起一个 Chrome，冷启动本身就要好几秒。
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error('探针 90 秒没跑完'))
-    }, 90000)
-    child.on('error', reject)
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const skip = out.split('\n').find((l) => l.startsWith('__SKIP__'))
-      if (skip) return resolve({ skip: skip.slice('__SKIP__'.length) })
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-browser.mjs', { timeout: 90_000, skippable: true })
 
 const all = (obj) => Object.entries(obj).filter(([, v]) => v !== true).map(([k]) => k)
 

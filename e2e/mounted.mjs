@@ -9,42 +9,20 @@
  * 别的套件都测不到这一类：它们各自 `ctx.plugin(服务)` 手动挂，**绕过了 inject**。
  * 真正的组合只发生在 Loader 读 cordis.yml 那一刻。
  */
-import { spawn } from 'node:child_process'
 import { rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
 const HOME = '/tmp/satuwork-e2e-mounted'
 
-function runProbe(root) {
-  /**
-   * **每次从干净的目录起。**
-   *
-   * 一个专门回答「组合对不对」的套件，带着上一次跑剩的库和名册跑，本身就拆了自己的
-   * 前提。ui-smoke 那边也是先删再起。
-   */
+/**
+ * **每次从干净的目录起。**
+ *
+ * 一个专门回答「组合对不对」的套件，带着上一次跑剩的库和名册跑，本身就拆了自己的
+ * 前提。ui-smoke 那边也是先删再起。
+ */
+const runProbe = (root) => {
   rmSync(HOME, { recursive: true, force: true })
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-mounted.mjs')], {
-      cwd: join(root, 'bot'),
-      env: { ...process.env, SATUWORK_HOME: HOME, SATUWORK_PORT: '18124' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error('探针 40 秒没跑完'))
-    }, 40000)
-    child.on('error', reject)
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      resolve(JSON.parse(line.slice('__RESULT__'.length)))
-    })
-  })
+  return sharedProbe(root, 'bot/e2e-mounted.mjs', { env: { SATUWORK_HOME: HOME, SATUWORK_PORT: '18124' }, timeout: 40_000 })
 }
 
 export async function runMounted({ root, test, assert, log }) {

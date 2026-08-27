@@ -31,7 +31,7 @@ export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log
       GATEWAY_SEED_OWNER: '0',
     },
   })
-  await waitHttp(`${gwBase}/health`, gw, 'setup gateway')
+  await waitHttp(`${gwBase}/health`, { child: gw, what: 'setup gateway' })
 
   try {
     await test('空库：GET /auth/state → needsSetup true，且不泄漏任何账号信息', async () => {
@@ -112,7 +112,7 @@ export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log
         },
       })
       try {
-        await waitHttp(`${raceBase}/health`, raceGw, 'setup race gateway')
+        await waitHttp(`${raceBase}/health`, { child: raceGw, what: 'setup race gateway' })
         const r = await Promise.all([
           req(raceBase, 'POST', '/auth/setup', { body: { email: 'race1@setup.test', password: 'correct-horse-3' } }),
           req(raceBase, 'POST', '/auth/setup', { body: { email: 'race2@setup.test', password: 'correct-horse-3' } }),
@@ -145,6 +145,7 @@ export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log
       }
     })
   } finally {
+    gw.kill()
     try {
       rmSync(GW_HOME, { recursive: true, force: true })
     } catch {}
