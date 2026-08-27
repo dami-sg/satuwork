@@ -3735,6 +3735,9 @@ function paintChat() {
   if (!thread) return
   // 正文里的文件名要接回哪几个文件，整条会话算一次（见 chatFileCands）。
   chatFileCands = fileCands(knownFiles(folded.blocks))
+  // 右栏那一屏也在这儿补一次。**render() 里那一句不够**：席位接上之后走的是
+  // hydrateChat / 流的帧，它们只 paintChat，不整页重绘——只挂在 render 上的话，那一屏
+  // 要等到下一次真的重绘（人点了点什么）才去取。
   ensureWorkspaceTree()
 
   const stick = thread.getAttribute('data-touched') !== '1' || nearBottom(thread)
@@ -4394,13 +4397,19 @@ function chatMachinePanel() {
  */
 
 /**
- * 文件那一屏开着、但根还没取过：补一次。
+ * 文件那一屏开着、但这条会话的根还没取过：补一次。
  *
- * 挂在每帧的重绘上，而不是在「点开那一屏」那一处调一次——进这一页的路不止一条
+ * 挂在每次重绘上，而不是在「点开那一屏」那一处调一次——进这一页的路不止一条
  * （偏好里本来就开着、从别的页面切回来、席位刚接上），少接一条的表现就是那一屏
- * 永远停在「载入中」。取过一次之后这里是一个 Map 查询，白跑也不值几个周期。
+ * 永远停在「载入中」。取过一次之后这里是两个等值判断，白跑也不值几个周期。
  *
- * **推迟一拍再取，不在这一帧里动手。** 这个函数是从 paintChat 里叫的，而
+ * **「取过了」是按会话记的，不是按「这个格子有没有东西」记的**（state.wsSession）。
+ * 这一条是那个「第一次打开文件夹是空的、按一下刷新就出来了」的原因：进页面那会儿
+ * 席位还没接上，`chatSessionId` 是空的，这一屏立刻拿到一句「实例还没接上」——而那
+ * 句话本身就算「取过了」，于是十几秒后席位接上、对话正常了，这一屏还停在原地，除非
+ * 有人去按那颗刷新。会话从空串变成一个 id，本身就是「刚才那次不作数」。
+ *
+ * **推迟一拍再取，不在这一帧里动手。** 这个函数是从 render() 和 paintChat 里叫的，而
  * loadWorkspaceDir 开跑之前会 render() 一次；在重绘中间再来一次整页重绘，会把
  * paintChat 手上那个 #chat-thread 整个换掉，它接着往一个已经脱离文档的节点上画——
  * 往前翻历史时那套「内容在上面长高了多少就把视线推回多少」的锚定，就是这么失灵的。
@@ -4409,24 +4418,57 @@ function chatMachinePanel() {
  * 流式的每一帧都会排一个白跑的定时器出去。
  */
 function ensureWorkspaceTree() {
-  if (!asidePref.open || asidePref.tab !== 'files') return
+  if (!wsPanelOnScreen()) return
+  // 会话换了（切了 Bot、席位重建过、或者刚从「还没接上」变成接上了）：手上这棵树是
+  // 上一台席位的，连同「取过了」这件事一起作废。
+  if ((state.wsSession || '') !== (state.chatSessionId || '')) resetWorkspaceTree()
   const cur = wsDirs()['']
-  if (cur && (cur.loading || cur.entries || cur.error)) return
+  if (cur && (cur.loading || cur.entries)) return
+  // 上一趟失败了：**看是哪种失败**。「这个席位没有这条接口」那种再问一百遍也是同一个
+  // 答案；而「席位还在热身」是**时间问题**——人进页面那会儿正好赶上，凭什么要他自己
+  // 去按刷新才看得到文件。所以只有后者带 retryAt，到点了自己再来一趟。
+  if (cur && cur.error && !(cur.retryAt && Date.now() >= cur.retryAt)) return
+  if (wsPending) return
+  wsPending = true
   setTimeout(() => {
-    // 这一拍之内人可能已经切走了。切走之后再取一份没人看的目录、还为它整页重绘一次，
-    // 会把新那一页上正在打字的输入框换掉。
-    if (!document.getElementById('chat-thread')) return
-    void loadWorkspaceDir('')
+    wsPending = false
+    // 这一拍之内人可能已经切走了、或者把那一屏收起来了。再取一份没人看的目录、还为它
+    // 整页重绘一次，会把新那一页上正在打字的输入框换掉。
+    if (!wsPanelOnScreen()) return
+    void loadWorkspaceDir('', Boolean(cur && cur.error))
   }, 0)
 }
 
 /**
- * 换了一条会话（切 Bot、席位重建过）：手上这棵树是上一台席位的，作废。
+ * 已经排了一个「去取根目录」的定时器。
+ *
+ * 排队的这一拍里 wsDirs 还是空的（或者还挂着上一趟那条错），于是同一拍里的每一次
+ * 重绘——流式的时候一拍能来好几次——都会再排一个，最后是好几条一模一样的请求同时
+ * 出发。真正拦住它们的只有 loadWorkspaceDir 里那道 loading 闸，而那道闸要等第一条
+ * 跑起来才立得住。
+ */
+let wsPending = false
+
+/**
+ * 文件那一屏此刻在不在屏幕上。
+ *
+ * **不看 #chat-thread**。那个节点只在「有 Bot、而且席位已经部署过」的时候才画得出来
+ * （见 chatPage 里的 chatDeployPrompt），可右栏那一屏在别的形态下照样开着——盯着它等
+ * 于在那几种形态下一次都不取，那一屏永远是「载入中」。
+ */
+function wsPanelOnScreen() {
+  return hasAside() && asidePref.open && asidePref.tab === 'files'
+}
+
+/**
+ * 换了一条会话（切 Bot、席位重建过、席位刚接上）：手上这棵树是上一台席位的，作废。
  */
 function resetWorkspaceTree() {
   state.wsDirs = {}
   state.wsOpen = {}
-  // 不在这里重取：那一屏开着的话，下一帧 paintChat 自己会补（见 ensureWorkspaceTree）。
+  // 记下这一次作废是冲着哪条会话去的，免得下一次重绘又判成「会话换了」，一帧作废一次。
+  state.wsSession = state.chatSessionId || ''
+  // 不在这里重取：那一屏开着的话，下一次重绘自己会补（见 ensureWorkspaceTree）。
 }
 
 /** 目录的展开状态与内容。key 是相对工作区根的路径，根目录是空串。 */
@@ -4434,17 +4476,30 @@ function wsDirs() {
   return state.wsDirs || (state.wsDirs = {})
 }
 
-/** 取一层。已经取过就不再取——除非 force（那是人按了刷新）。 */
+/**
+ * 软失败隔多久自己再来一趟。
+ *
+ * 十秒是照着「席位热身」定的：那一段通常是几十秒，重试个几次就赶上了，而人在这十秒里
+ * 多半还在读上面那句话。再短就成了打席位，再长就不如让他自己去按刷新。
+ */
+const WS_RETRY_MS = 10_000
+
+/** 取一层。已经取过就不再取——除非 force（那是人按了刷新，或者软失败到点了）。 */
 async function loadWorkspaceDir(path, force) {
   const key = path || ''
   const dirs = wsDirs()
   const cur = dirs[key]
   // 取过、正在取、或者上次取失败了，都不再自动重来——这个函数每次重绘都会被叫一次
-  // （见 paintChat），失败了还自动重试的话，一台没上线的席位会被打成一串重试。
-  // 重来的入口是那颗刷新。
+  // （见 ensureWorkspaceTree），失败了还自动重试的话，一台没上线的席位会被打成一串
+  // 重试。重来的入口是那颗刷新，外加「会话换了」——那不是重试，那是另一台席位。
   if (!force && cur && (cur.loading || cur.entries || cur.error)) return
-  if (!state.chatSessionId) {
+  // 这一趟是给哪条会话取的。**记下来**：席位接上之后 ensureWorkspaceTree 靠它判出
+  // 「刚才那次不作数」，重取一遍。
+  const sid = state.chatSessionId || ''
+  state.wsSession = sid
+  if (!sid) {
     // 会话还没接上（席位刚起来那几十秒）。**说出来**，别画一棵空树让人以为工作区是空的。
+    // 这句话不是终点：会话一到手，上面那句 wsSession 就对不上了，那一屏自己会再取一次。
     dirs[key] = { loading: false, error: t('实例还没接上，稍后再看'), entries: null }
     render()
     return
@@ -4452,15 +4507,34 @@ async function loadWorkspaceDir(path, force) {
   dirs[key] = { ...(cur || {}), loading: true, error: '' }
   render()
   try {
-    const url = '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/workspace?path=' + encodeURIComponent(key)
+    const url = '/runtime/sessions/' + encodeURIComponent(sid) + '/workspace?path=' + encodeURIComponent(key)
     const data = await api('GET', url)
-    dirs[key] = {
+    // 这一趟在路上的时候人可能已经换了 Bot、席位也可能重建过。**这份结果不作数**：
+    // 写回去就是把上一台席位的目录挂在新席位那一屏上，而 dirs 这会儿多半已经是被
+    // resetWorkspaceTree 换掉的那个空对象，写进去连画都画不出来。
+    if ((state.chatSessionId || '') !== sid) return
+    // 席位回的不是一份目录（反代把别的什么塞回来了、或者回了一个空身子）：那是**没
+    // 取到**，不是「工作区是空的」。差别全在人接下来会做什么——后者他会去传个文件，
+    // 前者他该再取一次。
+    const list = data && Array.isArray(data.entries) ? data.entries : null
+    if (!list) {
+      // **带一个状态码往下抛。** 下面那道分档拿 `!e.status` 认「根本没走到 Gateway」，
+      // 光杆一个 Error 会被认成那一种，摆出一句「连不上服务器」——而这一趟明明走到了
+      // 席位，只是回来的东西不对。502 说的正是这件事：上游回了一份不认识的东西。
+      const err = new Error(t('列不出来'))
+      err.status = 502
+      throw err
+    }
+    wsDirs()[key] = {
       loading: false,
       error: '',
-      entries: Array.isArray(data && data.entries) ? data.entries : [],
+      entries: list,
       more: Number((data && data.more) || 0),
     }
   } catch (e) {
+    // 同上：换过会话就不作数了。一条「上一台席位列不出来」挂在新席位那一屏上，
+    // 人只会拿它去猜新席位的毛病。
+    if ((state.chatSessionId || '') !== sid) return
     // 席位版本旧的时候这条路由根本不存在，席位回的是 404 加一句 `unknown endpoint`
     // （见 bot 那边 /api/* 的兜底）。照抄给人看等于没说——这一屏是新的，旧席位上没有，
     // 那就直说要更新（和文档提取那条同一个说法，见 openPreview）。
@@ -4470,12 +4544,27 @@ async function loadWorkspaceDir(path, force) {
     // 截一段就够。这条错在最坏的情况下不是一句话——反代在前面挡一下，回来的可能是
     // 整页 HTML 错误页（api() 拿不到 JSON 就把响应体原样当消息），糊满右栏那一条。
     const raw = (e.message || '').slice(0, 200)
-    dirs[key] = {
+    /**
+     * **压根没走到 Gateway**：`api()` 里那句 `await fetch()` 自己 reject 了，抛出来的是
+     * 浏览器的 TypeError，没有 status，`errText` 也过不上（它只作用在 `!res.ok` 上）。
+     * Gateway 正在重启、网断了一秒、机器刚从睡眠里醒过来，都长这样。
+     *
+     * 这是**最该自己再来一趟**的一种，偏偏最容易掉进「答案不会变」那一档去；照抄
+     * `e.message` 给人看则是在右栏上摆一句没翻译的 “Failed to fetch”。
+     */
+    const offline = !e.status
+    wsDirs()[key] = {
       loading: false,
-      error: e.status === 404 && /unknown endpoint/i.test(raw)
+      error: offline
+        ? t('连不上服务器，过一会儿自己会再试一次', 'Cannot reach the server — this will retry shortly.')
+        : e.status === 404 && /unknown endpoint/i.test(raw)
         ? t('这个席位还不支持列工作区文件（要更新 Bot 版本）', 'This seat cannot list workspace files yet (update the bot).')
         : raw || t('列不出来'),
       entries: null,
+      // 「那头这会儿不行」的都排一次重来（见 ensureWorkspaceTree）：席位还在热身、管家
+      // 没应声、反代超时（5xx），以及上面那种根本没出门的。4xx 不给——那是「答案不会
+      // 变」，重试只是在打一台已经把话说清楚了的席位。
+      retryAt: offline || e.status >= 500 ? Date.now() + WS_RETRY_MS : 0,
     }
   }
   render()

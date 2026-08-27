@@ -1119,6 +1119,14 @@ document.getElementById('app').addEventListener('click', async (e) => {
     state.chatDrafts = {}
     state.chatPending = []
     state.chatStatus = ''
+    // 右栏那棵工作区文件树同理，而且它比草稿更露骨：里面是上一个人工作区里的文件名和
+    // 目录名（「二季度裁员名单.xlsx」这一类名字本身就是内容）。`wsSession` 是「这棵树
+    // 是给哪条会话取的」，跟着一起归零——不清的话，下一个人打开对话页的**第一帧**画的
+    // 就是上一个人的清单：那一帧的 HTML 在 render() 末尾那句 ensureWorkspaceTree 之前
+    // 就拼好了，而登出这会儿 state.me 已经空了，它自己压根轮不到跑。
+    state.wsDirs = {}
+    state.wsOpen = {}
+    state.wsSession = ''
     state.runtimeBots = []
     state.runtimeError = ''
     state.runtimeMachine = null

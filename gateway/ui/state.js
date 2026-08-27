@@ -257,9 +257,14 @@ const state = {
   /**
    * 右栏那棵工作区文件树（见 chat.js 的 workspacePanel）。
    * `wsDirs` 是「路径 → 这一层的内容」，`wsOpen` 是「哪几层展开着」。根目录的 key 是空串。
+   *
+   * `wsSession` 记着**这棵树是给哪条会话取的**。空串也是一个值——「那会儿还没接上
+   * 席位」。少了它，一次「还没接上」就会被当成取过了：席位十几秒后接上，那一屏还停在
+   * 空的，得有人去按刷新（见 ensureWorkspaceTree）。
    */
   wsDirs: {},
   wsOpen: {},
+  wsSession: '',
   /**
    * 日常任务（右栏那一列）。`routinesBotId` 记着这几条是谁的——换 Bot 时先按它清空，
    * 免得上一颗 Bot 的任务留在屏上被人点。
