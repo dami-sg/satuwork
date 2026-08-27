@@ -11,8 +11,9 @@
  */
 import { rmSync } from 'node:fs'
 import { runProbe as sharedProbe } from './probe.mjs'
+import { tmpOf } from './isolate.mjs'
 
-const HOME = '/tmp/satuwork-e2e-mounted'
+const HOME = tmpOf('satuwork-e2e-mounted')
 
 /**
  * **每次从干净的目录起。**

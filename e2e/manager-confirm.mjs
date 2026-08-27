@@ -11,8 +11,9 @@
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
+import { tmpOf } from './isolate.mjs'
 
-const HOME = '/tmp/satuwork-e2e-confirm'
+const HOME = tmpOf('satuwork-e2e-confirm')
 
 function decide(script, { current, previous = true, state }) {
   const root = join(HOME, 'root')

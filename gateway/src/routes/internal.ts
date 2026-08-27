@@ -172,6 +172,10 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     // 盘取**最吃紧的那一块**：一台机器好几块盘，曲线上要看的是先满的那一块。
     const disk = m.disks.reduce((worst, d) => Math.max(worst, d.usage), 0)
     const minuteStart = Math.floor((after.telemetryAt ?? Date.now()) / MINUTE_MS) * MINUTE_MS
+    // 这个 try 底下有**两条**碰 machine_metric_minutes 的路，而它们坏起来的原因不一样
+    // （写不进去 vs 删不掉）。报错里带上是哪一条，否则日志上只剩一句 pg 的原话，查的人
+    // 得回来数代码才知道该往哪儿看。
+    let step = 'addMachineMetricSample'
     try {
       await db.addMachineMetricSample(after.id, minuteStart, {
         cpu: m.cpu.usage,
@@ -183,9 +187,10 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       // 保留期在这里收，**不挂在「有人打开日视图」上**：写入是每 30 秒自动的，清理
       // 要是得等人去点一下，那句「只留 30 天」在没人看图的部署上就是空话。整点那一
       // 分钟扫一次，一台机器一小时一次，绝大多数时候是条没删到东西的索引删除。
+      step = 'sweepMachineMetricMinutes'
       if (minuteStart % (60 * MINUTE_MS) === 0) await db.sweepMachineMetricMinutes(Date.now() - METRIC_RETENTION_MS)
     } catch (e) {
-      warnRollup(after.id, e)
+      warnRollup(after.id, step, e)
     }
   }
 
@@ -195,11 +200,13 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
    * 这类故障要么一瞬间过去、要么持续几小时（盘满），而后者按机器数乘以每分钟两轮，
    * 能把日志淹掉——真正要看的那几行反而被挤没了。同一台机器五分钟内只说一次。
    */
-  function warnRollup(machineId: string, e: unknown): void {
+  function warnRollup(machineId: string, step: string, e: unknown): void {
     const now = Date.now()
     if (now - (rollupWarnedAt.get(machineId) ?? 0) < 5 * 60_000) return
     rollupWarnedAt.set(machineId, now)
-    console.warn(`satuwork-gateway: 机器 ${machineId} 的负载归档写失败（心跳照常）：${e instanceof Error ? e.message : String(e)}`)
+    console.warn(
+      `satuwork-gateway: 机器 ${machineId} 的负载归档写失败（心跳照常，${step}）：${e instanceof Error ? e.message : String(e)}`,
+    )
   }
 
   router.post('/internal/machines/:id/heartbeat', async (req, res) => {

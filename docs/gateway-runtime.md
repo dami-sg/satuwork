@@ -670,6 +670,12 @@ messageCount?
 业务数据在 **PostgreSQL**（`GATEWAY_DATABASE_URL`）。同一个库里可以按
 `GATEWAY_PG_SCHEMA` 分开多套环境；默认 `public`。
 
+`GATEWAY_PG_RESET=1` 会在起进程时把这个 schema **整个 drop 掉重建**（只对非 `public`
+生效，e2e 用）。它起手先拿一把会话级 advisory lock 认领这个 schema，握到进程结束：
+同一个 schema 上已经有别的 Gateway 在跑时，当场停机并报出对面是谁，而不是把人家的
+数据抹掉。以前没有这道闸，两份 e2e 同时跑就会互相清库，而现象是一串
+`relation ... does not exist` 和 401「账号不存在」，指不回真正的原因。
+
 磁盘上只剩两样重启不能变的东西：
 
 ```

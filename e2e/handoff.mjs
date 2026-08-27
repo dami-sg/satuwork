@@ -19,6 +19,10 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
+
+/** 这一套自己的 schema。写死名字会被别的 worktree 的 e2e 清掉（见 pg.mjs 的 schemaOf）。 */
+const SCHEMA = schemaOf('e2e_handoff')
 import { createCompany } from './org.mjs'
 import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
@@ -200,7 +204,7 @@ export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, ass
   })
 
   // ── 第二段：Gateway 这一侧 ─────────────────────────────────────────
-  const GW_HOME = '/tmp/satuwork-e2e-handoff'
+  const GW_HOME = tmpOf('satuwork-e2e-handoff')
   const GW_PORT = await freePort()
   const gwBase = `http://127.0.0.1:${GW_PORT}`
   rmSync(GW_HOME, { recursive: true, force: true })
@@ -216,7 +220,7 @@ export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, ass
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
       GATEWAY_DATABASE_URL: PG_URL,
-      GATEWAY_PG_SCHEMA: 'e2e_handoff',
+      GATEWAY_PG_SCHEMA: SCHEMA,
       GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(GW_PORT),
@@ -442,7 +446,7 @@ export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, ass
       const client = new pg.Client({ connectionString: PG_URL })
       await client.connect()
       try {
-        await client.query('set search_path to e2e_handoff')
+        await client.query(`set search_path to ${SCHEMA}`)
         const row = await client.query('select state, "claimedAt" from handoffs where id = $1', [stale])
         assert(row.rows[0]?.state === 'expired', `库里状态 ${row.rows[0]?.state}`)
         assert(row.rows[0]?.claimedAt === null, `没人接过却写了 claimedAt=${row.rows[0]?.claimedAt}`)

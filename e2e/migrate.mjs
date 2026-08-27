@@ -12,11 +12,12 @@ import { readFileSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePort } from './ports.mjs'
 import { runProbe as sharedProbe } from './probe.mjs'
 
-const SCHEMA = 'e2e_migrate'
-const GW_HOME = '/tmp/satuwork-e2e-migrate'
+const SCHEMA = schemaOf('e2e_migrate')
+const GW_HOME = tmpOf('satuwork-e2e-migrate')
 
 /**
  * 0001 那段 SQL，直接从源码里读。
@@ -46,7 +47,9 @@ function initialSql(gwRoot) {
 }
 
 /** 跑一个要 tsx 的探针，把它 `__RESULT__` 那一行解出来。 */
-const runProbe = (gwRoot, file) => sharedProbe(gwRoot, file, { env: { E2E_DATABASE_URL: PG_URL } })
+// schema 名也要带上本 checkout 的后缀，否则两个 worktree 的探针会互相清库。
+const runProbe = (gwRoot, file) =>
+  sharedProbe(gwRoot, file, { env: { E2E_DATABASE_URL: PG_URL, E2E_MIGRATE_SCHEMA: schemaOf('e2e_migrate_race') } })
 
 function waitExit(child, ms = 20000) {
   return new Promise((ok, bad) => {
@@ -211,6 +214,67 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       assert(exit.code !== 0, `应该起不来，实际退出码 ${exit.code}`)
       assert(bad._out.includes('但这份代码里没有'), `报错没说清楚原因：\n${bad._out.slice(-600)}`)
       assert(bad._out.includes('9999-from-the-future'), '报错没说是哪一条')
+    })
+
+    /**
+     * 这条钉的是那次「查了七轮才找出来」的事故。
+     *
+     * 两份 e2e 同时在跑（两个 worktree），套件的 schema 名写死，于是后起的进程一句
+     * `drop schema cascade` 把前一个正在服务的库端了。前一个进程活得好好的，只是从那
+     * 一刻起表在重建窗口里查不到、账号 id 全换了新的——两种表现都指不回真正的原因。
+     */
+    await test('别的 Gateway 正用着这个 schema：拒绝清库，人家的数据一行不动', async () => {
+      const SHARED = schemaOf('e2e_migrate_claim')
+      const holderPort = await freePort()
+      const intruderPort = await freePort()
+      const reset = (name, port) =>
+        start(name, ['--import', 'tsx', `${gwRoot}/src/index.ts`], {
+          cwd: gwRoot,
+          env: {
+            SATUWORK_GATEWAY_HOME: `${GW_HOME}-${name}`,
+            GATEWAY_DATABASE_URL: PG_URL,
+            GATEWAY_PG_SCHEMA: SHARED,
+            GATEWAY_PG_RESET: '1',
+            GATEWAY_HOST: '127.0.0.1',
+            GATEWAY_PORT: String(port),
+            GATEWAY_ACCESS_HOST: 'satuwork.com',
+            GATEWAY_SEED_OWNER: '0',
+          },
+        })
+      let holder
+      try {
+        holder = reset('claim-holder', holderPort)
+        await waitHttp(`http://127.0.0.1:${holderPort}/health`)
+        // 占着的那位手上有一行真数据。撞车的老毛病正是把它连同整个 schema 一起抹掉。
+        const now = Date.now()
+        await client.query(`set search_path to ${SHARED}`)
+        await client.query(
+          'insert into companies (id, slug, name, "createdAt", "updatedAt") values ($1,$2,$3,$4,$5)',
+          ['co-claim', 'claim', '占着的公司', now, now],
+        )
+
+        const intruder = reset('claim-intruder', intruderPort)
+        const exit = await waitExit(intruder)
+        assert(exit.code !== 0, `第二个应该起不来，实际退出码 ${exit.code}`)
+        assert(intruder._out.includes('拒绝 GATEWAY_PG_RESET 清库'), `报错没说是撞了车：\n${intruder._out.slice(-600)}`)
+        assert(intruder._out.includes(SHARED), '报错没说是哪个 schema')
+        // 对面是谁要报得出来——不然人只知道「有人占着」，不知道该去杀哪个进程。
+        assert(/pid \d+/.test(intruder._out), `报错没指出占着的是谁：\n${intruder._out.slice(-600)}`)
+        // 「库停在哪一号」是迁移失败才该打的，这个错里打它只会把人往迁移那边引。
+        assert(!intruder._out.includes('库停在'), `不该按迁移失败来报：\n${intruder._out.slice(-600)}`)
+
+        // 最要紧的一条：占着的那位一个字都没少，而且还活着。
+        const kept = await client.query('select name from companies where id = $1', ['co-claim'])
+        assert(kept.rows.length === 1, '数据被闯进来的那个进程抹掉了')
+        const alive = await fetch(`http://127.0.0.1:${holderPort}/health`)
+        assert(alive.ok, `占着的 Gateway 被带塌了：${alive.status}`)
+      } finally {
+        await stop(holder)
+        await client.query(`drop schema if exists ${SHARED} cascade`).catch(() => {})
+        await client.query(`set search_path to ${SCHEMA}`).catch(() => {})
+        rmSync(`${GW_HOME}-claim-holder`, { recursive: true, force: true })
+        rmSync(`${GW_HOME}-claim-intruder`, { recursive: true, force: true })
+      }
     })
 
     await test('两个进程同时起：迁移只跑一遍，锁还得放开', async () => {

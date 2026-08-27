@@ -11,6 +11,7 @@
  */
 import { freePort } from './ports.mjs'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { rmSync } from 'node:fs'
 import net from 'node:net'
 
@@ -34,7 +35,7 @@ async function waitGone(pid, ms) {
 }
 
 export async function runShutdown({ gwRoot, test, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-shutdown'
+  const GW_HOME = tmpOf('satuwork-e2e-shutdown')
   const port = await freePort()
   const base = `http://127.0.0.1:${port}`
   rmSync(GW_HOME, { recursive: true, force: true })
@@ -45,7 +46,7 @@ export async function runShutdown({ gwRoot, test, start, waitHttp, assert, log }
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
       GATEWAY_DATABASE_URL: PG_URL,
-      GATEWAY_PG_SCHEMA: 'e2e_shutdown',
+      GATEWAY_PG_SCHEMA: schemaOf('e2e_shutdown'),
       GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(port),

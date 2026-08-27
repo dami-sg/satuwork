@@ -7,10 +7,11 @@
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePort } from './ports.mjs'
 
 export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-setup-gw'
+  const GW_HOME = tmpOf('satuwork-e2e-setup-gw')
   const GW_PORT = await freePort()
   const gwBase = `http://127.0.0.1:${GW_PORT}`
 
@@ -22,7 +23,7 @@ export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
       GATEWAY_DATABASE_URL: PG_URL,
-      GATEWAY_PG_SCHEMA: 'e2e_setup',
+      GATEWAY_PG_SCHEMA: schemaOf('e2e_setup'),
       GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(GW_PORT),
@@ -94,7 +95,7 @@ export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log
       // **必须换一个干净的库。** 在当前这个 gateway 上跑，因为上面已经建过 owner，两条
       // 请求必然都 409——断言过得去，但那条「谁先谁赢」的竞态一次都没跑到。这个测试
       // 以前就是这么空过的。
-      const RACE_HOME = '/tmp/satuwork-e2e-setup-race'
+      const RACE_HOME = tmpOf('satuwork-e2e-setup-race')
       const RACE_PORT = await freePort()
       const raceBase = `http://127.0.0.1:${RACE_PORT}`
       rmSync(RACE_HOME, { recursive: true, force: true })
@@ -103,7 +104,7 @@ export async function runSetup({ gwRoot, test, req, start, waitHttp, assert, log
         env: {
           SATUWORK_GATEWAY_HOME: RACE_HOME,
           GATEWAY_DATABASE_URL: PG_URL,
-          GATEWAY_PG_SCHEMA: 'e2e_setup_race',
+          GATEWAY_PG_SCHEMA: schemaOf('e2e_setup_race'),
           GATEWAY_PG_RESET: '1',
           GATEWAY_HOST: '127.0.0.1',
           GATEWAY_PORT: String(RACE_PORT),

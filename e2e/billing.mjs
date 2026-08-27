@@ -14,10 +14,11 @@ import { rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePort } from './ports.mjs'
 import { closeServer } from './probe.mjs'
 
-const SCHEMA = 'e2e_billing'
+const SCHEMA = schemaOf('e2e_billing')
 const MODEL = 'anthropic/claude-haiku-4-5'
 
 /**
@@ -60,7 +61,7 @@ function startFakeAnthropic() {
 }
 
 export async function runBilling({ gwRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-billing'
+  const GW_HOME = tmpOf('satuwork-e2e-billing')
   const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
@@ -517,7 +518,7 @@ export async function runBilling({ gwRoot, test, req, start, waitHttp, assert, l
        * 不存在的表。默认行为是把 pg 的原始错误对象打出来——那堆栈里一个字都没说
        * 该干什么。这条钉住的是**错误界面**，不是查询本身。
        */
-      const missing = await spawnScript({ GATEWAY_PG_SCHEMA: 'e2e_billing_not_migrated' })
+      const missing = await spawnScript({ GATEWAY_PG_SCHEMA: schemaOf('e2e_billing_not_migrated') })
       assert(missing.code === 1, `退出码 ${missing.code}`)
       assert(!missing.out.includes('at process.processTicksAndRejections'), `甩了堆栈出来：${missing.out}`)
       assert(missing.out.includes('schema'), `没说清是哪儿的问题：${missing.out}`)

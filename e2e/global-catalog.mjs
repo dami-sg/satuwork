@@ -6,10 +6,11 @@
  */
 import { rmSync } from 'node:fs'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePort } from './ports.mjs'
 
 export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-global'
+  const GW_HOME = tmpOf('satuwork-e2e-global')
   const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
@@ -21,7 +22,7 @@ export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, ass
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
       GATEWAY_DATABASE_URL: PG_URL,
-      GATEWAY_PG_SCHEMA: 'e2e_global',
+      GATEWAY_PG_SCHEMA: schemaOf('e2e_global'),
       GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(GW_PORT),

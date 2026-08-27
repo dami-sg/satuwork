@@ -82,3 +82,8 @@ GATEWAY_DATABASE_URL=... node gateway/scripts/backfill-charges.mjs --dry-run
 node e2e/run.mjs          # 全量端到端，要先起 postgres
 cd gateway && pnpm typecheck
 ```
+
+e2e 用的 schema 名和 `/tmp` 目录都按 checkout 路径带后缀（见
+[e2e/isolate.mjs](e2e/isolate.mjs)），所以**几个 worktree 可以同时跑**，不会互相清库、
+互相删数据目录。剩下一处躲不开的共用资源是端口 3200——它由 Gateway 的槽位公式定死，
+同一台机器上两套 manager 用例会撞，撞了那条用例会直说。

@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { createCompany } from './org.mjs'
 import { startMockMcp } from './mock-mcp.mjs'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
 import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
 import { freePorts } from './ports.mjs'
@@ -36,8 +37,8 @@ async function readLiveCreds() {
 }
 
 export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-runtime-gw'
-  const BOT_HOME = '/tmp/satuwork-e2e-runtime-bot'
+  const GW_HOME = tmpOf('satuwork-e2e-runtime-gw')
+  const BOT_HOME = tmpOf('satuwork-e2e-runtime-bot')
   const [GW_PORT, BOT_PORT] = await freePorts(2)
   const MACHINE_TOK = 'e2e-runtime-machine'
   const PLATFORM_TOK = 'e2e-runtime-platform'
@@ -53,7 +54,7 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
       GATEWAY_DATABASE_URL: PG_URL,
-      GATEWAY_PG_SCHEMA: 'e2e_runtime',
+      GATEWAY_PG_SCHEMA: schemaOf('e2e_runtime'),
       GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(GW_PORT),

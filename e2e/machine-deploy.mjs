@@ -8,6 +8,10 @@ import { createRequire } from 'node:module'
 import { connect } from 'node:net'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
+import { schemaOf, tmpOf } from './isolate.mjs'
+
+/** 这一套自己的 schema。写死名字会被别的 worktree 的 e2e 清掉（见 pg.mjs 的 schemaOf）。 */
+const SCHEMA = schemaOf('e2e_machine')
 import { createCompany } from './org.mjs'
 import { publishRelease, sha256Of, tarGz } from './release.mjs'
 import { freePort } from './ports.mjs'
@@ -59,7 +63,7 @@ function wsUpgrade(port, path, cookie) {
 }
 
 export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, assert, log }) {
-  const GW_HOME = '/tmp/satuwork-e2e-machine-gw'
+  const GW_HOME = tmpOf('satuwork-e2e-machine-gw')
   const GW_PORT = await freePort()
   const MACHINE_TOK = 'e2e-machine-deploy'
   const PLATFORM_TOK = 'e2e-platform-deploy'
@@ -74,7 +78,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
     env: {
       SATUWORK_GATEWAY_HOME: GW_HOME,
       GATEWAY_DATABASE_URL: PG_URL,
-      GATEWAY_PG_SCHEMA: 'e2e_machine',
+      GATEWAY_PG_SCHEMA: SCHEMA,
       GATEWAY_PG_RESET: '1',
       GATEWAY_HOST: '127.0.0.1',
       GATEWAY_PORT: String(GW_PORT),
@@ -714,7 +718,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       const client = new pg.Client({ connectionString: PG_URL })
       await client.connect()
       try {
-        await client.query('set search_path to e2e_machine')
+        await client.query(`set search_path to ${SCHEMA}`)
         const seat = await client.query(
           'select "machineId" from seat_runtimes where "accountId" = $1 and "botId" = $2',
           [memberId, botA],
@@ -1022,7 +1026,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       const client = new pg.Client({ connectionString: PG_URL })
       await client.connect()
       try {
-        await client.query('set search_path to e2e_machine')
+        await client.query(`set search_path to ${SCHEMA}`)
         const mine = await client.query(
           'select distinct "machineId" from seat_runtimes where "accountId" = (select id from accounts where email = $1)',
           ['member1@machine.test'],
