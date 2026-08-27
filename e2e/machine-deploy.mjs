@@ -11,6 +11,7 @@ import { PG_URL } from './pg.mjs'
 import { createCompany } from './org.mjs'
 import { publishRelease, sha256Of, tarGz } from './release.mjs'
 import { freePort } from './ports.mjs'
+import { closeServer, withDeadline } from './probe.mjs'
 
 /** 一个员工一个 Linux 账号——名下所有 bot 共用它。和 gateway/src/deploy.ts 保持一致。 */
 function linuxUserOf(accountId) {
@@ -901,17 +902,13 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n')
         socket.write('HELLO-WS')
       })
-      const guard = (p, what, ms = 15000) =>
-        Promise.race([
-          Promise.resolve(p),
-          new Promise((_, bad) => setTimeout(() => bad(new Error(`卡在「${what}」超过 ${ms}ms`)), ms)),
-        ])
-      await guard(
+      await withDeadline(
         new Promise((ok, bad) => {
           fake.once('error', bad)
           fake.listen(8443, '127.0.0.1', ok)
         }),
         'fake listen 8443',
+        15_000,
       )
       try {
         const rt = await req(gwBase, 'GET', '/runtime/desktop?botId=' + encodeURIComponent(botA), { token: memberTok })
@@ -1001,10 +998,9 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         const wsAnon = await wsUpgrade(GW_PORT, `/desktop/${seatId}/websockify`, '')
         assert(wsAnon.includes('401'), `无 cookie 的升级应 401: ${wsAnon.slice(0, 80)}`)
       } finally {
-        // 先掐连接再 close：Gateway 那侧的反代是 keep-alive，光 close 会一直等着它
-        // 自己断开——套件就停在这儿不动了。
-        fake.closeAllConnections?.()
-        await guard(new Promise((r) => fake.close(() => r())), 'fake close', 5000).catch(() => {})
+        // 走 closeServer：Gateway 那侧的反代是 keep-alive，光 close 会一直等着它自己
+        // 断开——套件就停在这儿不动了。
+        await closeServer(fake, '假管家')
       }
     })
 
@@ -1119,8 +1115,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         const after = await req(gwBase, 'GET', `/orgs/${co.company.id}`, { token: ownerTok })
         assert(after.status === 404, `公司应该删掉了，得到 ${after.status}`)
       } finally {
-        fake.closeAllConnections?.()
-        await new Promise((r) => fake.close(() => r()))
+        await closeServer(fake, '假管家')
       }
     })
 
@@ -1183,8 +1178,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
           `席位行还在：${rt.text}`,
         )
       } finally {
-        fake.closeAllConnections?.()
-        await new Promise((r) => fake.close(() => r()))
+        await closeServer(fake, '假管家')
       }
     })
 
@@ -1316,8 +1310,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
           `席位行还在：${after.text}`,
         )
       } finally {
-        fake.closeAllConnections?.()
-        await new Promise((r) => fake.close(() => r()))
+        await closeServer(fake, '假管家')
       }
     })
 

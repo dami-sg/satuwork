@@ -8,30 +8,9 @@
  *
  * 真反代 + 假席位，走探针（见 manager/e2e-proxy-close.mjs）。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'manager/e2e-proxy-close.mjs')], {
-      cwd: join(root, 'manager'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) {
-        reject(new Error(`探针退出 ${code}\n${err || out}`))
-        return
-      }
-      resolve(JSON.parse(line.slice('__RESULT__'.length)))
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'manager/e2e-proxy-close.mjs')
 
 export async function runProxyClose({ root, test, assert, log }) {
   log('\n# proxy-close')

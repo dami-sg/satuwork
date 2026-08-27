@@ -29,7 +29,7 @@ export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, ass
       GATEWAY_SEED_OWNER: '0',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'global gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'global gateway' })
 
   let owner = ''
   let adminA = ''
@@ -287,6 +287,7 @@ export async function runGlobalCatalog({ gwRoot, test, req, start, waitHttp, ass
       }
     })
   } finally {
+    gw.kill()
     try {
       rmSync(GW_HOME, { recursive: true, force: true })
     } catch {}

@@ -10,6 +10,7 @@ import { createCompany } from './org.mjs'
 import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
 import { freePorts } from './ports.mjs'
+import { closeServer } from './probe.mjs'
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -756,8 +757,7 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
           token: machineTok,
           body: { host: botBase, botId },
         })
-        stub.closeAllConnections?.()
-        await new Promise((r) => stub.close(() => r()))
+        await closeServer(stub, '席位替身')
       }
     })
 

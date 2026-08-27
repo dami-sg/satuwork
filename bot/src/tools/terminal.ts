@@ -115,6 +115,10 @@ interface Produced {
  * 判据是 mtime ≥ 命令起跑的时刻。起点在 `spawn` 之前取，而 `mtimeMs` 是文件系统按同
  * 一个墙上时钟写的，所以命令写下的文件一定落在起点之后。
  *
+ * **起点要往后挪一毫秒**（见 `startedAt` 那一行）。`Date.now()` 往下取整，`mtimeMs`
+ * 带小数，同一毫秒里前者恒小于后者——不挪的话这条窗口会往回张开将近一毫秒，把**上一次
+ * 工具调用**刚写下的文件算成这一条的产出。
+ *
  * **这不是一条能做到精确的判据，做不到的那部分要说清楚。** 文件系统只回答「这个文件
  * 什么时候被改的」，不回答「谁改的」。同一个工作区在这段时间里还可能有别的写入方：
  * 上一条 `background=true` 起的进程、同一个员工另一个席位上的 Bot（`/home/{用户}/work`
@@ -736,8 +740,16 @@ export function apply(ctx: Context, config: Config = {}) {
       }
 
       const seconds = Math.max(1, Math.min(Math.floor(timeout || defaultTimeout), MAX_TIMEOUT))
-      // 产出扫描的起点。**要在 spawn 之前取**：命令写下的文件 mtime 一定晚于这一刻。
-      const startedAt = Date.now()
+      /**
+       * 产出扫描的起点。**要在 spawn 之前取**：命令写下的文件 mtime 一定晚于这一刻。
+       *
+       * `+ 1` 不是保险余量，是对齐两种时钟：`Date.now()` 往下取整到毫秒，而 `mtimeMs`
+       * 带小数，同一毫秒内写下的文件永远满足 `mtimeMs >= Date.now()`。上一条命令的最后
+       * 一次写入和这里只隔着一次很快的扫描，落在同一毫秒里是常事——于是它那个文件被算
+       * 进这一条的产出，界面上多出一颗不属于这次调用的药丸，还跟着 details.files 进会话
+       * 日志。起一个 shell 再写文件远不止一毫秒，挪这一格不会漏掉真产出。
+       */
+      const startedAt = Date.now() + 1
       const r = await runForeground(command, dir, seconds * 1000, call?.signal)
       if (r.error) fail(`无法执行：${r.error}`)
 

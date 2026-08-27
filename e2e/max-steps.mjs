@@ -6,37 +6,9 @@
  * 恰好看见界面还在转。刹车只有 `shouldStopAfterTurn` 这一个口子，而它是 pi 的 API——
  * 升级一次就可能改名或改语义，静悄悄地把刹车拆掉。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-max-steps.mjs')], {
-      cwd: join(root, 'bot'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    // 刹车失灵的样子就是探针永远跑不完，别让它把整套 e2e 一起拖死。
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error('探针没能在 60 秒内跑完——循环没有停下，正是这条测试要防的'))
-    }, 60000)
-    child.on('error', reject)
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-max-steps.mjs', { timeout: 60_000 })
 
 export async function runMaxSteps({ root, test, assert, log }) {
   log('\n# max-steps')

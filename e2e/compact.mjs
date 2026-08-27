@@ -5,34 +5,11 @@
  * 一种是当场炸（边界切在轮次中间，provider 拒收），一种是悄悄变笨（旧事件还在发、
  * 或者摘要没进上下文、或者时间区间偏了 8 小时）。后一种要靠这里钉住。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
 const TZ = 'Asia/Shanghai'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-compact.mjs')], {
-      cwd: join(root, 'bot'),
-      env: { ...process.env, SATUWORK_TZ: TZ },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-compact.mjs', { env: { SATUWORK_TZ: TZ } })
 
 export async function runCompact({ root, test, assert, log }) {
   log('\n# compact')

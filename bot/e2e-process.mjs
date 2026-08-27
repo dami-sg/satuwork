@@ -126,7 +126,7 @@ out.foreground = {
     名字是文件名: (one.files ?? [])[0]?.name,
     只读命令不报: !none.files,
     别人的地盘不算我的: (foreign.files ?? []).map((f) => f.path),
-    十个全报: (many.files ?? []).length,
+    十个全报: (many.files ?? []).map((f) => f.path),
     批量改动不报: !bulk.files,
     批量改动说了一声: bulk.text.includes('个以上的文件'),
     不该无缘无故说那句: !one.text.includes('个以上的文件'),

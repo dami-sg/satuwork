@@ -10,27 +10,9 @@
  *   2. 两个连接器、同一个账号名   —— 保住尾巴也没用，头部一样
  *   3. 同一台服务器的两个长工具名 —— 尾巴在总长那一刀上被切掉
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function names(root, pairs) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-tool-names.mjs'), JSON.stringify(pairs)], {
-      cwd: join(root, 'bot'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      resolve(JSON.parse(line.slice('__RESULT__'.length)))
-    })
-  })
-}
+const names = (root, pairs) => sharedProbe(root, 'bot/e2e-tool-names.mjs', { args: [JSON.stringify(pairs)] })
 
 export async function runToolNames({ root, test, assert, log }) {
   log('\n# tool-names')

@@ -65,6 +65,7 @@ import { runManagerConfirm } from './manager-confirm.mjs'
 import { PG_URL, requirePg } from './pg.mjs'
 import { freePort } from './ports.mjs'
 import { createCompany } from './org.mjs'
+import { closeServer, withDeadline } from './probe.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const gwRoot = join(root, 'gateway')
@@ -108,9 +109,23 @@ function assert(cond, msg) {
   if (!cond) throw new Error(msg)
 }
 
+/**
+ * 一条用例、一个套件各自的墙钟额度。
+ *
+ * **这两道闸是诊断，不是保险丝。** 在它们之前，任何一处等不到的东西——探针不退出、
+ * 反代那侧不回话、`server.close()` 在等一条永远不断的 keep-alive——都会让整套 e2e
+ * 停在上一条 `ok` 后面一动不动。屏幕上看不出卡在哪个套件，也看不出卡了多久，人只能
+ * 等到失去耐心再 Ctrl-C，什么线索都没有。加上之后，卡住就是一条带名字的失败，剩下的
+ * 用例照跑，一次运行能把问题全抖出来。
+ *
+ * 套件那道闸比用例那道宽：起 Gateway、起真管家、起 Chrome 都发生在用例之外。
+ */
+const TEST_TIMEOUT_MS = Number(process.env.E2E_TEST_TIMEOUT_MS) || 120_000
+const SUITE_TIMEOUT_MS = Number(process.env.E2E_SUITE_TIMEOUT_MS) || 420_000
+
 async function test(name, fn) {
   try {
-    await fn()
+    await withDeadline(Promise.resolve().then(fn), `用例「${name}」`, TEST_TIMEOUT_MS)
     passed += 1
     log(`ok  ${name}`)
   } catch (e) {
@@ -118,6 +133,25 @@ async function test(name, fn) {
     log(`not ok  ${name}`)
     log(`  ${e.stack || e.message}`)
   }
+}
+
+/**
+ * 跑一个套件，记时间，并且不让它卡死整场。
+ *
+ * 只有「卡住」会被就地记成失败往下走：别的错还是往上抛，行为和以前一样——一个起不来的
+ * Gateway 会让后面每个套件各报一堆假失败，那种噪音比早点停下更糟。
+ */
+async function suite(name, fn) {
+  const t0 = Date.now()
+  try {
+    await withDeadline(Promise.resolve().then(fn), `套件 ${name}`, SUITE_TIMEOUT_MS)
+  } catch (e) {
+    if (!e?.deadline) throw e
+    failed += 1
+    log(`not ok  ${name}（整个套件卡住了）`)
+    log(`  ${e.message}`)
+  }
+  log(`# ${name} 用了 ${((Date.now() - t0) / 1000).toFixed(1)}s`)
 }
 
 function start(name, args, { cwd, env }) {
@@ -164,12 +198,26 @@ function killAll() {
   } catch {}
 }
 
-async function waitHttp(url, { timeout = 30000 } = {}) {
+/**
+ * 等一个进程把端口听起来。
+ *
+ * 两件事容易写错，都在这儿一次做对：
+ *
+ * 1. **单次请求也要有闸。** 只在两次尝试之间看墙钟的话，一个「连得上却不回话」的
+ *    对端会把 `await fetch` 卡在那儿，上面那个 30 秒的额度一次都轮不到检查。
+ * 2. **进程已经死了就别再等满。** 起不来的时候有用的是它的输出，不是三十秒之后
+ *    那句「等不到」。传 `child` 进来就顺带盯着它。
+ */
+async function waitHttp(url, { timeout = 30000, child, what } = {}) {
   const startAt = Date.now()
   let last
   while (Date.now() - startAt < timeout) {
+    if (child?._exited) {
+      const { code, sig } = child._exited
+      throw new Error(`${what || url} 起不来：进程已退出（${sig || code}）\n${child._out}`)
+    }
     try {
-      const r = await fetch(url)
+      const r = await fetch(url, { signal: AbortSignal.timeout(5000) })
       if (r.ok) return
       last = `HTTP ${r.status}`
     } catch (e) {
@@ -177,10 +225,15 @@ async function waitHttp(url, { timeout = 30000 } = {}) {
     }
     await new Promise((x) => setTimeout(x, 150))
   }
-  throw new Error(`等不到 ${url}：${last}`)
+  throw new Error(`等不到 ${what || url}：${last}`)
 }
 
-async function req(base, method, path, { token, body, raw, headers: extra } = {}) {
+/**
+ * 一次普通调用。**默认带闸**：`fetch` 自己不会超时，而这套里到处都是「拿一条本该
+ * 立刻结束的响应」的调用——万一对面开的是一条带心跳的 SSE，`r.text()` 就永远收不完，
+ * 整场停在这一行。要真的读一条流，别走这个助手（见「每条流的第一帧自报进程身份」）。
+ */
+async function req(base, method, path, { token, body, raw, headers: extra, timeout = 30000 } = {}) {
   const headers = { ...(extra || {}) }
   // raw：直接发字节（上传发布包），不套 JSON。
   if (raw !== undefined) headers['content-type'] = headers['content-type'] || 'application/gzip'
@@ -190,6 +243,7 @@ async function req(base, method, path, { token, body, raw, headers: extra } = {}
     method,
     headers,
     body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(timeout),
   })
   const text = await r.text()
   let json
@@ -822,7 +876,7 @@ async function runGateway() {
       assert(!pulled.json.pullError, '不应有 pullError')
       assert(!treeHas(GW_HOME, HELLO), 'Gateway home 含拉下来的正文')
     } finally {
-      await new Promise((r) => mock.server.close(r))
+      await closeServer(mock.server, '审计源替身')
     }
   })
 
@@ -2990,6 +3044,12 @@ async function runBot() {
     const file = join(BOT_HOME, 'sessions', `${sessionId}.jsonl`)
     const readLines = () =>
       readFileSync(file, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
+    // 上一条用例放开静默之后补发了一句 ping，那一轮此刻多半还在跑——重置撞上去就是
+    // 409「这一轮还在跑」，而这条用例要钉的根本不是那件事。等它跑完再动手。
+    for (let i = 0; i < 200 && (await req(base, 'GET', '/api/health')).json.busy; i++) {
+      await new Promise((x) => setTimeout(x, 50))
+    }
+
     const before = readLines()
     const ends = before.filter((e) => e.type === 'turn/end')
 
@@ -3125,93 +3185,97 @@ async function main() {
   })
   try {
     await requirePg()
-    await runGateway()
-    await runBot()
-    await runRuntimePath({
-      root,
-      gwRoot,
-      botRoot,
-      test,
-      req,
-      start,
-      waitHttp,
-      assert,
-      log,
-    })
-    await runGatewayChat({
-      gwRoot,
-      botRoot,
-      test,
-      req,
-      start,
-      waitHttp,
-      assert,
-      log,
-      treeHas,
-    })
-    await runDeployErrors({ root, test, assert, log })
-    await runUpgradeDrain({ root, test, assert, log })
-    await runProxyClose({ root, test, assert, log })
-    await runPairing({ root, test, assert, log })
-    await runMachineDeploy({
-      gwRoot,
-      test,
-      req,
-      start,
-      waitHttp,
-      assert,
-      log,
-    })
-    await runLlmUsage({
-      gwRoot,
-      test,
-      req,
-      start,
-      waitHttp,
-      assert,
-      log,
-    })
-    await runSetup({ gwRoot, test, req, start, waitHttp, assert, log })
-    await runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log })
-    await runStats({ gwRoot, test, req, start, waitHttp, assert, log })
-    await runWebTools({ gwRoot, test, req, start, waitHttp, assert, log })
-    await runBilling({ gwRoot, test, req, start, waitHttp, assert, log })
-    await runMigrate({ gwRoot, test, start, waitHttp, assert, log })
-    await runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log })
-    await runConnectors({ root, gwRoot, test, req, start, waitHttp, assert, log })
-    await runToolSearch({ root, gwRoot, test, req, start, waitHttp, assert, log })
-    await runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log })
-    await runManager({ root, gwRoot, test, req, start, waitHttp, assert, log })
-    await runManagerConfirm({ root, test, assert, log })
-    await runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log })
-    await runUiFiles({ root, test, assert, log })
-    await runMarkdown({ root, test, assert, log })
-    await runChatFold({ root, test, assert, log })
-    await runToolNames({ root, test, assert, log })
-    await runSessionStore({ root, test, assert, log })
-    await runLlmIdle({ root, test, assert, log })
-    await runReplaySlice({ root, test, assert, log })
-    await runWorkspaceFiles({ root, test, assert, log })
-    await runPatch({ root, test, assert, log })
-    await runProcess({ root, test, assert, log })
-    await runDocExtract({ root, test, assert, log })
-    await runWebBot({ root, test, assert, log })
-    await runVision({ root, test, assert, log })
-    await runTurnImages({ root, test, assert, log })
-    await runMentions({ root, test, assert, log })
-    await runRoutineModel({ root, test, assert, log })
-    await runHistoryTime({ root, test, assert, log })
-    await runCompact({ root, test, assert, log })
-    await runGatewayUrl({ root, test, assert, log })
-    await runMaxSteps({ root, test, assert, log })
-    await runDelegate({ root, test, assert, log })
-    await runToolCalls({ root, test, assert, log })
-    await runGuards({ root, test, assert, log })
-    await runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log })
-    await runBrowser({ root, test, assert, log })
-    await runMounted({ root, test, assert, log })
+    await suite('gateway', () => runGateway())
+    await suite('bot', () => runBot())
+    await suite('runtime-path', () =>
+      runRuntimePath({
+        root,
+        gwRoot,
+        botRoot,
+        test,
+        req,
+        start,
+        waitHttp,
+        assert,
+        log,
+      }))
+    await suite('gateway-chat', () =>
+      runGatewayChat({
+        gwRoot,
+        botRoot,
+        test,
+        req,
+        start,
+        waitHttp,
+        assert,
+        log,
+        treeHas,
+      }))
+    await suite('deploy-errors', () => runDeployErrors({ root, test, assert, log }))
+    await suite('upgrade-drain', () => runUpgradeDrain({ root, test, assert, log }))
+    await suite('proxy-close', () => runProxyClose({ root, test, assert, log }))
+    await suite('pairing', () => runPairing({ root, test, assert, log }))
+    await suite('machine-deploy', () =>
+      runMachineDeploy({
+        gwRoot,
+        test,
+        req,
+        start,
+        waitHttp,
+        assert,
+        log,
+      }))
+    await suite('llm-usage', () =>
+      runLlmUsage({
+        gwRoot,
+        test,
+        req,
+        start,
+        waitHttp,
+        assert,
+        log,
+      }))
+    await suite('setup', () => runSetup({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('custom-provider', () => runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('stats', () => runStats({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('web-tools', () => runWebTools({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('billing', () => runBilling({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('migrate', () => runMigrate({ gwRoot, test, start, waitHttp, assert, log }))
+    await suite('global-catalog', () => runGlobalCatalog({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('connectors', () => runConnectors({ root, gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('tool-search', () => runToolSearch({ root, gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('bot-template', () => runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('manager', () => runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('manager-confirm', () => runManagerConfirm({ root, test, assert, log }))
+    await suite('ui-smoke', () => runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('ui-files', () => runUiFiles({ root, test, assert, log }))
+    await suite('markdown', () => runMarkdown({ root, test, assert, log }))
+    await suite('chat-fold', () => runChatFold({ root, test, assert, log }))
+    await suite('tool-names', () => runToolNames({ root, test, assert, log }))
+    await suite('session-store', () => runSessionStore({ root, test, assert, log }))
+    await suite('llm-idle', () => runLlmIdle({ root, test, assert, log }))
+    await suite('replay-slice', () => runReplaySlice({ root, test, assert, log }))
+    await suite('workspace-files', () => runWorkspaceFiles({ root, test, assert, log }))
+    await suite('patch', () => runPatch({ root, test, assert, log }))
+    await suite('process', () => runProcess({ root, test, assert, log }))
+    await suite('doc-extract', () => runDocExtract({ root, test, assert, log }))
+    await suite('web-bot', () => runWebBot({ root, test, assert, log }))
+    await suite('vision', () => runVision({ root, test, assert, log }))
+    await suite('turn-images', () => runTurnImages({ root, test, assert, log }))
+    await suite('mentions', () => runMentions({ root, test, assert, log }))
+    await suite('routine-model', () => runRoutineModel({ root, test, assert, log }))
+    await suite('history-time', () => runHistoryTime({ root, test, assert, log }))
+    await suite('compact', () => runCompact({ root, test, assert, log }))
+    await suite('gateway-url', () => runGatewayUrl({ root, test, assert, log }))
+    await suite('max-steps', () => runMaxSteps({ root, test, assert, log }))
+    await suite('delegate', () => runDelegate({ root, test, assert, log }))
+    await suite('toolcalls', () => runToolCalls({ root, test, assert, log }))
+    await suite('guards', () => runGuards({ root, test, assert, log }))
+    await suite('handoff', () => runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('browser', () => runBrowser({ root, test, assert, log }))
+    await suite('mounted', () => runMounted({ root, test, assert, log }))
     // 关进程那条放在最后：它把 Gateway 起起来又掐掉，后面再挂用例只会跟它抢端口。
-    await runShutdown({ gwRoot, test, start, waitHttp, assert, log })
+    await suite('shutdown', () => runShutdown({ gwRoot, test, start, waitHttp, assert, log }))
   } finally {
     killAll()
     try {
@@ -3227,12 +3291,43 @@ async function main() {
   if (skips.length) {
     for (const s of skips) log(`# skip  ${s}`)
   }
-  if (failed) process.exit(1)
-  log('E2E OK')
+  if (!failed) log('E2E OK')
+  /**
+   * **全绿的那一轮以前根本回不到命令行。**
+   *
+   * `killAll()` 之后进程里仍然剩着没释放的句柄——machine-deploy 那个听 8443 的假管家、
+   * undici 攒下的连接、探针留下的管道——事件循环空不掉，node 就一直挂在这儿。而失败那
+   * 条路上一直有 `process.exit(1)` 兜着，所以这个坑只在「一条都不红」的时候露出来：
+   * 屏幕上明明写着 E2E OK，人却等着它结束，一等一个多小时。
+   *
+   * 结论已经全部打完了，退出码也已经定了。跨五十个套件去追最后一个没关干净的句柄是场
+   * 打不赢的仗，这里直接落闸——但要等这几行字先落地，见 `bye`。
+   */
+  bye(failed ? 1 : 0)
+}
+
+/**
+ * 打完再走。
+ *
+ * `process.exit()` **不等** stdout / stderr 把队列写完，而这两条在管道上（CI 就是管道、
+ * `| tee` 也是）是异步的。直接 exit 能把最后几行整段吞掉——实测两万行里丢了近四成，
+ * 而丢的恰恰是 `# N passed, M failed`、skip 清单和那些 `not ok` 的堆栈：退出码是对的，
+ * 日志里却看不出发生了什么。
+ *
+ * 两条都排空了才走；读的那头要是先撤了、回调永远不来，两秒后照样走。
+ */
+function bye(code) {
+  let left = 2
+  const go = () => {
+    if (--left === 0) process.exit(code)
+  }
+  setTimeout(() => process.exit(code), 2000)
+  process.stdout.write('', go)
+  process.stderr.write('', go)
 }
 
 main().catch((e) => {
   console.error(e.stack || e.message)
   killAll()
-  process.exit(1)
+  bye(1)
 })

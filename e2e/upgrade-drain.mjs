@@ -8,30 +8,9 @@
  * 席位那一侧由 e2e/manager.mjs 钉（真管家 + 假席位，走 HTTP 控制面）；这一组钉的是
  * 管家**自升级**那道闸——它由心跳驱动，没有一条外部接口能直接触发，所以走探针。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'manager/e2e-upgrade-drain.mjs')], {
-      cwd: join(root, 'manager'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) {
-        reject(new Error(`探针退出 ${code}\n${err || out}`))
-        return
-      }
-      resolve(JSON.parse(line.slice('__RESULT__'.length)))
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'manager/e2e-upgrade-drain.mjs')
 
 export async function runUpgradeDrain({ root, test, assert, log }) {
   log('\n# upgrade-drain')

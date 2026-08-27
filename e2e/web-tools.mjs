@@ -60,7 +60,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       E2E_STUB_WEB: '1',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'web-tools gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'web-tools gateway' })
 
   const require = createRequire(`${gwRoot}/package.json`)
   const pg = require('pg')
@@ -448,6 +448,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
       assert(r.status === 401, `席位口收了登录票：${r.status}`)
     })
   } finally {
+    gw.kill()
     await client.end().catch(() => {})
   }
 }

@@ -4,6 +4,7 @@
  */
 import { createServer } from 'node:http'
 import { pathToFileURL } from 'node:url'
+import { closeServer } from './probe.mjs'
 
 export function startMockMcp() {
   return new Promise((resolve, reject) => {
@@ -90,10 +91,7 @@ export function startMockMcp() {
       resolve({
         server,
         port,
-        close: () =>
-          new Promise((r) => {
-            server.close(() => r())
-          }),
+        close: () => closeServer(server, 'mock-mcp'),
       })
     })
   })

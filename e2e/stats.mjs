@@ -39,7 +39,7 @@ export async function runStats({ gwRoot, test, req, start, waitHttp, assert, log
       GATEWAY_SEED_OWNER: '0',
     },
   })
-  await waitHttp(`${base}/health`, gw, 'stats gateway')
+  await waitHttp(`${base}/health`, { child: gw, what: 'stats gateway' })
 
   const require = createRequire(`${gwRoot}/package.json`)
   const pg = require('pg')
@@ -323,6 +323,7 @@ export async function runStats({ gwRoot, test, req, start, waitHttp, assert, log
       assert(bad.status === 400, `坏 from ${bad.status} ${bad.text}`)
     })
   } finally {
+    gw.kill()
     try {
       await client.end()
     } catch {}

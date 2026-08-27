@@ -4,34 +4,11 @@
  * 这一层的错不会报错、不会丢消息，只会让模型对「昨天」一无所知——所以必须钉住。
  * 探针里用 SATUWORK_TZ 把时区钉死，否则断言会跟着跑测试的机器漂。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
 const TZ = 'Asia/Shanghai'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-history-time.mjs')], {
-      cwd: join(root, 'bot'),
-      env: { ...process.env, SATUWORK_TZ: TZ },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-history-time.mjs', { env: { SATUWORK_TZ: TZ } })
 
 export async function runHistoryTime({ root, test, assert, log }) {
   log('\n# history-time')

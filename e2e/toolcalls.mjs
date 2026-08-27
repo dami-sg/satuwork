@@ -5,36 +5,9 @@
  * 空壳「tool · 失败」（或者少一把真调用），而日志、状态码、类型检查全都干干净净——
  * 只有对着一段真实形状的 SSE 跑一遍才看得出来。
  */
-import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { runProbe as sharedProbe } from './probe.mjs'
 
-function runProbe(root) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'bot/e2e-toolcalls.mjs')], {
-      cwd: join(root, 'bot'),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      reject(new Error('探针 30 秒没跑完'))
-    }, 30000)
-    child.on('error', reject)
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const line = out.split('\n').find((l) => l.startsWith('__RESULT__'))
-      if (code !== 0 || !line) return reject(new Error(`探针退出 ${code}\n${err || out}`))
-      try {
-        resolve(JSON.parse(line.slice('__RESULT__'.length)))
-      } catch (e) {
-        reject(new Error(`探针输出解析失败：${e.message}\n${line}`))
-      }
-    })
-  })
-}
+const runProbe = (root) => sharedProbe(root, 'bot/e2e-toolcalls.mjs', { timeout: 30_000 })
 
 export async function runToolCalls({ root, test, assert, log }) {
   log('\n# toolcalls')
