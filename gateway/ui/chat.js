@@ -610,6 +610,23 @@ function fold(events, live) {
       if (seen) Object.assign(seen, data)
       else notes.push({ ...data })
       assistant.endTime = at
+    } else if (type === 'memory/saved') {
+      /**
+       * Bot 记下（改掉、删掉）了一条事实（docs/memory.md §9）。**挂在助手那一块上**，
+       * 理由和上面那张 Skill 卡一字不差。
+       *
+       * 比 Skill 那张更要紧一档：一条记忆此后**每一轮**都摆在提示词里影响回答，
+       * 而事后去 Bot 设置里翻，那一屏没人会没事去看。
+       */
+      if (!assistant) {
+        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        blocks.push(assistant)
+      }
+      const mem = assistant.memNotes || (assistant.memNotes = [])
+      const had = mem.find((x) => x.callId === data.callId)
+      if (had) Object.assign(had, data)
+      else mem.push({ ...data })
+      assistant.endTime = at
     } else if (type === 'tool/approval') {
       /**
        * 高风险确认。**挂在助手那一块上，不另起一块。**
@@ -3192,7 +3209,54 @@ function updateRow(el, b, streaming, since) {
     }
   }
 
+  /**
+   * 「记下了一条事实」那张小卡。**和 Skill 那张共用一套样式**——它们在人眼里是同一
+   * 类东西（Bot 自己改了自己），分两套皮只会让人以为它们是两种不同的事件。
+   */
+  const mems = b.memNotes || []
+  let mbox = bubble.querySelector('.sw-memnotes')
+  if (mems.length && !mbox) {
+    mbox = document.createElement('div')
+    mbox.className = 'sw-memnotes sw-skillnotes'
+    bubble.appendChild(mbox)
+  }
+  if (mbox) {
+    const mSig = mems.map((x) => x.id + ':' + x.action + ':' + (state.memNoteGone?.[x.id] ? 'x' : '-')).join('|')
+    if (mbox.getAttribute('data-sig') !== mSig) {
+      mbox.setAttribute('data-sig', mSig)
+      mbox.innerHTML = mems.map(memNoteHtml).join('')
+    }
+  }
+
   paintRowTime(el, b, streaming, since)
+}
+
+const MEM_NOTE_VERB = {
+  add: ['记住了', 'remembered'],
+  replace: ['改了记下的事', 'updated a memory'],
+  remove: ['忘掉了', 'forgot'],
+}
+
+/**
+ * 卡上摆的是**正文**，不是名字——记忆没有名字，而「它记住了什么」正是人要看的那一句。
+ *
+ * 删除按钮不做二次确认：一条记错的记忆每一轮都在影响回答，删它要极其容易
+ * （docs/memory.md §12 ②）。旁边那句小字说清「最多一分钟后在对话里生效」——不说的话，
+ * 人删完立刻再问一句、看见它还记得，得到的结论是「删除没用」（§12 ③）。
+ */
+function memNoteHtml(note) {
+  const gone = state.memNoteGone?.[note.id] || note.action === 'remove'
+  const verb = MEM_NOTE_VERB[note.action] || MEM_NOTE_VERB.add
+  const count = typeof note.used === 'number' && typeof note.max === 'number' ? ` · ${note.used}/${note.max}` : ''
+  return `<div class="sw-skillnote">
+    <span class="sw-skillnote-name">${esc(note.text || '')}</span>
+    <span class="sw-skillnote-verb">${esc(t(verb[0], verb[1]))}${esc(count)}</span>
+    ${
+      gone
+        ? `<span class="sw-skillnote-verb">${esc(t('已删掉', 'deleted'))}</span>`
+        : `<button type="button" class="sw-skillnote-act" data-act="chat-memory-delete" data-id="${esc(note.id)}">${esc(t('删掉', 'delete'))}</button>`
+    }
+  </div>`
 }
 
 const SKILL_NOTE_VERB = { create: ['记下了一条方法', 'noted a method'], update: ['改了自己记的方法', 'updated its own method'], remove: ['删掉了自己记的方法', 'deleted its own method'] }
@@ -3942,6 +4006,10 @@ const CTX_COLORS = {
   msg: 'var(--color-accent-500)',
   sys: 'var(--color-accent-2-400)',
   skill: 'var(--color-ok-500)',
+  // 记忆挨着 Skill：它们都在提示词末尾，同色系才看得出是同一类开销。
+  // **必须是 theme.css 里真有的色号**——写一个不存在的变量不会报错，只会画出一段
+  // 没有颜色的条，而那一格恰恰是拿来看「谁把上下文吃掉了」的。
+  memory: 'var(--color-ok-800)',
   tool: 'var(--color-warn-500)',
   mcp: 'var(--color-accent-2-600)',
   free: 'var(--color-neutral-300)',
@@ -4020,7 +4088,7 @@ function chatContextStat(events) {
       }
     }
     const sec = header && header.sections
-    const fixed = sec ? (sec.system || 0) + (sec.skills || 0) + (sec.builtinTools || 0) + (sec.mcpTools || 0) : 0
+    const fixed = sec ? (sec.system || 0) + (sec.skills || 0) + (sec.memory || 0) + (sec.builtinTools || 0) + (sec.mcpTools || 0) : 0
     const est = boundary.type === 'session/compact' ? Number(boundary.data.tokensAfter) || 0 : fixed
     const bot0 = chatBotOf()
     const window0 =
@@ -4052,17 +4120,27 @@ function chatContextStat(events) {
   const sec = header && header.sections
   const parts = []
   if (sec) {
-    const fixed = (sec.system || 0) + (sec.skills || 0) + (sec.builtinTools || 0) + (sec.mcpTools || 0)
+    /**
+     * **记忆那一格不能漏。** 漏掉的话它不会消失，会被算进「对话消息」——一个记了
+     * 四十条的 Bot，那一格凭空多出上万 token，而人看到的结论是「聊得太长了」，
+     * 于是去压缩，压完发现没小多少（docs/memory.md §12 ①）。
+     *
+     * 老日志没有 `sections.memory` 这个键，`|| 0` 兜住：那时候本来就没有这一段。
+     */
+    const fixed = (sec.system || 0) + (sec.skills || 0) + (sec.memory || 0) + (sec.builtinTools || 0) + (sec.mcpTools || 0)
     // 分段是估的，总量是真的。估出来比模型报的提示词还多时，按比例压回去——
     // 直接相减的话「对话消息」会变成负数，那一格在条上就消失了。
     const k = fixed > prompt && fixed > 0 ? prompt / fixed : 1
     const sys = Math.round((sec.system || 0) * k)
     const skills = Math.round((sec.skills || 0) * k)
+    const memory = Math.round((sec.memory || 0) * k)
     const builtin = Math.round((sec.builtinTools || 0) * k)
     const mcp = Math.round((sec.mcpTools || 0) * k)
-    parts.push({ key: 'msg', label: '对话消息', tokens: Math.max(0, used - sys - skills - builtin - mcp) })
+    parts.push({ key: 'msg', label: '对话消息', tokens: Math.max(0, used - sys - skills - memory - builtin - mcp) })
     parts.push({ key: 'sys', label: '系统提示词', tokens: sys })
     parts.push({ key: 'skill', label: 'Skill', tokens: skills })
+    // 记忆单独一格：和 Skill 并成一格的话，「今天忽然变大」说不清是谁涨的。
+    if (memory) parts.push({ key: 'memory', label: '记忆', tokens: memory })
     parts.push({ key: 'tool', label: '内置工具', tokens: builtin })
     parts.push({ key: 'mcp', label: 'MCP 工具', tokens: mcp })
   } else {

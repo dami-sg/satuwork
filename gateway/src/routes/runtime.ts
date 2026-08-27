@@ -6,11 +6,12 @@ import type { RouteCtx } from './ctx.ts'
 import { HttpError, bearer, json, type Req, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
 import { KIND, bodyOf, deployOptsOf, strField } from '../lib/validate.ts'
-import type { Account, CatalogItem } from '../db.ts'
+import type { Account, CatalogItem, Memory, MemoryKind } from '../db.ts'
 import { deploySeat, publicSeatRuntime, purgeBot } from '../deploy.ts'
 import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
-import { LEGACY_BOT_ICONS, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer, skillDisplayNames, skillFiles, tagsOf, trimStr } from '../lib/catalog.ts'
+import { LEGACY_BOT_ICONS, type BotMemory, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer, skillDisplayNames, skillFiles, tagsOf, trimStr } from '../lib/catalog.ts'
 import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
+import { MEMORY_PIN_MAX, MEMORY_TEXT_MAX, memoryExpiresAt, memoryKey, memoryKindAllowed, memoryKindOf, memoryScopeLayers, memoryStamp, memoryStoreMax, memoryText, publicMemory } from '../lib/memory.ts'
 import { WebToolError } from '../web-tools.ts'
 import { runExtract, runSearch } from '../web-service.ts'
 import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
@@ -63,9 +64,18 @@ function catalogStamp(
    * 模型，然后静静退化成「截原文前 8000 字」。
    */
   models = '',
+  /**
+   * 记忆那一截。
+   *
+   * **不能省，理由同上面两条。** 记忆不在 `catalog_items` 里，人在界面上删掉一条、
+   * 改掉一条，上面那几样一个字节都不会变——探针会一直判「没变」，而席位还带着那条
+   * 已经不存在的记忆去组每一轮的提示词。私有档 Skill 那次踩的是同一个洞
+   * （docs/skills.md §7、docs/memory.md §5）。
+   */
+  memories = '0:0',
 ): string {
   const toolsAt = tools.reduce((n, i) => Math.max(n, i.updatedAt), 0)
-  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}:${models}`
+  return `${version}:${bot?.updatedAt ?? 0}:${toolsAt}:${tools.length}:${conn.updatedAt}:${conn.count}:${models}:${memories}`
 }
 
 /** 两个模型角色压成一小段，进指纹用。 */
@@ -157,6 +167,15 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
      */
     const skills = await db.skillsFor(companyId, account.id, botId || null)
     const servers = await db.visibleCatalog('mcp', companyId)
+    /**
+     * **这颗 Bot 读得到的全部记忆**，四层一次取齐（`memoriesFor` 的 where 里带着层和
+     * 归属，别人的一条都进不来）。
+     *
+     * 这里**不按模版的「记忆范围」裁**：那三个 pill 决定装配提示词时读哪几层，是席位
+     * 的事。下发的是「看得见的全部」——`memory_list` 也要靠它，一条 company 层的记忆
+     * 正在影响这颗 Bot，藏起来的话「它怎么知道这件事的」就没有出处（docs/memory.md §4）。
+     */
+    const memories = companyId ? await db.memoriesFor(companyId, account.id, botId || null) : []
 
     /**
      * 连接器合成出来的 MCP 记录：这个账号每一把 `active` 的连接一条。
@@ -211,6 +230,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         [...skills, ...servers],
         await connectorStampOf(db, account.id, companyId),
         modelStamp(settings),
+        memoryStamp(memories),
       ),
       /**
        * 连接器绑账号、不绑 Bot：合成出来的那几条挂到**每一颗** Bot 的 `mcps` 上。
@@ -230,6 +250,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         return skills.map((i) => publicSkill(i, names.get(i.id)))
       })(),
       servers: [...servers.map(runtimeServer), ...synth],
+      memories: memories.map(publicMemory),
     })
   })
 
@@ -277,6 +298,8 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       ...(await db.skillsFor(companyId, account.id, botId || null)),
       ...(await db.visibleCatalog('mcp', companyId)),
     ]
+    /** 记忆同理，而且它连 `catalog_items` 都不在——不算进去就永远同步不下来。 */
+    const memories = companyId ? await db.memoriesFor(companyId, account.id, botId || null) : []
     json(res, 200, {
       templateVersion: version,
       stamp: catalogStamp(
@@ -285,6 +308,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         tools,
         await connectorStampOf(db, account.id, companyId),
         modelStamp(await db.platformSettings()),
+        memoryStamp(memories),
       ),
     })
   })
@@ -483,6 +507,398 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       })
     }
     json(res, 200, { deleted: true, id: item.id, name: item.name })
+  })
+
+  // ── 长期记忆：Bot 跨对话记住的一句事实 ──────────────────────────────
+  //
+  // 读走 /runtime/catalog（和 Skill、MCP 一起下发），这里只有**写**。整套的理由见
+  // docs/memory.md §2、§5。
+
+  /**
+   * 这颗 Bot 的记忆设置（模版上那一份）与它当前的用量。
+   *
+   * **判据只在这一侧。** 席位那把工具不自己判上限、不自己算到期时间——两边各写一套，
+   * 迟早一边说存下了、另一边说满了。模型看到的那句「18/40」也是这里回过去的。
+   */
+  async function memoryCtx(account: Account, companyId: string, botId: string) {
+    const { tpl } = await botContext(db, companyId)
+    const all = await db.memoriesFor(companyId, account.id, botId)
+    /** 只有下面两层算用量：上面两层是管理员写的，不占这颗 Bot 的额度。 */
+    const mine = all.filter((m) => m.layer === 'bot' || m.layer === 'self')
+    return { mem: tpl.memory, all, mine, max: memoryStoreMax(tpl.memory) }
+  }
+
+  /** 回给席位的那一份：归一化之后的整条记录 + 用量。缓存里落的必须是它。 */
+  function memoryOut(m: Memory, used: number, max: number) {
+    return { memory: publicMemory(m), used, max }
+  }
+
+  /**
+   * 模型只写得了下面两层。
+   *
+   * **这是权限边界，不是省事**：`group` / `company` 的条目会逐字进入别人的系统提示词，
+   * 而它的来源可能是这颗 Bot 半小时前读的一封邮件。收到别的值一律拒，不静默降级——
+   * 静默降级会让模型以为自己写成了一条全公司的记忆（docs/memory.md §3）。
+   */
+  function seatLayerOf(v: unknown): 'bot' | 'self' {
+    const raw = typeof v === 'string' ? v.trim() : ''
+    if (!raw || raw === 'bot') return 'bot'
+    if (raw === 'self') return 'self'
+    throw new HttpError(403, `记忆只能写 bot 或 self 这两层，写不了 ${raw}——那两层是管理员在界面上设的。`)
+  }
+
+  /** 席位写进来的正文：归一化 + 长度判据。**不截断**，超了直接拒（docs/memory.md §3）。 */
+  function seatTextOf(body: Record<string, unknown>): string {
+    const text = memoryText(body.text)
+    if (!text) throw new HttpError(400, '记忆要有正文')
+    if (text.length > MEMORY_TEXT_MAX) {
+      throw new HttpError(
+        400,
+        `这条太长（${text.length} 字，上限 ${MEMORY_TEXT_MAX}）。拆成几条，或者它其实是一段流程——那用 skill_manage。`,
+      )
+    }
+    return text
+  }
+
+  /** 席位写进来的类别。认不出来就拒；模版没勾这一类也拒，并说清是哪一类。 */
+  function seatKindOf(body: Record<string, unknown>, mem: BotMemory): MemoryKind {
+    const kind = memoryKindOf(body.kind)
+    if (!kind) throw new HttpError(400, '记忆的类别只能是「偏好」「事实」「联系人」之一。')
+    if (!memoryKindAllowed(mem, kind)) {
+      throw new HttpError(403, `这个 Bot 没开「${kind}」这一类，这条没记。`)
+    }
+    return kind
+  }
+
+  /**
+   * 席位记下一条。
+   *
+   * **botId 从 query 取、并验过是这个账号的**，不认请求体里的——同私有档 Skill 那条路
+   * （`seatBotOf`）。请求体是模型拼的，一个编出来的 botId 就能把记忆写到别人的 Bot 上。
+   */
+  router.post('/runtime/memories', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    if (!companyId) throw new HttpError(400, '这个账号不属于任何公司，写不了记忆')
+    const botId = await seatBotOf(req, account)
+    const body = bodyOf(req)
+    const { mem, all, mine, max } = await memoryCtx(account, companyId, botId)
+    if (!mem.on) throw new HttpError(403, '这个 Bot 的长期记忆是关着的。')
+
+    const layer = seatLayerOf(body.layer)
+    const text = seatTextOf(body)
+    const kind = seatKindOf(body, mem)
+
+    /**
+     * **完全重复的直接拒**（同 hermes 那份）。
+     *
+     * 判重的范围是**这颗 Bot 真的会看到的那几层**（按模版的「记忆范围」裁），不是库里
+     * 读得出来的全部。差别不是洁癖：`scope` 是「仅本人」时，公司层那些条目一条都不会
+     * 进它的提示词——拿它们去挡写入，模型收到的是「这条已经记过了」，而它永远看不见
+     * 那一条，于是它既记不下来、也答不上来（这条是 code review 抓出来的）。
+     */
+    const visible = memoryScopeLayers(mem.scope)
+    const key = memoryKey(text)
+    const dup = all.filter((m) => visible.has(m.layer)).find((m) => memoryKey(m.text) === key)
+    if (dup) {
+      throw new HttpError(409, `这条已经记过了（${dup.layer === 'bot' || dup.layer === 'self' ? '你自己记的' : '管理员设的'}）：${dup.text}`)
+    }
+    if (mine.length >= max) {
+      /** 到顶不自动淘汰最老的：那等于「它记住了，然后某天悄悄忘了」，而人不会收到任何
+       *  提示。让它撞墙、自己整合，是唯一能让「忘了什么」留下痕迹的做法。 */
+      const oldest = [...mine].sort((a, b) => a.updatedAt - b.updatedAt).slice(0, 3)
+      throw new HttpError(
+        409,
+        `记忆满了（${mine.length}/${max}）。先用 remove 或 replace 整合掉几条，最老的几条是：${oldest.map((m) => m.text).join('；')}`,
+      )
+    }
+
+    const row = await db.insertMemory({
+      layer,
+      companyId,
+      accountId: account.id,
+      botId,
+      kind,
+      text,
+      by: 'agent',
+      sourceSessionId: typeof body.sessionId === 'string' ? body.sessionId : null,
+      // 席位扫出来的敏感类型，**只存不判**：判据那一份在席位上（policy/pii.ts），
+      // 抄第二份就会分叉。界面拿它标红给管理员看。
+      pii: Array.isArray(body.pii) ? body.pii.map(String).slice(0, 8) : [],
+      expiresAt: memoryExpiresAt(mem),
+    })
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'memory.create',
+      detail: { id: row.id, layer, kind, botId, by: 'bot' },
+    })
+    json(res, 201, memoryOut(row, mine.length + 1, max))
+  })
+
+  /**
+   * 这条记忆必须是**这颗 Bot 改得动的**：它自己那两层，而且是这个账号的。
+   *
+   * 上面两层读得到、改不动——碰了要说清是为什么，不是回一句「没有这条」：模型看得见
+   * 它就在眼前，一句「不存在」只会让它换个说法再试一次。
+   */
+  async function ownSeatMemory(id: string, account: Account, botId: string): Promise<Memory> {
+    const m = await db.memory(id)
+    if (!m) throw new HttpError(404, '没有这条记忆')
+    if (m.layer === 'group' || m.layer === 'company') {
+      throw new HttpError(403, `「${m.text}」是管理员设的，我改不了。要改得去 Bot 设置里改。`)
+    }
+    if (m.accountId !== account.id || (m.layer === 'bot' && m.botId !== botId)) {
+      throw new HttpError(404, '没有这条记忆')
+    }
+    return m
+  }
+
+  router.patch('/runtime/memories/:memoryId', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    if (!companyId) throw new HttpError(400, '这个账号不属于任何公司，写不了记忆')
+    const botId = await seatBotOf(req, account)
+    const { mem, mine, max } = await memoryCtx(account, companyId, botId)
+    if (!mem.on) throw new HttpError(403, '这个 Bot 的长期记忆是关着的。')
+    const cur = await ownSeatMemory(req.params.memoryId, account, botId)
+    const body = bodyOf(req)
+    const text = body.text !== undefined ? seatTextOf(body) : cur.text
+    const kind = body.kind !== undefined ? seatKindOf(body, mem) : cur.kind
+    /**
+     * **改成另一条的原文也算重复**，和 add 那条一样判。
+     *
+     * 少了这一道，一次 `replace` 就能造出两条一模一样的记忆：两条都每轮进提示词、
+     * 都占着额度，而之后想删掉其中一条时 `match` 必然「匹配到多条」——两条哪条都删不掉
+     * （这条是 code review 抓出来的）。
+     */
+    if (body.text !== undefined) {
+      const visible = memoryScopeLayers(mem.scope)
+      const key = memoryKey(text)
+      const dup = (await db.memoriesFor(companyId, account.id, botId))
+        .filter((m) => m.id !== cur.id && visible.has(m.layer))
+        .find((m) => memoryKey(m.text) === key)
+      if (dup) throw new HttpError(409, `改成这句会和已经有的那条重复：${dup.text}`)
+    }
+    /**
+     * **改过的那条重新起算到期时间。** 一条被确认、被修正过的记忆，凭什么按它半年前
+     * 第一次写下的时刻过期——人刚刚才说它还成立。
+     */
+    const next = await db.updateMemory(cur.id, {
+      text,
+      kind,
+      expiresAt: memoryExpiresAt(mem),
+      ...(Array.isArray(body.pii) ? { pii: body.pii.map(String).slice(0, 8) } : {}),
+    })
+    if (!next) throw new HttpError(404, '没有这条记忆')
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'memory.update',
+      detail: { id: next.id, layer: next.layer, kind: next.kind, botId, by: 'bot' },
+    })
+    json(res, 200, memoryOut(next, mine.length, max))
+  })
+
+  router.delete('/runtime/memories/:memoryId', async (req, res) => {
+    const account = await requireSeatOnly(req, db)
+    const companyId = account.role === 'owner' ? null : account.companyId
+    if (!companyId) throw new HttpError(400, '这个账号不属于任何公司，写不了记忆')
+    const botId = await seatBotOf(req, account)
+    const cur = await ownSeatMemory(req.params.memoryId, account, botId)
+    await db.deleteMemory(cur.id)
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'memory.delete',
+      detail: { id: cur.id, layer: cur.layer, kind: cur.kind, botId, by: 'bot' },
+    })
+    const { mine, max } = await memoryCtx(account, companyId, botId)
+    json(res, 200, { deleted: true, id: cur.id, text: cur.text, used: mine.length, max })
+  })
+
+  /**
+   * 人这一侧的记忆增删改。
+   *
+   * **和上面那三条不是同一条路**：那三条认席位票（模型自己写），这三条认登录票
+   * （人在 Bot 设置里改）。分开的理由同私有档 Skill 那次——成员账号进不了
+   * `/orgs/:id/*`，而看着这一屏的恰恰是这颗 Bot 的主人（docs/skills.md §13）。
+   *
+   * 人写的东西**不过 kinds 的勾、不过条数上限**：那两条是拿来管模型的。人在界面上
+   * 明确加的一条，不该被一个他自己刚设的开关挡住——他要是不想要，不加就是了。
+   * 长度照旧限，那是提示词预算，跟谁写的无关。
+   */
+  async function userBotOf(req: Req, account: Account): Promise<{ botId: string; companyId: string }> {
+    const companyId = account.role === 'owner' ? null : account.companyId
+    const bots = await db.botsFor(companyId, account.id)
+    if (!bots.some((b) => b.id === req.params.botId)) throw new HttpError(404, '没有这个 Bot')
+    if (!companyId) throw new HttpError(400, '这个账号不属于任何公司')
+    return { botId: req.params.botId, companyId }
+  }
+
+  router.get('/runtime/bots/:botId/memories', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const { botId, companyId } = await userBotOf(req, account)
+    const all = await db.memoriesFor(companyId, account.id, botId)
+    const { tpl } = await botContext(db, companyId)
+    json(res, 200, {
+      items: all.map(publicMemory),
+      used: all.filter((m) => m.layer === 'bot' || m.layer === 'self').length,
+      max: memoryStoreMax(tpl.memory),
+    })
+  })
+
+  router.post('/runtime/bots/:botId/memories', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const { botId, companyId } = await userBotOf(req, account)
+    const body = bodyOf(req)
+    const text = memoryText(body.text)
+    if (!text) throw new HttpError(400, '记忆要有正文')
+    if (text.length > MEMORY_TEXT_MAX) throw new HttpError(400, `正文最多 ${MEMORY_TEXT_MAX} 个字`)
+    const kind = memoryKindOf(body.kind)
+    if (!kind) throw new HttpError(400, '类别只能是「偏好」「事实」「联系人」之一')
+    const layer = seatLayerOf(body.layer)
+    const { tpl } = await botContext(db, companyId)
+    const row = await db.insertMemory({
+      layer,
+      companyId,
+      accountId: account.id,
+      botId,
+      kind,
+      text,
+      by: 'user',
+      // 新建时不许直接钉：钉住要过上限那道判断（见 PATCH），而这里还没有这条记录。
+      // 人要钉就建完再点一下，多一次点击换一处不用重复写的判据。
+      pinned: false,
+      expiresAt: memoryExpiresAt(tpl.memory),
+    })
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'memory.create',
+      detail: { id: row.id, layer, kind, botId },
+    })
+    json(res, 201, { memory: publicMemory(row) })
+  })
+
+  /** 这条得是他自己那两层的。管理员设的上面两层，主人在这一屏看得见、改不动。 */
+  async function ownUserMemory(id: string, account: Account, botId: string): Promise<Memory> {
+    const m = await db.memory(id)
+    if (!m || m.accountId !== account.id) throw new HttpError(404, '没有这条记忆')
+    if (m.layer === 'group' || m.layer === 'company') throw new HttpError(403, '这条是管理员设的，去公司模版里改')
+    if (m.layer === 'bot' && m.botId !== botId) throw new HttpError(404, '没有这条记忆')
+    return m
+  }
+
+  router.patch('/runtime/bots/:botId/memories/:memoryId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const { botId, companyId } = await userBotOf(req, account)
+    const cur = await ownUserMemory(req.params.memoryId, account, botId)
+    const body = bodyOf(req)
+    const patch: Parameters<typeof db.updateMemory>[1] = {}
+    if (body.text !== undefined) {
+      const text = memoryText(body.text)
+      if (!text) throw new HttpError(400, '记忆要有正文')
+      if (text.length > MEMORY_TEXT_MAX) throw new HttpError(400, `正文最多 ${MEMORY_TEXT_MAX} 个字`)
+      patch.text = text
+      // 人改过一个字就等于确认它还成立——**由人来说的**，`by` 跟着换。事后查
+      // 「这句话是谁定的」时，一条被人改过的记忆不该还挂在 Bot 名下。
+      patch.by = 'user'
+    }
+    if (body.kind !== undefined) {
+      const kind = memoryKindOf(body.kind)
+      if (!kind) throw new HttpError(400, '类别只能是「偏好」「事实」「联系人」之一')
+      patch.kind = kind
+    }
+    if (body.pinned !== undefined) {
+      /**
+       * 钉住的**不占注入上限**（席位那边全放进提示词），所以钉的条数自己要有个顶——
+       * 否则那根「注入上限」滑杆就是摆设。判据只在这一侧，同别的上限。
+       */
+      if (body.pinned === true && !cur.pinned) {
+        const pinnedNow = (await db.memoriesFor(companyId, account.id, botId)).filter(
+          (m) => m.pinned && (m.layer === 'bot' || m.layer === 'self'),
+        ).length
+        if (pinnedNow >= MEMORY_PIN_MAX) {
+          throw new HttpError(409, `最多只能钉住 ${MEMORY_PIN_MAX} 条（钉住的每一轮都在，不受注入上限约束）。先取消钉住几条。`)
+        }
+      }
+      patch.pinned = body.pinned === true
+    }
+    /** 续期：把「已过期」那一栏里的一条捞回来。人点的，所以按现在的模版重新起算。 */
+    if (body.renew === true) {
+      const { tpl } = await botContext(db, companyId)
+      patch.expiresAt = memoryExpiresAt(tpl.memory)
+    }
+    const next = await db.updateMemory(cur.id, patch)
+    if (!next) throw new HttpError(404, '没有这条记忆')
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'memory.update',
+      detail: { id: next.id, layer: next.layer, kind: next.kind, botId },
+    })
+    json(res, 200, { memory: publicMemory(next) })
+  })
+
+  router.delete('/runtime/bots/:botId/memories/:memoryId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const { botId, companyId } = await userBotOf(req, account)
+    const cur = await ownUserMemory(req.params.memoryId, account, botId)
+    await db.deleteMemory(cur.id)
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'memory.delete',
+      detail: { id: cur.id, layer: cur.layer, kind: cur.kind, botId },
+    })
+    json(res, 200, { deleted: true, id: cur.id })
+  })
+
+  /**
+   * 升层：把一条 `self` 记忆推给分组或全公司。**只有管理员点得动。**
+   *
+   * 那两层会逐字进入本公司每个人的系统提示词——这不是一条设置，是一次对所有人的广播
+   * （docs/memory.md §12 ⑤）。所以它和私有档 Skill 的「晋升」一样，是人的决定，
+   * 而且是管理员的决定。
+   *
+   * **是搬家不是复制**（见 db.liftMemory）：留一份在原处，两份会各自被编辑，然后在
+   * 某一天说不同的话。
+   */
+  router.post('/runtime/memories/:memoryId/lift', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    if (account.role !== 'admin') throw new HttpError(403, '只有管理员能把一条记忆推给分组或全公司')
+    const companyId = account.companyId
+    if (!companyId) throw new HttpError(400, '这个账号不属于任何公司')
+    /**
+     * **这一条不挂在 `/runtime/bots/:botId/` 底下**，和它旁边那几条不一样。
+     *
+     * 那几条是「这颗 Bot 的主人管自己的记忆」，按调用者自己的 Bot 列表认人；而升层是
+     * **管理员对别人的一条记忆**动手——管理员的 Bot 列表里根本没有那颗 Bot，按那条路
+     * 走一定是 404。判据换成「这条记忆属于我这家公司」：升层本来就是公司这一层的动作。
+     */
+    const cur = await db.memory(req.params.memoryId)
+    if (!cur || cur.companyId !== companyId) throw new HttpError(404, '没有这条记忆')
+    if (cur.layer === 'group' || cur.layer === 'company') {
+      throw new HttpError(409, '这条已经在分组或全公司那一层了')
+    }
+    const body = bodyOf(req)
+    const to = body.to === 'company' ? 'company' : 'group'
+    const groupId = typeof body.groupId === 'string' ? body.groupId.trim() : ''
+    if (to === 'group') {
+      if (!groupId) throw new HttpError(400, '推给分组要说是哪个分组')
+      const g = await db.group(groupId)
+      if (!g || g.companyId !== companyId) throw new HttpError(404, '没有这个分组')
+    }
+    const next = await db.liftMemory(cur.id, to, to === 'group' ? groupId : null)
+    if (!next) throw new HttpError(404, '没有这条记忆')
+    await db.audit({
+      companyId,
+      accountId: account.id,
+      action: 'memory.lift',
+      detail: { id: next.id, from: cur.layer, to, groupId: next.groupId, text: next.text },
+    })
+    json(res, 200, { memory: publicMemory(next) })
   })
 
   /**

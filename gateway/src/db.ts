@@ -3,8 +3,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
-import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
+import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -3096,6 +3096,182 @@ export class Db {
     return lifted
   }
 
+
+  // ── 长期记忆（docs/memory.md）────────────────────────────────────────
+
+  /**
+   * 这颗 Bot 读得到的全部记忆。
+   *
+   * **可见性写进 where，不在调用点过滤**——`botsFor` 的注释已经把这条立成规矩，私有档
+   * Skill 照办过一次，这里是第三次。在应用层 filter 一次就够漏一次，而漏的表现是
+   * 「别人的 Bot 记的东西出现在我这儿」。
+   *
+   * 四层拼在一条 SQL 里：
+   *
+   * - `bot`：这个人 + **这一颗** Bot；`botId` 为空时这一层整个不取（没有 botId 就不知道
+   *   该给谁的，同 `skillsFor` 的口径）
+   * - `self`：这个人，跨他所有 Bot
+   * - `group`：他在的那几个分组（分组成员表是一个 jsonb 数组，解算在下面那半段）
+   * - `company`：这家公司
+   *
+   * **不在这儿按 scope 裁**：模版上「记忆范围」那三个 pill 决定注入时读哪几层，那是
+   * 席位装配提示词时的事。这里给的是"看得见的全部"，`memory_list` 也要靠它——一条
+   * `company` 层的记忆正在影响这颗 Bot，藏起来的话「它怎么知道这件事的」就没有出处。
+   */
+  async memoriesFor(companyId: string, accountId: string, botId: string | null): Promise<Memory[]> {
+    const groups = (await this.groupsOf(companyId)).filter((g) => g.members.includes(accountId))
+    const where: string[] = ['(layer = \'self\' and "accountId" = ?)', '(layer = \'company\' and "companyId" = ?)']
+    const args: (string | number)[] = [accountId, companyId]
+    if (botId) {
+      where.unshift('(layer = \'bot\' and "accountId" = ? and "botId" = ?)')
+      args.unshift(accountId, botId)
+    }
+    if (groups.length) {
+      where.push(`(layer = 'group' and "groupId" in (${groups.map(() => '?').join(',')}))`)
+      args.push(...groups.map((g) => g.id))
+    }
+    const rows = await this.many(
+      `select * from memories where ${where.join(' or ')} order by pinned desc, "updatedAt" desc`,
+      args,
+    )
+    return rows.map(memoryOf)
+  }
+
+  async memory(id: string): Promise<Memory | undefined> {
+    const r = await this.one('select * from memories where id = ?', [(id || '').trim()])
+    return r ? memoryOf(r) : undefined
+  }
+
+  async insertMemory(input: {
+    layer: MemoryLayer
+    companyId: string
+    accountId?: string | null
+    botId?: string | null
+    groupId?: string | null
+    kind: MemoryKind
+    text: string
+    by: 'agent' | 'user'
+    sourceSessionId?: string | null
+    pii?: string[]
+    pinned?: boolean
+    expiresAt?: number | null
+  }): Promise<Memory> {
+    const now = Date.now()
+    const row: Memory = {
+      id: randomUUID(),
+      layer: input.layer,
+      companyId: input.companyId,
+      /**
+       * **上面两层强制不带 accountId / botId。**
+       *
+       * 它们不是"顺手留个来源"：`memoriesFor` 的 where 是按 (layer, accountId) 认的,
+       * 一条 `company` 层却挂着 accountId 的记录，会同时被 company 这一支和别处的
+       * 判断认领。写进去的那一刻不裁掉，之后任何一处读的地方都得记得裁一次。
+       */
+      accountId: input.layer === 'bot' || input.layer === 'self' ? (input.accountId ?? null) : null,
+      // **只有 bot 层挂 botId。** self 层挂了的话，删掉那颗 Bot 会把它一起 cascade 掉
+      // ——而它本该跨这个人所有的 Bot（docs/memory.md §12 ④）。
+      botId: input.layer === 'bot' ? (input.botId ?? null) : null,
+      groupId: input.layer === 'group' ? (input.groupId ?? null) : null,
+      kind: input.kind,
+      text: input.text,
+      by: input.by,
+      sourceSessionId: input.sourceSessionId ?? null,
+      pii: input.pii ?? [],
+      pinned: input.pinned ?? false,
+      expiresAt: input.expiresAt ?? null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await this.run(
+      'insert into memories (id, layer, "companyId", "accountId", "botId", "groupId", kind, text, "by", "sourceSessionId", pii, pinned, "expiresAt", "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [
+        row.id,
+        row.layer,
+        row.companyId,
+        row.accountId,
+        row.botId,
+        row.groupId,
+        row.kind,
+        row.text,
+        row.by,
+        row.sourceSessionId,
+        JSON.stringify(row.pii),
+        row.pinned,
+        row.expiresAt,
+        row.createdAt,
+        row.updatedAt,
+      ],
+    )
+    return row
+  }
+
+  /**
+   * 改一条。**层改不了**——升层是搬家（换归属列），走 `liftMemory`，不是改一个字段。
+   */
+  async updateMemory(
+    id: string,
+    patch: {
+      kind?: MemoryKind
+      text?: string
+      pii?: string[]
+      pinned?: boolean
+      expiresAt?: number | null
+      by?: 'agent' | 'user'
+    },
+  ): Promise<Memory | undefined> {
+    const sets: string[] = []
+    const args: (string | number | boolean | null)[] = []
+    if (patch.kind !== undefined) {
+      sets.push('kind = ?')
+      args.push(patch.kind)
+    }
+    if (patch.text !== undefined) {
+      sets.push('text = ?')
+      args.push(patch.text)
+    }
+    if (patch.pii !== undefined) {
+      sets.push('pii = ?')
+      args.push(JSON.stringify(patch.pii))
+    }
+    if (patch.pinned !== undefined) {
+      sets.push('pinned = ?')
+      args.push(patch.pinned)
+    }
+    if (patch.expiresAt !== undefined) {
+      sets.push('"expiresAt" = ?')
+      args.push(patch.expiresAt)
+    }
+    if (patch.by !== undefined) {
+      sets.push('"by" = ?')
+      args.push(patch.by)
+    }
+    if (!sets.length) return this.memory(id)
+    sets.push('"updatedAt" = ?')
+    args.push(Date.now(), id)
+    await this.run(`update memories set ${sets.join(', ')} where id = ?`, args)
+    return this.memory(id)
+  }
+
+  /**
+   * 升层：把一条 `self` 记忆推给分组或全公司。
+   *
+   * **是搬家不是复制**，同私有档 Skill 的「晋升」（docs/skills.md §7）：留一份在原处的
+   * 话，两份会各自被编辑，然后在某一天说不同的话，而人不知道自己在改哪一份。
+   *
+   * 归属列跟着一起换：升上去之后 `accountId` / `botId` 必须清空，理由见 insertMemory。
+   */
+  async liftMemory(id: string, to: 'group' | 'company', groupId?: string | null): Promise<Memory | undefined> {
+    await this.run(
+      'update memories set layer = ?, "groupId" = ?, "accountId" = null, "botId" = null, "updatedAt" = ? where id = ?',
+      [to, to === 'group' ? (groupId ?? null) : null, Date.now(), id],
+    )
+    return this.memory(id)
+  }
+
+  async deleteMemory(id: string): Promise<boolean> {
+    return (await this.run('delete from memories where id = ?', [id])) > 0
+  }
 
   // ── 日常任务：定义、排期与流水 ────────────────────────────────────────
 

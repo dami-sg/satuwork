@@ -61,6 +61,8 @@ import { runConnectors } from './connectors.mjs'
 import { runToolSearch } from './tool-search.mjs'
 import { runSkills } from './skills.mjs'
 import { runSkillsBot } from './skills-bot.mjs'
+import { runMemoryBot } from './memory-bot.mjs'
+import { runMemory } from './memory.mjs'
 import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
@@ -759,6 +761,28 @@ async function runGateway() {
       body: { companyId: orgId, accountId: adminId, guard: 'pii', outcome: '随便写的', tool: 'x' },
     })
     assert(bogusOutcome.status === 400, `不认识的 outcome 拿到 ${bogusOutcome.status}`)
+
+    /**
+     * **席位认识的每一条边界，这边都得收得下。**
+     *
+     * 两张表分处两个包：席位的 `GuardId`（bot/src/policy/index.ts）和 Gateway 的白名单
+     * `GUARD_IDS`（routes/internal.ts）。加一条只改一边的后果不是报错——是席位拦得
+     * 好好的、报上来一律 400，而席位的 outbox **没有重试上限**，于是每次拦截都留下
+     * 一行永远重发的队列，审计里却一条记录都没有。「只拦不报」正是这条路要防的事。
+     *
+     * 所以这里**从席位源码里把那个联合类型读出来**逐个试，而不是手抄一份名单——
+     * 手抄的那份下次照样会漏（同 bot/e2e-mounted.mjs 的工具名单）。
+     */
+    const guardSrc = readFileSync(join(botRoot, 'src/policy/index.ts'), 'utf8')
+    const guardIds = [...(/export type GuardId =([^\n]+(?:\n\s*\|[^\n]+)*)/.exec(guardSrc)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1])
+    assert(guardIds.length >= 4, `没从席位源码里读出 GuardId：${JSON.stringify(guardIds)}`)
+    for (const g of guardIds) {
+      const r = await req(base, 'POST', '/internal/guard-events', {
+        token: orgMachineTok,
+        body: { companyId: orgId, accountId: adminId, guard: g, outcome: 'blocked', tool: 'x' },
+      })
+      assert(r.status === 200, `席位认识的边界「${g}」Gateway 收不下（${r.status} ${r.text}）——两张名单漏了同步`)
+    }
 
     // 别家公司的账号：报不进来。租户边界和会话索引那条是同一套口径。
     const outsider = await req(base, 'POST', '/internal/guard-events', {
@@ -3249,6 +3273,8 @@ async function main() {
     await suite('tool-search', () => runToolSearch({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('skills', () => runSkills({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('skills-bot', () => runSkillsBot({ root, test, assert, log }))
+    await suite('memory-bot', () => runMemoryBot({ root, test, assert, log }))
+    await suite('memory', () => runMemory({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('bot-template', () => runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager', () => runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager-confirm', () => runManagerConfirm({ root, test, assert, log }))

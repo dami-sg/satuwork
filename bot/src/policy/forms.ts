@@ -21,11 +21,12 @@ export interface ApprovalField {
  * 一次确认要给人看什么、让人改什么。
  *
  * `kind` 决定界面用哪一套样式：`generic` 是那张通用卡（工具名 + 参数 JSON），
- * `email` 是发信那张（收件人、主题、正文，正文可改）。**界面认不出的 kind 一律退回
- * generic**——新增一种表单不该让老版本的浏览器白屏。
+ * `email` 是发信那张（收件人、主题、正文，正文可改），`memory` 是记一条事实那张
+ * （正文和类别可改，层不可改）。**界面认不出的 kind 一律退回 generic**——新增一种
+ * 表单不该让老版本的浏览器白屏。
  */
 export interface ApprovalForm {
-  kind: 'generic' | 'email'
+  kind: 'generic' | 'email' | 'memory'
   /** 真正要跑的那把工具：穿过 SW_RUN 这类元工具之后的名字。 */
   tool: string
   fields: ApprovalField[]
@@ -145,6 +146,7 @@ function pathOf(prefix: string, key: string): string {
  */
 export function formOf(call: { name: string; arguments: string }): ApprovalForm {
   const un = unwrapCall(call)
+  if (un.tool === 'memory_write') return memoryForm(un)
   if (!isEmailSend(un.tool)) return { kind: 'generic', tool: un.tool, fields: [] }
 
   const fields: ApprovalField[] = []
@@ -181,6 +183,50 @@ export function formOf(call: { name: string; arguments: string }): ApprovalForm 
     })
   }
   return { kind: 'email', tool: un.tool, fields }
+}
+
+/**
+ * 记一条事实那张卡。
+ *
+ * **正文那一格可改，是这张卡最值钱的地方。** 模型多半记对了七成，人真正想做的是
+ * 把那句话改准，而不是拒绝、然后回去跟它解释一遍（docs/memory.md §6）。类别也可改
+ * ——记错类的代价是它以后按错的那一类被筛掉。
+ *
+ * **层不可改。** `bot` 和 `self` 决定这句话跨不跨 Bot，那是归属不是措辞；真要改，
+ * 删了重记一条比在一张审批卡上顺手拨一下清楚。
+ *
+ * 剩下的参数也摆出来、只是不给改，同 email 那张卡的理由：藏起来的话，人以为自己
+ * 看到了这次写入的全部。
+ */
+function memoryForm(un: Unwrapped): ApprovalForm {
+  const op = typeof un.args.op === 'string' ? un.args.op : ''
+  const fields: ApprovalField[] = []
+  const used = new Set<string>()
+  const put = (key: string, label: string, value: unknown, editable = false, multiline = false) => {
+    used.add(key)
+    fields.push({
+      key: pathOf(un.prefix, key),
+      label,
+      value: typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value),
+      ...(editable ? { editable: true } : {}),
+      ...(multiline ? { multiline: true } : {}),
+    })
+  }
+  put('op', '操作', op === 'add' ? '记一条' : op === 'replace' ? '改一条' : op === 'remove' ? '删一条' : op)
+  // remove 没有正文可改（要删的那条由 match 认），所以只有前两种摆可改的正文格。
+  if (op !== 'remove') put('text', '记什么', un.args.text, true, true)
+  if (un.args.match !== undefined) put('match', '改/删哪一条', un.args.match)
+  if (op !== 'remove') put('kind', '类别', un.args.kind ?? '事实', true)
+  put('layer', '范围', un.args.layer === 'self' ? '这个人所有的 Bot' : '只有这颗 Bot')
+  for (const [key, value] of Object.entries(un.args)) {
+    if (used.has(key)) continue
+    fields.push({
+      key: pathOf(un.prefix, key),
+      label: key,
+      value: typeof value === 'string' ? value : JSON.stringify(value),
+    })
+  }
+  return { kind: 'memory', tool: un.tool, fields }
 }
 
 /** 单格改动的长度上限。够写一封长信，又不至于让谁把一本书塞进会话日志。 */

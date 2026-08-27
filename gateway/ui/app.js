@@ -52,6 +52,16 @@ async function runConfirm() {
     } else if (c.kind === 'user-status') {
       await setUserStatus(c.id, c.next)
       return
+    } else if (c.kind === 'memory-lift') {
+      /**
+       * 升层要确认，和删除那颗按钮正好相反：删错了只影响这一个人，推错了是往本公司
+       * 每个人的系统提示词里插了一句话（docs/memory.md §12 ⑤）。
+       */
+      await api('POST', `/runtime/memories/${encodeURIComponent(c.id)}/lift`, { to: 'company' })
+      await loadBotDetail(c.bot)
+      flash('ok', t('已推给全公司', 'Shared company-wide'))
+      render()
+      return
     } else if (c.kind === 'redeploy-bot') {
       render()
       // force 而不是 update：这个按钮的意思是「把席位重铺一遍」，不是「升到新版本」。
@@ -338,6 +348,98 @@ document.getElementById('app').addEventListener('click', async (e) => {
       await api('DELETE', `/runtime/bots/${encodeURIComponent(bot)}/skills/${encodeURIComponent(id)}`)
       state.skillNoteGone = { ...(state.skillNoteGone || {}), [id]: true }
       flash('ok', t(`已删掉「${name}」`, `Deleted "${name}"`))
+    } catch (err) {
+      flash('err', err.message)
+    }
+    render()
+    return
+  }
+  if (act === 'bot-mem-lift') {
+    /**
+     * 把一条 `self` 记忆推给全公司。**这一条要确认**——和删除那颗按钮正好相反：
+     * 删错了只影响这一个人，推错了是往本公司每个人的系统提示词里插了一句话
+     * （docs/memory.md §12 ⑤）。**搬家不是复制**，推上去之后它就不在个人那一层了。
+     */
+    const id = btn.getAttribute('data-id') || ''
+    const bot = state.bot?.id || botIdOfPath(state.path)
+    const one = (state.botDraft?.memories || []).find((m) => m.id === id)
+    if (!id || !bot) return
+    state.confirm = {
+      title: t('推给全公司？', 'Share company-wide?'),
+      body: t(
+        // 确认框正文走 esc()，**不渲染 markdown**——写 `**…**` 只会让人看见两串星号。
+        `「${(one?.text || '').slice(0, 60)}」会进入本公司每个人的 Bot 提示词，而且不再留在个人这一层：这是搬家，不是复制。`,
+        `"${(one?.text || '').slice(0, 60)}" goes into every colleague's bot prompt and no longer stays at the personal layer — it moves, it isn't copied.`,
+      ),
+      label: t('推给全公司', 'Share'),
+      kind: 'memory-lift',
+      id,
+      bot,
+    }
+    render()
+    return
+  }
+  if (act === 'bot-mem-del' || act === 'bot-mem-pin' || act === 'bot-mem-renew') {
+    /**
+     * Bot 设置那一屏上的记忆增删改。
+     *
+     * **删不做二次确认**，同对话里那颗按钮：一条记错的记忆每一轮都在影响回答，删它
+     * 要极其容易（docs/memory.md §12 ②）。改完重拉这一颗 Bot 的详情——那是一条轻请求,
+     * 而就地改 state 会让「服务端到底存成了什么」和屏幕上显示的分家。
+     */
+    const id = btn.getAttribute('data-id') || ''
+    const bot = state.bot?.id || botIdOfPath(state.path)
+    if (!id || !bot) return
+    const cur = (state.botDraft?.memories || []).find((m) => m.id === id)
+    /**
+     * **找不到那条就什么都别做。** `!cur?.pinned` 在 cur 缺失时恒为 true——点「取消
+     * 钉住」反而会把它钉上，而钉住的不占注入上限。草稿对不上多半是另一处刚重拉过，
+     * 重画一次让人看见真实的那一份，比替他猜一个动作强。
+     */
+    if (!cur && act !== 'bot-mem-del') {
+      await loadBotDetail(bot).catch(() => {})
+      render()
+      return
+    }
+    try {
+      if (act === 'bot-mem-del') {
+        await api('DELETE', `/runtime/bots/${encodeURIComponent(bot)}/memories/${encodeURIComponent(id)}`)
+        flash('ok', t('已删掉，最多一分钟后在对话里生效', 'Deleted — takes effect in conversations within a minute'))
+      } else if (act === 'bot-mem-pin') {
+        await api('PATCH', `/runtime/bots/${encodeURIComponent(bot)}/memories/${encodeURIComponent(id)}`, { pinned: !cur.pinned })
+      } else {
+        await api('PATCH', `/runtime/bots/${encodeURIComponent(bot)}/memories/${encodeURIComponent(id)}`, { renew: true })
+        flash('ok', t('已续期', 'Renewed'))
+      }
+      await loadBotDetail(bot)
+    } catch (err) {
+      flash('err', err.message)
+    }
+    render()
+    return
+  }
+  if (act === 'chat-memory-delete') {
+    /**
+     * 把 Bot 刚记下的那条事实删掉，就在对话里。
+     *
+     * **不做二次确认**：一条记错的记忆每一轮都在影响回答，删它要极其容易
+     * （docs/memory.md §12 ②）。删完只把这张卡标成「已删掉」，不重拉整条会话。
+     *
+     * 那句「最多一分钟后生效」不是客套：席位按目录探针同步，删掉之后它最多还会带着
+     * 那条记忆跑一分钟。不说的话，人删完立刻再问一句、看见它还记得，得到的结论是
+     * 「删除没用」（§12 ③）。
+     */
+    const id = btn.getAttribute('data-id') || ''
+    const bot = state.chatBotId || chatBotIdOf(state.path)
+    if (!id) return
+    if (!bot) {
+      flash('err', t('这一屏认不出是哪颗 Bot，去 Bot 设置里删它', "Can't tell which bot this is — delete it from the bot's settings"))
+      return
+    }
+    try {
+      await api('DELETE', `/runtime/bots/${encodeURIComponent(bot)}/memories/${encodeURIComponent(id)}`)
+      state.memNoteGone = { ...(state.memNoteGone || {}), [id]: true }
+      flash('ok', t('已删掉，最多一分钟后在对话里生效', 'Deleted — takes effect in the conversation within a minute'))
     } catch (err) {
       flash('err', err.message)
     }
@@ -1087,7 +1189,13 @@ document.getElementById('app').addEventListener('click', async (e) => {
     if (!bot) return
     state.confirm = {
       title: '删除这个 Bot？',
-      body: t(`「${(a && a.name) || bot.name}」的人设、能力配置与已存记忆会一并删除，正在用它的定时任务与渠道会失效。`, `The persona, capability config and stored memories of "${(a && a.name) || bot.name}" are deleted; scheduled tasks and channels using it stop working.`),
+      /**
+       * **「已存记忆」这个说法太宽了。** 跟着这颗 Bot 走的只有它自己那一层
+       * （`layer='bot'`）；`self` 那一层是这个人**所有** Bot 共用的一份，删掉销售助理
+       * 不该让数据助理忘了他姓什么（docs/memory.md §12 ④）。照原来那句话理解，人会以为
+       * 删一颗 Bot 会把自己的称呼、习惯一起抹掉，于是不敢删。
+       */
+      body: t(`「${(a && a.name) || bot.name}」的人设、能力配置、以及它自己记下的那些事会一并删除（跨所有 Bot 的那几条留着），正在用它的定时任务与渠道会失效。`, `The persona, capability config and the facts this bot recorded itself are deleted (anything shared across all your bots stays); scheduled tasks and channels using it stop working.`),
       label: '删除',
       kind: isMyBot(bot) ? 'delete-my-bot' : 'delete-bot',
       id: bot.id,

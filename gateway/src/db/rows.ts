@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -489,6 +489,32 @@ export function routineOf(r: Row): Routine {
     triggers: parseRoutineTriggers(r.triggers),
     modelRole: parseRoutineModelRole(r.modelRole),
     nextRunAt: numOrNull(r.nextRunAt),
+    createdAt: num(r.createdAt),
+    updatedAt: num(r.updatedAt),
+  }
+}
+
+/**
+ * 一条长期记忆。
+ *
+ * `pii` 用 `parseMemoryPii` 而不是直接 `as string[]`：那一列是**席位报上来的**，
+ * Gateway 只存不判（docs/memory.md §6），所以读回来时也不能假设它的形状。
+ */
+export function memoryOf(r: Row): Memory {
+  return {
+    id: str(r.id),
+    layer: parseMemoryLayer(r.layer),
+    companyId: str(r.companyId),
+    accountId: strOrNull(r.accountId),
+    botId: strOrNull(r.botId),
+    groupId: strOrNull(r.groupId),
+    kind: parseMemoryKind(r.kind),
+    text: str(r.text),
+    by: str(r.by) === 'user' ? 'user' : 'agent',
+    sourceSessionId: strOrNull(r.sourceSessionId),
+    pii: parseMemoryPii(jsonOf(r.pii)),
+    pinned: Boolean(r.pinned),
+    expiresAt: numOrNull(r.expiresAt),
     createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt),
   }

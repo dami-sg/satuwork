@@ -32,8 +32,30 @@ interface RemoteBot {
   browser?: { on?: boolean; sites?: string[] }
   /** 模版上「让它自己记 Skill」那个开关。老 Gateway 不发，缺字段按**开**算。 */
   selfSkills?: boolean
+  /**
+   * 公司模版上的记忆策略。
+   *
+   * **Gateway 一直在发**（`publicBot` 里那一行 `memory: template.memory`），这边不声明
+   * 就读进来即丢——和上面 `guards` 那段注释说的是同一个坑，只是这次连运行面都还没有
+   * （docs/memory.md 开头）。
+   */
+  memory?: BotMemory
   escalate?: string
   templateVersion?: number
+}
+
+/**
+ * 记忆策略。**只搬运，不解释**——判据在 Gateway（gateway/src/lib/memory.ts），这边
+ * 只拿它决定两件事：注入哪几条、两把工具进不进工具表。
+ */
+export interface BotMemory {
+  on: boolean
+  scope: string
+  kinds: string[]
+  ttl: string
+  cap: number
+  confirm: boolean
+  pii: boolean
 }
 
 export interface ModelRole {
@@ -160,6 +182,57 @@ export function cachedSkill(ctx: Context, id: string): CachedSkill | undefined {
   if (!row) return undefined
   const s = cachedSkillOf(row)
   return s.enabled === false ? undefined : s
+}
+
+/**
+ * 席位缓存里的一条记忆。**唯一一份在 Gateway**，这儿是缓存，删了丢了都不算数据丢失。
+ *
+ * 形状照 `publicMemory` 下发的那一份（gateway/src/lib/memory.ts）：没有 accountId——
+ * 席位只认得自己那一个账号，多带一列没人用的归属 id 只是多一份要跟着对齐的东西。
+ */
+export interface CachedMemory {
+  id: string
+  layer: 'bot' | 'self' | 'group' | 'company'
+  kind: string
+  text: string
+  by: 'agent' | 'user'
+  pii: string[]
+  pinned: boolean
+  /** null = 永久。到期只停止注入，不删（docs/memory.md §8）。 */
+  expiresAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+/**
+ * 库里那一行 → 补齐字段的 `CachedMemory`。
+ *
+ * 换版之后缓存里躺着的是上一版写下的行，而装配提示词的地方在首次同步之前就在读它们了
+ * ——同 `cachedSkillOf` 那段注释。缺省一律往「不改变行为」的方向落：认不出的层当
+ * `bot`（最窄的一层），认不出的到期时间当永久（不因为一个缺字段就静静少注入一条）。
+ */
+export function cachedMemoryOf(raw: Partial<CachedMemory> & { id: string }): CachedMemory {
+  const layer = raw.layer
+  return {
+    id: raw.id,
+    layer: layer === 'self' || layer === 'group' || layer === 'company' ? layer : 'bot',
+    kind: typeof raw.kind === 'string' ? raw.kind : '事实',
+    text: typeof raw.text === 'string' ? raw.text : '',
+    by: raw.by === 'user' ? 'user' : 'agent',
+    pii: Array.isArray(raw.pii) ? raw.pii.map(String) : [],
+    pinned: raw.pinned === true,
+    expiresAt: typeof raw.expiresAt === 'number' ? raw.expiresAt : null,
+    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : 0,
+    updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+  }
+}
+
+/** 这颗席位缓存里的全部记忆（四层都在）。**读缓存只走这一条路。** */
+export function cachedMemories(ctx: Context): CachedMemory[] {
+  return ctx.storage
+    .collection<CachedMemory>('memories')
+    .list()
+    .map((r) => cachedMemoryOf(r.value))
 }
 
 interface CachedServer {
@@ -349,6 +422,7 @@ export class CatalogService extends Service {
       skills?: RemoteSkill[]
       servers?: RemoteServer[]
       models?: { daily?: ModelRole; utility?: ModelRole }
+      memories?: Partial<CachedMemory>[]
     }
     // **发车时刻要在 fetch 之前取**：豁免的判据就是「这份响应比那次写入更旧」。
     const startedAt = Date.now()
@@ -382,6 +456,11 @@ export class CatalogService extends Service {
       utility: roleOf(body.models?.utility),
     }
     this.syncSkills(Array.isArray(body.skills) ? body.skills : [], { since: startedAt })
+    /** 没有 id 的那些当场丢掉：缓存是按 id 认的，一条没有 id 的记录进去就再也删不掉。 */
+    const memories = (Array.isArray(body.memories) ? body.memories : []).filter(
+      (m): m is Partial<CachedMemory> & { id: string } => typeof m?.id === 'string' && !!m.id,
+    )
+    this.syncMemories(memories, { since: startedAt })
     this.syncServers(Array.isArray(body.servers) ? body.servers : [])
     const pinned = this.pinBots(this.remoteBots)
     await this.connectMcp()
@@ -531,6 +610,66 @@ export class CatalogService extends Service {
   }
 
   /**
+   * 把 Gateway 刚回过来的那一条记忆落进本地缓存。
+   *
+   * `memory_write` 写完之后调它。**落进去的必须是 Gateway 回来的那一份**——判重怎么判、
+   * `expiresAt` 落成什么，全是那边说了算（docs/memory.md 不变量 2）。
+   *
+   * 不等下一次 pull 是有具体理由的：探针一分钟一次，而模型很可能在**同一轮里**接着
+   * `memory_list` 一次核对自己刚记的东西。那时候读不到，它会以为没写成。
+   */
+  noteMemory(item: unknown) {
+    const m = item as Partial<CachedMemory> & { id?: unknown }
+    if (!m || typeof m.id !== 'string' || !m.id) return
+    // 先记时刻再落盘，同 noteSkill：此刻可能有一次早发车的 pull 正在途中。
+    this.noted.set(m.id, Date.now())
+    this.syncMemories([m as Partial<CachedMemory> & { id: string }], { prune: false })
+  }
+
+  /** 删掉一条本地缓存的记忆。`memory_write` 删完之后调它，不用等下一次同步。 */
+  dropMemory(id: string) {
+    this.noted.delete(id)
+    this.ctx.storage.collection<CachedMemory>('memories').delete(id)
+  }
+
+  /**
+   * 把这一份记忆落进本地缓存。
+   *
+   * **默认按全集处理**：Gateway 上没有的那些要跟着删掉。少了这一步，人在界面上删掉
+   * 一条之后，席位还带着它去组每一轮的提示词——而界面上它已经不在了。这条链路上
+   * 没有别的补救：记忆不像 Skill 那样「用到才展开」，它每一轮都在。
+   *
+   * 剪枝的豁免口径和 `syncSkills` 共用同一个 `noted`（同一个 id 空间不会撞：都是 uuid）。
+   */
+  private syncMemories(
+    items: (Partial<CachedMemory> & { id: string })[],
+    opts: { prune?: boolean; since?: number } = {},
+  ) {
+    const col = this.ctx.storage.collection<CachedMemory>('memories')
+    const now = Date.now()
+    if (opts.prune !== false) {
+      const live = new Set(items.map((m) => m.id))
+      const since = opts.since ?? now
+      for (const row of col.list()) {
+        if (live.has(row.value.id)) continue
+        // 这份响应发车时，那条还不存在——不是「被删了」，是「它还没赶上这一班」。
+        const wroteAt = this.noted.get(row.value.id) ?? 0
+        if (wroteAt > since) continue
+        col.delete(row.value.id)
+      }
+      for (const m of items) this.noted.delete(m.id)
+    }
+    for (const m of items) {
+      const prev = col.get(m.id)
+      col.put(m.id, {
+        ...cachedMemoryOf(m),
+        createdAt: typeof m.createdAt === 'number' ? m.createdAt : (prev?.createdAt ?? now),
+        updatedAt: typeof m.updatedAt === 'number' ? m.updatedAt : now,
+      })
+    }
+  }
+
+  /**
    * 把这一份 Skill 落进本地缓存。
    *
    * **默认按全集处理**：目录里没有的那些要跟着删掉。少了这一步，管理员在界面上删掉
@@ -636,6 +775,9 @@ export class CatalogService extends Service {
         ? { on: b.browser.on === true, sites: Array.isArray(b.browser.sites) ? b.browser.sites : [] }
         : undefined,
       selfSkills: typeof b.selfSkills === 'boolean' ? b.selfSkills : undefined,
+      // 记忆策略。**这一行就是那个坑的补丁**：Gateway 一直在发，之前这儿不接，
+      // 于是模版上改的每一样在席位上都不生效（docs/memory.md 开头）。
+      memory: b.memory && typeof b.memory === 'object' ? b.memory : undefined,
       escalate: b.escalate,
       templateVersion: typeof b.templateVersion === 'number' ? b.templateVersion : this.templateVersion,
     })

@@ -1026,6 +1026,65 @@ export interface Routine {
 }
 
 /**
+ * 一条长期记忆（见 docs/memory.md）。
+ *
+ * **是"事实"不是"方法"**：一句话说得完的进这里，有步骤有分支的进私有档 Skill
+ * （docs/memory.md §1）。判据是"要不要展开"——一段流程值得单独打开来读，一句事实
+ * 展开了还是它自己。
+ *
+ * 每一条都会**逐字进入系统提示词**，而且是每一轮。所以这张表上的每个上限（正文长度、
+ * 条数）都不是洁癖，是每轮都要付一次的钱。
+ */
+export type MemoryLayer = 'bot' | 'self' | 'group' | 'company'
+/**
+ * **没有「流程」。** 界面上「记录哪些内容」那一格里的「流程」不是一种存法，它决定的是
+ * "撞上一段流程时说哪一句话"——因为流程根本不存进这张表（docs/memory.md §6）。
+ */
+export const MEMORY_ITEM_KINDS = ['偏好', '事实', '联系人'] as const
+export type MemoryKind = (typeof MEMORY_ITEM_KINDS)[number]
+
+export interface Memory {
+  id: string
+  layer: MemoryLayer
+  companyId: string
+  /** layer = bot/self 时是本人；上面两层为 null。 */
+  accountId: string | null
+  /** **只有 layer = 'bot' 有。** self 层留空，理由见迁移 0018 的文件头。 */
+  botId: string | null
+  groupId: string | null
+  kind: MemoryKind
+  text: string
+  /** 谁写的。审计和界面要分得出人和 Bot。 */
+  by: 'agent' | 'user'
+  /** 哪条会话里记下的（by = 'agent' 时有）。用来回答"它怎么知道这件事的"。 */
+  sourceSessionId: string | null
+  /** 席位扫出来的敏感类型。**Gateway 只存不判**，判据在 bot/src/policy/pii.ts。 */
+  pii: string[]
+  /** 钉住的不参与注入上限的挤压、也不过期。 */
+  pinned: boolean
+  /** null = 永久。到期只停止注入，不删。 */
+  expiresAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export function parseMemoryLayer(v: unknown): MemoryLayer {
+  const s = typeof v === 'string' ? v.trim() : ''
+  return s === 'self' || s === 'group' || s === 'company' ? s : 'bot'
+}
+
+export function parseMemoryKind(v: unknown): MemoryKind {
+  const s = typeof v === 'string' ? v.trim() : ''
+  return (MEMORY_ITEM_KINDS as readonly string[]).includes(s) ? (s as MemoryKind) : '事实'
+}
+
+/** 敏感类型标记。**不解释、不判断**，原样搬运，最多留 8 个。 */
+export function parseMemoryPii(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return [...new Set(v.filter((x): x is string => typeof x === 'string' && !!x.trim()).map((x) => x.trim()))].slice(0, 8)
+}
+
+/**
  * 一张转人工的交接单（见 docs/handoff.md）。
  *
  * **`accountId` 是这颗 Bot 归谁，`assignee` 是该谁处理，`claimedBy` 是谁真的接了。**

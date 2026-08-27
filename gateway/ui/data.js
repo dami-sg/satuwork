@@ -566,7 +566,12 @@ function draftFromBot(bot) {
     selfSkills: bot.selfSkills !== false,
     escalate: bot.escalate || '',
     escalateTo: bot.escalateTo || 'owner',
-    memories: [],
+    /**
+     * **不在这儿垫一个空数组。** 垫了的话「还没拉过记忆」和「真的一条都没有」就长得
+     * 一模一样，而「已存记忆」那一格照着它画出来的空列表是假的——公司模版那一屏和
+     * owner 那条路都不拉记忆，人看到的会是一句斩钉截铁的「还没有记下任何事实」。
+     * 留成 undefined，那一格自己就不画了（见 pages-bots.js 的 storedMemories）。
+     */
     memoryOn: mem.on !== false,
     scope: MEMORY_SCOPES.includes(mem.scope) ? mem.scope : '所属分组',
     kinds: Array.isArray(mem.kinds) ? mem.kinds.filter((k) => MEMORY_KINDS.includes(k)) : ['偏好', '事实'],
@@ -595,12 +600,26 @@ async function loadBotDetail(botId) {
    * 管理员接口。那条给出的也是合成之后的样子（提示词已经拼上模版那一段），正是这一页
    * 要显示的东西。
    */
-  const [one, tpl] = await Promise.all([
+  /**
+   * 记忆那一份**单拉一条**，不塞进 `/runtime/bots/:id`。
+   *
+   * 那条路是每次打开这一页都要走的，而记忆是一张会长的表；更要紧的是它会变——
+   * Bot 在对话里刚记下的一条，人切回这一页就该看见。拉不到不挡这一页：少的是一格
+   * 列表，而人来这儿多半是改提示词的。
+   */
+  const [one, tpl, mems] = await Promise.all([
     api('GET', `/runtime/bots/${encodeURIComponent(botId)}`),
     api('GET', `${catalogBase()}/bot-template`).catch(() => null),
+    api('GET', `/runtime/bots/${encodeURIComponent(botId)}/memories`).catch(() => null),
   ])
   state.bot = one.bot
-  state.botDraft = { ...draftFromBot(one.bot), extraPrompt: one.bot.extraPrompt || '' }
+  state.botDraft = {
+    ...draftFromBot(one.bot),
+    extraPrompt: one.bot.extraPrompt || '',
+    memories: mems?.items || [],
+    memoryUsed: mems?.used ?? 0,
+    memoryMax: mems?.max ?? 0,
+  }
   state.template = tpl?.template || state.template
   state.botOptions = {
     skills: tpl?.options?.skills || [],
