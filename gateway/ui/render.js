@@ -285,6 +285,11 @@ function render() {
   }
   // 日志面板同理：壳在 render 里，内容由 paintLogs 增量填。
   if (document.getElementById('log-body')) paintLogs()
+  // 右栏那棵工作区文件树：开着而这条会话还没取过的话，补一次（见 chat.js 的
+  // ensureWorkspaceTree）。**挂在这儿而不是 paintChat 里**——paintChat 要先找得到
+  // #chat-thread 才往下走，而那个节点在「还没部署」「一个 Bot 都没有」这两种形态下
+  // 根本不画，右栏却照样开着，于是那一屏一次都不取，永远停在「载入中」。
+  ensureWorkspaceTree()
   // 内嵌桌面那块屏活在 #app 外面（重绘换不掉它），但它的位置是照着右栏里的空槽算
   // 的——壳换过一次就得重新对齐。
   syncDesktop()
