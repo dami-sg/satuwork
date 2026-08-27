@@ -10,9 +10,10 @@
  * 模型。
  */
 import type { RouteCtx } from './ctx.ts'
+import { settleCard } from '../kanban-tick.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
-import { requireSeatOnly, requireUser } from '../lib/guards.ts'
+import { requireInternalCaller, requireSeatOnly, requireUser, type InternalCaller } from '../lib/guards.ts'
 import {
   BOARD_BRIEF_MAX,
   BOARD_NAME_MAX,
@@ -114,6 +115,17 @@ function publicRun(r: CardRun) {
     startedAt: r.startedAt,
     endedAt: r.endedAt,
   }
+}
+
+/**
+ * 这个内部调用方能不能替这张卡说话。
+ *
+ * 席位票**只能是自己那个账号**；机器票能替本机任意席位报（管家那一层），所以只验公司。
+ * 判据一律服务端算，不收 body——同会话索引那条（`assignee` 和 `machineId` 服务端算）。
+ */
+function callerOwns(caller: InternalCaller, card: Card): boolean {
+  if (caller.companyId !== card.companyId) return false
+  return caller.kind !== 'seat' || caller.account.id === card.accountId
 }
 
 /** 板上按状态数一下。列表那一行只要这几个数，不用把卡全拉出来。 */
@@ -640,6 +652,50 @@ export function attachKanbanRuntime(router: Router, ctx: RouteCtx) {
     if (child.state === 'ready' && parent.state !== 'done') await db.updateCard(child.id, { state: 'todo' })
     await sysLine(db, child.id, `${botId} 加了依赖：要等《${parent.title}》`)
     json(res, 201, { linked: true })
+  })
+
+  /**
+   * 席位的**运行面**在汇报，不是模型在说话——所以这两条走 `/internal`，认的是
+   * `requireInternalCaller`（同会话索引、guard-events、ready、用量）。
+   *
+   * 混进 `/runtime` 那一组的话，模型有一天就能自己报一句「这张卡跑完了」。
+   */
+  router.post('/internal/kanban/cards/:id/result', async (req, res) => {
+    const caller = await requireInternalCaller(req, db)
+    const card = await db.card((req.params.id || '').trim())
+    if (!card || !callerOwns(caller, card)) throw new HttpError(404, '没有这张卡')
+    /**
+     * **已经收口的再报一次回 409，不静静覆盖。** 两段不一样的结论，后写的那段未必是
+     * 对的那段；而模型看到 409 才知道自己重复调了 kanban_complete。
+     */
+    if (card.state !== 'running') throw new HttpError(409, `这张卡已经是「${card.state}」了，收不了第二次`)
+    const body = bodyOf(req)
+    const status = String(body.status ?? '')
+    if (status !== 'ok' && status !== 'blocked' && status !== 'error') throw new HttpError(400, 'status 只能是 ok / blocked / error')
+    const next = await settleCard(db, card, {
+      status,
+      summary: strField(body, 'summary', false).slice(0, CARD_BODY_MAX),
+      metadata: body.metadata && typeof body.metadata === 'object' ? (body.metadata as Record<string, unknown>) : null,
+      error: strField(body, 'error', false).slice(0, CARD_COMMENT_MAX),
+      steps: Number.isFinite(Number(body.steps)) ? Math.trunc(Number(body.steps)) : undefined,
+      toolCalls: Number.isFinite(Number(body.toolCalls)) ? Math.trunc(Number(body.toolCalls)) : undefined,
+      sessionId: strField(body, 'sessionId', false) || undefined,
+    })
+    json(res, 200, { card: next ? publicCard(next) : null })
+  })
+
+  /**
+   * 心跳。**只动一列，不写流水**——一张跑一小时的卡会报 60 次，落成 60 行 card_runs
+   * 的话，人点开那张卡看到的是一屏「还活着」，而他要找的那行结论被顶到了最后。
+   *
+   * 卡不在了（人撤了、板删了）回 404：席位据此掐掉那一轮，而不是继续跑一个没人认领的活。
+   */
+  router.post('/internal/kanban/cards/:id/heartbeat', async (req, res) => {
+    const caller = await requireInternalCaller(req, db)
+    const card = await db.card((req.params.id || '').trim())
+    if (!card || !callerOwns(caller, card)) throw new HttpError(404, '没有这张卡')
+    if (!(await db.noteCardHeartbeat(card.id))) throw new HttpError(409, `这张卡已经是「${card.state}」了，别再跑了`)
+    json(res, 200, { ok: true })
   })
 
   /** `kanban_comment`：往时间线上留一句。Bot 之间说话，人也看得见。 */

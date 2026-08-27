@@ -4084,4 +4084,93 @@ export class Db {
     return r ? cardRunOf(r) : undefined
   }
 
+
+  // ── 看板调度：收依赖、收死的、选卡、抢卡 ─────────────────────────────
+
+  /**
+   * 把「父卡全部 done」的 `todo` 卡推成 `ready`。一条 SQL，调度器每一轮的第一步。
+   *
+   * `not exists` 那半句是判据本身：**有任何一张父卡还没 done 就不动它**。写成
+   * 「有一张 done 就推」的话，一条三段的流水线会在第一段做完时整条冲出去。
+   */
+  async promoteReadyCards(): Promise<number> {
+    return this.run(
+      `update cards set state = 'ready', "updatedAt" = ?
+         where state = 'todo'
+           and not exists (
+             select 1 from card_links l join cards p on p.id = l."parentId"
+              where l."childId" = cards.id and p.state <> 'done'
+           )`,
+      [Date.now()],
+    )
+  }
+
+  /**
+   * 该派的那几张：`ready`、过了退避时间。
+   *
+   * **并发闸不在这条 SQL 里**：它要按 (账号, Bot) 数正在跑的那些，而那是另一张结果集。
+   * 拉出候选再在内存里过闸，比写一条带两层窗口函数的 SQL 好读得多，而候选本来就有界。
+   */
+  async dueCards(now: number, limit = 40): Promise<Card[]> {
+    const rows = await this.many(
+      `select * from cards
+        where state = 'ready' and "assigneeBotId" is not null
+          and ("retryAfter" is null or "retryAfter" <= ?)
+        order by priority desc, "createdAt" limit ?`,
+      [now, Math.max(1, Math.trunc(limit))],
+    )
+    return rows.map(cardOf)
+  }
+
+  /** 现在每个 (账号, Bot) 上各有几张卡在跑。两道并发闸都从这一份算。 */
+  async runningCardLoad(): Promise<{ accountId: string; botId: string; n: number }[]> {
+    const rows = await this.many(
+      `select "accountId", coalesce("assigneeBotId", '') as "botId", count(*)::int as n
+         from cards where state = 'running' group by "accountId", "assigneeBotId"`,
+    )
+    return rows.map((r) => ({ accountId: str(r.accountId), botId: str(r.botId), n: num(r.n) }))
+  }
+
+  /**
+   * 抢一张卡：`ready` → `running`，**条件里带上旧状态**。
+   *
+   * 升级换版那几十秒里新旧两代进程会同时扫到同一张，谁都觉得该自己派——CAS 之后只有
+   * 一个人的 rowCount 是 1，另一个拿到 0 就跳过。少了这一句，那一刻的卡会被派两遍，
+   * 而两份执行包会在同一棵 ~/work 上一起写。
+   */
+  async claimCard(id: string, sessionId: string | null = null): Promise<boolean> {
+    const now = Date.now()
+    const n = await this.run(
+      `update cards set state = 'running', "startedAt" = ?, "heartbeatAt" = ?, "sessionId" = ?,
+              "endedAt" = null, "retryAfter" = null, "updatedAt" = ?
+         where id = ? and state = 'ready'`,
+      [now, now, sessionId, now, id],
+    )
+    return n > 0
+  }
+
+  /**
+   * 停在 `running` 上、已经没人在跑的那几张。
+   *
+   * 两条判据管两种死法，**主路是心跳那条**：席位被 kill 之后心跳当场停，而墙钟还有
+   * 五十多分钟才到——那段时间里界面上是一张正在跑的卡，跑它的进程早没了。墙钟管的是
+   * 另一种：进程还活着但那一轮陷进去了，心跳照报，只有它拦得住。
+   */
+  async deadRunningCards(staleBefore: number, timeoutBefore: number, limit = 20): Promise<Card[]> {
+    const rows = await this.many(
+      `select * from cards
+        where state = 'running'
+          and (coalesce("heartbeatAt", "startedAt", 0) <= ? or coalesce("startedAt", 0) <= ?)
+        order by "startedAt" limit ?`,
+      [staleBefore, timeoutBefore, Math.max(1, Math.trunc(limit))],
+    )
+    return rows.map(cardOf)
+  }
+
+  /** 席位报「这张卡还活着」。**只动一列**，不写流水（一张跑一小时的卡会报 60 次）。 */
+  async noteCardHeartbeat(id: string): Promise<boolean> {
+    const now = Date.now()
+    return (await this.run(`update cards set "heartbeatAt" = ?, "updatedAt" = ? where id = ? and state = 'running'`, [now, now, id])) > 0
+  }
+
 }

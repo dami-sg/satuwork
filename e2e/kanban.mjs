@@ -8,8 +8,11 @@
  * **用线上的默认参数**，不靠调小上限把测试凑出来。
  */
 import { rmSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
+import { pairMachine } from './pair.mjs'
+import { publishRelease } from './release.mjs'
 
 export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-kanban')
@@ -31,6 +34,16 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
       GATEWAY_ACCESS_HOST: 'satuwork.com',
       GATEWAY_SEED_OWNER: '0',
       GATEWAY_PLATFORM_TOKEN: 'e2e-platform-kanban',
+      // 调度器要真的转：派卡那条链子（收依赖 → 抢 → 派 → 回报）只有跑起来才验得到。
+      // 300ms 是为了让用例不用等半分钟；退避那两个数也一起调小，理由同上——但**判据
+      // 本身一个字没改**，验的仍然是「真失败等得比 busy 久」。
+      GATEWAY_ROUTINE_TICK_MS: '300',
+      GATEWAY_KANBAN_RETRY_DELAY_MS: '2000',
+      GATEWAY_KANBAN_REQUEUE_DELAY_MS: '200',
+      GATEWAY_KANBAN_STALE_MS: '60000',
+      // 不联系管家的部署（同 handoff / gateway-chat 那几套）：这一套验的是调度，
+      // 不是「机器上怎么把席位装起来」。
+      SATUWORK_DEPLOY_STUB: '1',
     },
   })
   await waitHttp(`${base}/health`, { child: gw, what: 'kanban gateway' })
@@ -46,6 +59,33 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
   let boardId = ''
   let seatTok = ''
   let meId = ''
+  let machineTok = ''
+  let seatPort = 0
+  let seatSrv = null
+  let seatGot = []
+  let seatSays = () => {}
+  let doneCardId = ''
+
+  /**
+   * 替席位报一次收口。
+   *
+   * 假席位只收不报（它不是一个真的 Bot），所以每条用例都得自己把开出去的那张收回来
+   * ——**并发闸是「一颗 Bot 同时一张」**，漏收一张，后面每一条用例都会等在门外，
+   * 而报出来的错是「该被派出去」，指不到真正的原因。
+   */
+  const settle = (id, body = { status: 'ok', summary: 'e2e 收口' }) =>
+    req(base, 'POST', `/internal/kanban/cards/${id}/result`, { token: machineTok, body })
+
+  /** 等一件事发生。调度器每 300ms 转一圈，所以这里的轮询要比它密。 */
+  const until = async (probe, timeout = 15000) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < timeout) {
+      const got = await probe()
+      if (got) return got
+      await new Promise((x) => setTimeout(x, 120))
+    }
+    return null
+  }
 
   /** 席位视角的那一份目录。板、指纹都从这里读。 */
   const catalog = async (bot) => {
@@ -371,6 +411,246 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
       assert(seen.json.timeline.some((t) => t.authorBotId === designBot && t.body.includes('登录')), `人也该看得见：${seen.text}`)
     })
 
+    await test('派卡：调度器抢到、送到席位、席位回报，卡走完一整条', async () => {
+      /**
+       * 假席位：只回答「收下了没有」。跑完由它自己打 /internal/kanban/cards/:id/result
+       * ——**不挂事件流、不等 turn/end**，这正是和 routines 那条路最大的区别。
+       */
+      const got = []
+      let reply = 200
+      const seat = createServer((rq, rs) => {
+        let raw = ''
+        rq.on('data', (d) => (raw += d))
+        rq.on('end', () => {
+          got.push({ url: rq.url, pack: JSON.parse(raw || '{}') })
+          rs.writeHead(reply, { 'content-type': 'application/json' })
+          rs.end(JSON.stringify(reply === 200 ? { ok: true } : { error: reply === 409 ? '浏览器被占着' : '正在排空' }))
+        })
+      })
+      await new Promise((ok) => seat.listen(0, '127.0.0.1', ok))
+      seatPort = seat.address().port
+      seatSrv = seat
+      seatSays = (code) => (reply = code)
+      seatGot = got
+
+      const paired = await pairMachine({ req, gwBase: base, ownerTok: owner, orgId, managerPort: 18992 })
+      await publishRelease({ req, gwBase: base, token: owner, version: '0.1.0', note: 'e2e-kanban' })
+      machineTok = paired.token
+
+      /**
+       * 先清场，**而且要循环到干净为止**。
+       *
+       * 前面那几条用例在板上留了一批 `ready` 的卡，而并发闸是「一颗 Bot 同时一张」——
+       * 席位一上线，调度器会先派它们，而假席位只收不报，那一格就被永久占住了。这不是
+       * bug，正是闸该有的样子（下面单独有一条用例验它）。
+       *
+       * 一遍不够：撤的时候调度器正好抢走一张（`ready` → `running`），而撤销对 running
+       * 是 409——那一张就会漏网，然后在后面每一条用例里表现成「调度器该把它派出去」。
+       */
+      const cleared = await until(async () => {
+        const board = await req(base, 'GET', `/kanban/boards/${boardId}`, { token: meTok })
+        const live = board.json.cards.filter((c) => c.state === 'todo' || c.state === 'ready' || c.state === 'running')
+        if (!live.length) return true
+        for (const c of live) {
+          if (c.state === 'running') await settle(c.id)
+          else await req(base, 'POST', `/kanban/cards/${c.id}/cancel`, { token: meTok })
+        }
+        return null
+      })
+      assert(cleared, '清不干净就别往下走：后面每一条用例都会被那一格闸挡在门外')
+
+      const dep = await req(base, 'POST', '/runtime/deploy', { token: meTok, body: { botId: designBot } })
+      assert(dep.status === 200, `deploy ${dep.status} ${dep.text}`)
+      const ready = await req(base, 'POST', `/internal/instances/${meId}/ready`, {
+        token: seatTok,
+        body: { host: `http://127.0.0.1:${seatPort}`, botId: designBot },
+      })
+      assert(ready.status === 200, `ready ${ready.status} ${ready.text}`)
+
+      const card = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+        token: meTok,
+        body: { title: '真的派一次', assigneeBotId: designBot, body: '交底书' },
+      })).json.card
+      const running = await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${card.id}`, { token: meTok })
+        return r.json.card.state === 'running' ? r.json.card : null
+      })
+      if (!running) {
+        // 红的时候最想知道的是「那一格闸被谁占着」——只报一句「没派出去」查不到。
+        const dump = await req(base, 'GET', `/kanban/boards/${boardId}`, { token: meTok })
+        assert(false, `调度器该把它派出去；板上现在是：${JSON.stringify(dump.json.cards.map((c) => [c.title, c.state]))}`)
+      }
+      const pack = got.find((g) => g.pack.cardId === card.id)
+      assert(pack, `执行包该送到席位：${JSON.stringify(got.map((g) => g.pack.cardId))}`)
+      // 板级交底书要跟着走：不然人得在每张卡的 body 里把同一段背景抄一遍。
+      assert(pack.pack.brief.includes('新品'), `执行包该带板的 brief：${JSON.stringify(pack.pack)}`)
+      assert(pack.pack.maxSteps === 60 && pack.pack.attempt === 0, `执行包字段不对：${JSON.stringify(pack.pack)}`)
+
+      const done = await req(base, 'POST', `/internal/kanban/cards/${card.id}/result`, {
+        token: machineTok,
+        body: { status: 'ok', summary: '抓了三家，表在 work/quote.md', metadata: { changed_files: ['work/quote.md'] }, steps: 12 },
+      })
+      assert(done.status === 200 && done.json.card.state === 'done', `result ${done.status} ${done.text}`)
+      // **收口只收一次**：两段不一样的结论，后写的那段未必是对的那段。
+      const again = await req(base, 'POST', `/internal/kanban/cards/${card.id}/result`, { token: machineTok, body: { status: 'ok' } })
+      assert(again.status === 409, `重复收口该 409，实际 ${again.status} ${again.text}`)
+      doneCardId = card.id
+    })
+
+    await test('父卡做完，子卡下一轮自己出发', async () => {
+      const mk = async (title) =>
+        (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, { token: meTok, body: { title, assigneeBotId: designBot } })).json.card
+      const child = await mk('等着的那张')
+      await req(base, 'POST', '/kanban/links', { token: meTok, body: { parentId: doneCardId, childId: child.id } })
+      // 父卡已经 done 了，所以这一条依赖不该把它按住——收依赖那一步下一轮就把它放出来。
+      const out = await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${child.id}`, { token: meTok })
+        return r.json.card.state === 'running' || r.json.card.state === 'done' ? r.json.card : null
+      })
+      assert(out, '父卡做完之后子卡该被放出来')
+      // 收掉它，否则那一格并发闸被永久占着，后面每一条用例都会等在门外。
+      await settle(child.id)
+    })
+
+    await test('席位说忙：退回 ready，不算失败', async () => {
+      /**
+       * 席位整夜关着是常态。把 409 / 503 记成失败的话，第二天早上是一板子的红，而没有
+       * 任何一件事真的出过错。
+       */
+      seatSays(409)
+      const card = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+        token: meTok,
+        body: { title: '撞上忙的那张', assigneeBotId: designBot, needsBrowser: true },
+      })).json.card
+      const back = await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${card.id}`, { token: meTok })
+        const t = r.json.timeline || []
+        return t.some((x) => x.body.includes('没派出去')) ? r.json : null
+      })
+      assert(back, '该在时间线上写明这一轮没派出去')
+      assert(back.card.state === 'ready', `该退回 ready，实际 ${back.card.state}`)
+      assert(back.card.attempt === 0, `busy 不该占 attempt，实际 ${back.card.attempt}`)
+      // **要分得清是哪一种没派出去**：席位说忙和席位压根没上线，处理一样但原因不一样，
+      // 时间线上混成一句话的话，人查「为什么这张卡一直不动」时看不出该去看哪儿。
+      const why = back.timeline.filter((t) => t.body.includes('没派出去')).pop()
+      assert(why.body.includes('浏览器'), `原因要是席位说的那句：${why.body}`)
+      // **趁席位还在说忙的时候撤掉它**：先放开的话，下一轮它就被派出去了，而假席位
+      // 不会回报，那一格并发闸就被永久占住。
+      await req(base, 'POST', `/kanban/cards/${card.id}/cancel`, { token: meTok })
+      seatSays(200)
+    })
+
+    await test('席位报错两次：第一次退避重试，第二次转人处理', async () => {
+      const card = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+        token: meTok,
+        body: { title: '注定失败的那张', assigneeBotId: designBot },
+      })).json.card
+      const failOnce = async () => {
+        const run = await until(async () => {
+          const r = await req(base, 'GET', `/kanban/cards/${card.id}`, { token: meTok })
+          return r.json.card.state === 'running' ? r.json.card : null
+        })
+        assert(run, '该被派出去')
+        const r = await req(base, 'POST', `/internal/kanban/cards/${card.id}/result`, {
+          token: machineTok,
+          body: { status: 'error', error: '第三家的页面 500' },
+        })
+        assert(r.status === 200, `result ${r.status} ${r.text}`)
+        return r.json.card
+      }
+      const first = await failOnce()
+      assert(first.state === 'ready' && first.attempt === 1, `第一次该重试：${JSON.stringify(first)}`)
+      const second = await failOnce()
+      assert(second.state === 'blocked' && second.blockedKind === 'failed', `第二次该转人处理：${JSON.stringify(second)}`)
+      assert(second.blockedReason.includes('500'), `原因要留下来：${JSON.stringify(second)}`)
+
+      // 重试那一次的执行包里**必须带上一次的报错**，不然第二次会一字不差地重演第一次。
+      const retry = seatGot.filter((g) => g.pack.cardId === card.id)
+      assert(retry.length === 2 && retry[1].pack.lastFailure.includes('500'), `重试的包该带上次的错：${JSON.stringify(retry.map((x) => x.pack.lastFailure))}`)
+
+      // 转人处理的进待办计数；人自己按停止的那些不进（blockedKind 分档的全部理由）。
+      const boards = await req(base, 'GET', '/kanban/boards', { token: meTok })
+      assert(boards.json.blocked >= 1, `blocked 该被数进去：${boards.text}`)
+    })
+
+    await test('模型说卡住了：不算失败、不占 attempt', async () => {
+      const card = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+        token: meTok,
+        body: { title: '要人拍板的那张', assigneeBotId: designBot },
+      })).json.card
+      await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${card.id}`, { token: meTok })
+        return r.json.card.state === 'running' ? r.json.card : null
+      })
+      const r = await req(base, 'POST', `/internal/kanban/cards/${card.id}/result`, {
+        token: machineTok,
+        body: { status: 'blocked', error: '要用哪家的报价得你定' },
+      })
+      assert(r.status === 200, `result ${r.status} ${r.text}`)
+      // 重试它只会让同一句「我需要人」再说一遍，每次都花钱。
+      assert(r.json.card.state === 'blocked' && r.json.card.blockedKind === 'by-model', `该是 by-model：${r.text}`)
+      assert(r.json.card.attempt === 0, `不该占 attempt：${r.text}`)
+
+      // 人处理完解锁：attempt 清零，这是新的一次机会。
+      const un = await req(base, 'POST', `/kanban/cards/${card.id}/unblock`, { token: meTok })
+      assert(un.status === 200 && un.json.card.state === 'ready', `unblock ${un.status} ${un.text}`)
+      assert(un.json.card.attempt === 0, `解锁要把 attempt 清零：${un.text}`)
+      // 解锁之后它就又能被派了——撤掉，别让它占住下一条用例要用的那格闸。
+      await req(base, 'POST', `/kanban/cards/${card.id}/cancel`, { token: meTok })
+    })
+
+    await test('一颗 Bot 同时只跑一张：第二张老实排队', async () => {
+      /**
+       * 闸是 1，理由是 `~/work`：委派那边不给工作区加锁，靠的是「一批并发委派的 goal
+       * 里各自划清文件范围」——那句话的前提是同一个主代理一次写出这一批，而板上的卡
+       * 来自不同的时候、可能不同的 Bot，没有任何一个环节会去划这个范围。
+       */
+      const mk = async (title) =>
+        (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, { token: meTok, body: { title, assigneeBotId: designBot } })).json.card
+      const a = await mk('排队的第一张')
+      const b = await mk('排队的第二张')
+      const first = await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${a.id}`, { token: meTok })
+        return r.json.card.state === 'running' ? r.json.card : null
+      })
+      assert(first, '第一张该被派出去')
+      // 等几轮 tick，确认第二张**没有**跟着出去。
+      await new Promise((x) => setTimeout(x, 1500))
+      const second = await req(base, 'GET', `/kanban/cards/${b.id}`, { token: meTok })
+      assert(second.json.card.state === 'ready', `第二张该还在排队，实际 ${second.json.card.state}`)
+
+      await req(base, 'POST', `/internal/kanban/cards/${a.id}/result`, { token: machineTok, body: { status: 'ok', summary: '好了' } })
+      const out = await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${b.id}`, { token: meTok })
+        return r.json.card.state === 'running' ? r.json.card : null
+      })
+      assert(out, '第一张腾出位置之后，第二张该自己出发')
+      await req(base, 'POST', `/internal/kanban/cards/${b.id}/result`, { token: machineTok, body: { status: 'ok', summary: '也好了' } })
+    })
+
+    await test('心跳停了就当席位死了：不用等墙钟', async () => {
+      /**
+       * **主要的回收路径是心跳那条**，不是墙钟：席位被 kill 之后心跳当场停，而墙钟还有
+       * 五十多分钟才到——那段时间里界面上是一张正在跑的卡，跑它的进程早没了。
+       */
+      const card = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+        token: meTok,
+        body: { title: '跑着跑着席位没了', assigneeBotId: designBot },
+      })).json.card
+      const run = await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${card.id}`, { token: meTok })
+        return r.json.card.state === 'running' ? r.json.card : null
+      })
+      assert(run, '该被派出去')
+      // 心跳这条路本身要通：席位每 60 秒替它报一次，模型不管这件事。
+      const beat = await req(base, 'POST', `/internal/kanban/cards/${card.id}/heartbeat`, { token: machineTok })
+      assert(beat.status === 200, `heartbeat ${beat.status} ${beat.text}`)
+      // 收口之后再报心跳要被顶回来，席位据此掐掉那一轮，而不是继续跑一个没人认领的活。
+      await req(base, 'POST', `/internal/kanban/cards/${card.id}/result`, { token: machineTok, body: { status: 'ok', summary: 'x' } })
+      const late = await req(base, 'POST', `/internal/kanban/cards/${card.id}/heartbeat`, { token: machineTok })
+      assert(late.status === 409, `收口之后的心跳该 409，实际 ${late.status} ${late.text}`)
+    })
+
     await test('删板：卡跟着走，别人删不掉', async () => {
       const board = (await req(base, 'POST', '/kanban/boards', { token: meTok, body: { name: '待删' } })).json.board
       const card = (await req(base, 'POST', `/kanban/boards/${board.id}/cards`, { token: meTok, body: { title: '一张' } })).json.card
@@ -383,5 +663,6 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
     })
   } finally {
     gw.kill('SIGTERM')
+    seatSrv?.close()
   }
 }
