@@ -9,7 +9,7 @@
  * 目录树那一屏又一个都点不动。两头都不会有人报 bug，只会觉得「这功能怪怪的」。
  */
 import { join } from 'node:path'
-import { loadApp } from './ui-dom.mjs'
+import { loadApp, el } from './ui-dom.mjs'
 
 /** 一份现成的名册：两个目录下各一个文件，外加一个重名的。 */
 function knownOf(ui, paths) {
@@ -118,5 +118,135 @@ export async function runUiFiles({ root, test, assert, log }) {
     ui.state.wsDirs = { '': { entries: [{ name: 'a.md', path: 'a.md', dir: false, size: 1 }], more: 7 } }
     ui.state.wsOpen = {}
     assert(/还有 7 条/.test(ui.workspacePanel()), '少列了几条却没说')
+  })
+
+  /**
+   * 头一回点开那个文件夹，看到的必须是这台席位里真有的东西。
+   *
+   * 这两条钉的是同一件事的两头：**「没取到」不能长得像「里面没东西」**，而「这一趟没
+   * 取成」也不能就此定格。原先两头都破：进页面那会儿席位还没接上，那一屏当场拿到一句
+   * 「实例还没接上」并且**把它当成取过了**——十几秒后席位接上、对话都能发了，那一屏
+   * 还停在原地，只有人自己去按那颗刷新才会出来。
+   */
+  const seatUi = ({ workspace, fail }) => {
+    const calls = []
+    const fetchImpl = async (path) => {
+      calls.push(path)
+      // fail：这台席位头 N 趟先摆一个状态码出来（热身中的 503、旧版本的 404）；
+      // status 给 0 就是**根本没出门**——Gateway 在重启、网断了一秒，fetch 自己 reject。
+      if (fail && path.includes('/workspace') && calls.length <= fail.times) {
+        if (!fail.status) throw new TypeError('Failed to fetch')
+        return new Response(JSON.stringify({ error: fail.error || '实例还没上线' }), {
+          status: fail.status,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      const body = path.includes('/workspace') ? workspace : {}
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    const app = loadApp({
+      appPath: join(root, 'gateway/ui/app.js'),
+      base: 'http://127.0.0.1:1',
+      fetchImpl,
+      stubIds: ['chat-thread'],
+    })
+    app.state.me = { account: { id: 'a1', role: 'member', email: 'a@b.c' } }
+    app.state.path = '/chat'
+    app.state.chatBotId = 'b1'
+    app.state.chatEvents = []
+    app.state.chatSessionId = ''
+    return { app, calls }
+  }
+
+  /** 点开右栏那一屏（走真的点击分发），再让排在后面那一拍跑完。 */
+  const openFiles = async (app) => {
+    await app.fire('click', el('button', { 'data-act': 'aside-tab', 'data-tab': 'files' }))
+    await new Promise((r) => setTimeout(r, 5))
+  }
+
+  await test('席位接上之后那一屏自己重取一遍，不用人去按刷新', async () => {
+    const { app, calls } = seatUi({ workspace: { entries: [{ name: '报表', path: '报表', dir: true, size: 0 }], more: 0 } })
+    app.render()
+    await openFiles(app)
+    assert(/实例还没接上/.test(app.workspacePanel()), '席位没接上却没说出来')
+    assert(calls.length === 0, `会话都没有还发了请求：${JSON.stringify(calls)}`)
+    // 席位接上了：走的是 hydrateChat / 流那条路，只 paintChat，不整页重绘。
+    app.state.chatSessionId = 's1'
+    app.paintChat()
+    await new Promise((r) => setTimeout(r, 5))
+    assert(calls.some((p) => p.includes('/workspace')), '接上之后没有自己去取')
+    assert(/报表/.test(app.workspacePanel()), `那一屏还停在旧状态：${app.workspacePanel()}`)
+  })
+
+  await test('席位还在热身（5xx）：过一会儿自己再来一趟', async () => {
+    const { app, calls } = seatUi({
+      workspace: { entries: [{ name: '报表', path: '报表', dir: true, size: 0 }], more: 0 },
+      fail: { status: 503, times: 1 },
+    })
+    app.state.chatSessionId = 's1'
+    app.render()
+    await openFiles(app)
+    assert(/实例还没上线/.test(app.workspacePanel()), `没把席位那句话说出来：${app.workspacePanel()}`)
+    // 到点了（十秒在测里等不起，直接把闹钟拨到现在）。
+    app.state.wsDirs[''].retryAt = 1
+    app.paintChat()
+    await new Promise((r) => setTimeout(r, 5))
+    assert(calls.filter((p) => p.includes('/workspace')).length === 2, `没有自己再来一趟：${JSON.stringify(calls)}`)
+    assert(/报表/.test(app.workspacePanel()), `重来那一趟没画出来：${app.workspacePanel()}`)
+  })
+
+  await test('席位版本旧（404）：说清楚要更新，而且不再自己重试', async () => {
+    const { app, calls } = seatUi({
+      workspace: {},
+      fail: { status: 404, times: 99, error: 'unknown endpoint' },
+    })
+    app.state.chatSessionId = 's1'
+    app.render()
+    await openFiles(app)
+    assert(/更新 Bot 版本/.test(app.workspacePanel()), `没说清楚是版本旧了：${app.workspacePanel()}`)
+    assert(!app.state.wsDirs[''].retryAt, '答案不会变的那种也排了重试')
+    app.paintChat()
+    await new Promise((r) => setTimeout(r, 5))
+    assert(calls.filter((p) => p.includes('/workspace')).length === 1, `打了一台已经把话说清楚的席位：${JSON.stringify(calls)}`)
+  })
+
+  await test('压根没走到 Gateway（网断了）：说人话，而且照样排下一趟', async () => {
+    const { app, calls } = seatUi({
+      workspace: { entries: [{ name: '报表', path: '报表', dir: true, size: 0 }], more: 0 },
+      fail: { status: 0, times: 1 },
+    })
+    app.state.chatSessionId = 's1'
+    app.render()
+    await openFiles(app)
+    const html = app.workspacePanel()
+    assert(!/Failed to fetch/.test(html), `把浏览器那句原话摆给人看了：${html}`)
+    assert(/连不上服务器/.test(html), `没说清楚是连不上：${html}`)
+    assert(app.state.wsDirs[''].retryAt, '最该重来的一种反而没排重试')
+    app.state.wsDirs[''].retryAt = 1
+    app.paintChat()
+    await new Promise((r) => setTimeout(r, 5))
+    assert(/报表/.test(app.workspacePanel()), `网回来了却没自己再取一遍：${app.workspacePanel()}`)
+    assert(calls.filter((p) => p.includes('/workspace')).length === 2, JSON.stringify(calls))
+  })
+
+  await test('换人登录：上一个账号的文件名一个都不许留在树上', async () => {
+    const { app } = seatUi({ workspace: { entries: [{ name: '裁员名单.xlsx', path: '裁员名单.xlsx', dir: false, size: 9 }], more: 0 } })
+    app.state.chatSessionId = 's1'
+    app.render()
+    await openFiles(app)
+    assert(/裁员名单/.test(app.workspacePanel()), '前置条件没成立：树没取到')
+    await app.fire('click', el('button', { 'data-act': 'logout' }))
+    assert(!/裁员名单/.test(app.workspacePanel()), `登出之后上一个人的文件名还在：${app.workspacePanel()}`)
+    assert(!app.state.wsSession, 'wsSession 没跟着归零')
+  })
+
+  await test('席位回的不是一份目录：说列不出来，不能画成「工作区还是空的」', async () => {
+    const { app } = seatUi({ workspace: {} })
+    app.state.chatSessionId = 's1'
+    app.render()
+    await openFiles(app)
+    const html = app.workspacePanel()
+    assert(!/还是空的/.test(html), `没取到却说成了空工作区：${html}`)
+    assert(/列不出来/.test(html), `没说出「没取到」：${html}`)
   })
 }

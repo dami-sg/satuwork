@@ -44,7 +44,12 @@ agent.prompt(…)                            这一轮那句话，单独送（�
 | `escalateBlock(rule)` | 模版的 `escalate` 字段，**原样引用不改写** | 有规则**且**挂了 `escalate_to_human` |
 | `linkOutBlock()` | 硬编码。列举东西时每条都要写成 markdown 链接 | 挂了 `web_search` / `web_extract` / `browser_snapshot` / 任一 `mcp_*` |
 | `fileOutBlock()` | 硬编码。产出的文件在界面上是一颗点得开的药丸，别教用户去文件系统里找 | 挂了 `write_file` / `patch` / `terminal` / `web_extract` / `browser_snapshot`——即**会报 `ToolResult.files` 的那五条路** |
-| Skill 正文 | `skills` 集合，`## Skill: 名字` + body **全文** | `bot.skills` 未定义 = 本机所有启用的；空数组 = 不加 |
+| Skill 正文 | `skills` 集合里**常驻**那一档，`## Skill: 名字` + body 全文 | 有常驻的 Skill 时 |
+| Skill 索引 | **按需**那一档，一条一行「名字 — 一句话」；装不下就只剩一行摘要，那一轮工具表里多一把 `skills_list`（见 [skills.md](./skills.md) §5） | 有按需的 Skill 时 |
+
+挂哪些 Skill 的口径没变：`bot.skills` 未定义 = 本机所有启用的，空数组 = 一条都不加。
+变的是**同一条 Skill 进不进正文**——那由它自己的 `mode` 决定（常驻 / 按需），存量一律
+是常驻。正文不进提示词的那些，由模型自己调 `skill_view` 取，见 [skills.md](./skills.md)。
 
 四段硬编码的都是**条件加载**，理由是同一条：没有那把工具时，那几行是在教模型防一种它
 遇不到的东西 / 用一把它没有的工具，纯占上下文。

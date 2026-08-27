@@ -363,6 +363,32 @@ export interface SessionEventMap {
   }
 
   /**
+   * Bot 给自己记下了一条 Skill（见 docs/skills.md §13）。
+   *
+   * 存在的理由只有一个：**员工要在事情发生的当下看见它**。私有档会持续改变这颗 Bot
+   * 之后的行为，而事后去 Skill 页面翻等于没有——那一屏没人会没事去看。
+   *
+   * **不靠界面去扫工具结果的文本**：那段文本是写给模型的散文，措辞一改就扫不出来
+   * （同 `ToolResult.files` 那条注释里的道理）。写下它的那把工具直接报出来。
+   *
+   * **不进模型上下文**（toAgentMessages 只认三种 role），所以它的全部代价是 JSONL 里
+   * 多一行。加一种事件不是破坏性变更，不动 SESSION_FORMAT_VERSION：老界面读到不认识
+   * 的 type 会跳过，退化成「少一张卡」——工具结果里那句「已保存」还在。
+   */
+  'skill/saved': {
+    /** 写下它的那次工具调用。 */
+    callId: string
+    /** 目录里的 id。界面拿它去开详情、或者删掉。 */
+    id: string
+    /** 模型看到的那个名字（重名时带序号）。 */
+    name: string
+    action: 'create' | 'update' | 'remove'
+    /** 这颗 Bot 自己记下的还剩几条，以及上限。界面上那句「7/30」。 */
+    used?: number
+    max?: number
+  }
+
+  /**
    * 一次**委派**的状态（见 docs/delegation.md §12.2）。
    *
    * 和 `tool/call` / `tool/result` 分开，因为它们回答的是两个问题：那两条是「模型调了

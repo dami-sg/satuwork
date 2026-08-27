@@ -520,6 +520,8 @@ function draftFromTemplate(tpl) {
     // 那一行不该在每次按键时都被切一次、归一化一次，光标会跳。
     browserOn: br.on === true,
     browserSites: (Array.isArray(br.sites) ? br.sites : []).join('\n'),
+    // 缺字段按开算：老模版没存过这个键，而它在服务端的默认就是开的。
+    selfSkills: tpl.selfSkills !== false,
     memoryOn: mem.on !== false,
     scope: MEMORY_SCOPES.includes(mem.scope) ? mem.scope : '所属分组',
     kinds: Array.isArray(mem.kinds) ? mem.kinds.filter((k) => MEMORY_KINDS.includes(k)) : ['偏好', '事实'],
@@ -560,6 +562,8 @@ function draftFromBot(bot) {
     guards: DEFAULT_BOT_GUARDS.map((g) => ({ ...g, on: typeof saved[g.id] === 'boolean' ? saved[g.id] : g.on })),
     browserOn: br.on === true,
     browserSites: (Array.isArray(br.sites) ? br.sites : []).join('\n'),
+    // 缺字段按开算：老模版没存过这个键，而它在服务端的默认就是开的。
+    selfSkills: bot.selfSkills !== false,
     escalate: bot.escalate || '',
     escalateTo: bot.escalateTo || 'owner',
     memories: [],

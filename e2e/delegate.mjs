@@ -11,8 +11,9 @@ const runProbe = (root) => sharedProbe(root, 'bot/e2e-delegate.mjs', { timeout: 
 /**
  * 把一组「断言名 → 真假」逐条报出来。名字就是断言，红的时候不用回头翻代码。
  *
- * `assert` 要显式传进来：`test` 只 `fn()`，不往回调里塞参数——写成 `(assert) => …`
- * 的话每一条都是 `assert is not a function`，二十多条断言一条都没真的执行过。
+ * `assert` 要从外面传进来：`test(name, fn)` 调 `fn()` 时不带参数，写成 `(assert) => …`
+ * 的话每一条都会以 `assert is not a function` 收场——十四条断言全红，而红的原因和被测
+ * 的东西一点关系都没有。
  */
 const each = (test, assert, group, obj) =>
   Object.entries(obj).map(([k, v]) => test(`${group}：${k}`, () => assert(v === true, `${k} 不成立`)))

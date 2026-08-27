@@ -30,6 +30,8 @@ interface RemoteBot {
    */
   guards?: Record<string, boolean>
   browser?: { on?: boolean; sites?: string[] }
+  /** 模版上「让它自己记 Skill」那个开关。老 Gateway 不发，缺字段按**开**算。 */
+  selfSkills?: boolean
   escalate?: string
   templateVersion?: number
 }
@@ -49,11 +51,25 @@ function roleOf(raw: ModelRole | undefined): ModelRole {
 interface RemoteSkill {
   id: string
   name: string
+  /**
+   * 模型拿去 `skill_view` 的那个名字：重名时 Gateway 已经加过序号（「退款审核（2）」）。
+   *
+   * **不在这边自己算。** 两边各算一次，迟早在某个 Unicode 边界上分叉，而分叉的表现是
+   * 模型照着索引里的名字调、席位说找不到（docs/skills.md §5）。
+   */
+  displayName?: string
   body?: string
   tags?: string[]
   source?: string
   enabled?: boolean
   fileName?: string
+  /** `常驻` 全文进提示词，`按需` 只进索引。老 Gateway 不发这个字段，落 `常驻`。 */
+  mode?: string
+  /** 索引里那一句话。Gateway 从 frontmatter 或正文首段算好发下来。 */
+  description?: string
+  /** 带不带 ZIP 包的文件。真要用时按需拉（tools/skill.ts），不随目录下发。 */
+  hasFiles?: boolean
+  origin?: 'company' | 'global' | 'seat'
 }
 
 interface RemoteServer {
@@ -71,16 +87,79 @@ interface RemoteServer {
   mentionOnly?: boolean
 }
 
-interface CachedSkill {
+export interface CachedSkill {
   id: string
   name: string
+  /** 见 RemoteSkill.displayName。Gateway 没发就退回 name。 */
+  displayName: string
   body: string
   tags: string[]
   source: '手动编写' | '单文件 Skill' | 'ZIP 包'
   fileName?: string
   enabled: boolean
+  /**
+   * `常驻` = 正文每一轮都在提示词里（这套东西之前的样子）；`按需` = 只进索引。
+   *
+   * **老 Gateway 不发这个字段时落 `常驻`**：那些 Skill 是在「全文常驻」的年代写的，
+   * 换个默认值等于趁人不注意改了它们的行为。
+   */
+  mode: '常驻' | '按需'
+  description: string
+  hasFiles: boolean
+  origin: 'company' | 'global' | 'seat'
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * 库里读出来的那一行 → 补齐字段的 `CachedSkill`。
+ *
+ * **换版之后，缓存里躺着的是上一版写下的行**：那时还没有 displayName / description /
+ * mode / hasFiles / origin 这几个键。而首次目录同步之前，提示词和三把工具就已经在读
+ * 它们了——不补的话，系统提示词里会出现「## Skill: undefined」，`skills_list` 会在
+ * `description.toLowerCase()` 上抛 TypeError（被兜成一句「工具执行失败」）。
+ *
+ * 缺省值的方向都往「和改之前一样」走：**mode 落常驻**（那些行本来就是全文进提示词的），
+ * displayName 落 name，origin 落 company。
+ */
+export function cachedSkillOf(raw: Partial<CachedSkill> & { id: string; name?: string }): CachedSkill {
+  const name = typeof raw.name === 'string' ? raw.name : raw.id
+  const shown = typeof raw.displayName === 'string' && raw.displayName.trim() ? raw.displayName : name
+  return {
+    id: raw.id,
+    name,
+    displayName: shown,
+    body: typeof raw.body === 'string' ? raw.body : '',
+    tags: Array.isArray(raw.tags) ? raw.tags.map(String) : [],
+    source: raw.source === '单文件 Skill' || raw.source === 'ZIP 包' ? raw.source : '手动编写',
+    ...(raw.fileName ? { fileName: raw.fileName } : {}),
+    enabled: raw.enabled !== false,
+    mode: raw.mode === '按需' ? '按需' : '常驻',
+    description: typeof raw.description === 'string' ? raw.description : '',
+    hasFiles: raw.hasFiles === true,
+    origin: raw.origin === 'global' || raw.origin === 'seat' ? raw.origin : 'company',
+    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : 0,
+    updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+  }
+}
+
+/**
+ * 这颗席位缓存里、启用着的全部 Skill。**读缓存只走这一条路**（补字段见 cachedSkillOf）。
+ */
+export function cachedSkills(ctx: Context): CachedSkill[] {
+  return ctx.storage
+    .collection<CachedSkill>('skills')
+    .list()
+    .map((r) => cachedSkillOf(r.value))
+    .filter((s) => s.enabled !== false)
+}
+
+/** 按 id 取一条，同样补过字段。取不到或停用了都回 undefined。 */
+export function cachedSkill(ctx: Context, id: string): CachedSkill | undefined {
+  const row = ctx.storage.collection<CachedSkill>('skills').get(id)
+  if (!row) return undefined
+  const s = cachedSkillOf(row)
+  return s.enabled === false ? undefined : s
 }
 
 interface CachedServer {
@@ -227,6 +306,19 @@ export class CatalogService extends Service {
   }
 
   private inflight: Promise<boolean> | null = null
+  /**
+   * 刚由 `skill_manage` 写下、还没被任何一次目录同步确认过的那几条：id → 写下的时刻。
+   *
+   * 存在的理由是一次**真实的竞态**：轮询每分钟发一次 `/runtime/catalog`，而 `pull()`
+   * 有单飞去重。模型在那一次请求**发出之后**写下一条 Skill，等那份（早于写入的）响应
+   * 落地时，`syncSkills` 的剪枝会把它当成「目录里已经没有的」删掉——而 `skill_manage`
+   * 刚跟模型说完「从下一轮开始出现在你的索引里」。要等下一次探针（最多一分钟）才自愈，
+   * 中间那几轮里模型会转头告诉用户没保存上（docs/skills.md §7）。
+   *
+   * 判据是时刻，不是「有没有」：**只有发车早于这次写入的那份响应**才需要被豁免，
+   * 更晚发车的响应里没有它就是真的被删了（管理员在界面上删的、或者晋升搬走了）。
+   */
+  private noted = new Map<string, number>()
 
   /** SATUWORK_BOT_ID 对应的那一颗已经钉进名册。 */
   get pinSucceeded(): boolean {
@@ -258,6 +350,8 @@ export class CatalogService extends Service {
       servers?: RemoteServer[]
       models?: { daily?: ModelRole; utility?: ModelRole }
     }
+    // **发车时刻要在 fetch 之前取**：豁免的判据就是「这份响应比那次写入更旧」。
+    const startedAt = Date.now()
     const pinId = (process.env.SATUWORK_BOT_ID || '').trim()
     const catalogUrl = pinId
       ? `${base}/runtime/catalog?botId=${encodeURIComponent(pinId)}`
@@ -287,7 +381,7 @@ export class CatalogService extends Service {
       daily: roleOf(body.models?.daily),
       utility: roleOf(body.models?.utility),
     }
-    this.syncSkills(Array.isArray(body.skills) ? body.skills : [])
+    this.syncSkills(Array.isArray(body.skills) ? body.skills : [], { since: startedAt })
     this.syncServers(Array.isArray(body.servers) ? body.servers : [])
     const pinned = this.pinBots(this.remoteBots)
     await this.connectMcp()
@@ -412,21 +506,67 @@ export class CatalogService extends Service {
     return this.pinOne(bot)
   }
 
-  private syncSkills(items: RemoteSkill[]) {
+  /**
+   * 把 Gateway 刚回过来的那一条 Skill 落进本地缓存。
+   *
+   * `skill_manage` 写完之后调它。**落进去的必须是 Gateway 回来的那一份**——名字怎么
+   * 去重、`mode` 落成什么、正文被截了没有，全是那边说了算；席位自己拼一条等于两边
+   * 各有一套归一化，而它们一定会分叉（docs/skills.md §15 不变量 4）。
+   *
+   * 注意它只补这一条：整份目录（连同别的席位改动）等下一次 `pull` 拉回来。
+   */
+  noteSkill(item: unknown) {
+    const s = item as RemoteSkill
+    if (!s || typeof s.id !== 'string' || !s.id) return
+    // 先记时刻再落盘：万一此刻有一次早发车的 pull 正在途中，它落地时要认得出这一条
+    // 是「刚写的」而不是「已经没了的」（见 noted 那段注释）。
+    this.noted.set(s.id, Date.now())
+    this.syncSkills([s], { prune: false })
+  }
+
+  /** 删掉一条本地缓存的 Skill。`skill_manage` 删完之后调它，不用等下一次同步。 */
+  dropSkill(id: string) {
+    this.noted.delete(id)
+    this.ctx.storage.collection<CachedSkill>('skills').delete(id)
+  }
+
+  /**
+   * 把这一份 Skill 落进本地缓存。
+   *
+   * **默认按全集处理**：目录里没有的那些要跟着删掉。少了这一步，管理员在界面上删掉
+   * 一条、或者模型自己删掉一条，席位这边还留着——模型照着索引去 `skill_view`，读到的
+   * 是一份已经不存在的东西。
+   *
+   * `prune: false` 是补一条（见 noteSkill）；`since` 是这份数据的发车时刻，用来豁免
+   * 那之后才写下的行（见 noted）。
+   */
+  private syncSkills(items: RemoteSkill[], opts: { prune?: boolean; since?: number } = {}) {
     const col = this.ctx.storage.collection<CachedSkill>('skills')
     const now = Date.now()
+    if (opts.prune !== false) {
+      const live = new Set(items.map((s) => s.id))
+      const since = opts.since ?? now
+      for (const row of col.list()) {
+        if (live.has(row.value.id)) continue
+        // 这份响应发车时，那条还不存在——不是「被删了」，是「它还没赶上这一班」。
+        const wroteAt = this.noted.get(row.value.id) ?? 0
+        if (wroteAt > since) continue
+        col.delete(row.value.id)
+      }
+      /**
+       * 记号只在**全量同步**里清：目录这一份认下了的，往后不用再豁免。
+       *
+       * **不能放在剪枝之外清**——`noteSkill` 自己就是一次 `prune: false` 的同步，
+       * 那样它会把刚设下的记号当场删掉，豁免等于没写（这条是第一版真踩到的）。
+       */
+      for (const s of items) this.noted.delete(s.id)
+    }
     for (const s of items) {
       const prev = col.get(s.id)
       const source =
         s.source === '单文件 Skill' || s.source === 'ZIP 包' ? s.source : ('手动编写' as const)
       col.put(s.id, {
-        id: s.id,
-        name: s.name,
-        body: typeof s.body === 'string' ? s.body : '',
-        tags: Array.isArray(s.tags) ? s.tags.map(String) : [],
-        source,
-        ...(s.fileName ? { fileName: s.fileName } : {}),
-        enabled: s.enabled !== false,
+        ...cachedSkillOf({ ...(s as Partial<CachedSkill>), id: s.id, source }),
         createdAt: prev?.createdAt ?? now,
         updatedAt: now,
       })
@@ -495,6 +635,7 @@ export class CatalogService extends Service {
       browser: b.browser && typeof b.browser === 'object'
         ? { on: b.browser.on === true, sites: Array.isArray(b.browser.sites) ? b.browser.sites : [] }
         : undefined,
+      selfSkills: typeof b.selfSkills === 'boolean' ? b.selfSkills : undefined,
       escalate: b.escalate,
       templateVersion: typeof b.templateVersion === 'number' ? b.templateVersion : this.templateVersion,
     })

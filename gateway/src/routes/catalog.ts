@@ -2,7 +2,7 @@
  * Bot / Skill / MCP 的定义构造，以及平台与公司两套 CRUD——它们共用同一个工厂。
  */
 import type { RouteCtx } from './ctx.ts'
-import { COMPANY_BOT_ICONS, CatalogOwner, escalateToOf, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botBrowserOf, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
+import { COMPANY_BOT_ICONS, CatalogOwner, skillDisplayNames, skillFiles, skillModeOf, escalateToOf, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botBrowserOf, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
 import { HttpError, type Req, type Router, json } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { kindOf, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
@@ -73,6 +73,9 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       tags,
       source,
       enabled: b.enabled !== false,
+      // 新建的默认按需。**存量落常驻**（publicSkill 里那个 fallback），两个默认值方向
+      // 相反是有意的：老的那些是在「全文常驻」的年代写的，改口径就是悄悄改行为。
+      mode: skillModeOf(b.mode, '按需'),
       createdAt: now,
       updatedAt: now,
     }
@@ -85,6 +88,8 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
     if (typeof b.body === 'string') def.body = b.body
     if (Array.isArray(b.tags)) def.tags = tagsOf(b.tags)
     if (typeof b.enabled === 'boolean') def.enabled = b.enabled
+    // 没传就不动：常驻还是按需是人在界面上拨的，改正文不该顺手把它改回默认。
+    if (b.mode !== undefined) def.mode = skillModeOf(b.mode, skillModeOf(def.mode, '常驻'))
     const source = def.source === '单文件 Skill' || def.source === 'ZIP 包' ? def.source : '手动编写'
     if (typeof b.body === 'string' && source === 'ZIP 包' && Array.isArray(def.files)) {
       def.files = (def.files as { path: string; text: string }[]).map((f) =>
@@ -341,11 +346,28 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       json(res, 200, { deleted: true, id: item.id, seats: released.length, orphans })
     })
 
+    /**
+     * 一份 Skill 清单：全局 ∪ 本公司 ∪ **这家公司里 Bot 自己写下的那些**（`origin: 'seat'`）。
+     *
+     * 私有档也要出现在这一屏，理由见 docs/skills.md §7：Bot 给自己写下的方法会持续改变
+     * 它的行为，攒在某个地方而界面上翻不到，等于给自己造一个查不了的故障源。
+     *
+     * **重名序号在这里算一次**（skillDisplayNames）。席位那边按「这颗 Bot 看得见的那些」
+     * 另算一次，两份可能对不齐——只可能发生在两颗 Bot 各自写了同名的私有档时，而那时
+     * 席位上的那份才是模型用的，这一屏是给人看的。
+     */
+    async function listSkills(owner: CatalogOwner) {
+      const items = await db.visibleCatalog('skill', owner.companyId)
+      if (owner.companyId) items.push(...(await db.companySeatSkills(owner.companyId)))
+      const names = skillDisplayNames(items)
+      return items.map((i) => publicSkill(i, names.get(i.id)))
+    }
+
     // ── Skill ──────────────────────────────────────────────────────────
     router.get(`${s.base}/skills`, async (req, res) => {
       const owner = await s.read(req)
       json(res, 200, {
-        skills: (await db.visibleCatalog('skill', owner.companyId)).map(publicSkill),
+        skills: await listSkills(owner),
         servers: (await db.visibleCatalog('mcp', owner.companyId)).map(publicServer),
         tags: await knownTags(db, owner.auditCompanyId),
       })
@@ -398,12 +420,50 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       json(res, 200, { tags: await knownTags(db, owner.auditCompanyId), touched })
     })
 
+    /**
+     * 把一条「Bot 自己写的」转成公司 Skill。**人点的，没有自动晋升。**
+     *
+     * 公司目录是所有人共用的东西，往里写只能是人的决定——「攒够几次就自动提升」听着
+     * 省事，实际是让一颗 Bot 的一次误判长到全公司身上（docs/skills.md §7）。
+     *
+     * 只在公司这一层有：全局目录不收私有档。
+     */
+    router.post(`${s.base}/skills/:skillId/promote`, async (req, res) => {
+      const { account, owner } = await s.write(req)
+      if (owner.scope !== 'company') throw new HttpError(400, '私有档只能转成公司 Skill')
+      const item = await db.catalog(req.params.skillId)
+      if (!item || item.kind !== 'skill' || item.scope !== 'user' || item.companyId !== owner.companyId) {
+        throw new HttpError(404, '没有这个 Skill')
+      }
+      const next = await db.promoteSkill(item.id)
+      await auditCatalog(owner, account.id, 'catalog.promote', {
+        kind: 'skill',
+        id: item.id,
+        name: item.name,
+        botId: item.botId,
+      })
+      json(res, 200, { skill: publicSkill(next, next.name) })
+    })
+
     router.get(`${s.base}/skills/:skillId`, async (req, res) => {
       const owner = await s.read(req)
       // 读详情用 visibleItem：列表给的是「全局 ∪ 本公司」，详情却只认本公司的话，
       // 点开自己列表里那条平台发布的 Skill 会得到一句「没有这个 Skill」。写路径下面
       // 两条仍然走 ownedItem——全局项能看不能改，和 Bot 那条路一致。
-      json(res, 200, { skill: publicSkill(await visibleItem(owner, req.params.skillId, 'skill', '没有这个 Skill')) })
+      /**
+       * 详情多带一份**包里的文件清单**（路径 + 字节数，不带正文）。
+       *
+       * 列表那一屏不带它：一屏几十条 Skill，每条再挂一份两百行的清单，翻一次目录页
+       * 就是几百 KB。而详情是点开一条才拉的，那时管理员正想核对包里到底有什么——
+       * 这些文件现在真的会下发到席位、被模型读到。
+       */
+      const item = await visibleItem(owner, req.params.skillId, 'skill', '没有这个 Skill')
+      json(res, 200, {
+        skill: {
+          ...publicSkill(item),
+          files: skillFiles(item).map((f) => ({ path: f.path, bytes: Buffer.byteLength(f.text) })),
+        },
+      })
     })
 
     router.patch(`${s.base}/skills/:skillId`, async (req, res) => {
@@ -419,9 +479,23 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
 
     router.delete(`${s.base}/skills/:skillId`, async (req, res) => {
       const { account, owner } = await s.write(req)
-      const item = await ownedItem(owner, req.params.skillId, 'skill', '没有这个 Skill')
+      /**
+       * 管理员也删得掉「Bot 自己写的」那一档。
+       *
+       * `ownedItem` 只认本公司的 `company` 项，而私有档是 `user` 项——不放这一条，
+       * 界面上那颗「删掉」按钮就是个 404。能看见却处理不了，比看不见更糟：它把一条
+       * 「这颗 Bot 学歪了」的线索变成一次死路（docs/skills.md §7）。
+       */
+      const seat =
+        owner.scope === 'company' ? await db.catalog(req.params.skillId) : undefined
+      const isSeat = seat?.kind === 'skill' && seat.scope === 'user' && seat.companyId === owner.companyId
+      const item = isSeat ? seat! : await ownedItem(owner, req.params.skillId, 'skill', '没有这个 Skill')
       await db.deleteCatalog(item.id)
-      await auditCatalog(owner, account.id, 'catalog.delete', { kind: 'skill', id: item.id })
+      await auditCatalog(owner, account.id, 'catalog.delete', {
+        kind: 'skill',
+        id: item.id,
+        ...(isSeat ? { scope: 'seat', botId: item.botId, name: item.name } : {}),
+      })
       json(res, 200, { deleted: true, id: item.id })
     })
 

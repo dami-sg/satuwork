@@ -432,6 +432,13 @@ export interface CatalogItem {
   companyId: string | null
   /** `scope: 'user'` 时是这条的主人。别的层级为 null。 */
   accountId: string | null
+  /**
+   * 私有档 Skill 归哪颗 Bot。**只有 `kind='skill'` 且 `scope='user'` 时有值。**
+   *
+   * 一颗 Bot 攒下的方法，另一颗看不见——它们的活不一样，把客服学到的话术塞给数据
+   * 分析那颗，是在用一条谁都没同意过的路径改它的行为。
+   */
+  botId: string | null
   name: string
   definition: unknown
   createdAt: number
