@@ -2366,8 +2366,9 @@ export class Db {
     await this.run(
       `insert into seat_runtimes (
          "accountId", "botId", "companyId", "linuxUser", "seatId", "machineId", slot, display, "vncPort", "novncPort",
-         "botPort", "vncPassword", status, "lastError", "deployedAt", "updatedAt", "botVersion"
-       ) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         "botPort", "vncPassword", status, "lastError", "deployedAt", "updatedAt", "botVersion",
+         "deployPhase", "deployStartedAt"
+       ) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        on conflict ("accountId", "botId") do update set
          "companyId"=excluded."companyId",
          "linuxUser"=excluded."linuxUser",
@@ -2383,7 +2384,9 @@ export class Db {
          "lastError"=excluded."lastError",
          "deployedAt"=excluded."deployedAt",
          "updatedAt"=excluded."updatedAt",
-         "botVersion"=excluded."botVersion"`,
+         "botVersion"=excluded."botVersion",
+         "deployPhase"=excluded."deployPhase",
+         "deployStartedAt"=excluded."deployStartedAt"`,
       [
         row.accountId,
         row.botId,
@@ -2402,6 +2405,8 @@ export class Db {
         row.deployedAt,
         row.updatedAt,
         row.botVersion,
+        row.deployPhase,
+        row.deployStartedAt,
       ],
     )
     return (await this.seatRuntime(row.accountId, row.botId))!

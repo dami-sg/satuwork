@@ -472,7 +472,16 @@ Skill / MCP：**定义**在 Gateway，**进程**跑在实例旁边。实例按�
 3. Gateway 从机器池派一台 Debian 给该公司，写入访问地址
 4. 开通最多 3 个账号。每个账号占用一席
 5. 用户登录 Gateway。聊天 UI 留在 Gateway，不跳到公司访问地址
-6. `POST /runtime/deploy` `{ botId }`（必填）；管理员可 `POST /orgs/:id/accounts/:accountId/deploy` `{ botId }`
+6. 员工在界面上建一颗自己的 Bot（`POST /runtime/bots`）——**建完就开装，不用再点一次
+   「部署」**。这条请求只等「登记」（挑机器、定槽位、把席位行写成 `deploying`），机器上
+   那十几分钟丢进后台；装不成的理由（没配机器、没发布版本、槽位满）回在回执的 `deploy`
+   字段里，不把 201 变成 409——Bot 本身是好的，机器修好之后点一下就能装上。
+   要重铺、要指定版本，仍然是 `POST /runtime/deploy` `{ botId }`（同步，等到装完为止）；
+   管理员可 `POST /orgs/:id/accounts/:accountId/deploy` `{ botId }`
+   - 装的这段时间里，界面每两秒问一次 `GET /runtime/deploy/progress?botId=`：Gateway 自己
+     的那份（`status` / `phase` / `elapsedMs`）永远有；机器上那份细进度（第几
+     步、这一步在干什么）由管家现问现答（`GET /seats/:id/progress`，协议 ≥ 3），问不到就
+     只剩粗的那一档
 7. Gateway `PUT {machine.host}/seats/{seatId}` 给机器管家：由管家在本机建 `linuxUser`、写 `$SATUWORK_HOME`、起 `slim-desktop@` 与 `satuwork-bot@`，注入 `SATUWORK_BOT_ID` 与三把票（`sat_` / `sk_sw_` / machine token）
 8. 实例 `POST /internal/instances/:accountId/ready` `{ host, botId }`
 
@@ -784,7 +793,7 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/orgs/:id/bots` | 该公司看得见的**全局** Bot，加上模版改版前留下、已停用的老公司 Bot（只读 / 可删）。员工自建的不在里面 |
 | GET/PUT | `/orgs/:id/bot-template` | 公司 Bot 模版。读：公司里所有人（员工建 Bot 那一屏要显示继承了什么）。写：公司 admin，每次保存 `version` 加一 |
 | POST | `/orgs/:id/bot-template/redeploy` | admin：把本公司已部署的席位挨个重铺一遍（会断对话）。平时不用——席位自己在盯版本号 |
-| CRUD | `/runtime/bots` `/runtime/bots/:id` | 员工自己的 Bot。POST/PATCH **只收身份字段**（名字、头像、简介、开场白、追加提示词），底座一概不收；DELETE 连席位一起拆，会话索引、实例地址、分组里的引用一并清掉（账本和审计不动）。席位拆不掉时 Bot 照删，那行席位留成待清理并回在 `orphans` 里 |
+| CRUD | `/runtime/bots` `/runtime/bots/:id` | 员工自己的 Bot。POST/PATCH **只收身份字段**（名字、头像、简介、开场白、追加提示词），底座一概不收；**POST 建完顺手开装**（后台，回执里带 `deploy: { started }` 或装不成的理由，见第 6 节）；DELETE 连席位一起拆，会话索引、实例地址、分组里的引用一并清掉（账本和审计不动）。席位拆不掉时 Bot 照删，那行席位留成待清理并回在 `orphans` 里 |
 | DELETE | `/platform/machines/:id/seats/:seatId` | `owner`：清理一条**没有主人的席位**（Bot 已删、当时没拆掉）。Bot 还在的席位 409——那是「删 Bot」的事 |
 | GET | `/orgs/:id/sessions` | 会话索引检索，公司 admin |
 | GET | `/orgs/:id/sessions/:sessionId` | **现场**向机器拉全文，Gateway 不存，公司 admin |
@@ -793,7 +802,8 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/runtime/bots` | Gateway 目录名册，200 即使实例未上线；每条 `runtime` 或 null。`runtime` 里除了部署状态（`status`），还带**席位那台机器的通联状态** `machineLink`（`online` / `stale` / `offline` / `unpaired`，判据与平台机器页那盏灯同一份）与 `machineHeartbeatAge`：`status` 落库之后就不动了，答不了「那台机器现在还在不在」，而对话页抬头那盏灯问的正是后者。界面每 30 秒重拉一次这份名册 |
 | GET | `/runtime/bots/:id/session` 等 | 反代到**该 pair**；未部署 503 `实例还没上线` |
 | GET | `/runtime/desktop?botId=` | 该 pair 的桌面（noVNC / 密码 / linuxUser / botVersion）。`botId` 必填 |
-| POST | `/runtime/deploy` | `{ botId }` 必填。给当前席位部署该 Bot |
+| POST | `/runtime/deploy` | `{ botId }` 必填。给当前席位部署该 Bot。**同步**：等到机器上装完才回（最长 15 分钟）。建 Bot 那条自动部署走的是同一段代码，只是把「装」丢进后台 |
+| GET | `/runtime/deploy/progress?botId=` | 装到哪一步了：`status` / `phase`（`queued` / `installing`）/ `elapsedMs`（**已经装了多久，不是起始时刻**——同 heartbeatAge，界面拿绝对时刻自己减本地时钟会在钟不准的电脑上写出「已经装了 10 分钟」），外加机器上那份细进度 `step`（第几步、这一步在干什么，来自管家 `/seats/:id/progress`，协议 ≥ 3；问不到就是 null）。没有席位行不是 404，回 `status: 'none'`——调用方是个每两秒转一圈的轮询，它要分得清「还没登记」和「问错了」 |
 | POST | `/orgs/:id/accounts/:accountId/deploy` | admin：给该账号部署 `{ botId }` |
 | GET | `/runtime/catalog?botId=` | 实例拉目录。有 `botId` 时只返回那一颗。响应带 `templateVersion` 与 `stamp`。**只认席位 `sat_`**：这条会带出 MCP 明文 token 与 env，登录 JWT → 401 |
 | GET | `/runtime/catalog/version?botId=&have=` | 「变了没有」的探针，只回 `templateVersion` + `stamp`。实例每分钟打一次，指纹没动就一个字节都不再取。`have` 是席位自报的当前模版版本，顺路记成同步状态（见上）。同样只认 `sat_` |

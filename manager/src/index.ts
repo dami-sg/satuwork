@@ -7,7 +7,7 @@ import { diagnose } from './diag.ts'
 import { botUnit, clampLines, followLogs, MANAGER_UNIT, recentLogs } from './logs.ts'
 import { checkLogs, defaultKeepMb, logUsage, setDesiredCapMb, startLogWatch, vacuum } from './logdisk.ts'
 import { metrics, startMetrics } from './metrics.ts'
-import { SeatBusy, deploySeat, removeSeat, seat, seatsWithLiveness, type SeatSpec } from './seats.ts'
+import { SeatBusy, deploySeat, removeSeat, seat, seatProgress, seatsWithLiveness, type SeatSpec } from './seats.ts'
 import { confirmVersion, maybeUpgrade, refreshConfirmScript, upgradeDeferred, upgradeError } from './upgrade.ts'
 import { currentTimezone, maybeSetTimezone, timezoneError } from './timezone.ts'
 import { standDown } from './standdown.ts'
@@ -285,6 +285,21 @@ router.get('/seats/:seatId/diag', async (req, res) => {
   requireMachine(req)
   const lines = Number(req.query.get('lines') || 40)
   json(res, 200, { diag: await diagnose(req.params.seatId, Number.isFinite(lines) ? lines : 40) })
+})
+
+/**
+ * 这个席位这会儿装到第几步了。**装的过程中问，装完就没有了。**
+ *
+ * 不认名册（和 diag / logs 那两条不同）：新席位第一次装的时候名册里**本来就还没有
+ * 它**——那一行要等脚本跑完才写下（见 doDeploy 的 commit）。而「第一次装」恰恰是这条
+ * 路唯一真正要用的时刻，按名册拦就等于永远 404。
+ *
+ * 没在装（或者这台机器上那个脚本还没报出第一行）回 `progress: null`，不是 404：调用
+ * 方要分得清「问不到」和「问错了」，前者照旧画粗进度，后者才是个 bug。
+ */
+router.get('/seats/:seatId/progress', async (req, res) => {
+  requireMachine(req)
+  json(res, 200, { seatId: req.params.seatId, progress: seatProgress(req.params.seatId) ?? null })
 })
 
 /**

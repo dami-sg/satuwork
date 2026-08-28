@@ -824,7 +824,8 @@ function fullBotPage(bot, a) {
 }
 
 /**
- * 「新建 Bot」弹窗。员工自己建，建完还没有席位——要真的能聊，得在对话页上再点一次部署。
+ * 「新建 Bot」弹窗。员工自己建，**按下「创建」就开始装**——跳进去的那一页是安装进度，
+ * 装好之后它自己变成对话（见 chat.js 的 chatDeployPrompt）。
  *
  * 只问身份：名字、头像、简介、一段补充说明。其余的来自公司模版，这里不问也不给改。
  */
@@ -863,7 +864,9 @@ function newBotModal() {
       ${state.newBotError ? `<p style="margin: 0; font-size: 13px; color: var(--color-danger, #d33);">${esc(state.newBotError)}</p>` : ''}
       <div style="display: flex; justify-content: flex-end; gap: var(--space-2);">
         <button type="button" class="btn btn-secondary" data-act="new-bot-close">${t('取消')}</button>
-        <button type="button" class="btn btn-primary" data-act="new-bot-save" ${state.busy ? 'disabled' : ''}>${state.busy ? t('创建中…') : t('创建')}</button>
+        ${/* 「创建并安装」不是啰嗦：按下去之后机器上真的开始装东西（一台干净机器上要
+              几分钟），这颗按钮得先把这件事说出来，人才不会在进度屏上愣一下。 */ ''}
+        <button type="button" class="btn btn-primary" data-act="new-bot-save" ${state.busy ? 'disabled' : ''}>${state.busy ? t('创建中…') : t('创建并安装', 'Create and install')}</button>
       </div>
     </div>
   </div>`

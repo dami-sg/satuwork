@@ -262,6 +262,21 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
       assert(list.json.seats.length === 1, `名册 ${list.json.seats.length}`)
     })
 
+    await test('安装进度：认票，没在装就明说「没有」而不是 404', async () => {
+      const anon = await req(mgrBase, 'GET', '/seats/seat-1/progress')
+      assert(anon.status === 401, `无票 ${anon.status}`)
+      const ok = await req(mgrBase, 'GET', '/seats/seat-1/progress', { token: machineTok })
+      assert(ok.status === 200, `进度 ${ok.status} ${ok.text}`)
+      // 这台是 dryRun，脚本压根没跑，所以没有进度——但这**不是** 404：调用方要分得清
+      // 「问不到」和「问错了」，前者照旧画粗进度，后者才是 bug。
+      assert(ok.json.progress === null, `不该有进度：${ok.text}`)
+      // 名册里没有的席位也照答：新席位第一次装的时候那一行还没写下（要等脚本跑完），
+      // 而「第一次装」恰恰是这条路唯一真正要用的时刻——按名册拦就等于永远 404。
+      const fresh = await req(mgrBase, 'GET', '/seats/seat-never-deployed/progress', { token: machineTok })
+      assert(fresh.status === 200, `没登记过的席位 ${fresh.status} ${fresh.text}`)
+      assert(fresh.json.progress === null, `${fresh.text}`)
+    })
+
     /**
      * 换版前的排空。
      *

@@ -770,7 +770,7 @@ window.SATU_I18N = {
   '系统管理员不属于任何公司，负责分配席位、配置模型和供应商密钥。': 'The system owner belongs to no company and handles seats, models and provider keys.',
   'Satuwork 控制面。按账号角色进入系统控制台或公司后台。': 'The Satuwork control plane. Your role decides whether you land in the system console or a company console.',
   'Skill 把一组步骤和 MCP 工具打包成可复用的工作方法。': 'A skill packages a set of steps and MCP tools into a reusable way of working.',
-  '还没有部署。员工打开某个 Bot 后可以点「部署这个 Bot」。': 'Nothing deployed. A member can open a bot and click "Deploy this bot".',
+  '还没有部署。员工自己建一颗 Bot，它就会自己装上。': 'Nothing deployed. It installs itself as soon as the member creates a bot.',
   '点一个标签把它删掉——用到它的 Skill 上那一个也会一起去掉。': 'Click a tag to delete it — it also disappears from every skill using it.',
   '平台公司、用户、已配置供应商，以及日常 / utility 模型。': 'Platform companies, users, configured providers, and the daily / utility models.',
   '已激活的账号退不回待接受。要让 TA 重设口令，用下面的重置链接。': "An active account can't go back to pending. To have them reset a password, use the link below.",

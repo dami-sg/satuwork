@@ -334,6 +334,17 @@ export const DEFAULT_MAX_ACCOUNTS = 10
 
 export type SeatRuntimeStatus = 'none' | 'deploying' | 'ready' | 'error'
 
+/**
+ * `status = 'deploying'` 这段里，**Gateway 自己知道的**那两档。
+ *
+ * - `queued`：席位行登记好了（槽位、端口都定了），还没把规格发给机器管家。
+ * - `installing`：已经发出去了，机器上在装——十几分钟里的绝大部分都停在这一档。
+ *
+ * 机器**里面**那几步（装桌面包、装浏览器、起单元）不在这里：那是管家看得见、Gateway
+ * 看不见的东西，现问现答（见 routes/runtime.ts 的 `/runtime/deploy/progress`），不落库。
+ */
+export type SeatDeployPhase = 'queued' | 'installing'
+
 export interface SeatRuntime {
   accountId: string
   botId: string
@@ -371,6 +382,15 @@ export interface SeatRuntime {
    */
   tplVersion: number | null
   tplSyncedAt: number | null
+  /**
+   * 这一次部署走到哪一档、从什么时候开始的。**只在 `status = 'deploying'` 期间有意义**，
+   * 落地（ready / error）时一起清空。
+   *
+   * `deployStartedAt` 不能用 `updatedAt` 顶：那一列每写一次行都会动，答不了「已经装了
+   * 多久」；也不是 `deployedAt`——那个记的是上一次**装完**的时刻。
+   */
+  deployPhase: SeatDeployPhase | null
+  deployStartedAt: number | null
 }
 
 /** 发布包的种类。bot 装到席位上，manager 是机器管家自己。 */

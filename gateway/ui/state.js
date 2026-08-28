@@ -222,6 +222,17 @@ const state = {
   logLines: [],
   logError: '',
   deployHint: '',
+  /**
+   * 正在装的那颗 Bot 的安装进度：
+   * `{ botId, status, phase, elapsedMs, since, lastError, stale, step: {…} | null }`。
+   *
+   * **带着 botId**：这一份是轮询回来的，人在两次回执之间换了 Bot 是常事，不认名字就会
+   * 把上一个 Bot 的进度画在这一页上（见 chat.js 的 deployProgressNow）。
+   *
+   * `since` 是**本地**锚点（`Date.now() - elapsedMs`，收到那一刻算一次）。服务端给的是
+   * 年龄不是时刻——两台钟差几分钟是常事，而读秒正是个时间问题（见 pollDeployProgress）。
+   */
+  deployProgress: null,
   releases: [],
   latestRelease: null,
   updatingRuntime: false,

@@ -1021,8 +1021,22 @@ document.getElementById('app').addEventListener('click', async (e) => {
       })
       state.newBot = null
       state.busy = false
+      /**
+       * 建完就在装了（服务端顺手开的，见 routes/runtime.ts 的 POST /runtime/bots），
+       * 所以这里把那份进度先摆上——**不等第一轮轮询**。差的那两秒里，屏幕上会是一句
+       * 「还没有部署」外加一颗按钮，而机器上已经开工了：人多半会去按它。
+       */
+      state.deployProgress = data.deploy && data.deploy.started
+        ? { botId: data.bot.id, status: 'deploying', phase: 'queued', since: Date.now(), lastError: null, step: null }
+        : null
+      /**
+       * 装不成的理由要说出来，**但不能让建 Bot 这件事看起来失败了**：Bot 建好了，
+       * 只是这会儿没机器可装（公司还没配机器、没发布过版本、槽位满了）。那一屏上
+       * 「还没有部署」底下的那行小字就是给这句话留的。
+       */
+      state.deployHint = data.deploy && !data.deploy.started ? data.deploy.error || '' : ''
       await loadRuntimeBots().catch(() => {})
-      // 直接进它的对话页：那儿有「部署这个 Bot」，也是建完之后人真正要去的地方。
+      // 直接进它的对话页：装好之后那一页会自己变成对话（见 chat.js 的 ensureDeployWatch）。
       go('/a/' + data.bot.id)
     } catch (err) {
       state.newBotError = err.message

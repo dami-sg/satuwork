@@ -64,10 +64,29 @@ esac
 
 DISPLAY_VAR=":${DISPLAY_NUM}"
 
+# ── 进度自报 ──────────────────────────────────────────────────────────
+# 一行 `@@step <第几步>/<共几步> <这一步在干什么>`，管家按行读（见 manager/src/seats.ts
+# 的 stepOf），最后落到建完 Bot 那一屏的安装进度上。
+#
+# **为什么非要脚本自己报。** 机器上这一段在干净机器上要跑十几分钟，其中 apt 装桌面栈
+# 和装浏览器各占一大截；而这段时间里 Gateway 手上只有一条挂着的 HTTP 请求，它看不见
+# 里面任何一步。人对着一句不动的「部署中…」等十分钟，唯一能做的判断是「是不是卡死
+# 了」——而正确答案通常是「没有，正常就这么久」。
+#
+# 报的是**即将开始的那一步**（在它前面 echo），不是百分比：这几步的时长差着一个数量
+# 级，摊成一个匀速的百分比条只会在装桌面那一步停住不动，比不报还糟。
+#
+# 步数写死在这里，加减步骤时两个数一起改——管家不认识这几步，它只是把括号里的数原样
+# 往上送。
+STEPS=7
+step() { echo "@@step $1/$STEPS $2"; }
+
+step 1 "创建席位账号"
 if ! id "$LINUX_USER" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "" "$LINUX_USER"
 fi
 
+step 2 "安装桌面组件"
 # procps/iproute2：slim-desktop.sh 靠 pkill 和 ss 清上一轮的残留，少了它们那段会静默失效。
 PKGS="xorg xvfb dbus-x11 x11-xserver-utils xfwm4 thunar xfce4-terminal plank picom hsetroot x11vnc novnc python3-websockify procps iproute2"
 NEED=""
@@ -143,8 +162,10 @@ ensure_chrome() {
   echo "chrome: 装不上（源里没有或网络不通），这个席位没有浏览器可用" >&2
   return 0
 }
+step 3 "安装浏览器"
 ensure_chrome
 
+step 4 "铺席位目录"
 mkdir -p /usr/local/bin /etc/systemd/system
 # 账号级：共享工作区。已存在就别动，里面是员工和 bot 的资料。
 mkdir -p "$HOME_DIR" "$WORK_DIR" "$HOME_DIR/.satuwork"
@@ -200,6 +221,7 @@ if ! vnc_out=$(runuser -u "$LINUX_USER" -- x11vnc -storepasswd "$VNC_PASSWORD" "
 fi
 printf 'backend = "xrender";\nvsync = false;\nuse-damage = false;\n' > "$SEAT_DIR/config/picom/picom.conf"
 
+step 5 "拷贝 Bot 程序"
 if [ ! -f "$BOT_EXTRACT/bin/satuwork.mjs" ]; then
   echo "release $BOT_VERSION has no bin/satuwork.mjs" >&2
   exit 42
@@ -246,6 +268,7 @@ EOF_ENV
 chown -R "$LINUX_USER:$LINUX_USER" "$SEAT_DIR"
 chmod 600 "$SEAT_DIR/desktop.env" "$SEAT_DIR/vnc-passwd" "$SEAT_DIR/bot.env"
 
+step 6 "启动桌面与 Bot"
 systemctl daemon-reload
 # **两个都要 restart，不能用 `enable --now`。**
 # `--now` 的语义是「没在跑就起来」——已经在跑就什么都不做。桌面这条以前正是
@@ -337,5 +360,6 @@ verify_seat_listener() {
   echo "$what 还没在端口 $port 上起来（等了 30 秒）；systemd 会继续拉起。" >&2
   echo "若一直不好：journalctl -u slim-desktop@$SEAT_ID" >&2
 }
+step 7 "等桌面起来"
 verify_seat_listener "$RFB" x11vnc
 verify_seat_listener "$HTTP" websockify

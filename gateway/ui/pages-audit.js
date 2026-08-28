@@ -1069,7 +1069,7 @@ function seatEnvModal() {
         })
         .join('') +
       `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('x11vnc 只听 localhost；noVNC 走内网 HTTP。不要当成公网安全。')}</p>`
-    : `<p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${state.seatError || t('还没有部署。员工打开某个 Bot 后可以点「部署这个 Bot」。')}</p>`
+    : `<p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${state.seatError || t('还没有部署。员工自己建一颗 Bot，它就会自己装上。')}</p>`
   return `<div class="gw-modal-backdrop" data-act="seat-close">
     <div class="gw-modal" style="max-width: 520px;" data-stop>
       <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);">
