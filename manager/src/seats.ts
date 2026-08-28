@@ -338,6 +338,12 @@ export async function deploySeat(spec: SeatSpec, token: string): Promise<SeatRec
   } finally {
     inFlight -= 1
     /**
+     * 进度只在装的这段时间里有意义，**每一条出口都要清**（成功、脚本失败、排空等不到、
+     * 抛异常）。留着的话下一个来问进度的人会拿到一句「正在装浏览器」，而机器上早就
+     * 什么都没在跑了——而问进度的恰恰是那个盯着屏幕等的人。
+     */
+    progress.delete(spec.seatId)
+    /**
      * 把静默放开。**每一条出口都要走到这里**：拉包失败、端口收不回来、脚本非零退出、
      * 排空等不到（SeatBusy 那一支是抛出去的），这些都停在了重启之前——闸还落着，而那台
      * 席位这会儿好端端的，不该白白几分钟不接活。
@@ -371,6 +377,41 @@ export function pruneRetired(reg: Record<string, SeatRecord>, retired: string[])
     changed = true
   }
   return changed
+}
+
+/**
+ * 一个正在装的席位这会儿走到哪一步了。
+ *
+ * **只在内存里，装完就没**：它每几秒变一次，而且过期之后一文不值——落盘只会把席位
+ * 名册变成一张高频写的表，还得多一份「进程重启之后这行是不是假的」的判断。管家重启
+ * 时正在跑的那次部署本来也一起没了（见 upgrade.ts 的 busy 门），进度跟着消失是对的。
+ *
+ * `label` 是脚本自己报的中文短句，管家一个字都不解释——加一步、改一句话只动脚本，
+ * 不必两处一起改（见 deploy-seat.sh 的 step）。
+ */
+export interface SeatProgress {
+  step: number
+  total: number
+  label: string
+  /** 这一步是什么时候开始的。界面上「这一步已经跑了多久」靠它。 */
+  at: number
+}
+
+const progress = new Map<string, SeatProgress>()
+
+/** `@@step 3/7 安装浏览器` → 结构化的一步。不是这个形状的一律回 null。 */
+export function stepOf(line: string): Omit<SeatProgress, 'at'> | null {
+  const m = /^@@step (\d+)\/(\d+) (.+)$/.exec(line.trim())
+  if (!m) return null
+  const step = Number(m[1])
+  const total = Number(m[2])
+  if (!Number.isFinite(step) || !Number.isFinite(total) || total <= 0 || step <= 0 || step > total) return null
+  return { step, total, label: m[3].slice(0, 80) }
+}
+
+/** 这个席位此刻的安装进度。没在装（或者这台管家没收到过一行 `@@step`）回 undefined。 */
+export function seatProgress(seatId: string): SeatProgress | undefined {
+  return progress.get(seatId)
 }
 
 async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
@@ -439,6 +480,10 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
 
   const r = await run('bash', [join(seatAssets(), 'deploy-seat.sh')], {
     timeout: 900_000,
+    onLine: (line) => {
+      const hit = stepOf(line)
+      if (hit) progress.set(spec.seatId, { ...hit, at: Date.now() })
+    },
     env: {
       LINUX_USER: spec.linuxUser,
       SEAT_ID: spec.seatId,
@@ -483,6 +528,7 @@ export async function removeSeat(seatId: string): Promise<void> {
 }
 
 async function doRemoveSeat(seatId: string): Promise<void> {
+  progress.delete(seatId)
   const row = seat(seatId)
   if (!row) return
   if (!bootConfig().dryRun) {

@@ -39,6 +39,35 @@ export async function runDeployErrors({ root, test, assert, log }) {
     assert(r.code0 === '兜底', `${r.code0}`)
   })
 
+  // ── 安装进度：脚本报的那几行，管家读不读得出来 ──────────────────────
+  // 建完 Bot 那一屏上的「第 3 步 / 共 7 步 · 安装浏览器」全靠这条链路：脚本 echo 一行
+  // → run() 边跑边按行喂出来 → stepOf 解出来。中间断一处，那一屏就退回到一句不动的
+  // 「正在安装…」，而它和「卡死了」长得一模一样。
+
+  await test('一行进度被切成两半发出来，也要拼回原样', async () => {
+    // 一次 stdout 事件切在行中间是常态。按 \n 直接切会把「@@st | ep 2/7 …」劈成两条，
+    // 于是第二步永远报不出来——而它恰恰是最长的那一步（apt 装桌面栈）。
+    assert(r.steps.length === 2, `没读全：${JSON.stringify(r.steps)}`)
+    assert(r.steps[0] === '1/7 创建席位账号', `第一步 ${r.steps[0]}`)
+    assert(r.steps[1] === '2/7 安装桌面组件', `第二步 ${r.steps[1]}`)
+  })
+
+  await test('不是那个形状的行一律不认，不编一个数出来', async () => {
+    // 越界（9/7）、坏数（x/7）、零总数都要落空：报进度宁可什么都不说，也不能说一个
+    // 编出来的数——那一屏上人正照着它判断「还要等多久」。
+    assert(r.stepBad.every((x) => x === null), `认了不该认的：${JSON.stringify(r.stepBad)}`)
+  })
+
+  await test('脚本里的步号和 STEPS 对得上', async () => {
+    // 加一步却忘了改 STEPS，进度条会在中途走到头然后停住——那正是它要治的病。
+    const want = Array.from({ length: r.scriptTotal }, (_, i) => i + 1)
+    assert(r.scriptTotal > 0, `deploy-seat.sh 里没有 STEPS：${r.scriptTotal}`)
+    assert(
+      JSON.stringify(r.scriptNums) === JSON.stringify(want),
+      `步号要从 1 连到 ${r.scriptTotal}，实际是 ${JSON.stringify(r.scriptNums)}`,
+    )
+  })
+
   // ── 端口被占着时，敢不敢清 ────────────────────────────────────────
   // 现场：席位部署 exited 43，5910 上蹲着一个已经拆掉的席位的 x11vnc——单元停了，
   // 进程从 logind session 里逃了出来（PAMName=login + KillUserProcesses=no）。

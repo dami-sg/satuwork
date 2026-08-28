@@ -1253,6 +1253,28 @@
 .sw-nodeploy .btn { margin-top: var(--space-2); }
 .sw-nodeploy-hint { font-size: 12px !important; }
 
+/* ── 安装进度 ─────────────────────────────────────────────────────────
+   建完 Bot 之后那一屏。条子按**步数**走，不按时间：几步的时长差着一个数量级，
+   按时间摊出来的匀速条会在装桌面那一步停住不动（见 chat.js 的 installProgressBody）。
+   管家报不出第几步时整根条子不画——一根不动的条比没有条更像卡住了。 */
+.sw-install-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--muted, rgba(127, 127, 127, 0.18));
+  overflow: hidden;
+}
+.sw-install-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-accent-500, var(--foreground));
+  /* 步与步之间平滑地推过去。跳变会让人以为刷新了一次页面。 */
+  transition: width 0.4s ease;
+}
+.sw-install-step { margin: 0; font-size: 13px !important; color: var(--color-text) !important; }
+.sw-install-since { margin: 0; font-size: 12px !important; }
+
 /* 已经发出去、还没收到回执的那一条。淡一档：它是真的在路上，不是画着玩的，所以要
    看得见；但和已经落库的消息不能长得一模一样。 */
 .sw-msg[data-pending="1"] { opacity: 0.6; }

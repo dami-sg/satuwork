@@ -4331,17 +4331,97 @@ function machineDownBanner() {
  * 渲染成文本会占掉半屏，而且没人会去手抄它——它唯一的用法就是点开。
  */
 /**
+ * 这一刻这一屏对着的那个 Bot 的安装进度。**别的 Bot 的那一份不作数**——轮询是异步的，
+ * 人在两次回执之间换了 Bot，认领上一份就等于把别人的进度画在这一页上。
+ */
+function deployProgressNow() {
+  const p = state.deployProgress
+  return p && p.botId === chatBotIdNow() ? p : null
+}
+
+/**
  * 这个 Bot 的席位走到哪一步了：`unbound` / `none` / `deploying` / `error` / `ready`。
  *
  * 抽出来是因为有两处要看它——对话正文中间那块「去部署」，和右栏。两处各判一次的话，
  * 迟早出现「中间说没部署、右栏说在线」这种自相矛盾的画面。
+ *
+ * **进度那一份优先于 desktopRuntime。** 它每两秒刷一次，而 desktopRuntime 只在进页面
+ * 和部署收尾时取；刚建完的那颗 Bot 尤其——那一刻 `/runtime/desktop` 完全可能还是 404
+ * （席位行刚落库、或者后台那次登记还差几百毫秒），照着它画就是一句「还没有部署」外加
+ * 一颗按钮，而机器上已经开工了。
  */
 function seatStage() {
   if (!(state.runtimeMachine && state.runtimeMachine.paired)) return 'unbound'
+  const p = deployProgressNow()
+  /**
+   * **`stalled` 和 `deploying` 必须分开。**
+   *
+   * 库里那一行两种情况长得一模一样，可人要做的事完全相反：一个是接着等（什么都不用
+   * 按），一个是这次装到一半没人接着装了（非按一下不可）。混成一档的代价是后者——
+   * 一屏永远走不完的读秒，外加一颗都没有的按钮。判据由服务端给（见
+   * `/runtime/deploy/progress` 的 stale）：只有那个进程知道自己手上有没有这活儿。
+   */
+  if (p && p.status === 'deploying') return p.stale ? 'stalled' : 'deploying'
   const mine = state.desktopRuntime
-  if (!mine || mine.status === 'none') return 'none'
+  if (!mine || mine.status === 'none') return p && p.status === 'error' ? 'error' : 'none'
   if (mine.status === 'error' || mine.status === 'deploying') return mine.status
   return mine.status === 'ready' ? 'ready' : 'none'
+}
+
+/** 上一次部署失败的理由。两份里哪份有话说算哪份（见 seatStage 里那段）。 */
+function seatErrorText() {
+  const p = deployProgressNow()
+  return (state.desktopRuntime && state.desktopRuntime.lastError) || (p && p.lastError) || t('部署失败')
+}
+
+/**
+ * 安装进度那一屏的正文。
+ *
+ * 三档，**说得出多少就说多少，不摊成一根匀速的百分比条**：机器上那几步的时长差着一个
+ * 数量级（apt 装桌面栈占大半，写 systemd 单元一秒都不到），摊平的进度条只会在最长的那
+ * 一步上停住不动——比不画还糟，因为它明确地在骗人。
+ *
+ *   · 管家报得出第几步（协议 3 起）→ 「第 3 步 / 共 7 步 · 安装浏览器」，带一根按步数
+ *     走的条；
+ *   · 只知道已经下发了 → 「机器上正在安装」；
+ *   · 刚登记完还没发出去 → 「正在下发到机器」。
+ *
+ * 读秒那一格套的是现成的 `.sw-time[data-running]`（见 tickClocks）：每秒自己往前走，
+ * 不用为这一屏再挂一个定时器。**它是这屏上最要紧的一句话**——人真正想知道的是「这是
+ * 正常的等，还是卡住了」，而唯一能回答的就是「已经装了多久」。
+ */
+function installProgressBody() {
+  const p = deployProgressNow()
+  const step = p && p.step
+  const rows = []
+  if (step && step.total > 0) {
+    const pct = Math.max(4, Math.min(100, Math.round((step.step / step.total) * 100)))
+    rows.push(`<div class="sw-install-bar"><span style="width:${pct}%"></span></div>`)
+    rows.push(
+      `<p class="sw-install-step">${esc(
+        t('第 %a 步 / 共 %b 步', 'Step %a of %b').replace('%a', String(step.step)).replace('%b', String(step.total)),
+      )} · ${esc(step.label || '')}</p>`,
+    )
+  } else {
+    rows.push(
+      `<p class="sw-install-step">${esc(
+        p && p.phase === 'queued'
+          ? t('正在下发到机器…', 'Sending it to the machine…')
+          : t('机器上正在安装…', 'Installing on the machine…'),
+      )}</p>`,
+    )
+  }
+  // **本地锚点，不是服务端时刻**（见 pollDeployProgress 里那段）：读秒往后每一下都由
+  // 这台电脑自己的时钟走，两台钟差多少都不进这个数。
+  const since = (p && p.since) || 0
+  if (since) {
+    rows.push(
+      `<p class="sw-install-since">${t('已经装了', 'Running for')} <span class="sw-time" data-running data-since="${since}">${esc(
+        elapsedText(Date.now() - since),
+      )}</span></p>`,
+    )
+  }
+  return rows.join('')
 }
 
 /**
@@ -4361,15 +4441,37 @@ function chatDeployPrompt(botId) {
   let title = ''
   let body = ''
   let action = ''
+  let extra = ''
   if (stage === 'unbound') {
     title = t('公司的运行机器还没配好')
     body = t('公司的运行机器还没有配对机器管家，请系统管理员在公司详情里生成配对码。')
   } else if (stage === 'deploying') {
-    title = t('正在部署…')
-    body = t('机器那边正在装这个席位，通常一两分钟。装好之后这里会自己变成对话。')
+    /**
+     * 建完 Bot 之后人就坐在这一屏上等。所以这里说的不能只是「部署中…」——那句话在第
+     * 一秒和第十分钟长得一模一样，人唯一能做的判断变成「是不是卡死了」，而正确答案
+     * 通常是「没有，第一次装就是这么久」。
+     *
+     * 三句话，一句都不能少：**在装什么**（第几步）、**装了多久**（读秒）、**要不要
+     * 守着**（不用，装好自己会变成对话）。
+     */
+    title = t('正在安装「%s」…', 'Setting up “%s”…').replace('%s', name)
+    body = t(
+      '第一次装要在机器上铺一整套桌面，通常几分钟。装好之后这一页会自己变成对话，不用守着——也可以先去做别的。',
+      'The first install lays down a whole desktop on the machine and usually takes a few minutes. This page turns into the conversation on its own once it is done.',
+    )
+    extra = installProgressBody()
+  } else if (stage === 'stalled') {
+    // 说清楚**发生了什么**、**现在是什么状态**、**该按哪一下**。只写一句「部署失败」
+    // 的话，人会去查一个根本不存在的故障——机器好好的，只是这次装没人接着做完。
+    title = t('上一次安装没做完', 'The last install did not finish')
+    body = t(
+      '装到一半中断了（多半是 Gateway 重启过），机器上没有人接着装。点「重新部署」再来一次，已经装好的部分会复用。',
+      'It stopped halfway — most likely the Gateway restarted — and nothing is installing it now. Hit “Redeploy” to run it again; whatever was already installed is reused.',
+    )
+    action = deployBotButton(botId, t('重新部署'))
   } else if (stage === 'error') {
     title = t('上一次部署没成功')
-    body = (state.desktopRuntime && state.desktopRuntime.lastError) || t('部署失败')
+    body = seatErrorText()
     action = deployBotButton(botId, t('重新部署'))
   } else {
     title = t('%s 还没有部署').replace('%s', name)
@@ -4381,7 +4483,7 @@ function chatDeployPrompt(botId) {
     <span class="sw-nodeploy-icon">${svg(MONITOR, 26)}</span>
     <h2>${esc(title)}</h2>
     <p>${esc(body)}</p>
-    ${action}${hint}
+    ${extra}${action}${hint}
   </div></div>`
 }
 
@@ -4401,9 +4503,16 @@ function chatMachinePanel() {
   } else if (stage === 'none') {
     rows.push(`<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('实例还没上线')}</p>`)
   } else if (stage === 'error') {
-    rows.push(`<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(mine.lastError || t('部署失败'))}</div>`)
+    // **不能读 mine.lastError**：这一档现在也可能只有进度那一份说得出话（席位行还没
+    // 落到这个浏览器手上），那时 mine 是 null，读它就是一个白屏。
+    rows.push(`<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(seatErrorText())}</div>`)
+  } else if (stage === 'stalled') {
+    rows.push(`<div class="gw-flash gw-flash-err" style="margin: 0;">${esc(t('上一次安装没做完', 'The last install did not finish'))}</div>`)
   } else if (stage === 'deploying') {
-    rows.push(`<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${t('部署中…')}</p>`)
+    const p = deployProgressNow()
+    const step = p && p.step
+    const line = step ? `${t('正在安装', 'Installing')} · ${step.label || ''}` : t('正在安装…', 'Installing…')
+    rows.push(`<p style="margin: 0; font-size: 12px; color: var(--muted-foreground);">${esc(line)}</p>`)
   }
 
   /**
@@ -6565,15 +6674,17 @@ async function pollSeatLinks() {
   if (isOwner()) return
   // 名册里每个 Bot 的通联状态都在这一份里，一次请求就够——一个 Bot 一次的话，
   // 名册长一点就是每半分钟一串请求，而它们全在问同一件事。
-  const before = (state.runtimeBots || []).map((b) => b.id + ':' + seatLinkOf(b)).join(',')
+  // 键里带上部署状态：名单上那一行「正在安装…」要在装完的时候自己消失，而通联状态
+  // 从头到尾都是 online——只比它的话，那句话会一直挂到人点了点什么才换掉。
+  const rosterKey = () => (state.runtimeBots || []).map((b) => b.id + ':' + seatLinkOf(b) + ':' + ((b.runtime && b.runtime.status) || '')).join(',')
+  const before = rosterKey()
   try {
     await loadRuntimeBots()
   } catch {
     // 拉不动就算了：这一份只用来点亮那盏灯，不该因为一次网络抖动把界面上的话改掉。
     return
   }
-  const after = (state.runtimeBots || []).map((b) => b.id + ':' + seatLinkOf(b)).join(',')
-  if (after === before) return
+  if (rosterKey() === before) return
   // 别的页上没有这盏灯，也没有那条横幅——重绘只会把人正在填的表单换掉。回到对话页时
   // loadPage 自己会重画。
   if (isChatPath(state.path)) render()
@@ -6619,9 +6730,145 @@ async function updateOrgRuntime() {
   }
 }
 
+/* ── 安装进度的轮询 ──────────────────────────────────────────────────
+   建完 Bot 之后自动开装（见 routes/runtime.ts 的 POST /runtime/bots），装完这一页要
+   **自己**变成对话——让人为了知道「好了没有」去刷新页面，等于把刚省掉的那一次点击
+   又还回去。 */
+
+/** 两秒一轮。管家那份进度也就这个粒度（一步一变），再密只是白问。 */
+const DEPLOY_WATCH_MS = 2000
+let deployWatchTimer = null
+let deployWatchBound = false
+
+/**
+ * 该不该转：这一页对着的那颗 Bot 正在装（或者刚建完、席位行还没落库）。
+ *
+ * 装完就停——**这不是一个长明的定时器**。一台已经好了的机器上每两秒问一次「装到哪儿
+ * 了」，问的是一件没有答案的事，而它还要一路敲到那台机器上去。
+ */
+function ensureDeployWatch() {
+  const want = !isOwner() && isChatPath(state.path) && Boolean(chatBotIdNow()) && seatStage() === 'deploying'
+  if (want && !deployWatchTimer) {
+    deployWatchTimer = setInterval(() => {
+      if (document.hidden) return
+      void pollDeployProgress()
+    }, DEPLOY_WATCH_MS)
+    // Node 环境（e2e 垫片）下别拽着进程不退出；浏览器里 setInterval 是数字，没有 unref。
+    if (deployWatchTimer && typeof deployWatchTimer.unref === 'function') deployWatchTimer.unref()
+    // 第一轮**当场就问**，不等这两秒：进这一页的那一瞬间，屏幕上那份进度可能是几分钟
+    // 前留下的（换页回来、刷新过），而人正是为了看它才进来的。
+    void pollDeployProgress()
+    // 切回前台补一次，理由同待办和席位那两条轮询：后台标签页里不转，回来时立刻补上
+    // 那一眼。**只挂一次**——这个函数每次 render 都会跑到。
+    if (!deployWatchBound) {
+      deployWatchBound = true
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && deployWatchTimer) void pollDeployProgress()
+      })
+    }
+  } else if (!want && deployWatchTimer) {
+    clearInterval(deployWatchTimer)
+    deployWatchTimer = null
+  }
+}
+
+/**
+ * 上一轮还没跑完。**这道闸非有不可。**
+ *
+ * 收尾那一段（拉席位、拉名册、接会话）比两秒长是常事——尤其席位刚 ready、bot 进程还
+ * 没上线的时候，正是这一段最慢的时刻。没有闸的话下一次 tick 会叠进来再跑一遍收尾，而
+ * `ensureChatSession` 的第一句是 `cancelSessionRetry()`：它会把上一轮排好的退避重试取
+ * 消掉，紧接着自己再发一次——退避于是被换成每两秒一记的硬打，而这条路是要经管家转到
+ * 席位机器上去的。
+ */
+let deployPolling = false
+
+/**
+ * 问一次「装到哪一步了」，装好了就把这一页接上。
+ *
+ * **进度拉不动不清空 state.deployProgress**：一次网络抖动会让这一屏从「第 3 步 · 安装
+ * 浏览器」跳回「还没有部署」外加一颗按钮——而机器上什么都没变。宁可让那个读秒继续走。
+ */
+async function pollDeployProgress() {
+  const id = chatBotIdNow()
+  if (!id || isOwner() || deployPolling) return
+  deployPolling = true
+  try {
+    await runDeployPoll(id)
+  } finally {
+    deployPolling = false
+  }
+}
+
+async function runDeployPoll(id) {
+  let data
+  try {
+    data = await api('GET', '/runtime/deploy/progress?botId=' + encodeURIComponent(id))
+  } catch {
+    return
+  }
+  // 这一份是给 `id` 拉的。人在等待期间换了 Bot 的话，认领它就是把别人的进度画在这一页上。
+  if (chatBotIdNow() !== id) return
+  const before = deployProgressNow()
+  /**
+   * **年龄在收到的这一刻锚成本地时刻**，此后读秒走的是本机时钟。
+   *
+   * 服务端给的是「已经装了多久」而不是「什么时候开始的」（见 `/runtime/deploy/progress`）：
+   * 员工的电脑和 Gateway 差几分钟是常事，拿绝对时刻自己减本地时钟，一台快十分钟的电脑
+   * 会在刚按下「创建」的那一秒写出「已经装了 10:03」。
+   *
+   * 锚点**只在这里算一次**：每轮轮询都重锚的话，网络抖一下这个数就会往回跳，而人正盯着
+   * 它判断「是不是卡住了」。同一次安装（状态还是 deploying、上一轮也是）就沿用上一次的
+   * 锚点，只有换了一次安装才重新锚。
+   */
+  const keepAnchor = before && before.status === 'deploying' && data.status === 'deploying' && before.since
+  const age = Number(data.elapsedMs)
+  const since = keepAnchor || (Number.isFinite(age) ? Date.now() - Math.max(0, age) : 0)
+  state.deployProgress = { botId: id, ...data, since }
+  if (data.status === 'deploying') {
+    // 装的过程中不整页重绘：那一屏上只有两处会动（第几步、读秒），而读秒自己每秒走
+    // （tickClocks）。步骤没变就一个字都不用改。
+    const same = before && before.status === 'deploying' && stepKeyOf(before) === stepKeyOf(state.deployProgress)
+    if (!same) render()
+    ensureClockTick()
+    return
+  }
+  // 落地了（ready / error / none）：把席位那一份、名册那一份都换成新的，再整页重绘。
+  await loadDesktopRuntime(id)
+  await loadRuntimeBots().catch(() => {})
+  if (data.status === 'ready') {
+    state.runtimeError = ''
+    state.deployHint = ''
+    // 会话要现开一条：这颗 Bot 是刚装好的，之前每一次 ensureChatSession 都撞在 503 上。
+    //
+    // 吞掉它抛的那几种（这颗 Bot 不是你的、已经删了）：这是一条**定时器**里的调用，
+    // 没有人接着这个 promise，抛出去只会变成一条 unhandled rejection；而这一页该说的
+    // 话由下面的 render 按 state 画，不靠这次异常。
+    await ensureChatSession(id).catch(() => {})
+  }
+  ensureDeployWatch()
+  render()
+}
+
+/** 「这一屏此刻画的是什么」的身份。一个字都没变就没必要重绘。 */
+function stepKeyOf(p) {
+  const s = p && p.step
+  // stale 也在里面：它一翻，这一屏就从「正在安装」换成「上一次安装没做完」，
+  // 而 phase 和 step 那时通常一个都没动——漏掉它就是那句话永远换不过来。
+  return (p && p.phase) + '/' + (p && p.stale ? 'stale' : 'live') + '/' + (s ? s.step + '/' + s.total + '/' + s.label : '-')
+}
+
 async function deployMyRuntime(botId, opts = {}) {
   const id = botId || chatBotIdOf(state.path) || state.chatBotId
   if (state.deploying || isOwner() || !id) return
+  /**
+   * **手上那份进度先扔掉。**
+   *
+   * 它可能正写着「上一次安装没做完」——而人按的正是那颗「重新部署」。留着它，seatStage
+   * 会一直照它说话（进度那一份优先），于是这一次装完了，屏幕上还挂着上一次没做完的那
+   * 句话，按钮也还是那颗。下一轮轮询会把新的那份填回来。
+   */
+  if (state.deployProgress && state.deployProgress.botId === id) state.deployProgress = null
   state.deploying = true
   state.deployHint = opts.update ? '正在重新部署…' : '正在部署…'
   render()
