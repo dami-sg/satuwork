@@ -3309,12 +3309,16 @@ export class Db {
       // 没指定就是 utility：省 token 的那一档是默认（见 RoutineModelRole）。
       modelRole: input.modelRole ?? 'utility',
       nextRunAt: input.nextRunAt ?? null,
+      // 新建的一条不欠任何重试。这两格明写出来，不靠库里的 default——返回的这个对象
+      // 就是调用方拿去用的那一份，少一格就是一个 undefined 混进业务里。
+      retryAt: null,
+      retryCount: 0,
       createdAt: now,
       updatedAt: now,
     }
     await this.run(
-      'insert into routines (id, "botId", "accountId", "companyId", name, instruction, active, triggers, "modelRole", "nextRunAt", "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?,?,?,?)',
-      [row.id, row.botId, row.accountId, row.companyId, row.name, row.instruction, row.active, JSON.stringify(row.triggers), row.modelRole, row.nextRunAt, row.createdAt, row.updatedAt],
+      'insert into routines (id, "botId", "accountId", "companyId", name, instruction, active, triggers, "modelRole", "nextRunAt", "retryAt", "retryCount", "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [row.id, row.botId, row.accountId, row.companyId, row.name, row.instruction, row.active, JSON.stringify(row.triggers), row.modelRole, row.nextRunAt, row.retryAt, row.retryCount, row.createdAt, row.updatedAt],
     )
     return row
   }
@@ -3332,6 +3336,8 @@ export class Db {
       triggers?: RoutineTrigger[]
       modelRole?: RoutineModelRole
       nextRunAt?: number | null
+      retryAt?: number | null
+      retryCount?: number
     },
   ): Promise<Routine | undefined> {
     const sets: string[] = []
@@ -3342,6 +3348,8 @@ export class Db {
     if (patch.triggers !== undefined) (sets.push('triggers = ?'), args.push(JSON.stringify(patch.triggers)))
     if (patch.modelRole !== undefined) (sets.push('"modelRole" = ?'), args.push(patch.modelRole))
     if (patch.nextRunAt !== undefined) (sets.push('"nextRunAt" = ?'), args.push(patch.nextRunAt))
+    if (patch.retryAt !== undefined) (sets.push('"retryAt" = ?'), args.push(patch.retryAt))
+    if (patch.retryCount !== undefined) (sets.push('"retryCount" = ?'), args.push(patch.retryCount))
     sets.push('"updatedAt" = ?')
     args.push(Date.now(), id)
     await this.run(`update routines set ${sets.join(', ')} where id = ?`, args)
@@ -3369,13 +3377,53 @@ export class Db {
    * `rowCount` 是 1，另一个拿到 0 就跳过。少了这一句，每天九点的日报会发两份。
    */
   async claimRoutine(id: string, expectedNextRunAt: number, nextRunAt: number | null): Promise<boolean> {
-    const n = await this.run('update routines set "nextRunAt" = ?, "updatedAt" = ? where id = ? and "nextRunAt" = ?', [
-      nextRunAt,
+    // **抢到新的一次，就把欠着的那次重试一笔勾销**（见 routines.ts 的重试那一节）。
+    // 不勾销的话，21:00 那次失败排下的 21:05 重试，会和 22:00 到点的那一次一起排着
+    // ——而 22:00 这一次做的就是同一件事，重试已经没有意义了。
+    const n = await this.run(
+      'update routines set "nextRunAt" = ?, "retryAt" = null, "retryCount" = 0, "updatedAt" = ? where id = ? and "nextRunAt" = ?',
+      [nextRunAt, Date.now(), id, expectedNextRunAt],
+    )
+    return n > 0
+  }
+
+  /** 欠着重试、而且到点了的那几条。和 dueRoutines 分开问：两条路的处置完全不同。 */
+  async dueRoutineRetries(nowMs: number, limit = 20): Promise<Routine[]> {
+    const rows = await this.many(
+      'select * from routines where active and "retryAt" is not null and "retryAt" <= ? order by "retryAt" limit ?',
+      [nowMs, Math.max(1, Math.trunc(limit))],
+    )
+    return rows.map(routineOf)
+  }
+
+  /**
+   * 抢一次重试：把 `retryAt` 抹掉，**但留着 `retryCount`**——它记的是「这一串补跑到
+   * 第几次了」，抢的时候归零就等于每次都从 5 分钟重新数，永远停不下来。
+   *
+   * 同 claimRoutine，条件里带旧值：两个 Gateway 进程同时扫到同一条时只有一个抢得到。
+   */
+  async claimRoutineRetry(id: string, expectedRetryAt: number): Promise<boolean> {
+    const n = await this.run('update routines set "retryAt" = null, "updatedAt" = ? where id = ? and "retryAt" = ?', [
       Date.now(),
       id,
-      expectedNextRunAt,
+      expectedRetryAt,
     ])
     return n > 0
+  }
+
+  /** 排下一次重试。`retryCount` 由调用方算，因为「还剩几次」的规矩在调度器那边。 */
+  async armRoutineRetry(id: string, retryAt: number, retryCount: number): Promise<void> {
+    await this.run('update routines set "retryAt" = ?, "retryCount" = ?, "updatedAt" = ? where id = ?', [
+      retryAt,
+      Math.max(0, Math.trunc(retryCount)),
+      Date.now(),
+      id,
+    ])
+  }
+
+  /** 这一串补跑结束了（跑成了、停用了、或者不该再补）：两格一起清干净。 */
+  async clearRoutineRetry(id: string): Promise<void> {
+    await this.run('update routines set "retryAt" = null, "retryCount" = 0, "updatedAt" = ? where id = ?', [Date.now(), id])
   }
 
   async insertRoutineRun(input: {

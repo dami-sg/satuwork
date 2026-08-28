@@ -1016,6 +1016,16 @@ export interface Routine {
   /** 下一次什么时候跑。null = 不排（停用、没触发器、或者算不出来）。 */
   nextRunAt: number | null
   /**
+   * 欠着的那次重试排在什么时候。null = 不欠（绝大多数时候的样子）。
+   *
+   * **和 `nextRunAt` 分开两列**，不是把重试写回下一次那一格：写回去的话，一次失败
+   * 会把「每天 21:00」挪成「21:05」，而界面上那行「下一次」也跟着变——人看到的是
+   * 自己设的时间被系统改掉了。重试是这一次的补救，排期是排期，两件事。
+   */
+  retryAt: number | null
+  /** 这一串已经补跑过几次。跑成了、或者到点开始新的一次，都归零（见 routines.ts）。 */
+  retryCount: number
+  /**
    * **没有 `lastRunAt` 这一列。** 「上一次是什么时候、跑成没跑成」的唯一出处是
    * `routine_runs`。在这儿再存一份的话，它只能记「上一次被调度器抢到」——而抢到之后
    * 还可能因为指令空着、错过太久、上一轮没跑完而根本没跑，于是这个字段会在界面上
@@ -1123,7 +1133,14 @@ export const HANDOFF_LIVE: HandoffState[] = ['open', 'claimed', 'returned']
 export const HANDOFF_STATES: HandoffState[] = [...HANDOFF_LIVE, 'closed', 'expired', 'cancelled']
 
 export type RoutineRunStatus = 'running' | 'ok' | 'error'
-export type RoutineRunTrigger = 'schedule' | 'manual'
+/**
+ * 这一次是谁敲的。
+ *
+ * `retry` 单独算一种，不并进 `schedule`：流水那一列上，「到点跑的」和「上一次砸了
+ * 补的」是两件要分得开的事——一条每天都要补跑一次才成的任务，并在一起看就是一列
+ * 正常的绿勾，而它其实每天都在第一跳上摔一次。
+ */
+export type RoutineRunTrigger = 'schedule' | 'manual' | 'retry'
 
 export interface RoutineRun {
   id: string

@@ -489,6 +489,8 @@ export function routineOf(r: Row): Routine {
     triggers: parseRoutineTriggers(r.triggers),
     modelRole: parseRoutineModelRole(r.modelRole),
     nextRunAt: numOrNull(r.nextRunAt),
+    retryAt: numOrNull(r.retryAt),
+    retryCount: num(r.retryCount),
     createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt),
   }

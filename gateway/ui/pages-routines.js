@@ -179,6 +179,7 @@ function routineDetailPanel() {
         <button type="button" class="sw-rt-add" data-act="routine-trigger-add">${svg(PLUS_ICON, 14)}${t('添加时间')}</button>
       </div>
       ${routine.active && routine.nextRunAt ? `<p class="sw-rt-next">${t('下一次')} ${esc(rtRunTime(routine.nextRunAt, rtTzOf(routine)))}</p>` : ''}
+      ${routineRetryLine(routine)}
     </div>
     ${routineModelField(routine)}
     <div class="field">
@@ -248,10 +249,38 @@ function routineTriggerRow(trigger, i) {
   </div>`
 }
 
+/**
+ * 「上一次砸了，等会儿自己再试一次」。
+ *
+ * **要写出来。** 不写的话，屏上只有一条红的运行记录，人看到的是「今天这件事没做成」，
+ * 于是他自己去点试跑——而十分钟后那次补跑照样会跑，同一件事做了两遍。写第几次也是
+ * 同一个道理：他要判断的是「等它自己好」还是「现在就去看一眼」，而那取决于还剩几次。
+ *
+ * 补跑排着的那几分钟里这一栏**不轮询**（见 routinePollWant：只有真的有一轮在跑时才
+ * 转）。等五分钟每四秒问一次，为的是把一行字提前几秒换掉，不值当；人回头刷新、或者
+ * 补跑真的跑起来之后再看到，都不晚。
+ */
+function routineRetryLine(routine) {
+  if (!routine.active || !routine.retryAt) return ''
+  return `<p class="sw-rt-next">${esc(
+    t('上一次没跑成，%s 再试一次（第 %n 次，共 %m 次）')
+      .replace('%s', rtRunTime(routine.retryAt, rtTzOf(routine)))
+      .replace('%n', String(routine.retryCount || 1))
+      .replace('%m', String(routine.retryMax || 3)),
+  )}</p>`
+}
+
 function routineRunRow(run, routine) {
   const tz = rtTzOf(routine)
   const label = run.status === 'running' ? t('正在跑…') : rtRunTime(run.startedAt, tz)
+  /**
+   * 「试跑」和「重试」各挂各的牌子。
+   *
+   * 补跑不标出来的话，一条**每天都要补一次才成**的任务，在这一列上就是一串正常的
+   * 绿勾——而它其实每天都在第一跳上摔一次。
+   */
   const manual = run.trigger === 'manual' ? `<span class="sw-rt-tag">${t('试跑')}</span>` : ''
+  const retried = run.trigger === 'retry' ? `<span class="sw-rt-tag">${t('重试')}</span>` : ''
   const mark =
     run.status === 'running'
       ? `<span class="sw-rt-spin" aria-hidden="true"></span>`
@@ -259,7 +288,7 @@ function routineRunRow(run, routine) {
       ? `<span class="sw-rt-ok">${svg(RT_CHECK, 15)}</span>`
       : `<span class="sw-rt-bad" title="${esc(run.error || t('失败'))}">${svg(RT_BANG, 15)}</span>`
   return `<li class="sw-rt-run">
-    <span class="sw-rt-runtime">${esc(label)}</span>${manual}
+    <span class="sw-rt-runtime">${esc(label)}</span>${manual}${retried}
     <span class="sw-spacer"></span>${mark}
   </li>`
 }
@@ -332,6 +361,9 @@ function routineShot(id) {
           m: row.modelRole,
           t: row.triggers || [],
           x: row.nextRunAt,
+          // 补跑排上、或者排到了第几次，屏上那句话跟着变——不比这两格就画不出来。
+          y: row.retryAt,
+          z: row.retryCount,
         }
       : null,
     // 流水只比看得见的那几样。`runs` 整个 JSON 也行，但那一份里还有 sessionId 之类
