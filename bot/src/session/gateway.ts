@@ -367,13 +367,20 @@ export function apply(ctx: Context) {
    * 正是天天在长的那一条。会话的 kind 是根事件上的东西，一旦定下就不会变，缓存不会过期。
    */
   const sessionKind = new Map<string, boolean>()
-  const isTask = async (sessionId: string): Promise<boolean> => {
+  /**
+   * 这条会话是不是**旁支**（委派的子会话、看板的卡片会话）——旁支不上报索引。
+   *
+   * **判据是「不是 main」，不是「是 task」。** 照后者写的话，卡片会话会一条条报上控制面，
+   * 而那份索引回答的是「这个人有哪几条对话」（docs/kanban.md 口径二）。
+   */
+  const isSideSession = async (sessionId: string): Promise<boolean> => {
     const known = sessionKind.get(sessionId)
     if (known !== undefined) return known
     const root = (await ctx.sessions.events(sessionId)).find((e) => e.type === 'session')
-    const task = (root?.data as { kind?: string } | undefined)?.kind === 'task'
-    sessionKind.set(sessionId, task)
-    return task
+    const kind = (root?.data as { kind?: string } | undefined)?.kind
+    const side = !!kind && kind !== 'main'
+    sessionKind.set(sessionId, side)
+    return side
   }
 
   ctx.on('session/event', (sessionId: string, event: SessionEvent) => {
@@ -388,7 +395,7 @@ export function apply(ctx: Context) {
        * 进程带走——一次读盘异常就能让整台席位在人说话说到一半时消失。上报失败远没有那么
        * 严重：它本来就有重试队列。
        */
-      void isTask(sessionId)
+      void isSideSession(sessionId)
         .then((task) => {
           if (!task) void report(sessionId)
         })

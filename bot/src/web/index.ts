@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
-import { CommandError, QUIET_MESSAGE, type ImageRef, type Mention } from '../agent/index.ts'
+import { CommandError, QUIET_MESSAGE, type CardSpec, type ImageRef, type Mention } from '../agent/index.ts'
 import { expiredMessage, returnMessage, type Disposition, type HandoffActor } from '../policy/handoff.ts'
 import { readTodos } from '../tools/todo.ts'
 
@@ -16,7 +16,7 @@ import { readTodos } from '../tools/todo.ts'
  * 所以下面不需要任何「服务还在吗」的防御判断。
  */
 export const name = 'satu-web'
-export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace', 'policy', 'handoffs']
+export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace', 'policy', 'handoffs', 'kanban']
 
 export interface Config {
 }
@@ -125,6 +125,76 @@ export function apply(ctx: Context, _config: Config = {}) {
   /**
    * 模型目录。来自 Gateway /v1/models 的缓存。本机没有密钥。
    */
+  /**
+   * Gateway 派一张看板卡过来（见 docs/kanban.md §9.1、§15.3）。
+   *
+   * **立即返回**：这一跳只回答「收下了没有」，跑完由席位自己打 Gateway 的 `/result`。
+   * 不这么写的话，Gateway 那边就得挂着一条几十分钟的连接等结果——而它随时会换版。
+   *
+   * 三种回话的意思分得很开，因为混成一种，Gateway 就会把「机器忙着」记成「这件事做砸
+   * 了」：**503 = 正在换版排空**、**409 = 要浏览器而那块屏被占着**，两种都不是失败，
+   * Gateway 会把卡放回 ready；其余 4xx 才是「这个执行包我接不住」。
+   */
+  ctx.server.post('/api/cards', async (req, res) => {
+    const body = (await req.json().catch(() => ({}))) as Partial<CardSpec>
+    const cardId = String(body.cardId ?? '').trim()
+    if (!cardId) {
+      res.status = 400
+      res.json({ error: 'cardId 不能为空' })
+      return
+    }
+    /**
+     * 换版静默期间不接新卡。
+     *
+     * 已经在跑的那张照旧——它进了 `live`，`busy().running` 自动把它算上，排空会等它。
+     */
+    if (ctx.agents.quiesced()) {
+      res.status = 503
+      res.json({ error: '席位正在换版排空，这张卡待会儿再派' })
+      return
+    }
+    const spec: CardSpec = {
+      cardId,
+      boardId: String(body.boardId ?? ''),
+      title: String(body.title ?? ''),
+      body: String(body.body ?? ''),
+      brief: String(body.brief ?? ''),
+      parents: Array.isArray(body.parents) ? body.parents : [],
+      comments: Array.isArray(body.comments) ? body.comments : [],
+      attempt: Number(body.attempt) || 0,
+      lastFailure: String(body.lastFailure ?? ''),
+      modelRole: body.modelRole === 'utility' ? 'utility' : 'daily',
+      maxSteps: Math.max(1, Math.trunc(Number(body.maxSteps) || 60)),
+      needsBrowser: body.needsBrowser === true,
+      deadlineAt: Number(body.deadlineAt) || Date.now() + 60 * 60_000,
+      runId: String(body.runId ?? ''),
+    }
+    /**
+     * 要浏览器、而那块屏正被别人驱动着 → 409。
+     *
+     * **在入口拒掉，不是跑到那一步再说**：跑了十几步、花了钱才发现最关键的那把工具用
+     * 不了，它多半会把「我打不开浏览器」写成结论收口——一张看起来做完了的废卡。
+     */
+    if (spec.needsBrowser && !ctx.agents.browserFree()) {
+      res.status = 409
+      res.json({ error: '浏览器正被别的会话用着，这张卡待会儿再派' })
+      return
+    }
+    // 不 await：跑完由 report 那条路回报，这一跳只说「收下了」。
+    void ctx.agents.runCard(spec).catch((e: Error) => {
+      ctx.logger?.error?.(`卡 ${cardId} 跑崩了：${e.message}`)
+      return ctx.kanban?.report(cardId, { runId: String(body.runId ?? ''), status: 'error', error: `席位这边崩了：${e.message}` })?.catch(() => {})
+    })
+    res.status = 202
+    res.json({ accepted: true, cardId })
+  })
+
+  /** 人在板上按了停止。掐掉那一轮——Gateway 那边随后把卡记成「人停的」。 */
+  ctx.server.post('/api/cards/:id/abort', async (req, res) => {
+    const stopped = ctx.agents.abortCard(String(req.params.id || ''))
+    res.json({ ok: true, stopped })
+  })
+
   ctx.server.get('/api/models', async (req, res) => {
     const catalog = await ctx.llm.refresh()
     res.json({

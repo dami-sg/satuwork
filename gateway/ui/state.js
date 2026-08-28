@@ -297,6 +297,20 @@ const state = {
    * 「要我处理、还没处理完」的。让界面自己去数的话，两处口径迟早会漂。
    */
   handoffs: [],
+  /**
+   * 看板（见 docs/kanban.md）。`kanbanBoards` 是板列表；打开某块板 / 某张卡时把 id
+   * 记在这儿，那一屏的数据现拉。
+   *
+   * **不把三屏的数据合成一份**：板列表要的是每块板的计数，一块板要的是全部卡，一张卡
+   * 要的是时间线和流水——合成一份的话，翻一下板列表就得把所有卡的时间线全拉一遍。
+   */
+  kanbanBoards: [],
+  kanbanBoardId: '',
+  kanbanBoard: null,
+  kanbanCardId: '',
+  kanbanCard: null,
+  /** 要人管的卡有几张。和交接单那个数**加在一起**显示——对人是同一件事。 */
+  kanbanBlocked: 0,
   handoffCount: 0,
   /** 近 30 天的概览（开了几张、还欠着几张、多久有人接）。空 = 还没拉到。 */
   handoffStats: null,
@@ -483,6 +497,8 @@ function allowedHrefs() {
   // 转人工待办的入口在**顶栏**那颗按钮上，不在侧栏菜单里（员工那份菜单是空的，
   // 见 MEMBER_NAV）。所以这里单独放行，否则点那颗按钮会被 pathAllowed 踢回首页。
   if (!isOwner()) set.add('/handoffs')
+  // 看板的入口也在顶栏那一侧，不在侧栏菜单里（同上一行的理由）。
+  if (!isOwner()) set.add('/kanban')
   return set
 }
 
