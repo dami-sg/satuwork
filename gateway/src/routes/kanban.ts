@@ -10,7 +10,7 @@
  * 模型。
  */
 import type { RouteCtx } from './ctx.ts'
-import { settleCard } from '../kanban-tick.ts'
+import { runMatches, settleCard } from '../kanban-tick.ts'
 import { notifyBlocked } from '../kanban-notify.ts'
 import { abortOnSeat } from '../kanban-tick.ts'
 import { HttpError, json, type Router } from '../http.ts'
@@ -398,26 +398,43 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
       body: `${card.body}\n\n【第 ${card.reopens + 1} 次打回】${reason}`.slice(0, CARD_BODY_MAX),
     })
     await sysLine(db, card.id, `被打回：${reason}`)
-    json(res, 200, { card: publicCard(next!) })
+    /**
+     * **下游已经 done 的那些要打回去等。**
+     *
+     * 文档 §3 推荐的评审流水线就是「干活卡 A → 评审卡 B」，而 B 说不行时打回的正是 A。
+     * 不动 B 的话：A 重做、再次 done，而 B 早就是 done 了、永远不会再跑——这条流水线
+     * 停在 B 上一次那份「不合格」的结论上，板上四列全绿，没有任何迹象表明重做之后
+     * 根本没人复核。
+     *
+     * 打回 `todo` 而不是 `ready`：它要等 A 重新做完，`promoteReadyCards` 会在那之后
+     * 放它出来。`attempt` 清零——这是新的一次机会，不是接着上次的第二次。
+     */
+    const stale = await invalidateDownstream(db, card.id)
+    json(res, 200, { card: publicCard(next!), rerun: stale })
   })
 
   /**
    * 人在板上按了停止。
    *
-   * 两步：先让席位掐掉那一轮，再把卡收成 `blocked`。**顺序不能倒**——先改状态的话，
-   * 席位那边还在跑，而它跑完会打 `/result` 报一个「做完了」，把人刚按下的那一下覆盖掉。
+   * **先把卡收成 `blocked/stopped`，再去掐席位。顺序是判据的一部分。**
    *
-   * `blockedKind: 'stopped'` 这一档**不推通知、不进待办计数**：他刚按完停止，紧接着
-   * 收到一条「你有一张卡卡住了」，是这套通知最容易失去信任的方式。
+   * 反过来的话有一条静默的抢跑：席位被掐掉之后，`runCard` 的收尾会自己报一次
+   * `status: 'error'`（模型一句收口的话都没说）。那条回报要是抢在这里的 `updateCard`
+   * 前面到达 Gateway，卡此刻还是 `running`，于是走的是 `failCard`——**人按一下停止就
+   * 占掉一次 attempt**，时间线上多一行「第 1 次失败」；而如果这张卡此前已经失败过一次，
+   * 它会直接转 `blocked/failed` 并**推一条 webhook 出去**：他刚按完停止就收到「你有一张
+   * 卡卡住了」，正是 `stopped` 这一档存在的全部理由要避免的事。
    *
-   * **不算失败、不占 attempt**：人停它是因为他要改点什么，不是因为它做错了。
+   * 先落状态就没有这条缝：`/result` 那边第一句判的就是「这张卡是不是 running」，卡已经
+   * 是 `blocked` 了，那条迟到的回报拿 409 收场，什么都改不动。
+   *
+   * `blockedKind: 'stopped'` 这一档**不推通知、不进待办计数**；**不算失败、不占
+   * attempt**——人停它是因为他要改点什么，不是因为它做错了。
    */
   router.post('/kanban/cards/:id/abort', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const card = await ownCardOf(db, account, req.params.id)
     if (card.state !== 'running') throw new HttpError(409, '这张卡没在跑')
-    // 掐不掉也照样往下走：席位可能刚好死了，而那时更该把卡收掉——它已经没人在跑了。
-    await abortOnSeat(db, card).catch(() => false)
     const run = await db.runningCardRun(card.id)
     if (run) await db.finishCardRun(run.id, { status: 'aborted', error: '人停的' })
     const next = await db.updateCard(card.id, {
@@ -427,6 +444,8 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
       endedAt: Date.now(),
     })
     await sysLine(db, card.id, '人按了停止')
+    // 掐不掉也照样算数：席位可能刚好死了，而那时更该把卡收掉——它已经没人在跑了。
+    await abortOnSeat(db, card).catch(() => false)
     json(res, 200, { card: publicCard(next!) })
   })
 
@@ -441,7 +460,17 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
     if (card.state === 'cancelled' || card.state === 'archived') throw new HttpError(409, '这张卡已经不在板上了')
     const next = await db.updateCard(card.id, { state: 'cancelled', endedAt: Date.now() })
     await sysLine(db, card.id, '人撤销了这张卡')
-    json(res, 200, { card: publicCard(next!) })
+    /**
+     * **下游还没开跑的那些一起撤掉。**
+     *
+     * 它们等的那份产出永远不会来了。留着的话，人看到的是一张收在「等依赖」折叠区里的
+     * 卡，界面上只写着「还在等」——而它等的东西已经不存在了。
+     *
+     * 只撤 `todo` / `ready`：已经在跑的那张有人在做（要停有停止按钮），已经 done 的
+     * 产出是真的。
+     */
+    const dropped = await cancelDownstream(db, card.id)
+    json(res, 200, { card: publicCard(next!), cancelled: dropped })
   })
 
   /** 归档一张做完的卡。**不自动**：N 天那个数字定成多少都会在某个人身上出错。 */
@@ -494,6 +523,52 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
  * 「还有父卡没做完」——一个查不出原因的僵局。深度有限（一块板上的卡就那么多），走完
  * 就完了，不用怕。
  */
+/**
+ * 从一张卡出发，把整条下游走一遍（广度优先，`seen` 兜住任何意外的环）。
+ *
+ * 两个用处都在「上游变了，下游得跟着动」这件事上：撤销时把没开跑的一起撤，打回时把
+ * 已经做完的打回去等。**都要走整条链**，不只是直接子卡——A→B→C 里 A 变了，C 手上那份
+ * 输入同样是旧的。
+ */
+async function walkDownstream(db: Db, from: string): Promise<Card[]> {
+  const seen = new Set<string>([from])
+  const out: Card[] = []
+  const queue = [from]
+  while (queue.length) {
+    for (const child of await db.cardChildren(queue.shift()!)) {
+      if (seen.has(child.id)) continue
+      seen.add(child.id)
+      out.push(child)
+      queue.push(child.id)
+    }
+  }
+  return out
+}
+
+/** 撤销：下游还没开跑的一起撤。在跑的和做完的不动。 */
+async function cancelDownstream(db: Db, from: string): Promise<string[]> {
+  const out: string[] = []
+  for (const child of await walkDownstream(db, from)) {
+    if (child.state !== 'todo' && child.state !== 'ready') continue
+    await db.updateCard(child.id, { state: 'cancelled', endedAt: Date.now() })
+    await sysLine(db, child.id, '上游那张被撤销了，这张跟着一起收掉')
+    out.push(child.id)
+  }
+  return out
+}
+
+/** 打回：下游已经做完的打回去等——它们手上那份输入作废了。 */
+async function invalidateDownstream(db: Db, from: string): Promise<string[]> {
+  const out: string[] = []
+  for (const child of await walkDownstream(db, from)) {
+    if (child.state !== 'done') continue
+    await db.updateCard(child.id, { state: 'todo', attempt: 0, retryAfter: null, endedAt: null })
+    await sysLine(db, child.id, '上游那张被打回重做了，这张要等它做完再跑一次')
+    out.push(child.id)
+  }
+  return out
+}
+
 async function hasPath(db: Db, from: string, to: string): Promise<boolean> {
   const seen = new Set<string>([from])
   const queue = [from]
@@ -702,6 +777,14 @@ export function attachKanbanRuntime(router: Router, ctx: RouteCtx) {
      */
     if (card.state !== 'running') throw new HttpError(409, `这张卡已经是「${card.state}」了，收不了第二次`)
     const body = bodyOf(req)
+    /**
+     * **还要认是哪一次执行。** 「这张卡是 running」这句话认不出是哪一轮：一个断网被判
+     * 失联、之后重派的卡，旧那一轮恢复过来时看到的正是一张 running 的卡，报进去就把全新
+     * 的一次盖掉了，而新那一轮成了没人认领的孤儿。
+     */
+    if (!(await runMatches(db, card.id, strField(body, 'runId', false)))) {
+      throw new HttpError(409, '这一次执行已经不算数了（这张卡后来重派过），你这一轮可以停了')
+    }
     const status = String(body.status ?? '')
     if (status !== 'ok' && status !== 'blocked' && status !== 'error') throw new HttpError(400, 'status 只能是 ok / blocked / error')
     const next = await settleCard(db, card, {
@@ -726,6 +809,10 @@ export function attachKanbanRuntime(router: Router, ctx: RouteCtx) {
     const caller = await requireInternalCaller(req, db)
     const card = await db.card((req.params.id || '').trim())
     if (!card || !callerOwns(caller, card)) throw new HttpError(404, '没有这张卡')
+    // 心跳同理：一个旧那一轮的心跳不该把**新**那一次的失联判据一直续着。
+    if (!(await runMatches(db, card.id, strField(bodyOf(req), 'runId', false)))) {
+      throw new HttpError(409, '这一次执行已经不算数了（这张卡后来重派过），你这一轮可以停了')
+    }
     if (!(await db.noteCardHeartbeat(card.id))) throw new HttpError(409, `这张卡已经是「${card.state}」了，别再跑了`)
     json(res, 200, { ok: true })
   })

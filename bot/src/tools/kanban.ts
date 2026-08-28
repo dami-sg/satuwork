@@ -327,7 +327,7 @@ export function apply(ctx: Context) {
       // 而那时收口已经发生了。等到 turn/end 一起报的话，「跑完了没交结论」那条判据永远
       // 为真，每张卡都会被算成一次失败。
       if (!ctx.agents.markCardSettled?.(call.sessionId)) fail('这张卡已经收过口了，别再报一次——两段不一样的结论，后写的那段未必是对的那段。')
-      await ctx.kanban.report(row.cardId, { status: 'ok', summary: text, metadata: metadata ?? null, sessionId: call.sessionId })
+      await ctx.kanban.report(row.cardId, { runId: row.runId, status: 'ok', summary: text, metadata: metadata ?? null, sessionId: call.sessionId })
       return `收到，${row.cardId} 记成做完了。接下来把手上的事收个尾就行，不用再做新的。`
     },
   )
@@ -352,7 +352,7 @@ export function apply(ctx: Context) {
       const text = (reason ?? '').trim()
       if (!text) fail('缺少 reason：卡在哪儿？不写的话人打开这张卡第一件事是回来问你。')
       if (!ctx.agents.markCardSettled?.(call.sessionId)) fail('这张卡已经收过口了。')
-      await ctx.kanban.report(row.cardId, { status: 'blocked', error: text, sessionId: call.sessionId })
+      await ctx.kanban.report(row.cardId, { runId: row.runId, status: 'blocked', error: text, sessionId: call.sessionId })
       return `记下了，${row.cardId} 转给人处理。停下来吧，别再试了。`
     },
   )

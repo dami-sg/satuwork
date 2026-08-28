@@ -242,6 +242,23 @@ async function packOf(db: Db, card: Card) {
 }
 
 /**
+ * 这次回报/心跳报的是不是**当前**那一次执行。
+ *
+ * 席位不带 `runId`（换版期间的旧席位）时**放行并留一行 warn**：为一个身份字段把一台还
+ * 在正常干活的席位的回报全部顶回去，是拿正确性换严格——那些卡会一张不落地卡到失联。
+ * 同 routines 那条「旧版席位当这个字段不存在」的口径。
+ */
+export async function runMatches(db: Db, cardId: string, reported: string): Promise<boolean> {
+  const want = (reported || '').trim()
+  if (!want) {
+    console.warn(`satuwork-gateway: 看板回报没带 runId（${cardId}），认不出是哪一次执行——旧版席位？`)
+    return true
+  }
+  const run = await db.runningCardRun(cardId)
+  return !run || run.id === want
+}
+
+/**
  * 一轮。
  *
  * 返回这一轮真的派出去几张——调度器只拿它打日志，e2e 拿它当断言。
@@ -271,7 +288,11 @@ export async function tickKanban(db: Db, now = Date.now()): Promise<number> {
   }
 
   let fired = 0
-  for (const card of await db.dueCards(now, BATCH * 4)) {
+  /**
+   * 候选取得比 BATCH 宽：这一轮派不出去的（闸满了、要浏览器而那块屏占着）要能被跳过，
+   * 循环才走得到下一张。每个账号最多 `CARD_ACCOUNT_CONCURRENCY * 4` 张，谁都占不满窗口。
+   */
+  for (const card of await db.dueCards(now, BATCH * 4, CARD_ACCOUNT_CONCURRENCY * 4)) {
     if (fired >= BATCH) break
     const bot = card.assigneeBotId
     if (!bot) continue
@@ -296,8 +317,14 @@ export async function tickKanban(db: Db, now = Date.now()): Promise<number> {
      */
     const pack = await packOf(db, card)
     const run = await db.insertCardRun({ cardId: card.id, attempt: card.attempt, botId: bot })
-    // 5. 派。
-    const got = await deliver(db, card, pack)
+    /**
+     * **`runId` 跟着执行包一起下去**，席位回报和心跳时原样带回来。
+     *
+     * 没有它的话，`/result` 只能判「这张卡现在是不是 running」——而那句判据认不出**是哪
+     * 一次**。一个断网三分钟被判失联、五分钟后重派、然后旧那一轮恢复过来的席位，会拿着
+     * 上一次的结论把全新的一次盖掉，而新那一轮变成没人认领的孤儿。
+     */
+    const got = await deliver(db, card, { ...pack, runId: run.id })
     if (got.ok) {
       fired += 1
       await sysLine(db, card.id, `派给了 ${bot}（第 ${card.attempt + 1} 次）`)

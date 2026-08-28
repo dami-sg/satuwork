@@ -70,14 +70,15 @@ export class KanbanService extends Service {
  * 返回 false = Gateway 那边说这张卡已经不在了（人撤了、板删了、或者被判失联收掉了），
  * 席位据此掐掉那一轮，而不是继续跑一个没人认领的活。
  */
-  async beat(cardId: string): Promise<boolean> {
+  async beat(cardId: string, runId?: string): Promise<boolean> {
     const base = gatewayUrl()
     const token = gatewayToken()
     if (!base || !token) return true
     try {
       const r = await fetch(`${base}/internal/kanban/cards/${encodeURIComponent(cardId)}/heartbeat`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: runId ?? '' }),
         signal: AbortSignal.timeout(15_000),
       })
       // 连不上不当作「卡没了」：网络抖一下就掐掉一轮正在跑的活，代价比多跑一会儿大得多。

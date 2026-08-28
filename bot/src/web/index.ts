@@ -167,6 +167,7 @@ export function apply(ctx: Context, _config: Config = {}) {
       maxSteps: Math.max(1, Math.trunc(Number(body.maxSteps) || 60)),
       needsBrowser: body.needsBrowser === true,
       deadlineAt: Number(body.deadlineAt) || Date.now() + 60 * 60_000,
+      runId: String(body.runId ?? ''),
     }
     /**
      * 要浏览器、而那块屏正被别人驱动着 → 409。
@@ -182,7 +183,7 @@ export function apply(ctx: Context, _config: Config = {}) {
     // 不 await：跑完由 report 那条路回报，这一跳只说「收下了」。
     void ctx.agents.runCard(spec).catch((e: Error) => {
       ctx.logger?.error?.(`卡 ${cardId} 跑崩了：${e.message}`)
-      return ctx.kanban?.report(cardId, { status: 'error', error: `席位这边崩了：${e.message}` })?.catch(() => {})
+      return ctx.kanban?.report(cardId, { runId: String(body.runId ?? ''), status: 'error', error: `席位这边崩了：${e.message}` })?.catch(() => {})
     })
     res.status = 202
     res.json({ accepted: true, cardId })

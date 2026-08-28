@@ -794,6 +794,26 @@ async function loadPage() {
     startSeatWatch()
   }
   try {
+    /**
+     * 看板这一页的三屏共用一个路由，靠 `state.kanbanBoardId` / `kanbanCardId` 选屏。
+     *
+     * **走到 `/kanban` 就把它们复位。** `go()` 不认识这两个字段，而点开某块板 / 某张卡
+     * 是不经过 `go()` 的（那两个动作自己 render）——不复位的话，「← 所有板」那颗按钮
+     * （data-act="go"）点下去什么都不会发生：`kanbanPage()` 读到的还是上一次那块板。
+     * 从顶栏那颗按钮进来同理，看到的是上次停在哪儿。
+     *
+     * 顺手起轮询：落在板列表这一屏时没有任何点击动作会去起它，而那一屏上也可能有正在
+     * 跑的卡。
+     */
+    if (state.path === '/kanban') {
+      state.kanbanBoardId = ''
+      state.kanbanCardId = ''
+      state.kanbanBoard = null
+      state.kanbanCard = null
+      await loadKanban().catch(() => {})
+      kanbanPoll()
+      return
+    }
     if (state.path === '/') {
       if (isOwner()) {
         await Promise.all([

@@ -88,6 +88,13 @@ export interface CardSpec {
   needsBrowser: boolean
   /** 墙钟。Gateway 那边还有一道兜底，两层都要有。 */
   deadlineAt: number
+  /**
+   * 这是**第几次执行**（Gateway 那条 `card_runs` 的 id）。回报和心跳都要原样带回去。
+   *
+   * 没有它的话，Gateway 只能判「这张卡现在是不是 running」，而那句话认不出是哪一轮：
+   * 一台断网被判失联、之后卡被重派的席位，恢复过来时报上去的旧结论会盖掉全新的一次。
+   */
+  runId?: string
 }
 
 /** 一条子任务跑完之后的全部产出。 */
@@ -575,12 +582,12 @@ export class AgentService extends Service {
    * 主会话里没有这个东西，所以那三把工具在主会话里调不通（判据在工具自己身上，不是
    * 靠「schema 里没有」）。
    */
-  cardOf(sessionId: string): { cardId: string; boardId: string; title: string; settled: boolean } | undefined {
+  cardOf(sessionId: string): { cardId: string; boardId: string; title: string; runId?: string; settled: boolean } | undefined {
     return this.cards.get(sessionId)
   }
 
   /** 席位上正在跑的卡。换版排空、进程关停时要等它们（它们进 live，busy() 自动算上）。 */
-  private cards = new Map<string, { cardId: string; boardId: string; title: string; settled: boolean }>()
+  private cards = new Map<string, { cardId: string; boardId: string; title: string; runId?: string; settled: boolean }>()
 
   /**
    * 那块屏现在有没有人在驱动。
@@ -896,7 +903,7 @@ export class AgentService extends Service {
      * 对着板上那张红卡的人毫无意义。这条路上唯一有用的信息是「这台席位装歪了」。
      */
     if (!bot?.id && !botId) {
-      await this.ctx.kanban?.report(spec.cardId, { status: 'error', error: '这台席位没钉 Bot（缺 SATUWORK_BOT_ID），跑不了卡' })
+      await this.ctx.kanban?.report(spec.cardId, { runId: spec.runId, status: 'error', error: '这台席位没钉 Bot（缺 SATUWORK_BOT_ID），跑不了卡' })
       return
     }
 
@@ -911,7 +918,7 @@ export class AgentService extends Service {
       // 卡不是某次工具调用开出来的，所以只有卡号；没有「回到哪条会话」这回事。
       parent: { sessionId: '', callId: '', taskId: spec.cardId },
     })
-    this.cards.set(child, { cardId: spec.cardId, boardId: spec.boardId, title: spec.title, settled: false })
+    this.cards.set(child, { cardId: spec.cardId, boardId: spec.boardId, title: spec.title, runId: spec.runId, settled: false })
 
     const pinned = this.roleModel(spec.modelRole)
     const provider = pinned?.provider ?? bot?.provider?.trim() ?? this.provider
@@ -997,7 +1004,7 @@ export class AgentService extends Service {
      * 而产出没有任何一条路回到人手上。
      */
     const beat = setInterval(() => {
-      void this.ctx.kanban?.beat(spec.cardId).then((alive) => {
+      void this.ctx.kanban?.beat(spec.cardId, spec.runId).then((alive) => {
         if (!alive) {
           this.ctx.logger?.warn?.(`agents: 卡 ${spec.cardId} 在 Gateway 那边已经不在了，掐掉这一轮`)
           this.abort(child)
@@ -1049,6 +1056,7 @@ export class AgentService extends Service {
             ? `跑到步数上限（${spec.maxSteps} 步）还没交结论`
             : '跑完了但没调 kanban_complete / kanban_block'
       await this.ctx.kanban?.report(spec.cardId, {
+        runId: spec.runId,
         status: 'error',
         error: said ? `${why}。它最后说的是：${said.slice(0, 500)}` : why,
         steps,

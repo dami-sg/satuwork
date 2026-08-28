@@ -4090,8 +4090,14 @@ export class Db {
   /**
    * 把「父卡全部 done」的 `todo` 卡推成 `ready`。一条 SQL，调度器每一轮的第一步。
    *
-   * `not exists` 那半句是判据本身：**有任何一张父卡还没 done 就不动它**。写成
-   * 「有一张 done 就推」的话，一条三段的流水线会在第一段做完时整条冲出去。
+   * `not exists` 那半句是判据本身：**有任何一张父卡还活着就不动它**。写成「有一张 done
+   * 就推」的话，一条三段的流水线会在第一段做完时整条冲出去。
+   *
+   * **挡路的判据是「还没走到终点」，不是「还没 done」。** 写成后者的话，父卡被撤销
+   * （`cancelled`）或者做完之后被人归档（`archived`）时，子卡会永远停在 `todo`：调度器
+   * 每一轮都因为它不是 `done` 而跳过，而界面上它收在「等依赖」那个折叠区里，人看到的只是
+   * 「还在等」，没有任何一条路能让它继续——卡页上连拆依赖的按钮都没有。`archived` 那一档
+   * 尤其阴险：它是从 `done` 走过来的，产出明明就在。
    */
   async promoteReadyCards(): Promise<number> {
     return this.run(
@@ -4099,7 +4105,8 @@ export class Db {
          where state = 'todo'
            and not exists (
              select 1 from card_links l join cards p on p.id = l."parentId"
-              where l."childId" = cards.id and p.state <> 'done'
+              where l."childId" = cards.id
+                and p.state not in ('done', 'archived', 'cancelled')
            )`,
       [Date.now()],
     )
@@ -4108,16 +4115,31 @@ export class Db {
   /**
    * 该派的那几张：`ready`、过了退避时间。
    *
-   * **并发闸不在这条 SQL 里**：它要按 (账号, Bot) 数正在跑的那些，而那是另一张结果集。
-   * 拉出候选再在内存里过闸，比写一条带两层窗口函数的 SQL 好读得多，而候选本来就有界。
+   * **候选要先按账号截一刀，再取前 N 条。**
+   *
+   * 直接 `order by ... limit N` 的写法有一个静默的饥饿：并发闸是在内存里逐条过的，而一个
+   * 人往同一颗 Bot 上排 45 张卡时，每一轮取回来的都是他那 40 张最老的，前几张占满闸、其余
+   * 全被跳过——**别人后建的那张永远排不进这个窗口**，而板上显示的是「待派」，看不出被谁
+   * 挡着。按账号各截 `perAccount` 张之后，谁都占不满整个窗口。
+   *
+   * **但只能截到这一层，不能再按 (账号, Bot) 截成一张。** 那样是把跨账号的饥饿换成同一颗
+   * Bot 内部的**队头阻塞**：排在最前面那张要是这一轮派不出去（`needsBrowser` 而那块屏被
+   * 占着、席位正在排空），调度器连看一眼下一张的机会都没有，而它后面那些本来跑得起来的卡
+   * 会一直等着——同样是静默的，板上同样显示「待派」。给每个账号留一叠而不是一张，循环才
+   * 有得可挑。
+   *
+   * 剩下的并发判定仍然在内存里做（它要数**正在跑**的那些，是另一张结果集）。
    */
-  async dueCards(now: number, limit = 40): Promise<Card[]> {
+  async dueCards(now: number, limit = 40, perAccount = 12): Promise<Card[]> {
     const rows = await this.many(
-      `select * from cards
-        where state = 'ready' and "assigneeBotId" is not null
-          and ("retryAfter" is null or "retryAfter" <= ?)
-        order by priority desc, "createdAt" limit ?`,
-      [now, Math.max(1, Math.trunc(limit))],
+      `with spread as (
+         select *, row_number() over (partition by "accountId" order by priority desc, "createdAt") as acct_rn
+           from cards
+          where state = 'ready' and "assigneeBotId" is not null
+            and ("retryAfter" is null or "retryAfter" <= ?)
+       )
+       select * from spread where acct_rn <= ? order by priority desc, "createdAt" limit ?`,
+      [now, Math.max(1, Math.trunc(perAccount)), Math.max(1, Math.trunc(limit))],
     )
     return rows.map(cardOf)
   }
