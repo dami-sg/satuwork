@@ -1149,6 +1149,8 @@ window.SATU_I18N = {
   '和你自己问它时用的是同一个模型。每天都跑的活，utility 那一档省得多。':
     'Same model you get when you ask it yourself. For something that runs every day, the utility model costs far less.',
   下一次: 'Next run',
+  重试: 'Retry',
+  '上一次没跑成，%s 再试一次（第 %n 次，共 %m 次）': 'Last run failed — retrying at %s (attempt %n of %m)',
   运行记录: 'Run history',
   还没跑过: 'No runs yet',
   '正在跑…': 'Running…',

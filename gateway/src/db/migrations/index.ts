@@ -17,6 +17,7 @@ import { SQL as m0016 } from './0016-routine-model.ts'
 import { SQL as m0017 } from './0017-seat-skills.ts'
 import { SQL as m0018 } from './0018-memories.ts'
 import { SQL as m0019 } from './0019-seat-deploy-progress.ts'
+import { SQL as m0020 } from './0020-routine-retry.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -72,6 +73,11 @@ export const MIGRATIONS: Migration[] = [
   { id: '0017-seat-skills', name: '私有档 Skill：目录项多一维 botId', sql: m0017 },
   { id: '0018-memories', name: '长期记忆：四层、按 Bot / 人 / 分组 / 公司归属', sql: m0018 },
   { id: '0019-seat-deploy-progress', name: '席位部署的阶段与起始时刻', sql: m0019 },
+  // 这条在分支上原本占的是 0019，撞上了先合进来的席位部署进度（同 0006、0011、0012 那
+  // 几次）。**编号是身份**：撞号意味着两套库各自记着「0019 跑过了」，跑的却是不同的
+  // 东西，所以让路排到它后面。这一条还没合进 main，除了 e2e 那几个用完就丢的 schema
+  // 没有任何库应用过旧编号，改号是安全的。
+  { id: '0020-routine-retry', name: '日常任务失败后的退避重试：下一次重试的时刻与已重试次数', sql: m0020 },
 ]
 
 /**

@@ -13,7 +13,7 @@ import { visibleBotOf } from '../lib/runtime.ts'
 import { companyMachineOf } from '../deploy.ts'
 import { canonicalTimezone, parseRoutineTriggers, ROUTINE_MAX_TRIGGERS, type Account, type Db, type Routine, type RoutineModelRole, type RoutineRun } from '../db.ts'
 import { nextRunAtOf } from '../lib/schedule.ts'
-import { runRoutine } from '../routines.ts'
+import { ROUTINE_RETRY_MAX, runRoutine } from '../routines.ts'
 
 /** 名字和指令的长度。**指令不是提示词工程的画布**：真要长文，写进 Skill 里。 */
 const MAX_NAME = 80
@@ -29,6 +29,17 @@ const RUNS_SHOWN = 10
  * 聊天全文），头一段足够认出是哪件事。
  */
 const AUDIT_INSTRUCTION = 200
+
+/**
+ * 「上一次砸了，还欠着一次补跑」这件事，界面上要说得出来。
+ *
+ * 只发**时刻和第几次**，不发那三档间隔：界面写的是「22:42 再试一次（第 1 次，共 3 次）」
+ * ——它要的就是这两个数。把间隔表也发过去，等于让浏览器自己再算一遍同一件事，而那份
+ * 算法在 Gateway 手里（`GATEWAY_ROUTINE_RETRY_MS` 一改，两边就对不上了）。
+ */
+function publicRetry(routine: Routine) {
+  return { retryAt: routine.retryAt, retryCount: routine.retryCount, retryMax: ROUTINE_RETRY_MAX }
+}
 
 function publicRun(run: RoutineRun) {
   return {
@@ -52,6 +63,7 @@ function publicRoutine(routine: Routine, lastRun?: RoutineRun) {
     triggers: routine.triggers,
     modelRole: routine.modelRole,
     nextRunAt: routine.nextRunAt,
+    ...publicRetry(routine),
     // 列表里那一行也要能显示「上一次红了」。为此单查一条，不是把十条全带上。
     lastRun: lastRun ? publicRun(lastRun) : null,
     createdAt: routine.createdAt,
@@ -183,6 +195,30 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
         active: patch.active ?? routine.active,
         triggers: patch.triggers ?? routine.triggers,
       })
+    }
+    /**
+     * **这条任务从此不再自己动了，就把欠着的那次补跑一起收掉。**
+     *
+     * 判据是**重算出来的下一次是不是 null**，不是「有没有拨开关」。两条路都到得了这个
+     * 状态，而它们在人那边是同一句话「别再自己跑了」：
+     *
+     * - 拨到停用
+     * - **把时间一个不剩地删光**（界面上删掉最后一个触发器发的就是 `triggers: []`）
+     *
+     * 少了后半句的话：21:00 那次失败排下 21:05 的补跑，人 21:02 把唯一那个时间删掉，
+     * 21:05 这个 Bot 照样自己把指令发了出去——而那一刻界面上写着「还没有设定时间」。
+     *
+     * 反过来重新打开时也清（`toggled` 那一半）：不清的话，停用期间攒下的旧时刻会在打开
+     * 的一瞬间就到点，人拨一下开关，屏幕上当场多出一次没头没脑的运行。
+     *
+     * 改指令、把时间从九点改成七点**不清**——那两下说的是「以后怎么跑」，这条任务还是
+     * 会自己动，而这次补跑欠的是刚才那一次。
+     */
+    const unscheduled = patch.nextRunAt === null
+    const toggled = patch.active !== undefined && patch.active !== routine.active
+    if (unscheduled || toggled) {
+      patch.retryAt = null
+      patch.retryCount = 0
     }
     const next = await db.updateRoutine(routine.id, patch)
     // 读到之后、写下去之前被另一个标签页删掉了：update 影响 0 行，读回来是空。
