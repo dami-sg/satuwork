@@ -120,6 +120,7 @@ const spec = (over = {}) => ({
   maxSteps: 5,
   needsBrowser: false,
   deadlineAt: Date.now() + 60_000,
+  runId: 'run-1',
   ...over,
 })
 
@@ -159,6 +160,8 @@ out.提示词 = {
 }
 out.收口 = {
   报了一次: reports.length === 1,
+  // Gateway 靠它认「这是哪一次执行」——不带的话，一条迟到的旧回报能把新那一轮盖掉。
+  带回了runId: reports[0]?.runId === 'run-1',
 
   是做完了: reports[0]?.status === 'ok',
   结论对得上: reports[0]?.summary === '表在 work/table.md',

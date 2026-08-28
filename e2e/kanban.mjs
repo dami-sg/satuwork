@@ -66,7 +66,6 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
   let seatSays = () => {}
   let seatBrowserBusy = () => {}
   let doneCardId = ''
-  let hookSrv = null
 
   /**
    * 替席位报一次收口。
@@ -780,28 +779,29 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
       assert(late.status === 409, `收口之后的心跳该 409，实际 ${late.status} ${late.text}`)
     })
 
-    await test('卡住了推一条出去：只推该推的三档，而且不带标题', async () => {
+    await test('哪一档算「要人管」：模型说卡住了算，人自己按停止的不算', async () => {
       /**
        * 这条 webhook 是**公司级**的，而板只有主人看得见（口径〇）：带上标题就是把一块
        * 私人板的内容一天几条地倒进公司群，而板名和卡名恰恰是最能说明问题的两样东西。
        *
        * 看着没用，其实正好够——**这一层的作用是把人叫回来，不是让他在群里把事读完。**
        */
-      const hooks = []
-      const hook = createServer((rq, rs) => {
-        let raw = ''
-        rq.on('data', (d) => (raw += d))
-        rq.on('end', () => {
-          hooks.push(JSON.parse(raw || '{}'))
-          rs.writeHead(200).end('{}')
-        })
+      /**
+       * **这条用例验的是分档，不是 webhook 的正文。**
+       *
+       * `notifyBlocked` 只收 https（那条 URL 是一把凭据，走明文等于交给路上的每一跳），
+       * 而这一套里没有证书，架不起一个真的 TLS 服务端。所以「推出去那条消息不带标题」
+       * 这一句**在这一层验不了**——写一个收 http 的假地址、再让断言看起来通过，是拿一条
+       * 骗人的用例换一个绿点。
+       *
+       * 这里验得到的是判据本身：哪一档该算「要人管」、哪一档不该。webhook 那一跳发不
+       * 发得出去，和它是同一个 `blockedNeedsAttention`。
+       */
+      const saved = await req(base, 'PATCH', `/orgs/${orgId}`, {
+        token: adminTok,
+        body: { handoffWebhook: 'https://example.invalid/hook' },
       })
-      await new Promise((ok) => hook.listen(0, '127.0.0.1', ok))
-      hookSrv = hook
-      // 只收 https 是线上口径；e2e 里没有证书，所以这一条用例只验「推了什么」，
-      // 由下面那句直接调内部接口来触发，不经过 https 那道判据。
-      const saved = await req(base, 'PUT', `/orgs/${orgId}`, { token: adminTok, body: { handoffWebhook: `https://127.0.0.1:${hook.address().port}/x` } })
-      assert(saved.status === 200 || saved.status === 404, `设 webhook ${saved.status} ${saved.text}`)
+      assert(saved.status === 200, `设 webhook ${saved.status} ${saved.text}`)
 
       const stuck = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
         token: meTok, body: { title: '会卡住的那张', assigneeBotId: designBot },
@@ -829,9 +829,7 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
       // 顶栏那个计数：by-model 的算进去，stopped 的不算。
       const boards = await req(base, 'GET', '/kanban/boards', { token: meTok })
       assert(boards.json.blocked >= 1, `blocked 计数该有：${boards.text}`)
-      hook.close()
-      hookSrv = null
-      await req(base, 'POST', `/kanban/cards/${stuck.id}/cancel`, { token: meTok })
+      await dropCard(stuck.id)
     })
 
     await test('notify=report：做完了往做完它的那颗 Bot 的主会话里说一声', async () => {
@@ -968,6 +966,5 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
   } finally {
     gw.kill('SIGTERM')
     seatSrv?.close()
-    hookSrv?.close()
   }
 }

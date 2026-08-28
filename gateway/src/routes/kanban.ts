@@ -435,14 +435,18 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     const card = await ownCardOf(db, account, req.params.id)
     if (card.state !== 'running') throw new HttpError(409, '这张卡没在跑')
-    const run = await db.runningCardRun(card.id)
-    if (run) await db.finishCardRun(run.id, { status: 'aborted', error: '人停的' })
+    /**
+     * **状态排在收流水之前。** 反过来的话，`finishCardRun` 和 `updateCard` 之间那一次
+     * DB 往返里，卡还是 `running` 而流水已经收掉了——一条迟到的回报正好从这个缝钻进去。
+     */
     const next = await db.updateCard(card.id, {
       state: 'blocked',
       blockedKind: 'stopped',
       blockedReason: '人停的',
       endedAt: Date.now(),
     })
+    const run = await db.runningCardRun(card.id)
+    if (run) await db.finishCardRun(run.id, { status: 'aborted', error: '人停的' })
     await sysLine(db, card.id, '人按了停止')
     // 掐不掉也照样算数：席位可能刚好死了，而那时更该把卡收掉——它已经没人在跑了。
     await abortOnSeat(db, card).catch(() => false)

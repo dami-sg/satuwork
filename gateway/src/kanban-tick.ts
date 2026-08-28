@@ -255,7 +255,17 @@ export async function runMatches(db: Db, cardId: string, reported: string): Prom
     return true
   }
   const run = await db.runningCardRun(cardId)
-  return !run || run.id === want
+  /**
+   * **查不到「正在跑的那一次」就是不认。**
+   *
+   * 写成 `!run || run.id === want` 是反的：那一格恰恰在最危险的时刻打开——收口和改状态
+   * 之间隔着一次 DB 往返（先 `finishCardRun` 再 `updateCard`），而在那个缝里卡还是
+   * `running`、流水已经收掉了。一条迟到的回报正好从这儿钻进去，把人刚按下的那次停止
+   * 冲掉：attempt +1，甚至转成 blocked/failed 再推一条 webhook 出去。
+   *
+   * 拒掉的代价是可控的：那张卡照旧走失联/墙钟那条回收路。
+   */
+  return !!run && run.id === want
 }
 
 /**
