@@ -293,6 +293,10 @@ function render() {
   // 内嵌桌面那块屏活在 #app 外面（重绘换不掉它），但它的位置是照着右栏里的空槽算
   // 的——壳换过一次就得重新对齐。
   syncDesktop()
+  // 正在装的那颗 Bot 要有人替它盯着（见 chat.js 的 ensureDeployWatch）：装好之后这一
+  // 页自己变成对话。挂在这儿是因为「要不要盯」由这一次画出来的那一屏决定——换页、
+  // 换 Bot、装完，三件事都在 render 之后才成立。
+  ensureDeployWatch()
   if (!keep) return
   const after = document.querySelector('.gw-page')
   if (after) after.scrollTop = keep

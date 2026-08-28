@@ -7,7 +7,7 @@ import { HttpError, bearer, json, type Req, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
 import { KIND, bodyOf, deployOptsOf, strField } from '../lib/validate.ts'
 import type { Account, CatalogItem, Memory, MemoryKind } from '../db.ts'
-import { deploySeat, publicSeatRuntime, purgeBot } from '../deploy.ts'
+import { deployInFlight, deploySeat, publicSeatRuntime, purgeBot, seatStepOf, startSeatDeploy } from '../deploy.ts'
 import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
 import { LEGACY_BOT_ICONS, type BotMemory, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer, skillDisplayNames, skillFiles, tagsOf, trimStr } from '../lib/catalog.ts'
 import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
@@ -1033,6 +1033,60 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     else await proxyJson(res, 'GET', url, undefined, undefined, t.machineToken)
   })
 
+  /**
+   * 这个席位这会儿装到哪一步了。**建完 Bot 那一屏每两秒问一次的就是它。**
+   *
+   * 两层进度拼在一起：
+   *
+   * - **Gateway 自己的那份**（`status` / `phase` / `elapsedMs`）永远有，不依赖机器通不
+   *   通——「已经装了几分钟」是这一屏上最要紧的一句话，它不该在管家答不上来的时候连着
+   *   一起没有。
+   *   「装了多久」**给的是年龄，不是起始时刻**（同 heartbeatAge，见 publicMachine 里那
+   *   段）：员工的电脑和 Gateway 差几分钟是常事，让界面拿绝对时刻自己减本地时钟的话，
+   *   一台快十分钟的电脑会在人刚按下「创建」的那一秒写出「已经装了 10:03」——正好是这
+   *   一屏要打消的那个念头。界面收到之后自己锚一次，往后每秒由它自己的时钟往前走。
+   * - **机器上那份**（第几步、这一步在干什么）由管家现问现答，问不到就没有（老管家、
+   *   刚开始装还没报出第一行、这一刻网络抖了）。
+   *
+   * 没有席位行不是 404：这条路的调用方是一个每两秒转一圈的轮询，它要分得清「还没登记」
+   * 和「问错了」——前者照旧画那句「还没有部署」，后者才是 bug。所以回 200 + `none`。
+   */
+  router.get('/runtime/deploy/progress', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireSeat(account)
+    const botId = (req.query.get('botId') || '').trim()
+    if (!botId) throw new HttpError(400, 'botId 不能为空')
+    const runtime = await db.seatRuntime(account.id, botId)
+    const live = deployInFlight(account.id, botId)
+    if (!runtime) {
+      // 后台那次登记还没落库（建完 Bot 之后的头几百毫秒），也说成「在装」——这一屏
+      // 上「还没有部署」那句话会带一颗按钮，让人在机器已经开工的时候再按一次。
+      json(res, 200, { status: live ? 'deploying' : 'none', phase: live ? 'queued' : null, elapsedMs: null, lastError: null, step: null, stale: false })
+      return
+    }
+    /**
+     * **装到一半没人管了。**
+     *
+     * 装现在跑在后台，于是 Gateway 一重启，库里那一行就永远停在 `deploying`：机器上
+     * 什么都没在装，而界面上那个读秒会一直往上走。人守着一屏永远不会完成的进度，
+     * 手里连一颗能按的按钮都没有——这是把「装得久」换成了「永远装不完」。
+     *
+     * 库里看不出这件事（两种 `deploying` 长得一模一样），只有进程自己知道手上有没有
+     * 这活儿。所以这一格由 deployInFlight 回答，界面据此改口并给出「重新部署」。
+     */
+    const stale = runtime.status === 'deploying' && !live
+    const machine = runtime.status === 'deploying' && !stale ? await db.machine(runtime.machineId) : undefined
+    json(res, 200, {
+      status: runtime.status,
+      phase: runtime.deployPhase,
+      elapsedMs: runtime.deployStartedAt == null ? null : Math.max(0, Date.now() - runtime.deployStartedAt),
+      lastError: runtime.lastError,
+      stale,
+      // 只有真的在装才去问机器：装完之后每两秒敲一次管家，问的是一件已经没有答案的事。
+      step: machine && runtime.deployPhase === 'installing' ? (await seatStepOf(machine, runtime.seatId)) ?? null : null,
+    })
+  })
+
   router.post('/runtime/deploy', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireSeat(account)
@@ -1079,8 +1133,18 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
    * 记忆策略、能用哪些 Skill / MCP 全部来自公司模版（见 lib/catalog.ts 的 publicBot），
    * 这里既不存也不收——收了就会有人以为自己改得动，而下一次读仍然是模版那一份。
    *
-   * 建完还没有席位。要真的能聊，得再点一次「部署」（`POST /runtime/deploy`）——一个
-   * Bot 一个进程，那是机器上的真实开销，不该在填完名字的一瞬间悄悄发生。
+   * **建完就开装，不用再点一次「部署」。** 以前这里是「只落一行目录项」，理由是「一个
+   * Bot 一个进程，那是机器上的真实开销，不该在填完名字的一瞬间悄悄发生」。可那笔开销
+   * 并不会因为多一颗按钮就少一点：人建 Bot 就是为了跟它说话，没有谁会建完之后不部署。
+   * 代价全落在了另一头——建完跳进对话页，看到的是一块空屏加一句「还没有部署」，而他
+   * 刚刚明明填完了整张表。
+   *
+   * 装那一段（十几分钟）**不挂在这条请求上**：startSeatDeploy 只等「登记」做完就返回，
+   * 席位行这时已经是 `deploying` 了，界面照着它画安装进度。
+   *
+   * **装不成不等于建不成。** 公司还没配机器、没发布过 Bot 版本、槽位用满——这些都不该
+   * 让「建 Bot」这件事失败（那颗 Bot 本身好好的，机器修好之后点一下就能装上）。所以理
+   * 由回在 `deploy` 里，让界面把话说清楚，而不是把 201 变成 409。
    */
   router.post('/runtime/bots', async (req, res) => {
     const account = await requireUser(req, db, keys)
@@ -1108,8 +1172,51 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       action: 'bot.create',
       detail: { id: item.id, name: item.name },
     })
+    /**
+     * **开装这一步不许把「建 Bot」带倒。**
+     *
+     * 目录项这时已经落库了，而这条路上每一步都可能抛：挑机器、定槽位那个事务、审计，
+     * 全是查库。一次连接抖动就会让这条请求变成 500，可 Bot 明明建好了——界面上是一句
+     * 「创建失败」外加一个还开着、字都填好了的弹窗，人当然会再按一次，于是同名的第二颗
+     * Bot 建出来，十个配额白扣一个。**回执必须如实说「建好了，只是没装上」。**
+     *
+     * 预料之内的失败（没配机器、没发布版本、槽位满）由 startSeatDeploy 用返回值说；
+     * 这个 catch 只兜预料之外的那些。
+     */
+    let started: Awaited<ReturnType<typeof startSeatDeploy>>
+    try {
+      started = await startSeatDeploy(db, account, { botId: item.id })
+    } catch (e) {
+      console.warn(`satuwork-gateway: Bot ${item.id} 建好了但没能开装：${e instanceof Error ? e.message : String(e)}`)
+      started = { ok: false, status: 500, error: '这个 Bot 建好了，但这次没能开始安装。稍后在它的对话页上点「部署这个 Bot」再试。', runtime: undefined }
+    }
+    if (started.ok) {
+      // 同上：审计写不进去也不该把已经建好的 Bot 报成失败。
+      await db
+        .audit({
+          companyId: account.companyId!,
+          accountId: account.id,
+          action: 'runtime.deploy',
+          detail: {
+            botId: item.id,
+            linuxUser: started.runtime.linuxUser,
+            seatId: started.runtime.seatId,
+            slot: started.runtime.slot,
+            status: started.runtime.status,
+            // 审计里要分得出「谁按的」：这一条没有人按，是建 Bot 顺带开的。
+            auto: true,
+          },
+        })
+        .catch((e) => console.warn(`satuwork-gateway: Bot ${item.id} 自动部署的审计没写成：${e instanceof Error ? e.message : String(e)}`))
+    }
     const { pinned, tpl } = await botContext(db, account.companyId)
-    json(res, 201, { bot: { ...publicBot(item, pinned, tpl), runtime: null } })
+    // 席位那一份同理：读不出来就当没有（界面照旧从轮询那条路要），不能因此把 201 变成
+    // 500——这一整段之后没有任何一件事值得让「建 Bot」失败。
+    const runtime = await pairRuntime(db, account, item.id).catch(() => null)
+    json(res, 201, {
+      bot: { ...publicBot(item, pinned, tpl), runtime },
+      deploy: started.ok ? { started: started.installing } : { started: false, error: started.error },
+    })
   })
 
   /** 改自己那一个。同样只认身份字段——底座在模版里，这里传什么都不看。 */

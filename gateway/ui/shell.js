@@ -152,6 +152,11 @@ function navItem(item) {
  * 时间和摘要留空位不留内容：它们来自各自的事件流，每帧都在变（见 paintRoster），
  * 靠重绘整页去更新的话，一边打字一边就把侧栏刷没了。
  */
+/** 这一颗此刻在装吗。名单和 paintRoster 两处都要问，判据只能有一份。 */
+function installingOf(bot) {
+  return Boolean(bot && bot.runtime && bot.runtime.status === 'deploying')
+}
+
 function chatRosterNav() {
   const bots = state.runtimeBots || []
   if (!bots.length) return ''
@@ -181,8 +186,10 @@ function chatRosterNav() {
             <span class="satu-botname">${esc(b.name || b.id)}</span>
             <time class="satu-bottime">${esc(sum.lastAt ? chatClock(sum.lastAt) : '')}</time>
           </span>
-          ${/* 没有消息就不留这一行——空着一道灰边比少一行更碍眼。 */ ''}
-          <span class="satu-botsnip"${sum.lastText ? '' : ' hidden'}>${esc(sum.lastText)}</span>
+          ${/* 没有消息就不留这一行——空着一道灰边比少一行更碍眼。
+               正在装的那一颗**借这一行说话**：建完 Bot 之后人完全可能先去点别的 Bot，
+               回来时名单上得看得出它还在装，而不是和一颗没消息的旧 Bot 长得一模一样。 */ ''}
+          <span class="satu-botsnip"${installingOf(b) || sum.lastText ? '' : ' hidden'}>${esc(installingOf(b) ? t('正在安装…', 'Installing…') : sum.lastText)}</span>
         </span>
       </button>`
     })
@@ -213,6 +220,13 @@ function botStateLabel(state) {
 function paintRoster() {
   for (const row of document.querySelectorAll('[data-bot-row]')) {
     const id = row.getAttribute('data-bot-row')
+    /**
+     * 正在装的那一颗，这一行由名单自己写死（「正在安装…」），**这里不许覆盖**。
+     *
+     * 席位还没起来，它那条流开不起来，摘要永远是空的——照常走下去就是把那句话擦掉，
+     * 于是名单上它和一颗没消息的旧 Bot 一模一样，而它此刻恰恰是最需要说明的那一个。
+     */
+    if (installingOf((state.runtimeBots || []).find((b) => b.id === id))) continue
     const sum = (botStreams.get(id) || {}).sum
     if (!sum) continue
     const dot = row.querySelector('.satu-botdot')

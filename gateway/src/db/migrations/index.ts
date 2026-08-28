@@ -16,6 +16,7 @@ import { SQL as m0015 } from './0015-handoff-webhook.ts'
 import { SQL as m0016 } from './0016-routine-model.ts'
 import { SQL as m0017 } from './0017-seat-skills.ts'
 import { SQL as m0018 } from './0018-memories.ts'
+import { SQL as m0019 } from './0019-seat-deploy-progress.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -70,6 +71,7 @@ export const MIGRATIONS: Migration[] = [
   { id: '0016-routine-model', name: '日常任务选模型：日常还是 utility', sql: m0016 },
   { id: '0017-seat-skills', name: '私有档 Skill：目录项多一维 botId', sql: m0017 },
   { id: '0018-memories', name: '长期记忆：四层、按 Bot / 人 / 分组 / 公司归属', sql: m0018 },
+  { id: '0019-seat-deploy-progress', name: '席位部署的阶段与起始时刻', sql: m0019 },
 ]
 
 /**

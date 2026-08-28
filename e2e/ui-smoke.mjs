@@ -617,6 +617,135 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(ui.machineDownBanner() === '', '字段缺席时弹了失联横幅')
     })
 
+    await test('建完 Bot 那一屏：说得出在装第几步、装了多久，装好之前不给按钮', async () => {
+      /**
+       * 建 Bot 现在建完就开装（服务端顺手开的），所以这一屏取代了原来那句「还没有部署
+       * ＋一颗按钮」。它要答的是人此刻唯一的问题：**这是正常的等，还是卡住了。**
+       *
+       * 三样缺一不可：在装什么、装了多久、装好之后会怎样。而那颗「部署这个 Bot」按钮
+       * **不许出现**——机器已经在装了，再点一次只会把它重铺一遍。
+       */
+      const ui = await boot()
+      ui.state.me = { account: { id: 'me', companyId: 'c1', role: 'member', email: 'm@x' }, company: { id: 'c1' } }
+      ui.state.path = '/a/b9'
+      ui.state.chatBotId = 'b9'
+      ui.state.runtimeMachine = { paired: true }
+      ui.state.runtimeBots = [{ id: 'b9', name: '新助手', runtime: { status: 'deploying' } }]
+      // **席位那一份故意留空**：刚建完的那颗 Bot，/runtime/desktop 完全可能还是 404，
+      // 而这一屏必须照样说得出「在装」——否则人看到的是一句「还没有部署」加一颗按钮。
+      ui.state.desktopRuntime = null
+      ui.state.deployProgress = {
+        botId: 'b9',
+        status: 'deploying',
+        phase: 'installing',
+        // 本地锚点（pollDeployProgress 收到服务端那份年龄时算的），读秒照它走。
+        since: Date.now() - 200_000,
+        lastError: null,
+        step: { step: 3, total: 7, label: '安装浏览器', at: Date.now() },
+      }
+      assert(ui.seatStage() === 'deploying', `席位状态 ${ui.seatStage()}`)
+      const html = ui.chatDeployPrompt('b9')
+      assert(html.includes('正在安装「新助手」'), `没说在装谁：${html}`)
+      assert(html.includes('第 3 步') && html.includes('共 7 步'), `没说第几步：${html}`)
+      assert(html.includes('安装浏览器'), `没说在装什么：${html}`)
+      assert(html.includes('3:20'), `没说装了多久：${html}`)
+      assert(html.includes('sw-install-bar'), `没画进度条：${html}`)
+      assert(!html.includes('runtime-deploy'), `装着的时候还摆了部署按钮：${html}`)
+
+      // 老管家报不出第几步（协议低于 3）：话照说，**但整根条子不画**——一根不动的
+      // 条比没有条更像卡住了。
+      ui.state.deployProgress = { ...ui.state.deployProgress, step: null }
+      const coarse = ui.chatDeployPrompt('b9')
+      assert(coarse.includes('机器上正在安装'), `粗进度没说话：${coarse}`)
+      assert(!coarse.includes('sw-install-bar'), `没有步数还画了条子：${coarse}`)
+      assert(coarse.includes('3:20'), `粗进度也得有读秒：${coarse}`)
+
+      // 登记完还没发出去那一档，说的是另一句话。
+      ui.state.deployProgress = { ...ui.state.deployProgress, phase: 'queued' }
+      assert(ui.chatDeployPrompt('b9').includes('正在下发到机器'), '排队那一档没说清')
+
+      // 装到一半没人管了（Gateway 重启过）：**必须改口**，而且要给一颗能按的按钮。
+      // 混在「正在安装」里的话，人守着的是一屏永远走不完的读秒。
+      ui.state.deployProgress = { ...ui.state.deployProgress, phase: 'installing', step: null, stale: true }
+      assert(ui.seatStage() === 'stalled', `没认出中断：${ui.seatStage()}`)
+      const stalled = ui.chatDeployPrompt('b9')
+      assert(stalled.includes('上一次安装没做完'), `没改口：${stalled}`)
+      assert(stalled.includes('runtime-deploy'), `中断了却没给按钮：${stalled}`)
+      assert(!stalled.includes('sw-install-bar'), `中断了还画着进度条：${stalled}`)
+
+      // 装好了：这一屏整个让位给对话（chatPage 据此决定画不画输入框）。
+      ui.state.deployProgress = { botId: 'b9', status: 'ready', phase: null, since: 0, lastError: null, step: null }
+      ui.state.desktopRuntime = { status: 'ready', seatId: 'seat-9' }
+      assert(ui.seatStage() === 'ready', `装好了还挡着：${ui.seatStage()}`)
+      assert(ui.chatDeployPrompt('b9') === '', '装好了还画着安装屏')
+    })
+
+    await test('安装读秒：年龄在收到那一刻锚成本地时刻，往后不再跟服务端比', async () => {
+      /**
+       * 这一条钉的是两件事，都属于「读秒必须可信」：
+       *
+       * 1. **锚点算一次就不动。** 服务端给的是「已经装了多久」（不是起始时刻——两台钟差
+       *    几分钟是常事，拿绝对时刻自己减本地时钟，一台快十分钟的电脑会在人刚按下
+       *    「创建」的那一秒写出「已经装了 10:03」）。收到之后锚成本地时刻，之后每轮
+       *    轮询都沿用它——每轮重锚的话，网络抖一下这个数就往回跳，而人正盯着它判断
+       *    「是不是卡住了」。
+       * 2. **上一轮没跑完就不开下一轮。** 收尾那一段（拉席位、拉名册、接会话）比两秒长
+       *    是常事，叠进来的第二轮会把 ensureChatSession 排好的退避重试取消掉、紧接着
+       *    自己再发一次——退避于是变成每两秒一记的硬打，而这条路要经管家转到席位机器上。
+       */
+      let hits = 0
+      let ageMs = 200_000
+      let gate = null
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: 'ui-smoke-token',
+        fetchImpl: async (path) => {
+          if (!path.startsWith('/runtime/deploy/progress')) throw new Error('这条用例只该问进度：' + path)
+          hits += 1
+          if (gate) await gate
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({ status: 'deploying', phase: 'installing', elapsedMs: ageMs, lastError: null, stale: false, step: null }),
+          }
+        },
+      })
+      ui.state.me = { account: { id: 'me', companyId: 'c1', role: 'member', email: 'm@x' }, company: { id: 'c1' } }
+      ui.state.path = '/a/b9'
+      ui.state.chatBotId = 'b9'
+      ui.state.runtimeMachine = { paired: true }
+      ui.state.runtimeBots = [{ id: 'b9', name: '新助手', runtime: { status: 'deploying' } }]
+
+      await ui.pollDeployProgress()
+      const first = ui.state.deployProgress
+      assert(first && first.botId === 'b9', `没认下这份进度：${JSON.stringify(first)}`)
+      assert(first.startedAt === undefined, '服务端不该再发绝对时刻，前端也不该留着它')
+      const drift = Math.abs(Date.now() - ageMs - first.since)
+      assert(drift < 5000, `锚点没按年龄算：差了 ${drift}ms`)
+
+      // 第二轮：服务端那个数无论怎么变，锚点都不动——同一次安装的读秒只能往前走。
+      ageMs = 1000
+      await ui.pollDeployProgress()
+      assert(ui.state.deployProgress.since === first.since, '每轮都重锚了，读秒会往回跳')
+
+      // 那道闸：上一轮挂着的时候，第二次调用一个请求都不许发。
+      const before = hits
+      let open
+      gate = new Promise((r) => (open = r))
+      const running = ui.pollDeployProgress()
+      const overlapped = ui.pollDeployProgress()
+      assert(hits === before + 1, `叠进来又发了一次：${hits - before} 次`)
+      open()
+      gate = null
+      await running
+      await overlapped
+      // 闸放开之后照旧能问下一轮，不能一次卡住就再也不转了。
+      await ui.pollDeployProgress()
+      assert(hits === before + 2, `闸没放开：${hits - before} 次`)
+    })
+
     await test('按下停止：从按下到真停下来那一段，界面上必须有动静', async () => {
       /**
        * 这一条钉的是那次报障：点停止之后什么都不变——按钮还是那颗「停止」，输入框

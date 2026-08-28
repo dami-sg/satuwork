@@ -21,8 +21,12 @@ import { fileURLToPath } from 'node:url'
  * 2：`/seats/:id/vnc/*` 认机器票，桌面因此能从 Gateway 同域反代出去。1 号管家在这
  * 条路上只认票和 cookie，而反代过来的请求两样都没有——表现是浏览器上一句
  * 「桌面票无效或已过期」，跟票真的过期长得一模一样。Gateway 拿这个号数把两者分开。
+ *
+ * 3：`/seats/:id/progress` 报「这次部署走到第几步了」。号数在这里只用来**省一次
+ * 白问**：老管家没有这条路，Gateway 照它决定要不要发那个请求，界面上退回到只有
+ * 「已经装了几分钟」的粗进度（见 gateway 的 MIN_PROGRESS_PROTOCOL）。
  */
-export const PROTOCOL = 2
+export const PROTOCOL = 3
 
 export interface ManagerState {
   machineId: string
