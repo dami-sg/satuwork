@@ -6,7 +6,6 @@ import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
 import { CommandError, QUIET_MESSAGE, type CardSpec, type ImageRef, type Mention } from '../agent/index.ts'
-import { reportCard } from '../tools/kanban.ts'
 import { expiredMessage, returnMessage, type Disposition, type HandoffActor } from '../policy/handoff.ts'
 import { readTodos } from '../tools/todo.ts'
 
@@ -17,7 +16,7 @@ import { readTodos } from '../tools/todo.ts'
  * 所以下面不需要任何「服务还在吗」的防御判断。
  */
 export const name = 'satu-web'
-export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace', 'policy', 'handoffs']
+export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster', 'workspace', 'policy', 'handoffs', 'kanban']
 
 export interface Config {
 }
@@ -181,9 +180,9 @@ export function apply(ctx: Context, _config: Config = {}) {
       return
     }
     // 不 await：跑完由 report 那条路回报，这一跳只说「收下了」。
-    void ctx.agents.runCard(spec, (out) => reportCard(cardId, out)).catch((e: Error) => {
+    void ctx.agents.runCard(spec).catch((e: Error) => {
       ctx.logger?.error?.(`卡 ${cardId} 跑崩了：${e.message}`)
-      return reportCard(cardId, { status: 'error', error: `席位这边崩了：${e.message}` }).catch(() => {})
+      return ctx.kanban?.report(cardId, { status: 'error', error: `席位这边崩了：${e.message}` })?.catch(() => {})
     })
     res.status = 202
     res.json({ accepted: true, cardId })

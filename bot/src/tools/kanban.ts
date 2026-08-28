@@ -16,7 +16,7 @@ import { fail, registerTool } from './common.ts'
  * （见下面 apply 开头那段）。
  */
 export const name = 'satu-tools-kanban'
-export const inject = ['tools', 'catalog', 'agents']
+export const inject = ['tools', 'catalog', 'agents', 'kanban']
 
 /** 一次最多建几张。和 Gateway 那一侧同一个数，但**判据在那边**——这里只是先说清楚。 */
 const CREATE_MAX = 5
@@ -63,59 +63,6 @@ async function callGateway<T>(method: string, path: string, body?: unknown): Pro
     throw new Error(`Gateway 返回 HTTP ${r.status}${text ? ` ${text.slice(0, 200)}` : ''}`)
   }
   return (await r.json()) as T
-}
-
-/**
- * 席位的**运行面**向 Gateway 回报一张卡的收口。
- *
- * 走 `/internal`，不走 `/runtime`——**判据是「谁在说话」**：这一条是这台机器在汇报
- * （和「这条会话结束了」「这次用了多少 token」同一类），不是模型在说话。混进模型那一组
- * 的话，模型有一天就能自己报一句「这张卡跑完了」。
- *
- * 这里用的是席位票（`sat_`），Gateway 那边 `requireInternalCaller` 认它，并且只允许它
- * 替**自己那个账号**说话。
- */
-export async function reportCard(cardId: string, body: Record<string, unknown>): Promise<void> {
-  const base = gatewayUrl()
-  const token = gatewayToken()
-  if (!base || !token) return
-  const r = await fetch(`${base}/internal/kanban/cards/${encodeURIComponent(cardId)}/result`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
-  })
-  // 409 = 那边已经收过口了（比如 kanban_complete 报过一次，收尾这条又报了一次）。
-  // **不是错**：正是我们要的那个「只收一次」。
-  if (!r.ok && r.status !== 409) {
-    throw new Error(`回报卡 ${cardId} 失败：HTTP ${r.status}`)
-  }
-}
-
-/**
- * 心跳：席位每 60 秒替正在跑的卡报一次「还活着」。
- *
- * **模型不管这件事**（所以没有 `kanban_heartbeat` 这把工具）：让模型负责保活，是把一个
- * 运维问题伪装成一个提示词问题——它会忘，而忘了的表现是一张明明在跑的卡被判成崩了。
- *
- * 返回 false = Gateway 那边说这张卡已经不在了（人撤了、板删了、或者被判失联收掉了），
- * 席位据此掐掉那一轮，而不是继续跑一个没人认领的活。
- */
-export async function beatCard(cardId: string): Promise<boolean> {
-  const base = gatewayUrl()
-  const token = gatewayToken()
-  if (!base || !token) return true
-  try {
-    const r = await fetch(`${base}/internal/kanban/cards/${encodeURIComponent(cardId)}/heartbeat`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(15_000),
-    })
-    // 连不上不当作「卡没了」：网络抖一下就掐掉一轮正在跑的活，代价比多跑一会儿大得多。
-    return r.ok || r.status >= 500
-  } catch {
-    return true
-  }
 }
 
 interface RemoteCard {
@@ -380,7 +327,7 @@ export function apply(ctx: Context) {
       // 而那时收口已经发生了。等到 turn/end 一起报的话，「跑完了没交结论」那条判据永远
       // 为真，每张卡都会被算成一次失败。
       if (!ctx.agents.markCardSettled?.(call.sessionId)) fail('这张卡已经收过口了，别再报一次——两段不一样的结论，后写的那段未必是对的那段。')
-      await reportCard(row.cardId, { status: 'ok', summary: text, metadata: metadata ?? null, sessionId: call.sessionId })
+      await ctx.kanban.report(row.cardId, { status: 'ok', summary: text, metadata: metadata ?? null, sessionId: call.sessionId })
       return `收到，${row.cardId} 记成做完了。接下来把手上的事收个尾就行，不用再做新的。`
     },
   )
@@ -405,7 +352,7 @@ export function apply(ctx: Context) {
       const text = (reason ?? '').trim()
       if (!text) fail('缺少 reason：卡在哪儿？不写的话人打开这张卡第一件事是回来问你。')
       if (!ctx.agents.markCardSettled?.(call.sessionId)) fail('这张卡已经收过口了。')
-      await reportCard(row.cardId, { status: 'blocked', error: text, sessionId: call.sessionId })
+      await ctx.kanban.report(row.cardId, { status: 'blocked', error: text, sessionId: call.sessionId })
       return `记下了，${row.cardId} 转给人处理。停下来吧，别再试了。`
     },
   )

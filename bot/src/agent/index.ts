@@ -13,7 +13,6 @@ import type {
 import type { ReassignedItem, WorkspaceFile } from '../tools/index.ts'
 import { browserOf, memoryOf, type BotRecord } from '../registry/index.ts'
 import { cachedMemories, cachedSkill, cachedSkills, type CachedMemory, type CachedSkill } from '../catalog/index.ts'
-import { beatCard } from '../tools/kanban.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -885,11 +884,21 @@ export class AgentService extends Service {
    * 那时收口已经发生了。所以收口由工具当场上报，这个方法只负责「跑完之后如果它一句
    * 收口的话都没说，报一次失败」（docs/kanban.md §9.4）。
    */
-  async runCard(spec: CardSpec, report: (body: Record<string, unknown>) => Promise<void>): Promise<void> {
+  async runCard(spec: CardSpec): Promise<void> {
     const { sessions, llm } = this.ctx
     const botId = (process.env.SATUWORK_BOT_ID || '').trim()
     const bot = this.ctx.roster?.get?.(botId)
     const startedAt = Date.now()
+    /**
+     * 没钉 Bot 就当场报回去，别往下走。
+     *
+     * 再往下一句 `sessions.create` 也会抛，但抛出来的是「创建会话必须带 botId」——那句话
+     * 对着板上那张红卡的人毫无意义。这条路上唯一有用的信息是「这台席位装歪了」。
+     */
+    if (!bot?.id && !botId) {
+      await this.ctx.kanban?.report(spec.cardId, { status: 'error', error: '这台席位没钉 Bot（缺 SATUWORK_BOT_ID），跑不了卡' })
+      return
+    }
 
     const child = await sessions.create({
       botId: bot?.id ?? botId,
@@ -988,7 +997,7 @@ export class AgentService extends Service {
      * 而产出没有任何一条路回到人手上。
      */
     const beat = setInterval(() => {
-      void beatCard(spec.cardId).then((alive) => {
+      void this.ctx.kanban?.beat(spec.cardId).then((alive) => {
         if (!alive) {
           this.ctx.logger?.warn?.(`agents: 卡 ${spec.cardId} 在 Gateway 那边已经不在了，掐掉这一轮`)
           this.abort(child)
@@ -1039,13 +1048,13 @@ export class AgentService extends Service {
           : capped
             ? `跑到步数上限（${spec.maxSteps} 步）还没交结论`
             : '跑完了但没调 kanban_complete / kanban_block'
-      await report({
+      await this.ctx.kanban?.report(spec.cardId, {
         status: 'error',
         error: said ? `${why}。它最后说的是：${said.slice(0, 500)}` : why,
         steps,
         toolCalls,
         sessionId: child,
-      }).catch(() => {})
+      })?.catch(() => {})
     }
     this.ctx.logger?.info?.(`agents: 卡 ${spec.cardId} 收口（${steps} 步，${Date.now() - startedAt}ms）`)
     const forget = setTimeout(() => this.cards.delete(child), TASK_MEMO_TTL_MS)
@@ -3535,7 +3544,7 @@ export const name = 'satu-agent'
 // without inject`，于是任何一条带图的历史都会让 toAgentMessages 抛，整轮静默丢掉。
 // 装载顺序不看 cordis.yml 的行序、只看 inject（见那份文件开头的说明），所以这一行
 // 就是「workspace 必须排在我前面」的全部声明，不用再动 yml。
-export const inject = ['sessions', 'llm', 'tools', 'storage', 'catalog', 'workspace']
+export const inject = ['sessions', 'llm', 'tools', 'storage', 'catalog', 'workspace', 'kanban']
 
 export function apply(ctx: Context, config: Config = {}) {
   ctx.plugin(AgentService, config)

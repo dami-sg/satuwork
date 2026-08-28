@@ -29,6 +29,7 @@ import * as toolsPlugin from './src/tools/index.ts'
 import * as llmPlugin from './src/llm/index.ts'
 import * as agentPlugin from './src/agent/index.ts'
 import { AssistantMessageEventStream, emptyAssistant } from './src/llm/stream.ts'
+import * as kanbanReportPlugin from './src/tools/kanban-report.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'satu-rtmodel-'))
 const work = mkdtempSync(join(tmpdir(), 'satu-rtmodel-work-'))
@@ -70,6 +71,12 @@ ctx.plugin(toolsPlugin)
 ctx.plugin(FakeCatalog)
 ctx.plugin(llmPlugin)
 // Bot 自己那一对：下面「不覆盖」的几条就是拿它比的。
+/**
+ * 看板的回报服务。**探针也要挂**：agent 那边 `inject: ['kanban']`（runCard 收尾要用它
+ * 报一次失败），不挂的话 agents 服务根本起不来——而报出来的是「探针跑得完」不成立，
+ * 一句和看板无关的话。
+ */
+ctx.plugin(kanbanReportPlugin)
 ctx.plugin(agentPlugin, { provider: 'p-bot', model: 'm-bot' })
 await new Promise((r) => setTimeout(r, 300))
 

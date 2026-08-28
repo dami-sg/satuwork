@@ -64,6 +64,7 @@ import { runSkillsBot } from './skills-bot.mjs'
 import { runMemoryBot } from './memory-bot.mjs'
 import { runMemory } from './memory.mjs'
 import { runKanban } from './kanban.mjs'
+import { runCard } from './card.mjs'
 import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
@@ -3277,6 +3278,7 @@ async function main() {
     await suite('memory-bot', () => runMemoryBot({ root, test, assert, log }))
     await suite('memory', () => runMemory({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('kanban', () => runKanban({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('card', () => runCard({ root, test, assert, log }))
     await suite('bot-template', () => runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager', () => runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager-confirm', () => runManagerConfirm({ root, test, assert, log }))
