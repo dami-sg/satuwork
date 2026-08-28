@@ -93,8 +93,18 @@ export async function reportToOwner(db: Db, card: Card): Promise<boolean> {
     }
     const machine = await machineTokenFor(db, account, card.assigneeBotId)
     if (machine) headers['x-satuwork-machine'] = machine
-    // 这颗 Bot 的长会话。席位那边没有就现建一个，和界面走的是同一条路。
-    const got = await fetch(`${host}/api/bots/${encodeURIComponent(card.assigneeBotId)}/session`, { headers })
+    /**
+     * 这颗 Bot 的长会话。席位那边没有就现建一个，和界面走的是同一条路。
+     *
+     * **超时要带**，和下面那一跳同一个数：Node 的 fetch 没有默认超时，而这一跳打的是一台
+     * 随时可能半开的机器（防火墙静默丢包、机器休眠、管家卡死但 TCP 没关）。不带的话这个
+     * promise 永远不 settle，每一张 `notify: report` 的卡漏一条连接，连接池被慢慢占满之后
+     * 派卡和日常任务那些出站调用会跟着一起排队——而这里只是想打个招呼。
+     */
+    const got = await fetch(`${host}/api/bots/${encodeURIComponent(card.assigneeBotId)}/session`, {
+      headers,
+      signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+    })
     const sessionId = ((await got.json().catch(() => null)) as { sessionId?: string } | null)?.sessionId
     if (!sessionId) return false
     const text = [

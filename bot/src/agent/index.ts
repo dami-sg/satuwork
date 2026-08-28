@@ -97,6 +97,26 @@ export interface CardSpec {
   runId?: string
 }
 
+/**
+ * 席位上一张正在跑的卡。**只在内存里**，进程一停就没了（同 `parents` / `procs`）。
+ *
+ * 三个用处，各在一处：`kanban_show / complete / block` 靠它认「当前这张卡」；`settled`
+ * 保证收口只收一次；`homeSessionId` 是「要人拍板的事往哪儿投」——卡片会话在界面上没有
+ * 入口，投在它自己身上等于没人看得见（见 `cardHomeOf`）。
+ */
+export interface CardRow {
+  cardId: string
+  boardId: string
+  title: string
+  runId?: string
+  settled: boolean
+  /**
+   * 这颗 Bot 那条人看得见的长会话。开跑时定下来，可能没有（席位刚起来、一条会话都还
+   * 没建过）——那时审批照旧退回卡片会话自己，行为和这个字段出现之前一样。
+   */
+  homeSessionId?: string
+}
+
 /** 一条子任务跑完之后的全部产出。 */
 export interface TaskOutcome {
   index: number
@@ -581,13 +601,32 @@ export class AgentService extends Service {
    * `kanban_show` / `complete` / `block` 全靠它——**「当前这张卡」只存在于卡片会话里**，
    * 主会话里没有这个东西，所以那三把工具在主会话里调不通（判据在工具自己身上，不是
    * 靠「schema 里没有」）。
+   *
+   * 策略那侧也要它：审批卡要改投 `homeSessionId`、连着被挡三次的话术要说 `kanban_block`
+   * 而不是 `escalate_to_human`（那把工具在卡片会话里被摘掉了）。
    */
-  cardOf(sessionId: string): { cardId: string; boardId: string; title: string; runId?: string; settled: boolean } | undefined {
+  cardOf(sessionId: string): CardRow | undefined {
     return this.cards.get(sessionId)
   }
 
+  /**
+   * 这张卡该把「要人拍板」的事投到哪条会话上。
+   *
+   * **卡片会话自己不算**：它 `kind: 'card'`，侧栏里根本不列（见 runCard 里那句标题的
+   * 注释），审批卡开在上面等于开在一间没有门的屋子里——五分钟后按超时收口，而人从头到尾
+   * 不知道有人问过他。同 delegation §6.2 那条「子代理的卡片开在主会话上」，只是这里没有
+   * 「主会话」这个现成的东西，得在开跑时把这颗 Bot 的长会话记下来。
+   *
+   * **不走 `parents`。** 那张表还兼着两件别的事——`mentionedIn` 顺着它继承这一轮的 `@`
+   * 点名、`tools/index.ts` 顺着它给 `rebind` 的工具改道——而卡跑在自己的一条线上，既不该
+   * 继承人这一轮点的名，也不该让工具去摸人的那条会话。
+   */
+  cardHomeOf(sessionId: string): string | undefined {
+    return this.cards.get(sessionId)?.homeSessionId
+  }
+
   /** 席位上正在跑的卡。换版排空、进程关停时要等它们（它们进 live，busy() 自动算上）。 */
-  private cards = new Map<string, { cardId: string; boardId: string; title: string; runId?: string; settled: boolean }>()
+  private cards = new Map<string, CardRow>()
 
   /**
    * 那块屏现在有没有人在驱动。
@@ -618,6 +657,21 @@ export class AgentService extends Service {
     if (!row || row.settled) return false
     row.settled = true
     return true
+  }
+
+  /**
+   * 把刚占上的那面旗子放回去。**只有「占了但没报成」那一处调它。**
+   *
+   * `kanban_complete` 是先占旗、再打 Gateway 的：那一跳失败（5xx、网络抖、20 秒超时）时
+   * 旗子已经落下，于是模型重试拿到的是「这张卡已经收过口了」，而 `runCard` 收尾那条兜底
+   * 回报也被同一面旗子关掉——两条路一起堵死，结论就此丢了，卡在 Gateway 那边停在
+   * `running` 直到三分钟后被判「席位失联」，白占一次 attempt 再把整张卡重跑一遍。
+   *
+   * 放回去之后两条路都活着：模型可以再调一次；它要是不调，收尾那条兜底会替它报一次失败。
+   */
+  unmarkCardSettled(sessionId: string): void {
+    const row = this.cards.get(sessionId)
+    if (row) row.settled = false
   }
 
   taskOf(sessionId: string): { taskId: string; goal: string; leases: string[] } | undefined {
@@ -907,6 +961,19 @@ export class AgentService extends Service {
       return
     }
 
+    /**
+     * 这颗 Bot 那条人看得见的长会话，**在开跑之前先问出来**。
+     *
+     * 两处要它，而且两处都不能等到跑完再找：审批卡要投在它上面（见 `cardHomeOf`——投在
+     * 卡片会话上就是投进一间没有门的屋子），后台进程移交也要投在它上面（下面 finally
+     * 里那一句，本来就在找同一条会话）。一次查询，两处共用。
+     *
+     * 查不到不算错：席位刚起来、这颗 Bot 一条会话都还没建过。那时审批退回卡片会话自己，
+     * 行为和这个字段出现之前一模一样。
+     */
+    const roster = await sessions.list().catch(() => null)
+    const home = roster?.find((row) => row.botId === (bot?.id ?? botId))?.id
+
     const child = await sessions.create({
       botId: bot?.id ?? botId,
       origin: bot?.origin,
@@ -918,7 +985,7 @@ export class AgentService extends Service {
       // 卡不是某次工具调用开出来的，所以只有卡号；没有「回到哪条会话」这回事。
       parent: { sessionId: '', callId: '', taskId: spec.cardId },
     })
-    this.cards.set(child, { cardId: spec.cardId, boardId: spec.boardId, title: spec.title, runId: spec.runId, settled: false })
+    this.cards.set(child, { cardId: spec.cardId, boardId: spec.boardId, title: spec.title, runId: spec.runId, settled: false, homeSessionId: home })
 
     const pinned = this.roleModel(spec.modelRole)
     const provider = pinned?.provider ?? bot?.provider?.trim() ?? this.provider
@@ -1035,8 +1102,9 @@ export class AgentService extends Service {
        * 人杀得掉了（同 docs/delegation.md §7.3）。卡片会话没有「主人」，所以改挂到这颗
        * Bot 的长会话上——那是这台席位上唯一一条人看得见的会话。
        */
-      const mine = (await sessions.list()).find((row) => row.botId === (bot?.id ?? botId))
-      if (mine) await this.ctx.tools.reassign(child, mine.id).catch(() => [])
+      // 上面开跑前已经问过一次（`home`），这里不再查第二遍——中途新建一条长会话不是这个
+      // 席位会发生的事（一个 Bot 一条，见 registry 的 ensureSession）。
+      if (home) await this.ctx.tools.reassign(child, home).catch(() => [])
     }
 
     /**

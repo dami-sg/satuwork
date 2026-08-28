@@ -953,6 +953,71 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
       if (again.state === 'running') await settle(review.id)
     })
 
+    await test('打回一张卡：下游那张**还排在队里等着被派**的（ready）也要退回去等', async () => {
+      /**
+       * 上面那条验的是 `done` 的下游。**`ready` 的那些同样要退**，而且这一档更险：
+       * 只推 done 的话，那张 ready 的卡会在下一个 tick 带着刚被人否掉的上游结论跑出去
+       * （执行包里 `parents[].summary` 取的就是它），跑完就是 done——等上游真的重做完，
+       * 它已经不在打回名单里了，再也不会跑第二次。板上四列全绿，而复核的是废掉的那份。
+       */
+      const mk = async (title, assignee) =>
+        (
+          await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+            token: meTok,
+            body: assignee ? { title, assigneeBotId: assignee } : { title },
+          })
+        ).json.card
+      const work = await mk('要被打回的那张', designBot)
+      /**
+       * 评审那张**故意不派人**：`dueCards` 只挑有 assignee 的，所以它会稳稳停在 ready 上。
+       * 线上让它停在那儿的是「一颗 Bot 同时一张」那道闸（等上几轮是常态），而那个窗口在
+       * 用例里拿不稳——这里换一个同样落在 ready 的、可复现的理由。
+       */
+      const review = await mk('等着被派的那张')
+      await req(base, 'POST', '/kanban/links', { token: meTok, body: { parentId: work.id, childId: review.id } })
+      await untilRunning(work.id, '打回-ready：干活卡该被派出去')
+      await settle(work.id)
+      const ready = await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${review.id}`, { token: meTok })
+        return r.json.card.state === 'ready' ? r.json.card : null
+      })
+      assert(ready, '干活卡做完之后，评审卡该被推成 ready')
+      const back = await req(base, 'POST', `/kanban/cards/${work.id}/reopen`, { token: meTok, body: { reason: '第三家抄错了' } })
+      assert(back.status === 200, `reopen ${back.status} ${back.text}`)
+      assert((back.json.rerun || []).includes(review.id), `ready 的下游也要跟着打回：${back.text}`)
+      const rv = await req(base, 'GET', `/kanban/cards/${review.id}`, { token: meTok })
+      assert(rv.json.card.state === 'todo', `它该回去等上游重做，实际 ${rv.json.card.state}`)
+      await dropCard(work.id)
+      await dropCard(review.id)
+    })
+
+    await test('解锁：上游还没做完的话回去等，不是直接待派', async () => {
+      /**
+       * `blocked` 的这段时间里上游完全可能被打回重做（或者像这里，人顺手补了一条依赖）。
+       * 解锁写死 `ready` 就是让它插到自己的依赖前面去跑，拿的还是那份作废的输入——而
+       * `promoteReadyCards` 只推 todo → ready，推不回来。
+       */
+      const mk = async (title, assignee) =>
+        (
+          await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+            token: meTok,
+            body: assignee ? { title, assigneeBotId: assignee } : { title },
+          })
+        ).json.card
+      const child = await mk('卡住的那张', designBot)
+      await untilRunning(child.id, '解锁-依赖：该被派出去')
+      await settle(child.id, { status: 'blocked', error: '要人给个账号' })
+      // 不派人，所以它会一直停在 ready——「上游还没做完」这件事因此是稳的。
+      const parent = await mk('后来才补上的上游')
+      const link = await req(base, 'POST', '/kanban/links', { token: meTok, body: { parentId: parent.id, childId: child.id } })
+      assert(link.status === 201, `加依赖失败：${link.status} ${link.text}`)
+      const un = await req(base, 'POST', `/kanban/cards/${child.id}/unblock`, { token: meTok })
+      assert(un.status === 200, `unblock ${un.status} ${un.text}`)
+      assert(un.json.card.state === 'todo', `上游没做完，解锁后该回去等，实际 ${un.json.card.state}`)
+      await dropCard(parent.id)
+      await dropCard(child.id)
+    })
+
     await test('删板：卡跟着走，别人删不掉', async () => {
       const board = (await req(base, 'POST', '/kanban/boards', { token: meTok, body: { name: '待删' } })).json.board
       const card = (await req(base, 'POST', `/kanban/boards/${board.id}/cards`, { token: meTok, body: { title: '一张' } })).json.card

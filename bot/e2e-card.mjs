@@ -204,6 +204,48 @@ out.主会话 = {
   })()).some((t) => ['kanban_show', 'kanban_complete', 'kanban_block'].includes(t)),
 }
 
+// ── 5. 「要人拍板」的事往哪儿投：主会话，不是卡片会话自己 ─────────────────
+//
+// 卡片会话 `kind: 'card'`，侧栏里不列（上面「不进列表」那条验的就是它）——审批卡开在它
+// 身上等于开在一间没有门的屋子里：五分钟后按超时收口，而人从头到尾不知道有人问过他。
+// 一张要发邮件的卡会在每一次 external+write 上白等五分钟，几次就撞穿 Gateway 那道墙钟。
+// 这里钉的是 approvals.ts 依赖的那条线（`cardHomeOf`），不是审批本身。
+reports.length = 0
+seen.length = 0
+script = (n) => (n === 1 ? { tool: 'kanban_complete', input: { summary: '好了' } } : { text: '收尾' })
+await ctx.agents.runCard(spec({ cardId: 'c_home' }))
+// 卡片会话的 id 从回报里拿：kanban_complete 带的就是 `call.sessionId`。
+const cardSession = reports[0]?.sessionId
+out.审批投哪儿 = {
+  认得出卡片会话: typeof cardSession === 'string' && cardSession.length > 0,
+  记下了主会话: ctx.agents.cardHomeOf(cardSession) === mainSession,
+  不是卡片会话自己: ctx.agents.cardHomeOf(cardSession) !== cardSession,
+}
+
+// ── 6. 收口那一跳没送到：旗子要放回去，结论不能丢 ────────────────────────
+//
+// 「已收口」是在打 Gateway **之前**占的（收口的判据是这次调用本身，不是 turn/end）。占了
+// 之后那一跳要是没成，旗子还落着的话两条路一起堵死：模型重试拿到「已经收过口了」，收尾
+// 那条兜底也被同一面旗子关掉——这段结论就此丢了，卡在 Gateway 那边停在 running 直到三分钟
+// 后被判「席位失联」，白占一次 attempt 再把整张卡重跑一遍。
+reports.length = 0
+seen.length = 0
+const tried = []
+ctx.kanban.report = async (cardId, body) => {
+  tried.push({ cardId, ...body })
+  // 第一次当成管道故障（连不上 / 超时 / 5xx）：**可重试**，所以旗子该被放回去。
+  if (tried.length === 1) throw new kanbanReportPlugin.ReportError('回报卡 c_flaky 没送到：fetch failed', true)
+  reports.push({ cardId, ...body })
+}
+script = (n) => (n <= 2 ? { tool: 'kanban_complete', input: { summary: '这段结论不能丢' } } : { text: '收尾' })
+await ctx.agents.runCard(spec({ cardId: 'c_flaky' }))
+out.收口没送到 = {
+  第一次真的试过: tried.length >= 1 && tried[0]?.summary === '这段结论不能丢',
+  模型能再报一次: tried.length >= 2,
+  结论没丢: reports.some((r) => r.status === 'ok' && r.summary === '这段结论不能丢'),
+  没被记成失败: !reports.some((r) => r.status === 'error'),
+}
+
 // `__RESULT__` 前缀是探针和 e2e/probe.mjs 之间的约定：那一行之外的全是噪声（日志、警告）。
 console.log('__RESULT__' + JSON.stringify(out))
 process.exit(0)
