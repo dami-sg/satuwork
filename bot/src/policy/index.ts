@@ -444,12 +444,22 @@ export class PolicyService extends Service {
        * docs/delegation.md §3）。照原话劝下去，它只会去调一把不存在的工具，然后把剩下
        * 的步数耗在这上面。
        */
-      const inTask = !!agentsOf(this.ctx)?.taskOf?.(call.sessionId)
+      const agents = agentsOf(this.ctx)
+      const inTask = !!agents?.taskOf?.(call.sessionId)
+      /**
+       * **卡片会话里这句话同样是死路**：`cardTools` 把 `escalate_to_human` 摘掉了
+       * （docs/kanban.md 口径三——卡片会话里没有人）。照原话劝下去，它只会去调一把不存在
+       * 的工具，然后把剩下的步数耗在这上面。这儿的出口是 `kanban_block`。
+       */
+      const inCard = !!agents?.cardOf?.(call.sessionId)
       tail = inTask
         ? `\n\n这一轮已经被挡下 ${hits} 次了。别再换写法重试——你是子代理，问不了人：` +
           `现在停下来，把卡在哪儿、已经排除了什么写进结论交回去，由主代理去处理。`
-        : `\n\n这一轮已经被挡下 ${hits} 次了。别再换写法重试——这件事需要人来处理：` +
-          `调用 escalate_to_human 说明卡在哪儿，然后停下来等人接手。`
+        : inCard
+          ? `\n\n这一轮已经被挡下 ${hits} 次了。别再换写法重试——你在做板上的一张卡，面前没有人：` +
+            `调用 kanban_block 把卡在哪儿、已经排除了什么写清楚，然后停下来。`
+          : `\n\n这一轮已经被挡下 ${hits} 次了。别再换写法重试——这件事需要人来处理：` +
+            `调用 escalate_to_human 说明卡在哪儿，然后停下来等人接手。`
       await this.record({
         sessionId: call.sessionId,
         botId: bot?.id ?? '',
@@ -732,7 +742,7 @@ export function apply(ctx: Context) {
           if (mem.confirm && (op === 'add' || op === 'replace')) {
             const why = op === 'add' ? '它要记下一条跨对话的事实' : '它要改掉一条已经记下的事实'
             ctx.policy.markAsked(call.callId)
-            const why2 = task ? `来自子任务《${task.goal.slice(0, 24)}》：${why}` : why
+            const why2 = provenance(ctx, call, why)
             const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why2, formOf(call))
             await ctx.policy.record({
               sessionId: call.sessionId,
@@ -765,7 +775,7 @@ export function apply(ctx: Context) {
              * 不写的话，人看到的是一次凭空出现的发信确认——而他刚才只说了一句「帮我把
              * 这周的活收个尾」，中间隔着一次他没看见的委派。
              */
-            const why2 = task ? `来自子任务《${task.goal.slice(0, 24)}》：${why}` : why
+            const why2 = provenance(ctx, call, why)
             // 表单在**席位这边**算：剥元工具的壳、认字段、定哪几格能改，全在 forms.ts。
             const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why2, formOf(call))
             await ctx.policy.record({
@@ -847,6 +857,22 @@ function urlArgOf(raw: string): string {
 function outboundOf(call: ToolCall, risk: readonly string[]): boolean {
   if (call.name === 'terminal') return Boolean(networkCommand(call.arguments))
   return risk.includes('external')
+}
+
+/**
+ * 审批卡上那句「这次调用从哪儿来的」。
+ *
+ * 不写的话，人看到的是一次凭空出现的发信确认——而他刚才只说了一句「帮我把这周的活收个
+ * 尾」，中间隔着一次他没看见的委派。**看板的卡更要写**：那张卡是后台派下来的，人可能连
+ * 「现在有活在跑」都不知道，卡片却开在他自己那条对话里（见 approvals.ts 的改投）。
+ */
+function provenance(ctx: Context, call: ToolCall, why: string): string {
+  const agents = agentsOf(ctx)
+  const task = agents?.taskOf?.(call.sessionId)
+  if (task) return `来自子任务《${task.goal.slice(0, 24)}》：${why}`
+  const card = agents?.cardOf?.(call.sessionId)
+  if (card) return `来自板上的卡《${card.title.slice(0, 24)}》：${why}`
+  return why
 }
 
 /**

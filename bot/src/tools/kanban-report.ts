@@ -12,6 +12,23 @@ import { gatewayToken, gatewayUrl } from '../llm/gateway.ts'
  */
 export const name = 'satu-kanban-report'
 
+/**
+ * 回报失败。`retryable` 回答的是**再报一次有没有希望**：连不上 / 超时 / 5xx 有，
+ * 4xx 没有（那是 Gateway 判出来的，不会因为再问一遍就变）。
+ *
+ * `kanban_complete` 拿它决定要不要把「已收口」那面旗子放回去（见 tools/kanban.ts 的
+ * `reportOrRelease`）——不分开的话，一张被人撤掉的卡会让模型把剩下的步数全耗在重报上。
+ */
+export class ReportError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message)
+    this.name = 'ReportError'
+  }
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     kanban: KanbanService
@@ -48,17 +65,31 @@ export class KanbanService extends Service {
     const base = gatewayUrl()
     const token = gatewayToken()
     if (!base || !token) return
-    const r = await fetch(`${base}/internal/kanban/cards/${encodeURIComponent(cardId)}/result`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(20_000),
-    })
-    // 409 = 那边已经收过口了（比如 kanban_complete 报过一次，收尾这条又报了一次）。
-    // **不是错**：正是我们要的那个「只收一次」。
-    if (!r.ok && r.status !== 409) {
-      throw new Error(`回报卡 ${cardId} 失败：HTTP ${r.status}`)
+    let r: Response
+    try {
+      r = await fetch(`${base}/internal/kanban/cards/${encodeURIComponent(cardId)}/result`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20_000),
+      })
+    } catch (e) {
+      // 连不上、超时：**管道故障**。再报一次有希望，所以标 retryable。
+      throw new ReportError(`回报卡 ${cardId} 没送到：${(e as Error).message}`, true)
     }
+    // 409 = 那边已经收过口了（比如 kanban_complete 报过一次，收尾这条又报了一次），
+    // 或者这一次执行已经不算数了（卡后来重派过）。**不是错**：正是我们要的那个「只收一次」。
+    if (r.ok || r.status === 409) return
+    const hint = await r.text().then((t) => t.slice(0, 200)).catch(() => '')
+    /**
+     * **5xx 和 4xx 要分得开。**
+     *
+     * 前者是 Gateway 这会儿不舒服，再报一次有希望；后者是它判出来的（这张卡不在了、
+     * 这个调用方管不着它），再报一百次也是同一个答案。调用方拿这一位决定「要不要把
+     * 『已收口』那面旗子放回去让模型重试」——不分的话，一张被人撤掉的卡会让模型把剩下的
+     * 步数全耗在重报上。
+     */
+    throw new ReportError(`回报卡 ${cardId} 失败：HTTP ${r.status}${hint ? ` ${hint}` : ''}`, r.status >= 500)
   }
 
 /**

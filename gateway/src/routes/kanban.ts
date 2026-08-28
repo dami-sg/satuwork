@@ -352,19 +352,24 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
    *
    * 解锁顺手把 `attempt` 清零：人处理过了（改了正文、加了条评论、把要登录的那个页面
    * 登好了），这就是新的一次机会，而不是接着上次的第二次。
+   *
+   * **放回哪一档现算，不写死 `ready`**（`queueStateOf`）：它卡住的这段时间里，上游完全
+   * 可能被人打回重做。写死 `ready` 就是让它插到自己的依赖前面去跑，拿的还是那份作废的
+   * 输入——而 `promoteReadyCards` 只推 todo → ready，推不回来。
    */
   router.post('/kanban/cards/:id/unblock', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const card = await ownCardOf(db, account, req.params.id)
     if (card.state !== 'blocked') throw new HttpError(409, '这张卡没有卡住')
+    const state = await queueStateOf(db, card.id)
     const next = await db.updateCard(card.id, {
-      state: 'ready',
+      state,
       blockedKind: null,
       blockedReason: '',
       attempt: 0,
       retryAfter: null,
     })
-    await sysLine(db, card.id, '人解锁了，回到待派')
+    await sysLine(db, card.id, state === 'ready' ? '人解锁了，回到待派' : '人解锁了，先回去等上游那几张')
     json(res, 200, { card: publicCard(next!) })
   })
 
@@ -389,8 +394,10 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
         card: publicCard(stuck!),
       })
     }
+    // 被打回的这张自己也要现算：它的上游可能同样被打回过（`invalidateDownstream` 走的是
+    // 整条下游链，一次打回能连推好几层）。
     const next = await db.updateCard(card.id, {
-      state: 'ready',
+      state: await queueStateOf(db, card.id),
       reopens: card.reopens + 1,
       attempt: 0,
       retryAfter: null,
@@ -399,14 +406,19 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
     })
     await sysLine(db, card.id, `被打回：${reason}`)
     /**
-     * **下游已经 done 的那些要打回去等。**
+     * **下游那些还没跑或者已经跑完的都要打回去等。**
      *
      * 文档 §3 推荐的评审流水线就是「干活卡 A → 评审卡 B」，而 B 说不行时打回的正是 A。
      * 不动 B 的话：A 重做、再次 done，而 B 早就是 done 了、永远不会再跑——这条流水线
      * 停在 B 上一次那份「不合格」的结论上，板上四列全绿，没有任何迹象表明重做之后
      * 根本没人复核。
      *
-     * 打回 `todo` 而不是 `ready`：它要等 A 重新做完，`promoteReadyCards` 会在那之后
+     * **`ready` 的那些一样要推回去**：B 正等着被派（一颗 Bot 一张的并发闸，等上几轮是
+     * 常态）时打回 A，只推 `done` 的话 B 会在下一个 tick 带着 A 刚被否掉的结论跑出去，
+     * 跑完就是 `done`——等 A 真的重做完，它已经不在打回名单里了。判据见
+     * `invalidateDownstream`。
+     *
+     * 一律推 `todo` 而不是 `ready`：它要等 A 重新做完，`promoteReadyCards` 会在那之后
      * 放它出来。`attempt` 清零——这是新的一次机会，不是接着上次的第二次。
      */
     const stale = await invalidateDownstream(db, card.id)
@@ -561,16 +573,47 @@ async function cancelDownstream(db: Db, from: string): Promise<string[]> {
   return out
 }
 
-/** 打回：下游已经做完的打回去等——它们手上那份输入作废了。 */
+/**
+ * 打回：下游**还没跑或者已经跑完**的一律推回去等——它们手上那份输入作废了。
+ *
+ * **`ready` 和 `todo` 一样要推**，不能只推 `done`。一张 `ready` 的下游卡是「父卡都做完了、
+ * 就等调度器来派」——而调度器随时会来（半分钟一轮，还要过一颗 Bot 一张的并发闸，等上几轮
+ * 是常态）。只推 `done` 的话，那张 `ready` 的卡会在下一个 tick 带着**刚被人否掉的**上游
+ * 结论跑出去（`packOf` 里 `parents[].summary` 取的就是它），而且跑完就是 `done`——等上游
+ * 真的重做完，它已经不在打回名单里了，再也不会跑第二次。
+ *
+ * `todo` 的那些照理已经在等，但它们的 `attempt` / `retryAfter` 也该跟着清：这是新的一次
+ * 机会，不是接着上次那第二次。
+ *
+ * `running` 不动：那张有人在做，要停有停止按钮（同 cancelDownstream 的口径）。
+ */
 async function invalidateDownstream(db: Db, from: string): Promise<string[]> {
   const out: string[] = []
   for (const child of await walkDownstream(db, from)) {
-    if (child.state !== 'done') continue
+    if (child.state !== 'done' && child.state !== 'ready' && child.state !== 'todo') continue
     await db.updateCard(child.id, { state: 'todo', attempt: 0, retryAfter: null, endedAt: null })
-    await sysLine(db, child.id, '上游那张被打回重做了，这张要等它做完再跑一次')
+    // 已经在等的那些不用再说一遍，人读时间线要的是「发生了什么变化」。
+    if (child.state !== 'todo') await sysLine(db, child.id, '上游那张被打回重做了，这张要等它做完再跑一次')
     out.push(child.id)
   }
   return out
+}
+
+/**
+ * 这张卡现在该是 `ready` 还是 `todo`——**按父卡现在的状态现算**。
+ *
+ * 「解锁」「打回」这类把卡放回队列的动作不能一律写 `ready`：`ready` 的意思是「父卡都收口
+ * 了，随时可派」，而一张卡被挡住的这段时间里上游完全可能被打回重做。写死 `ready` 就是让
+ * 它插到自己的依赖前面去跑，拿的还是那份作废的输入。
+ *
+ * 挡路的判据和 `promoteReadyCards` 那条 SQL 一字不差（`done` / `archived` / `cancelled`
+ * 都算收口了）——两处对不上的话，这里放出去的卡会在下一轮被那条 SQL 判成还该等着，而它
+ * 只推 todo → ready，推不回来。
+ */
+async function queueStateOf(db: Db, cardId: string): Promise<'ready' | 'todo'> {
+  const parents = await db.cardParents(cardId)
+  const settled = (s: string) => s === 'done' || s === 'archived' || s === 'cancelled'
+  return parents.every((p) => settled(p.state)) ? 'ready' : 'todo'
 }
 
 async function hasPath(db: Db, from: string, to: string): Promise<boolean> {

@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { gatewayToken, gatewayUrl } from '../llm/gateway.ts'
 import { fail, registerTool } from './common.ts'
+import { ReportError } from './kanban-report.ts'
 
 /**
  * 看板工具集：`kanban_list` / `kanban_create` / `kanban_link` / `kanban_comment`。
@@ -63,6 +64,32 @@ async function callGateway<T>(method: string, path: string, body?: unknown): Pro
     throw new Error(`Gateway 返回 HTTP ${r.status}${text ? ` ${text.slice(0, 200)}` : ''}`)
   }
   return (await r.json()) as T
+}
+
+/**
+ * 报一次收口。**报不上去就把「已收口」那面旗子放回去。**
+ *
+ * 占旗排在这一跳前面是对的（收口的判据是这次调用本身，不是 turn/end——见工具里那段
+ * 注释）。可占了之后要是这一跳没成——Gateway 5xx、网络抖一下、30 秒超时——旗子还落着，
+ * 于是模型重试拿到的是「这张卡已经收过口了」，而 `runCard` 收尾那条兜底回报也被同一面
+ * 旗子关掉：两条路一起堵死，这段结论就此丢了。Gateway 那边这张卡停在 `running` 直到三
+ * 分钟后被判「席位失联」，白占一次 attempt，再把整张卡从头跑一遍。
+ *
+ * 放回去之后两条路都活着：模型可以再调一次（下面那句话就是让它去调的），它要是不调，
+ * 收尾那条兜底会替它报一次失败。
+ *
+ * **只有再报一次有希望的才回滚**（`ReportError.retryable`：连不上 / 超时 / 5xx）。4xx 是
+ * Gateway 判出来的——这张卡不在了、这一次执行不算数了——再报一百次也是同一个答案，放旗子
+ * 回去只会让模型把剩下的步数全耗在重报上。那种情况旗子留着，收尾那条兜底也不再多报一次。
+ */
+async function reportOrRelease(ctx: Context, sessionId: string, cardId: string, body: Record<string, unknown>): Promise<void> {
+  try {
+    await ctx.kanban.report(cardId, body)
+  } catch (e) {
+    if (e instanceof ReportError && !e.retryable) fail(`${e.message}。这张卡这边已经收不了了，停下来吧。`)
+    ctx.agents.unmarkCardSettled?.(sessionId)
+    fail(`${(e as Error).message}。原样再调一次这把工具——你刚才那段结论还没有被记下。`)
+  }
 }
 
 interface RemoteCard {
@@ -327,7 +354,13 @@ export function apply(ctx: Context) {
       // 而那时收口已经发生了。等到 turn/end 一起报的话，「跑完了没交结论」那条判据永远
       // 为真，每张卡都会被算成一次失败。
       if (!ctx.agents.markCardSettled?.(call.sessionId)) fail('这张卡已经收过口了，别再报一次——两段不一样的结论，后写的那段未必是对的那段。')
-      await ctx.kanban.report(row.cardId, { runId: row.runId, status: 'ok', summary: text, metadata: metadata ?? null, sessionId: call.sessionId })
+      await reportOrRelease(ctx, call.sessionId, row.cardId, {
+        runId: row.runId,
+        status: 'ok',
+        summary: text,
+        metadata: metadata ?? null,
+        sessionId: call.sessionId,
+      })
       return `收到，${row.cardId} 记成做完了。接下来把手上的事收个尾就行，不用再做新的。`
     },
   )
@@ -352,7 +385,12 @@ export function apply(ctx: Context) {
       const text = (reason ?? '').trim()
       if (!text) fail('缺少 reason：卡在哪儿？不写的话人打开这张卡第一件事是回来问你。')
       if (!ctx.agents.markCardSettled?.(call.sessionId)) fail('这张卡已经收过口了。')
-      await ctx.kanban.report(row.cardId, { runId: row.runId, status: 'blocked', error: text, sessionId: call.sessionId })
+      await reportOrRelease(ctx, call.sessionId, row.cardId, {
+        runId: row.runId,
+        status: 'blocked',
+        error: text,
+        sessionId: call.sessionId,
+      })
       return `记下了，${row.cardId} 转给人处理。停下来吧，别再试了。`
     },
   )

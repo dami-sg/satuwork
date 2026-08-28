@@ -32,6 +32,11 @@ export async function runCard({ root, test, assert, log }) {
     ['没交结论', r.没交结论],
     ['重试', r.重试],
     ['主会话', r.主会话],
+    // 审批卡开在卡片会话上等于开在一间没有门的屋子里：五分钟后按超时收口，而人不知道
+    // 有人问过他。这一格钉的是 approvals.ts 依赖的那条线。
+    ['审批投哪儿', r.审批投哪儿],
+    // 占了「已收口」那面旗子却没报成，两条路一起堵死，结论就此丢了。
+    ['收口没送到', r.收口没送到],
   ]
   for (const [name, obj] of groups) {
     for (const one of each(test, assert, name, obj ?? {})) await one()

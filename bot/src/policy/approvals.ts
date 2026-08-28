@@ -138,8 +138,16 @@ export class ApprovalGate {
      * 顺带两件事自动对了：`scope: 'turn'` 的放行名单记在主会话上，而 clearTurn 由**主
      * 轮**的 turn/end 触发——子代理跑多久都在这一轮里，语义正好；同一个 callId 不会撞，
      * 它本来就是全局唯一的。
+     *
+     * **看板的卡片会话是同一件事**，只是它没有「主会话」这个现成的东西：卡不是某次工具
+     * 调用开出来的，`rootOf` 查不到它。它 `kind: 'card'`，侧栏一样不列，所以开在它自己
+     * 身上的审批卡一样没人点得到——一张要发邮件的卡会在每一次 external+write 上白等满五
+     * 分钟再按超时收口，60 步的预算几次就撞穿 Gateway 那道墙钟，整张卡按失败重派、重派
+     * 之后再撞一遍。所以回落到那颗 Bot 自己的长会话（`cardHomeOf`），也就是人真的看得见
+     * 的那一条。
      */
-    const sessionId = agentsOf(this.ctx)?.rootOf?.(call.sessionId) ?? call.sessionId
+    const agents = agentsOf(this.ctx)
+    const sessionId = agents?.rootOf?.(call.sessionId) ?? agents?.cardHomeOf?.(call.sessionId) ?? call.sessionId
     /**
      * 拦停名单先看：人这一轮已经说过「别再试了」。
      *
