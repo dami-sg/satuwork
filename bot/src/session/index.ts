@@ -34,9 +34,21 @@ export interface CreateSession {
   origin?: SessionOrigin
   remoteId?: string
   title?: string
-  /** `task` = 一次委派开出来的子会话（见 docs/delegation.md）。默认 `main`。 */
-  kind?: 'main' | 'task'
-  /** 谁开的。`kind === 'task'` 时必须给。 */
+  /**
+   * `task` = 一次委派开出来的子会话（docs/delegation.md）；
+   * `card` = 一张看板卡（docs/kanban.md）。默认 `main`。
+   *
+   * **除了 `main` 之外的都不是「这个人的对话」**：不进 list()、不上报会话索引、
+   * 不会被 ensureSession 认领成长会话。判据一律写成「是不是 main」，不是「是不是
+   * task」——第三个取值出现时，照后者写的每一处都会静默地把它当成主会话。
+   */
+  kind?: 'main' | 'task' | 'card'
+  /**
+   * 谁开的。**非 `main` 的都必须给。**
+   *
+   * 卡片会话没有开它的那次工具调用（是 Gateway 派过来的），所以 `sessionId` / `callId`
+   * 留空，`taskId` 写卡号。
+   */
   parent?: { sessionId: string; callId: string; taskId: string }
 }
 
@@ -78,15 +90,15 @@ export class SessionService extends Service {
 
   async create(opts: CreateSession): Promise<string> {
     if (!opts.botId) throw new Error('sessions: 创建会话必须带 botId')
-    if (opts.kind === 'task' && !opts.parent) throw new Error('sessions: 子会话必须带 parent')
+    if (opts.kind && opts.kind !== 'main' && !opts.parent) throw new Error('sessions: 非主会话必须带 parent')
     await mkdir(this.root, { recursive: true })
     /**
-     * 子会话用 `t-` 前缀。
+     * 主会话 `s-`、委派子会话 `t-`、看板卡 `c-`。
      *
      * **只为运维时 `ls` 一眼分得开**，代码里不许拿它做判断——事实源是根事件的 `kind`
      * （见 session/types.ts）。两个判据并存的话，它们迟早会分叉。
      */
-    const id = `${opts.kind === 'task' ? 't' : 's'}-${randomUUID()}`
+    const id = `${opts.kind === 'task' ? 't' : opts.kind === 'card' ? 'c' : 's'}-${randomUUID()}`
     const state: SessionState = { id, events: [], seq: 0, file: join(this.root, `${id}.jsonl`) }
     this.cache.set(id, state)
     await this.append(id, 'session', {
@@ -97,7 +109,7 @@ export class SessionService extends Service {
       botId: opts.botId,
       origin: opts.origin ?? 'local',
       ...(opts.remoteId ? { remoteId: opts.remoteId } : {}),
-      ...(opts.kind === 'task' ? { kind: 'task' as const, parent: opts.parent } : {}),
+      ...(opts.kind && opts.kind !== 'main' ? { kind: opts.kind, parent: opts.parent } : {}),
     })
     return id
   }
@@ -129,16 +141,19 @@ export class SessionService extends Service {
   /**
    * 会话列表，按创建时间倒序。标题取 session/title，没有就回落到根记录。
    *
-   * **默认不含子会话。** 委派开出来的那些（`kind: 'task'`）不是「这个人的对话」，
-   * 而这个列表的每一个调用方都是在问那个问题：侧栏画什么、认领哪条长会话
+   * **默认只有主会话。** 委派开出来的（`task`）和看板卡（`card`）都不是「这个人的
+   * 对话」，而这个列表的每一个调用方都是在问那个问题：侧栏画什么、认领哪条长会话
    * （registry 的 ensureSession）、往控制面报哪些索引。混进去的后果最狠的一条是认领
-   * ——列表按创建时间**倒序**，子会话永远比主会话新，于是席位重装、名册行上的
-   * sessionId 丢了的那一刻，`mine[0]` 认回来的是半年前某次委派的现场。
+   * ——列表按创建时间**倒序**，它们永远比主会话新，于是席位重装、名册行上的
+   * sessionId 丢了的那一刻，`mine[0]` 认回来的是某次委派、或者昨天某张卡的现场。
    *
-   * 要连子会话一起看（调试、清理）传 `{ tasks: true }`。
+   * **判据是「是不是 main」，不是「是不是 task」。** 照后者写的话，第三个取值出现的
+   * 那天它会被静默地当成主会话——而卡是天天在跑的。
+   *
+   * 要连它们一起看（调试、清理）传 `{ tasks: true }`。
    */
   async list(opts: { tasks?: boolean } = {}): Promise<
-    { id: string; title: string; createdAt: number; botId?: string; kind?: 'main' | 'task' }[]
+    { id: string; title: string; createdAt: number; botId?: string; kind?: 'main' | 'task' | 'card' }[]
   > {
     if (!existsSync(this.root)) return []
     const files = (await readdir(this.root)).filter((f) => f.endsWith('.jsonl'))
@@ -154,9 +169,9 @@ export class SessionService extends Service {
           createdAt: number
           botId?: string
           agentId?: string
-          kind?: 'main' | 'task'
+          kind?: 'main' | 'task' | 'card'
         }
-        if (data.kind === 'task' && !opts.tasks) return null
+        if (data.kind && data.kind !== 'main' && !opts.tasks) return null
         return {
           id,
           title:

@@ -16,7 +16,7 @@ import { fail, registerTool } from './common.ts'
  * （见下面 apply 开头那段）。
  */
 export const name = 'satu-tools-kanban'
-export const inject = ['tools', 'catalog']
+export const inject = ['tools', 'catalog', 'agents']
 
 /** 一次最多建几张。和 Gateway 那一侧同一个数，但**判据在那边**——这里只是先说清楚。 */
 const CREATE_MAX = 5
@@ -63,6 +63,59 @@ async function callGateway<T>(method: string, path: string, body?: unknown): Pro
     throw new Error(`Gateway 返回 HTTP ${r.status}${text ? ` ${text.slice(0, 200)}` : ''}`)
   }
   return (await r.json()) as T
+}
+
+/**
+ * 席位的**运行面**向 Gateway 回报一张卡的收口。
+ *
+ * 走 `/internal`，不走 `/runtime`——**判据是「谁在说话」**：这一条是这台机器在汇报
+ * （和「这条会话结束了」「这次用了多少 token」同一类），不是模型在说话。混进模型那一组
+ * 的话，模型有一天就能自己报一句「这张卡跑完了」。
+ *
+ * 这里用的是席位票（`sat_`），Gateway 那边 `requireInternalCaller` 认它，并且只允许它
+ * 替**自己那个账号**说话。
+ */
+export async function reportCard(cardId: string, body: Record<string, unknown>): Promise<void> {
+  const base = gatewayUrl()
+  const token = gatewayToken()
+  if (!base || !token) return
+  const r = await fetch(`${base}/internal/kanban/cards/${encodeURIComponent(cardId)}/result`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
+  })
+  // 409 = 那边已经收过口了（比如 kanban_complete 报过一次，收尾这条又报了一次）。
+  // **不是错**：正是我们要的那个「只收一次」。
+  if (!r.ok && r.status !== 409) {
+    throw new Error(`回报卡 ${cardId} 失败：HTTP ${r.status}`)
+  }
+}
+
+/**
+ * 心跳：席位每 60 秒替正在跑的卡报一次「还活着」。
+ *
+ * **模型不管这件事**（所以没有 `kanban_heartbeat` 这把工具）：让模型负责保活，是把一个
+ * 运维问题伪装成一个提示词问题——它会忘，而忘了的表现是一张明明在跑的卡被判成崩了。
+ *
+ * 返回 false = Gateway 那边说这张卡已经不在了（人撤了、板删了、或者被判失联收掉了），
+ * 席位据此掐掉那一轮，而不是继续跑一个没人认领的活。
+ */
+export async function beatCard(cardId: string): Promise<boolean> {
+  const base = gatewayUrl()
+  const token = gatewayToken()
+  if (!base || !token) return true
+  try {
+    const r = await fetch(`${base}/internal/kanban/cards/${encodeURIComponent(cardId)}/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(15_000),
+    })
+    // 连不上不当作「卡没了」：网络抖一下就掐掉一轮正在跑的活，代价比多跑一会儿大得多。
+    return r.ok || r.status >= 500
+  } catch {
+    return true
+  }
 }
 
 interface RemoteCard {
@@ -245,6 +298,115 @@ export function apply(ctx: Context) {
       if (!child || !par) fail('要写清楚哪张等哪张：card 是子卡，parent 是先做的那张。')
       await callGateway('POST', `/runtime/kanban/cards/${encodeURIComponent(child)}/links${q()}`, { parentId: par })
       return `记下了：${child} 要等 ${par} 做完。`
+    },
+  )
+
+  // ── 卡上的那一组：只有卡片会话里调得通 ────────────────────────────────
+  //
+  // 「当前这张卡」只存在于卡片会话里，主会话里没有这个东西。判据挂在**工具自己**身上
+  // （`ctx.agents.cardOf(call.sessionId)`），不是靠「主会话的 schema 里没有它」——那只是
+  // 遮掩，模型硬报一个名字照样调得通。
+
+  /** 这次调用是在哪张卡上。不在卡片会话里就当场说清楚，别让它以为是自己参数写错了。 */
+  const cardOf = (sessionId: string) => {
+    const row = ctx.agents.cardOf?.(sessionId)
+    if (!row) fail('这里不是卡片会话——`kanban_show` / `kanban_complete` / `kanban_block` 只在你正做着某张卡的时候才有意义。')
+    return row!
+  }
+
+  registerTool(
+    ctx,
+    {
+      name: 'kanban_show',
+      /** 读。卡片会话里派出去的子代理**该**看得见自己在做哪张卡。 */
+      delegation: {},
+      risk: ['read'],
+      description: '把你正在做的这张卡再读一遍：正文、上游卡的结论、卡上的留言。开工的交底书已经在第一条消息里了，这把是给「做到一半想再核对一下」用的。',
+      parameters: { type: 'object', properties: {} },
+    },
+    async (_args: unknown, call) => {
+      const row = cardOf(call.sessionId)
+      const out = await callGateway<{ card: RemoteCard & { body: string }; parents: RemoteCard[]; timeline: { authorBotId: string | null; body: string }[] }>(
+        'GET',
+        `/runtime/kanban/cards/${encodeURIComponent(row.cardId)}${q()}`,
+      )
+      const parents = out.parents.length
+        ? `\n\n## 上游卡的结论\n${out.parents.map((p) => `### ${p.title}（${p.id}）\n${p.summary || '（它没留下结论）'}`).join('\n\n')}`
+        : ''
+      const said = out.timeline.filter((t) => t.body.trim())
+      const notes = said.length ? `\n\n## 留言\n${said.map((t) => `- ${t.authorBotId ?? '人'}：${t.body}`).join('\n')}` : ''
+      return `# ${out.card.title}（${out.card.id}）\n\n${out.card.body || '（这张卡没写正文）'}${parents}${notes}`
+    },
+  )
+
+  registerTool(
+    ctx,
+    {
+      name: 'kanban_complete',
+      /**
+       * **只有这一层有。**
+       *
+       * 收口是这张卡那一轮的事：子代理替它收口的话，主流程还在跑，而卡已经 done 了——
+       * 而且那段结论是子代理写的，不是真正做完这件事的那一位写的。
+       */
+      delegation: { mode: 'root-only' },
+      risk: ['write'],
+      description:
+        '这张卡做完了。**结论要自足**：做了什么、结果是什么、还有什么没做——下游那张卡看不见你的过程，只看得见这一段。\n' +
+        '产出的文件路径写进 metadata.changed_files，下游靠它找东西，不是靠猜目录。\n' +
+        '做不完就别调它，调 kanban_block。',
+      parameters: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string', description: '结论。一段话，自足。' },
+          metadata: {
+            type: 'object',
+            description: '交付证据：changed_files（产出路径）、verification（怎么验的）、residual_risk（哪些没验）。',
+            properties: {
+              changed_files: { type: 'array', items: { type: 'string' } },
+              verification: { type: 'array', items: { type: 'string' } },
+              residual_risk: { type: 'array', items: { type: 'string' } },
+            },
+          },
+        },
+        required: ['summary'],
+      },
+    },
+    async ({ summary, metadata }: { summary?: string; metadata?: Record<string, unknown> }, call) => {
+      const row = cardOf(call.sessionId)
+      const text = (summary ?? '').trim()
+      if (!text) fail('缺少 summary：这张卡做成什么样了？下游那张卡只看得见这一段。')
+      // **一调就报，不等 turn/end**：你之后还可能接着说两句、还可能撞上步数上限被截断，
+      // 而那时收口已经发生了。等到 turn/end 一起报的话，「跑完了没交结论」那条判据永远
+      // 为真，每张卡都会被算成一次失败。
+      if (!ctx.agents.markCardSettled?.(call.sessionId)) fail('这张卡已经收过口了，别再报一次——两段不一样的结论，后写的那段未必是对的那段。')
+      await reportCard(row.cardId, { status: 'ok', summary: text, metadata: metadata ?? null, sessionId: call.sessionId })
+      return `收到，${row.cardId} 记成做完了。接下来把手上的事收个尾就行，不用再做新的。`
+    },
+  )
+
+  registerTool(
+    ctx,
+    {
+      name: 'kanban_block',
+      delegation: { mode: 'root-only' },
+      risk: ['write'],
+      description:
+        '这张卡干不下去了，要人。把**卡在哪儿、已经排除了什么**写清楚，然后停下来。\n' +
+        '要人拍板、缺一个只有人知道的东西、权限不够，都走这条。**不要换个写法再试三遍**——你面前没有人，试到最后也没人会回答你。',
+      parameters: {
+        type: 'object',
+        properties: { reason: { type: 'string', description: '卡在哪儿，一句话说清。顺带写上你已经排除了什么。' } },
+        required: ['reason'],
+      },
+    },
+    async ({ reason }: { reason?: string }, call) => {
+      const row = cardOf(call.sessionId)
+      const text = (reason ?? '').trim()
+      if (!text) fail('缺少 reason：卡在哪儿？不写的话人打开这张卡第一件事是回来问你。')
+      if (!ctx.agents.markCardSettled?.(call.sessionId)) fail('这张卡已经收过口了。')
+      await reportCard(row.cardId, { status: 'blocked', error: text, sessionId: call.sessionId })
+      return `记下了，${row.cardId} 转给人处理。停下来吧，别再试了。`
     },
   )
 
