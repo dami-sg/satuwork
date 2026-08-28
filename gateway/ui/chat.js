@@ -6485,6 +6485,13 @@ async function loadHandoffs() {
     state.handoffCount = Number(data.count) || 0
     state.handoffStats = data.stats || null
     applyHandoffSnapshot(state.handoffs)
+    /**
+     * 顺手把板的计数也拉一次。
+     *
+     * **两个数要一起变**：顶栏显示的是它们的和（见 paintHandoffBadge），各拉各的话，
+     * 卡解锁之后那个和还挂着旧的 blocked 数，要等到下一次交接单轮询才对上。
+     */
+    await loadKanban()
     paintHandoffBadge()
     // 待办页正开着就重画：这个数刚变过，而那一页整屏都是它。
     if (state.path === '/handoffs') render()

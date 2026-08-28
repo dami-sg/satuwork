@@ -206,6 +206,8 @@ document.getElementById('app').addEventListener('submit', (e) => {
     e.preventDefault()
     return sendChat()
   }
+  const kb = form.getAttribute('data-act')
+  if (kb === 'kanban-new-board' || kb === 'kanban-new-card' || kb === 'kanban-comment') return submitKanban(e, kb)
   if (form.getAttribute('data-form') === 'org-profile') return saveOrgProfile(e)
   if (form.getAttribute('data-form') === 'machine') return saveMachine(e)
   if (form.getAttribute('data-form') === 'manager-version') return saveManagerVersion(e)
@@ -481,6 +483,41 @@ document.getElementById('app').addEventListener('click', async (e) => {
     // 交还要写一句话，而那句话该在对话里写——接手的人得先看见 Bot 已经做到哪一步。
     const bot = btn.getAttribute('data-bot')
     if (bot) go('/a/' + encodeURIComponent(bot))
+    return
+  }
+  if (act === 'kanban-board') {
+    const id = btn.getAttribute('data-id') || ''
+    void loadKanbanBoard(id).then(render).then(kanbanPoll).catch((e) => flash('err', e.message))
+    return
+  }
+  if (act === 'kanban-card') {
+    const id = btn.getAttribute('data-id') || ''
+    void loadKanbanCard(id).then(render).then(kanbanPoll).catch((e) => flash('err', e.message))
+    return
+  }
+  if (act === 'kanban-open-run') {
+    // 流水那一行点得进会话全文——那是席位上的东西，走已有的会话页。
+    go('/s/' + encodeURIComponent(btn.getAttribute('data-id') || ''))
+    return
+  }
+  if (act === 'kanban-abort' || act === 'kanban-unblock' || act === 'kanban-cancel' || act === 'kanban-archive') {
+    const id = btn.getAttribute('data-id') || ''
+    const path = act.slice('kanban-'.length)
+    void api('POST', `/kanban/cards/${encodeURIComponent(id)}/${path}`)
+      .then(() => loadKanbanCard(id))
+      .then(render)
+      .catch((e) => flash('err', e.message))
+    return
+  }
+  if (act === 'kanban-reopen') {
+    const id = btn.getAttribute('data-id') || ''
+    const reason = window.prompt(t('哪儿不对？这句话会进那张卡的正文，做它的 Bot 读得到', 'What was wrong? It goes into the card body'))
+    if (!reason) return
+    void api('POST', `/kanban/cards/${encodeURIComponent(id)}/reopen`, { reason })
+      .then(() => loadKanbanCard(id))
+      .then(render)
+      // 打回到顶（第 3 次）时那边回 409 并把卡转成 blocked——那句话要原样说给人听。
+      .catch((e) => flash('err', e.message))
     return
   }
   if (act === 'handoff-scope') {

@@ -28,6 +28,7 @@ import {
   type Db,
 } from './db.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
+import { notifyBlocked, reportToOwner } from './kanban-notify.ts'
 
 /** 席位多久没报心跳就算它死了。**主要的回收路径就是这一条。** */
 const STALE_MS = Math.max(60_000, Math.trunc(Number(process.env.GATEWAY_KANBAN_STALE_MS ?? 3 * 60_000)))
@@ -107,6 +108,9 @@ async function failCard(db: Db, card: Card, reason: string, runStatus: 'error' |
       endedAt: Date.now(),
     })
     await sysLine(db, card.id, `第 ${attempt} 次失败，转人处理：${reason}`)
+    // 推给人。**只推三档**，人自己按停止的那些不推（见 kanban-notify.ts）。
+    const stuck = await db.card(card.id)
+    if (stuck) void notifyBlocked(db, stuck)
     return
   }
   await db.updateCard(card.id, {
@@ -127,6 +131,26 @@ async function seatLinkOf(db: Db, accountId: string, botId: string) {
   const account = await db.account(accountId)
   if (!account) throw new Error('账号不在了')
   return { host, bearer: await seatBearer(db, accountId), machineToken: await machineTokenFor(db, account, botId) }
+}
+
+/**
+ * 让席位掐掉某张卡那一轮。
+ *
+ * 人在板上按停止时走这条。**失败不抛给调用方**：席位可能刚好死了，而那时更该把卡收掉
+ * ——它已经没人在跑了。
+ */
+export async function abortOnSeat(db: Db, card: Card): Promise<boolean> {
+  const link = await seatLinkOf(db, card.accountId, card.assigneeBotId ?? '')
+  const r = await fetch(`${link.host}/api/cards/${encodeURIComponent(card.id)}/abort`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      ...(link.bearer ? { authorization: `Bearer ${link.bearer}` } : {}),
+      ...(link.machineToken ? { 'x-satuwork-machine': link.machineToken } : {}),
+    },
+    signal: AbortSignal.timeout(10_000),
+  })
+  return r.ok
 }
 
 /** 席位对这次投递的回话。三种「不是失败」的答案要分得出来。 */
@@ -319,6 +343,13 @@ export async function settleCard(
       ...(result.sessionId ? { sessionId: result.sessionId } : {}),
     })
     await sysLine(db, card.id, '做完了')
+    /**
+     * 做完了要不要吭一声，看卡上那一格。**默认什么都不做**：结论在卡上，而人挂完就走
+     * 的那些才需要有人喊他一声。
+     *
+     * 不 await：一条发不出去的招呼不该把这张卡的收口拖在那儿（席位可能正在重启）。
+     */
+    if (next) void reportToOwner(db, next)
     return next
   }
   if (result.status === 'blocked') {
@@ -335,6 +366,7 @@ export async function settleCard(
       ...(result.sessionId ? { sessionId: result.sessionId } : {}),
     })
     await sysLine(db, card.id, `卡住了：${result.error ?? '（没写原因）'}`)
+    if (next) void notifyBlocked(db, next)
     return next
   }
   await failCard(db, card, result.error || '席位没说原因', 'error')

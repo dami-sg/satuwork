@@ -30,6 +30,8 @@ function pageView() {
       return accountsPage()
     case '/handoffs':
       return handoffsPage()
+    case '/kanban':
+      return kanbanPage()
     case '/audit':
       return auditPage()
     case '/machines':
@@ -233,6 +235,7 @@ function appView() {
         <div style="width: 1px; height: 18px; background: var(--color-divider);"></div>
         ${head}
         ${handoffBell()}
+        ${kanbanBell()}
         ${asideToggle()}
       </div>
       <div class="gw-body">${pageView()}</div>

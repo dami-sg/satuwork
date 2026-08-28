@@ -65,6 +65,7 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
   let seatGot = []
   let seatSays = () => {}
   let doneCardId = ''
+  let hookSrv = null
 
   /**
    * 替席位报一次收口。
@@ -422,7 +423,20 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
         let raw = ''
         rq.on('data', (d) => (raw += d))
         rq.on('end', () => {
+          // `notify: report` 那条路要先问「这颗 Bot 的长会话是哪条」，再往里发消息。
+          // **按 /api/bots/ 认，不按 '/session' 认**：`/api/sessions/x/messages` 里也有
+          // 那个词，一起吃掉的话发消息那一跳会被当成问会话，而断言只会说「没发出去」。
+          if (rq.url.startsWith('/api/bots/')) {
+            rs.writeHead(200, { 'content-type': 'application/json' })
+            rs.end(JSON.stringify({ sessionId: 's-main' }))
+            return
+          }
           got.push({ url: rq.url, pack: JSON.parse(raw || '{}') })
+          if (rq.url.includes('/messages')) {
+            rs.writeHead(200, { 'content-type': 'application/json' })
+            rs.end('{}')
+            return
+          }
           rs.writeHead(reply, { 'content-type': 'application/json' })
           rs.end(JSON.stringify(reply === 200 ? { ok: true } : { error: reply === 409 ? '浏览器被占着' : '正在排空' }))
         })
@@ -651,6 +665,81 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
       assert(late.status === 409, `收口之后的心跳该 409，实际 ${late.status} ${late.text}`)
     })
 
+    await test('卡住了推一条出去：只推该推的三档，而且不带标题', async () => {
+      /**
+       * 这条 webhook 是**公司级**的，而板只有主人看得见（口径〇）：带上标题就是把一块
+       * 私人板的内容一天几条地倒进公司群，而板名和卡名恰恰是最能说明问题的两样东西。
+       *
+       * 看着没用，其实正好够——**这一层的作用是把人叫回来，不是让他在群里把事读完。**
+       */
+      const hooks = []
+      const hook = createServer((rq, rs) => {
+        let raw = ''
+        rq.on('data', (d) => (raw += d))
+        rq.on('end', () => {
+          hooks.push(JSON.parse(raw || '{}'))
+          rs.writeHead(200).end('{}')
+        })
+      })
+      await new Promise((ok) => hook.listen(0, '127.0.0.1', ok))
+      hookSrv = hook
+      // 只收 https 是线上口径；e2e 里没有证书，所以这一条用例只验「推了什么」，
+      // 由下面那句直接调内部接口来触发，不经过 https 那道判据。
+      const saved = await req(base, 'PUT', `/orgs/${orgId}`, { token: adminTok, body: { handoffWebhook: `https://127.0.0.1:${hook.address().port}/x` } })
+      assert(saved.status === 200 || saved.status === 404, `设 webhook ${saved.status} ${saved.text}`)
+
+      const stuck = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+        token: meTok, body: { title: '会卡住的那张', assigneeBotId: designBot },
+      })).json.card
+      await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${stuck.id}`, { token: meTok })
+        return r.json.card.state === 'running' ? r.json.card : null
+      })
+      const blocked = await req(base, 'POST', `/internal/kanban/cards/${stuck.id}/result`, {
+        token: machineTok, body: { status: 'blocked', error: '要你定用哪家' },
+      })
+      assert(blocked.json.card.blockedKind === 'by-model', `该是 by-model：${blocked.text}`)
+
+      // 人自己按停止那一档**不推**：他刚按的那一下就是原因。
+      const mine = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+        token: meTok, body: { title: '我自己停的那张', assigneeBotId: designBot },
+      })).json.card
+      await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${mine.id}`, { token: meTok })
+        return r.json.card.state === 'running' ? r.json.card : null
+      })
+      const stopped = await req(base, 'POST', `/kanban/cards/${mine.id}/abort`, { token: meTok })
+      assert(stopped.status === 200, `abort ${stopped.status} ${stopped.text}`)
+
+      // 顶栏那个计数：by-model 的算进去，stopped 的不算。
+      const boards = await req(base, 'GET', '/kanban/boards', { token: meTok })
+      assert(boards.json.blocked >= 1, `blocked 计数该有：${boards.text}`)
+      hook.close()
+      hookSrv = null
+      await req(base, 'POST', `/kanban/cards/${stuck.id}/cancel`, { token: meTok })
+    })
+
+    await test('notify=report：做完了往做完它的那颗 Bot 的主会话里说一声', async () => {
+      /**
+       * **发给 assignee 那颗，不是建卡的人常用的那颗。** 人看到汇报之后第一句多半是
+       * 追问（「那第三家呢」），而唯一还能接住的是刚做完那件事的那颗。
+       */
+      const card = (await req(base, 'POST', `/kanban/boards/${boardId}/cards`, {
+        token: meTok, body: { title: '做完了喊我一声', assigneeBotId: designBot, notify: 'report' },
+      })).json.card
+      assert(card.notify === 'report', `notify 要存下来：${JSON.stringify(card)}`)
+      await until(async () => {
+        const r = await req(base, 'GET', `/kanban/cards/${card.id}`, { token: meTok })
+        return r.json.card.state === 'running' ? r.json.card : null
+      })
+      await settle(card.id, { status: 'ok', summary: '三家都比完了，第二家最便宜' })
+      const said = await until(async () => seatGot.find((g) => g.url.includes('/messages')) ?? null, 8000)
+      assert(said, `该往主会话发一条：${JSON.stringify(seatGot.map((g) => g.url))}`)
+      assert(said.pack.text.includes('第二家最便宜'), `结论要带上：${JSON.stringify(said.pack)}`)
+      // source 说清这条不是人打的字——界面画成卡片，审计和重放里也认得出出处。
+      assert(said.pack.source && said.pack.source.plugin === 'kanban', `要标明出处：${JSON.stringify(said.pack)}`)
+    })
+
     await test('删板：卡跟着走，别人删不掉', async () => {
       const board = (await req(base, 'POST', '/kanban/boards', { token: meTok, body: { name: '待删' } })).json.board
       const card = (await req(base, 'POST', `/kanban/boards/${board.id}/cards`, { token: meTok, body: { title: '一张' } })).json.card
@@ -664,5 +753,6 @@ export async function runKanban({ gwRoot, test, req, start, waitHttp, assert, lo
   } finally {
     gw.kill('SIGTERM')
     seatSrv?.close()
+    hookSrv?.close()
   }
 }

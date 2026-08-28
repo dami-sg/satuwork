@@ -11,6 +11,8 @@
  */
 import type { RouteCtx } from './ctx.ts'
 import { settleCard } from '../kanban-tick.ts'
+import { notifyBlocked } from '../kanban-notify.ts'
+import { abortOnSeat } from '../kanban-tick.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { requireInternalCaller, requireSeatOnly, requireUser, type InternalCaller } from '../lib/guards.ts'
@@ -382,6 +384,7 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
         blockedReason: `被打回 ${card.reopens} 次，需要人看一眼`,
       })
       await sysLine(db, card.id, `第 ${card.reopens + 1} 次打回被拒：转人处理`)
+      if (stuck) void notifyBlocked(db, stuck)
       throw new HttpError(409, `这张卡已经被打回 ${card.reopens} 次了，再打回也是同一个结果——它现在等人处理`, {
         card: publicCard(stuck!),
       })
@@ -395,6 +398,35 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
       body: `${card.body}\n\n【第 ${card.reopens + 1} 次打回】${reason}`.slice(0, CARD_BODY_MAX),
     })
     await sysLine(db, card.id, `被打回：${reason}`)
+    json(res, 200, { card: publicCard(next!) })
+  })
+
+  /**
+   * 人在板上按了停止。
+   *
+   * 两步：先让席位掐掉那一轮，再把卡收成 `blocked`。**顺序不能倒**——先改状态的话，
+   * 席位那边还在跑，而它跑完会打 `/result` 报一个「做完了」，把人刚按下的那一下覆盖掉。
+   *
+   * `blockedKind: 'stopped'` 这一档**不推通知、不进待办计数**：他刚按完停止，紧接着
+   * 收到一条「你有一张卡卡住了」，是这套通知最容易失去信任的方式。
+   *
+   * **不算失败、不占 attempt**：人停它是因为他要改点什么，不是因为它做错了。
+   */
+  router.post('/kanban/cards/:id/abort', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const card = await ownCardOf(db, account, req.params.id)
+    if (card.state !== 'running') throw new HttpError(409, '这张卡没在跑')
+    // 掐不掉也照样往下走：席位可能刚好死了，而那时更该把卡收掉——它已经没人在跑了。
+    await abortOnSeat(db, card).catch(() => false)
+    const run = await db.runningCardRun(card.id)
+    if (run) await db.finishCardRun(run.id, { status: 'aborted', error: '人停的' })
+    const next = await db.updateCard(card.id, {
+      state: 'blocked',
+      blockedKind: 'stopped',
+      blockedReason: '人停的',
+      endedAt: Date.now(),
+    })
+    await sysLine(db, card.id, '人按了停止')
     json(res, 200, { card: publicCard(next!) })
   })
 
