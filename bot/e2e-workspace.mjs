@@ -273,4 +273,49 @@ out.paging = {
   }
 }
 
+// ── 11. 删（右栏那棵树上的那颗按钮） ─────────────────────────────────
+/**
+ * 这一组和上面那些同一个理由：删除是这个目录上**唯一不可逆**的操作，写松了不会有人
+ * 报 bug——功能照跑，直到有人拿 `..` 或者一条符号链接去试。
+ */
+{
+  const delRoot = join(root, 'del')
+  mkdirSync(join(delRoot, '里面'), { recursive: true })
+  writeFileSync(join(delRoot, 'a.txt'), 'x')
+  writeFileSync(join(delRoot, '里面/b.txt'), 'x')
+  symlinkSync('/etc', join(delRoot, 'link'))
+  // 工作区**外面**的一份东西，外加一条指过去的链接：删除得挡住穿过它的那种路径。
+  const outside = mkdtempSync(join(tmpdir(), 'satu-out-'))
+  writeFileSync(join(outside, 'keep.txt'), 'x')
+  mkdirSync(join(outside, '里屋'), { recursive: true })
+  symlinkSync(outside, join(delRoot, 'out'))
+  const goneFile = await ws.remove('del/a.txt')
+  const goneDir = await ws.remove('del/里面')
+  out.remove = {
+    删得掉文件: !existsSync(join(delRoot, 'a.txt')),
+    报出删了什么: goneFile.path,
+    目录连里面一起删: !existsSync(join(delRoot, '里面')),
+    说清楚删的是目录: goneDir.dir === true,
+    // 越界、根、符号链接：三条各挡各的。根那条尤其要紧——`resolve('')` 合法地落在
+    // 根上，不单独挡的话一次手滑就是把整个工作区清空。
+    越界拦得住: await ws.remove('../../../etc/passwd').then(() => false).catch(() => true),
+    根删不掉: await ws.remove('').then(() => false).catch(() => true),
+    点号也是根: await ws.remove('.').then(() => false).catch(() => true),
+    // 跟着它能走出工作区，而 list 一开始就不列它——树上点不到的东西，这里也不该删得掉。
+    符号链接不给删: await ws.remove('del/link').then(() => false).catch(() => true),
+    符号链接指的目录还在: existsSync('/etc'),
+    // **路上那几段也要认**：只认最后一段的话，`out/keep.txt` 里的 out 是链接、
+    // keep.txt 是个规规矩矩的文件，上面那道判断一声不响，删掉的是工作区外面那一份。
+    穿过链接的不给删: await ws.remove('del/out/keep.txt').then(() => false).catch(() => true),
+    外面那份还在: existsSync(join(outside, 'keep.txt')),
+    穿过链接删目录也不给: await ws.remove('del/out/里屋').then(() => false).catch(() => true),
+    外面那个目录还在: existsSync(join(outside, '里屋')),
+    // 已经不在了要回 ENOENT（上面那层据此回 404）。安静地报成功的话，人看着那一行
+    // 消失会以为是自己刚才那一下删的。
+    不存在的报ENOENT: await ws.remove('del/没有这个.txt').then(() => '').catch((e) => e.code),
+    // 工作区自己还在：删完一层不能把根一起带走。
+    工作区还在: existsSync(root),
+  }
+}
+
 console.log('__RESULT__' + JSON.stringify(out))

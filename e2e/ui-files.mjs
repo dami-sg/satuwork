@@ -240,6 +240,231 @@ export async function runUiFiles({ root, test, assert, log }) {
     assert(!app.state.wsSession, 'wsSession 没跟着归零')
   })
 
+  /**
+   * 树上那颗删除。
+   *
+   * 这一组盯的是**「点一下」和「真的删了」之间那道确认**，以及删完之后手上那棵树还
+   * 对不对得上：工作区没有回收站，删错一次找不回来，而这颗按钮就贴在「点开预览」
+   * 那一行的末尾。
+   */
+  const delUi = ({ workspace, status, error } = {}) => {
+    const calls = []
+    const fetchImpl = async (path, init) => {
+      const method = (init && init.method) || 'GET'
+      calls.push(`${method} ${path}`)
+      if (method === 'DELETE') {
+        return new Response(JSON.stringify(status ? { error: error || '文件不存在' } : { path: '报告.md' }), {
+          status: status || 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      const body = path.includes('/workspace') ? workspace : {}
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    const app = loadApp({
+      appPath: join(root, 'gateway/ui/app.js'),
+      base: 'http://127.0.0.1:1',
+      fetchImpl,
+      stubIds: ['chat-thread'],
+    })
+    app.state.me = { account: { id: 'a1', role: 'member', email: 'a@b.c' } }
+    app.state.path = '/chat'
+    app.state.chatBotId = 'b1'
+    app.state.chatEvents = []
+    app.state.chatSessionId = 's1'
+    return { app, calls }
+  }
+
+  const delBtn = (path, name, dir) =>
+    el('button', { 'data-act': 'ws-del', 'data-path': path, 'data-name': name, 'data-dir': dir ? '1' : '' })
+
+  await test('每一行末尾都有一颗删除，而且它不在行那颗按钮里面', async () => {
+    const { app } = delUi({ workspace: {} })
+    app.state.wsDirs = {
+      '': {
+        entries: [
+          { name: 'uploads', path: 'uploads', dir: true, size: 0 },
+          { name: '报告.md', path: '报告.md', dir: false, size: 2048 },
+        ],
+        more: 0,
+      },
+    }
+    app.state.wsOpen = {}
+    const html = app.workspacePanel()
+    assert(/data-act="ws-del"[\s\S]{0,80}data-path="uploads"/.test(html), '目录那一行没有删除')
+    assert(/data-act="ws-del"[\s\S]{0,80}data-path="报告.md"/.test(html), '文件那一行没有删除')
+    // 按钮套按钮是非法 HTML，浏览器会把里层那颗拎出去——真出来的 DOM 里它就不在
+    // 行里了，点谁都是外面那一下。所以删除必须画在行**后面**，不在它体内。
+    const row = html.indexOf('data-act="chat-preview"')
+    const close = html.indexOf('</button>', row)
+    const del = html.search(/data-act="ws-del"[\s\S]{0,80}data-path="报告\.md"/)
+    assert(row > 0 && del > close, '删除被画进了行那颗按钮里面')
+  })
+
+  await test('点一下删除只弹框，不删；确认之后才真的发出去', async () => {
+    const { app, calls } = delUi({ workspace: { entries: [], more: 0 } })
+    app.render()
+    await app.fire('click', delBtn('报告.md', '报告.md', false))
+    assert(app.state.confirm && app.state.confirm.kind === 'ws-del', '点一下就直接删了，没有确认')
+    assert(/报告\.md/.test(app.state.confirm.body), `确认框里没写清楚删的是哪个：${app.state.confirm.body}`)
+    assert(!calls.some((c) => c.startsWith('DELETE')), `还没确认就发出去了：${JSON.stringify(calls)}`)
+    await app.runConfirm()
+    const del = calls.find((c) => c.startsWith('DELETE'))
+    assert(del && del.includes('path=%E6%8A%A5%E5%91%8A.md'), `删的不是那个文件：${JSON.stringify(calls)}`)
+    assert(del.includes('/runtime/sessions/s1/workspace'), `路径不对：${del}`)
+    // 删完要重取上一层，不然那一行还在树上——而它已经不存在了，点开是 404。
+    assert(calls.filter((c) => c.startsWith('GET') && c.includes('/workspace')).length >= 1, `删完没重取：${JSON.stringify(calls)}`)
+  })
+
+  await test('确认框把目录的后果说全：连里面的东西一起没', async () => {
+    const { app } = delUi({ workspace: { entries: [], more: 0 } })
+    app.render()
+    await app.fire('click', delBtn('uploads', 'uploads', true))
+    const body = app.state.confirm.body
+    assert(/底下的所有文件/.test(body), `目录那句没说清楚会连里面一起删：${body}`)
+  })
+
+  await test('删掉目录之后，手上缓存的它和它底下那几层一起扔掉', async () => {
+    const { app } = delUi({ workspace: { entries: [], more: 0 } })
+    app.state.wsDirs = {
+      '': { entries: [{ name: 'uploads', path: 'uploads', dir: true, size: 0 }], more: 0 },
+      uploads: { entries: [{ name: '单据.pdf', path: 'uploads/单据.pdf', dir: false, size: 1 }], more: 0 },
+      'uploads/旧': { entries: [], more: 0 },
+    }
+    app.state.wsOpen = { uploads: true, 'uploads/旧': true }
+    app.render()
+    await app.fire('click', delBtn('uploads', 'uploads', true))
+    await app.runConfirm()
+    // 留着的话，下次谁建了个同名目录再展开，看到的是上一份内容——那些文件早就不在了。
+    assert(!app.state.wsDirs.uploads && !app.state.wsDirs['uploads/旧'], `旧内容还留在手上：${JSON.stringify(Object.keys(app.state.wsDirs))}`)
+    assert(!app.state.wsOpen.uploads && !app.state.wsOpen['uploads/旧'], '展开状态没跟着扔掉')
+  })
+
+  await test('那个东西本来就不在了（404）：不当失败说', async () => {
+    const { app } = delUi({ workspace: { entries: [], more: 0 }, status: 404 })
+    app.render()
+    await app.fire('click', delBtn('报告.md', '报告.md', false))
+    await app.runConfirm()
+    // 人要的结果已经成立。摆一句红字只会让他以为还得再删一次。
+    assert(!app.state.error, `已经不在了却报成失败：${app.state.error}`)
+    assert(/已经不在了/.test(app.state.notice || ''), `没说清楚发生了什么：${app.state.notice}`)
+  })
+
+  /**
+   * 「刷新正取着这一层」和「把这一层删掉」撞在一起。
+   *
+   * 会话在这种情况下一动不动，所以那道「换过会话就不作数」的判据一点忙都帮不上：
+   * 在途那一趟回来，会把刚删掉的那份内容原样写回缓存。当时看不见——那一行已经从
+   * 上一层里消失了——直到 Bot 又建出一个同名目录（每传一个附件都会建
+   * `uploads/<sessionId>`），展开它看到的是上一茬的文件，点开全是「文件不存在」。
+   */
+  await test('刷新正取着这一层时把它删掉：那一趟回来不许把它写回去', async () => {
+    let release = () => {}
+    const held = new Promise((r) => {
+      release = r
+    })
+    const calls = []
+    const reply = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    const fetchImpl = async (path, init) => {
+      const method = (init && init.method) || 'GET'
+      calls.push(`${method} ${path}`)
+      if (method === 'DELETE') return reply({ path: 'uploads', dir: true })
+      // uploads 那一趟卡在半路上，等这条测里放行。
+      if (path.includes('path=uploads')) {
+        await held
+        return reply({ entries: [{ name: '单据.pdf', path: 'uploads/单据.pdf', dir: false, size: 1 }], more: 0 })
+      }
+      // 根：删完之后它是空的。
+      return reply({ entries: [], more: 0 })
+    }
+    const app = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base: 'http://127.0.0.1:1', fetchImpl, stubIds: ['chat-thread'] })
+    app.state.me = { account: { id: 'a1', role: 'member', email: 'a@b.c' } }
+    app.state.path = '/chat'
+    app.state.chatBotId = 'b1'
+    app.state.chatEvents = []
+    app.state.chatSessionId = 's1'
+    app.state.wsDirs = {
+      '': { entries: [{ name: 'uploads', path: 'uploads', dir: true, size: 0 }], more: 0 },
+      uploads: { entries: [{ name: '单据.pdf', path: 'uploads/单据.pdf', dir: false, size: 1 }], more: 0 },
+    }
+    app.state.wsOpen = { uploads: true }
+    app.render()
+    // 刷新：根和展开着的那几层一起重取，uploads 那一趟卡住不回。
+    const refreshing = app.fire('click', el('button', { 'data-act': 'ws-refresh' }))
+    await new Promise((r) => setTimeout(r, 5))
+    // 就在这会儿把 uploads 删掉。
+    await app.fire('click', delBtn('uploads', 'uploads', true))
+    await app.runConfirm()
+    assert(!app.state.wsDirs.uploads, `删完缓存里还留着：${JSON.stringify(Object.keys(app.state.wsDirs))}`)
+    // 在途那一趟这才回来。
+    release()
+    await refreshing
+    await new Promise((r) => setTimeout(r, 5))
+    assert(!app.state.wsDirs.uploads, '在途那一趟把删掉的那一层又写回来了')
+    assert(!app.state.wsOpen.uploads, '展开状态也被写回来了')
+  })
+
+  /**
+   * 上一层同理：删的是根底下的一个文件，而刷新那一趟正取着根。
+   */
+  await test('刷新正取着上一层时删掉一个文件：那一趟回来不许把这一行摆回去', async () => {
+    let release = () => {}
+    const held = new Promise((r) => {
+      release = r
+    })
+    let rootCalls = 0
+    const reply = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    const fetchImpl = async (path, init) => {
+      const method = (init && init.method) || 'GET'
+      if (method === 'DELETE') return reply({ path: '报告.md' })
+      rootCalls += 1
+      // 头一趟（刷新按下去那一趟）卡住，回的是删之前那份清单。
+      if (rootCalls === 1) {
+        await held
+        return reply({ entries: [{ name: '报告.md', path: '报告.md', dir: false, size: 2 }], more: 0 })
+      }
+      return reply({ entries: [], more: 0 })
+    }
+    const app = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base: 'http://127.0.0.1:1', fetchImpl, stubIds: ['chat-thread'] })
+    app.state.me = { account: { id: 'a1', role: 'member', email: 'a@b.c' } }
+    app.state.path = '/chat'
+    app.state.chatBotId = 'b1'
+    app.state.chatEvents = []
+    app.state.chatSessionId = 's1'
+    app.state.wsDirs = { '': { entries: [{ name: '报告.md', path: '报告.md', dir: false, size: 2 }], more: 0 } }
+    app.state.wsOpen = {}
+    app.render()
+    const refreshing = app.fire('click', el('button', { 'data-act': 'ws-refresh' }))
+    await new Promise((r) => setTimeout(r, 5))
+    await app.fire('click', delBtn('报告.md', '报告.md', false))
+    await app.runConfirm()
+    release()
+    await refreshing
+    await new Promise((r) => setTimeout(r, 5))
+    const names = (app.state.wsDirs[''].entries || []).map((e) => e.name)
+    assert(!names.includes('报告.md'), `删掉的那一行被写回上一层了：${JSON.stringify(names)}`)
+  })
+
+  await test('席位版本旧（404 unknown endpoint）：说要更新，别说成「已经不在了」', async () => {
+    const { app } = delUi({ workspace: { entries: [], more: 0 }, status: 404, error: 'unknown endpoint' })
+    app.render()
+    await app.fire('click', delBtn('报告.md', '报告.md', false))
+    await app.runConfirm()
+    // 认成「已经不在了」的话，人收到一句「删掉了」，刷新一下那个文件却还在。
+    assert(/更新 Bot 版本/.test(app.state.error || ''), `没说清楚是版本旧了：${app.state.error} / ${app.state.notice}`)
+    assert(!/已经不在了/.test(app.state.notice || ''), '把「这台席位没这条接口」说成了「文件已经不在了」')
+  })
+
+  await test('席位还没接上：不发这条删除请求', async () => {
+    const { app, calls } = delUi({ workspace: {} })
+    app.state.chatSessionId = ''
+    app.render()
+    await app.fire('click', delBtn('报告.md', '报告.md', false))
+    await app.runConfirm()
+    assert(!calls.some((c) => c.startsWith('DELETE')), `没有会话还发了删除：${JSON.stringify(calls)}`)
+    assert(app.state.error, '什么都没说，人只会以为删掉了')
+  })
+
   await test('席位回的不是一份目录：说列不出来，不能画成「工作区还是空的」', async () => {
     const { app } = seatUi({ workspace: {} })
     app.state.chatSessionId = 's1'

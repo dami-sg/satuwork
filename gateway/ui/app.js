@@ -117,6 +117,11 @@ async function runConfirm() {
       flash('ok', '席位已清理')
       render()
       return
+    } else if (c.kind === 'ws-del') {
+      // 自己管提示与重取（见 chat.js 的 deleteWorkspaceEntry）：删完只重取上一层，
+      // 而这里的兜底是整页 render——两者一起做的话，那一屏会先闪一次旧内容。
+      await deleteWorkspaceEntry(c.path, c.name)
+      return
     } else if (c.kind === 'routine-delete') {
       await deleteRoutineNow(c.id)
       return
@@ -598,6 +603,36 @@ document.getElementById('app').addEventListener('click', async (e) => {
   }
   if (act === 'ws-refresh') {
     await refreshWorkspaceTree()
+    return
+  }
+  /**
+   * 树上那颗删除。**先弹框**：工作区没有回收站，删掉就没了，而这颗按钮就贴在
+   * 「点开预览」那一行的末尾，指头偏一点就是另一件事。
+   *
+   * 框里要写全名字和后果——目录那句尤其：人点的是一个文件夹图标，脑子里未必装着
+   * 它底下那几十个文件。
+   */
+  if (act === 'ws-del') {
+    const path = btn.getAttribute('data-path') || ''
+    const name = btn.getAttribute('data-name') || path
+    const dir = Boolean(btn.getAttribute('data-dir'))
+    state.confirm = {
+      title: dir ? t('删掉这个文件夹？', 'Delete this folder?') : t('删掉这个文件？', 'Delete this file?'),
+      body: dir
+        ? t(
+            `「${name}」连同它底下的所有文件都会从工作区里删掉，删掉就找不回来了。`,
+            `"${name}" and everything inside it is removed from the workspace. This cannot be undone.`,
+          )
+        : t(
+            `「${name}」会从工作区里删掉，删掉就找不回来了。对话里提到过它的地方点开会变成「文件不存在」。`,
+            `"${name}" is removed from the workspace. This cannot be undone, and links to it in the conversation will stop opening.`,
+          ),
+      label: '删除',
+      kind: 'ws-del',
+      path,
+      name,
+    }
+    render()
     return
   }
   if (act === 'runtime-redeploy') {

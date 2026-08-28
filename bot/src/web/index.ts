@@ -757,6 +757,35 @@ export function apply(ctx: Context, _config: Config = {}) {
     })
   })
 
+  /**
+   * 删掉工作区里的一个文件或目录（界面右栏那棵树上，鼠标移上去出来的那颗）。
+   *
+   * 和上面那两条同一个工作区、同一道越界检查（workspace 服务），差别只在这条是
+   * **有副作用**的：删掉就没了，工作区里没有回收站。所以确认在界面上做（那颗按钮
+   * 弹一次框），这里不再问第二遍——两处都问的话，人只会把第二问当成噪音点掉。
+   */
+  ctx.server.delete('/api/workspace/file', async (req, res) => {
+    const path = req.query.get('path') ?? ''
+    if (!path.trim()) {
+      res.status = 400
+      res.json({ error: 'path 不能为空' })
+      return
+    }
+    try {
+      const gone = await ctx.workspace.remove(path)
+      // 记一笔。删除是这个目录上唯一不可逆的操作，出了事「谁在什么时候删的」只能从
+      // 这儿找回来——上传那条也是同一个理由记的。
+      ctx.logger?.info?.(`delete: ${gone.path}${gone.dir ? '/（整个目录）' : ''}`)
+      res.json(gone)
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException
+      res.status = e instanceof WorkspaceError ? 400 : err?.code === 'ENOENT' ? 404 : 500
+      res.json({
+        error: e instanceof WorkspaceError ? e.message : err?.code === 'ENOENT' ? '文件不存在' : '删不掉',
+      })
+    }
+  })
+
   // 未知的 /api/* 必须是 JSON 404，不能掉进下面的 SPA 兜底——否则前端 fetch
   // 拿到一段 HTML，报错会指向 JSON 解析而不是真正的路由缺失。
   //
