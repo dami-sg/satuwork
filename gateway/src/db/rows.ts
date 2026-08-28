@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, Board, BoardMember, Card, CardComment, CardRun, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseCardBlockedKind, parseCardNotify, parseCardRunStatus, parseCardState, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseWebTools } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseWebTools, Board, BoardMember, Card, CardComment, CardRun, parseCardBlockedKind, parseCardNotify, parseCardRunStatus, parseCardState } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -291,6 +291,12 @@ export function seatStatusOf(v: unknown): SeatRuntimeStatus {
   return 'error'
 }
 
+/** 认不出来的一律当「没在装」。这一列只用来画进度，猜错还不如不画。 */
+export function seatPhaseOf(v: unknown): SeatDeployPhase | null {
+  const s = str(v || '')
+  return s === 'queued' || s === 'installing' ? s : null
+}
+
 export function seatRuntimeOf(r: Row): SeatRuntime {
   return {
     accountId: str(r.accountId),
@@ -312,6 +318,8 @@ export function seatRuntimeOf(r: Row): SeatRuntime {
     botVersion: strOrNull(r.botVersion),
     tplVersion: numOrNull(r.tplVersion),
     tplSyncedAt: numOrNull(r.tplSyncedAt),
+    deployPhase: seatPhaseOf(r.deployPhase),
+    deployStartedAt: numOrNull(r.deployStartedAt),
   }
 }
 export function botReleaseOf(r: Row): BotRelease {
@@ -489,6 +497,8 @@ export function routineOf(r: Row): Routine {
     triggers: parseRoutineTriggers(r.triggers),
     modelRole: parseRoutineModelRole(r.modelRole),
     nextRunAt: numOrNull(r.nextRunAt),
+    retryAt: numOrNull(r.retryAt),
+    retryCount: num(r.retryCount),
     createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt),
   }

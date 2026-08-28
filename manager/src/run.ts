@@ -15,7 +15,20 @@ export interface RunResult {
 export function run(
   file: string,
   args: string[],
-  opts: { env?: NodeJS.ProcessEnv; timeout?: number; cwd?: string } = {},
+  opts: {
+    env?: NodeJS.ProcessEnv
+    timeout?: number
+    cwd?: string
+    /**
+     * stdout 每满一行就叫一次，**跑的过程中**，不是跑完之后。
+     *
+     * 唯一的用处是进度：`deploy-seat.sh` 边跑边报「第几步」，而这条命令一跑十几分钟，
+     * 等它 resolve 再看输出，那份进度早就没人要了（见 seats.ts 的 stepOf）。
+     *
+     * 抛出来的异常吞掉：一个画进度的回调没有任何理由把部署带倒。
+     */
+    onLine?: (line: string) => void
+  } = {},
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(file, args, {
@@ -26,8 +39,24 @@ export function run(
     let stdout = ''
     let stderr = ''
     const cap = (s: string, chunk: string) => (s + chunk).slice(-65536)
+    // 半行留着：一次 data 事件切在一行中间是常态，直接按 \n 切会把那一行劈成两半，
+    // 而进度那条恰恰是整行才有意义的。
+    let pending = ''
     child.stdout.on('data', (d) => {
-      stdout = cap(stdout, String(d))
+      const chunk = String(d)
+      stdout = cap(stdout, chunk)
+      if (!opts.onLine) return
+      pending += chunk
+      const lines = pending.split('\n')
+      pending = lines.pop() ?? ''
+      // 一直不换行的输出（进度条那种 \r 刷新）不许把这半行攒成一片内存。留尾不留头，
+      // 和上面 stdout 的 64 KiB 一个道理——要认的那行标记也只可能在尾巴上。
+      if (pending.length > 65536) pending = pending.slice(-4096)
+      for (const line of lines) {
+        try {
+          opts.onLine(line)
+        } catch {}
+      }
     })
     child.stderr.on('data', (d) => {
       stderr = cap(stderr, String(d))

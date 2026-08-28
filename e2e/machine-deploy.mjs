@@ -1009,6 +1009,98 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
     })
 
     /**
+     * 建完 Bot 就该在装了——**不用再点一次「部署」**。
+     *
+     * 这条盯的是产品承诺本身：填完那张表，人下一眼看到的应该是「正在装」，而不是一块
+     * 空屏加一颗按钮。所以断言分两截：建的那一下回执里就有席位（`bot.runtime` 不是
+     * null），以及进度那条路答得上「它在装/装好了」。
+     *
+     * 这套 e2e 跑在 `SATUWORK_DEPLOY_STUB=1` 下，机器上那十几分钟被跳过了，所以回执
+     * 拿到的可能已经是 `ready`——两种都算数，要钉的是「有席位」这件事。
+     */
+    await test('建 Bot 顺手就开装：不用再点一次部署', async () => {
+      const made = await req(gwBase, 'POST', '/runtime/bots', { token: memberTok, body: { name: '自动部署的助手' } })
+      assert(made.status === 201, `建 Bot ${made.status} ${made.text}`)
+      const newBot = made.json.bot.id
+      assert(made.json.deploy && made.json.deploy.started === true, `没有自动开装：${made.text}`)
+      assert(made.json.bot.runtime, `回执里没有席位：${made.text}`)
+      assert(
+        ['deploying', 'ready'].includes(made.json.bot.runtime.status),
+        `席位状态 ${made.json.bot.runtime.status}`,
+      )
+
+      // 进度那条路：状态、开始时刻、机器那份细进度（stub 下没有管家，step 就是 null）。
+      let prog
+      for (let i = 0; i < 60; i++) {
+        const r = await req(gwBase, 'GET', '/runtime/deploy/progress?botId=' + encodeURIComponent(newBot), { token: memberTok })
+        assert(r.status === 200, `进度 ${r.status} ${r.text}`)
+        prog = r.json
+        if (prog.status === 'ready' || prog.status === 'error') break
+        assert(prog.status === 'deploying', `进度状态 ${prog.status}`)
+        // 年龄，不是起始时刻：两台钟差几分钟是常事，界面拿绝对时刻自己减本地时钟就会
+        // 在人刚按下「创建」的那一秒写出「已经装了 10 分钟」。
+        assert(prog.startedAt === undefined, `不该再发绝对时刻：${r.text}`)
+        assert(Number.isFinite(prog.elapsedMs) && prog.elapsedMs >= 0, `进度没有年龄：${r.text}`)
+        await sleep(100)
+      }
+      assert(prog.status === 'ready', `装完了没有：${JSON.stringify(prog)}`)
+      // 装好了才算数：席位真的在，桌面那条路给得出票。
+      const desk = await req(gwBase, 'GET', '/runtime/desktop?botId=' + encodeURIComponent(newBot), { token: memberTok })
+      assert(desk.status === 200, `桌面 ${desk.status} ${desk.text}`)
+      assert(desk.json.seatId === seatIdOf(memberId, newBot), `seatId ${desk.json.seatId}`)
+      assert(desk.json.deployPhase === null, `装完了还挂着阶段：${desk.json.deployPhase}`)
+
+      /**
+       * **装到一半没人管了。**
+       *
+       * 装跑在后台，Gateway 一重启，库里那一行就永远停在 `deploying`：机器上什么都没在
+       * 装，而界面上那个读秒会一直往上走——人守着一屏永远不会完成的进度，手里连一颗能
+       * 按的按钮都没有。库里看不出这件事（两种 `deploying` 一模一样），所以判据是「这个
+       * 进程手上有没有这活儿」。这里直接把那一行改回 `deploying` 来造这个现场。
+       */
+      const require = createRequire(`${gwRoot}/package.json`)
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      try {
+        await client.query(`set search_path to ${SCHEMA}`)
+        await client.query(
+          'update seat_runtimes set status = $2, "deployPhase" = $3, "deployStartedAt" = $4 where "botId" = $1',
+          [newBot, 'deploying', 'installing', Date.now() - 600_000],
+        )
+        const r = await req(gwBase, 'GET', '/runtime/deploy/progress?botId=' + encodeURIComponent(newBot), { token: memberTok })
+        assert(r.status === 200, `进度 ${r.status} ${r.text}`)
+        assert(r.json.status === 'deploying', `状态 ${r.json.status}`)
+        assert(r.json.stale === true, `没认出「没人在装」：${r.text}`)
+        // 没人在装就别再去敲机器问第几步了——那是一件已经没有答案的事。
+        assert(r.json.step === null, `${r.text}`)
+      } finally {
+        await client.end().catch(() => {})
+      }
+
+      // 收尾：这颗 Bot 是这条用例自己建的，连席位一起删掉，别影响后面的槽位账。
+      const del = await req(gwBase, 'DELETE', `/runtime/bots/${newBot}`, { token: memberTok })
+      assert(del.status === 200, `删 ${del.status} ${del.text}`)
+    })
+
+    await test('没有机器的时候：Bot 照建，装不成的理由说出来', async () => {
+      const co = await createCompany(req, gwBase, {
+        ownerToken: ownerTok,
+        email: 'admin@nomachine.test',
+        password: 'correct-horse',
+        companyName: 'NoMachine',
+        slug: 'nomachine',
+      })
+      const made = await req(gwBase, 'POST', '/runtime/bots', { token: co.token, body: { name: '没机器的助手' } })
+      // **201，不是 409**：Bot 本身好好的，机器配好之后点一下就能装上；把建 Bot 判失败
+      // 只会让人以为自己填错了什么。
+      assert(made.status === 201, `建 Bot ${made.status} ${made.text}`)
+      assert(made.json.bot.runtime === null, `没机器还给了席位：${made.text}`)
+      assert(made.json.deploy && made.json.deploy.started === false, `deploy 字段 ${made.text}`)
+      assert(String(made.json.deploy.error).includes('运行机器'), `理由没说清：${made.text}`)
+    })
+
+    /**
      * 粘住机器是不变量，不是优化。
      *
      * 以前 machineForAccount 找到这个账号的机器、发现它此刻不可用（没配对好、换过

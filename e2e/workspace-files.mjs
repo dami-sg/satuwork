@@ -117,6 +117,23 @@ export async function runWorkspaceFiles({ root, test, assert, log }) {
     assert(r.names.超长截断 === 200, `超长名没截断：${r.names.超长截断}`)
   })
 
+  await test('删：文件、目录连里面一起，根和符号链接一律不给', () => {
+    const d = r.remove
+    assert(d.删得掉文件, '文件没删掉')
+    assert(d.报出删了什么 === 'del/a.txt', `报出来的路径不对：${d.报出删了什么}`)
+    assert(d.目录连里面一起删 && d.说清楚删的是目录, `目录没删干净：${JSON.stringify(d)}`)
+    // 下面这三条是这一组存在的理由：写松了功能照跑，要等到有人专门去试才发作。
+    assert(d.越界拦得住, '`../../../etc/passwd` 能删')
+    assert(d.根删不掉 && d.点号也是根, '空 path / `.` 能把整个工作区删掉')
+    assert(d.符号链接不给删 && d.符号链接指的目录还在, '顺着符号链接删到了工作区外面')
+    // 只认最后一段是不够的：resolve() 不 realpath，`out/keep.txt` 拼出来照样落在根
+    // 以内，而末段是个规规矩矩的文件——删掉的是工作区外面那一份。
+    assert(d.穿过链接的不给删 && d.外面那份还在, '穿过符号链接把工作区外面的文件删掉了')
+    assert(d.穿过链接删目录也不给 && d.外面那个目录还在, '穿过符号链接把工作区外面的目录删掉了')
+    assert(d.不存在的报ENOENT === 'ENOENT', `删一个不存在的东西没报出来：${d.不存在的报ENOENT}`)
+    assert(d.工作区还在, '删完一层把工作区根一起带走了')
+  })
+
   await test('只有白名单里的类型允许内联', () => {
     assert(r.inline.png && r.inline.pdf, '图片和 PDF 应该能直接看')
     assert(r.inline.大写后缀也认, '大写后缀没认出来，会被当成未知格式')

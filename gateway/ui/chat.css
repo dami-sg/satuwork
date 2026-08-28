@@ -100,6 +100,28 @@
    .gw-chat-main 上的话会落到输入区后面去。 */
 .sw-threadwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
+/* ── 内容的最大宽度 ────────────────────────────────────────────────────
+   消息流和输入区共用同一条宽度上限，并且居中。宽屏上不设上限的话，一行正文会被
+   拉到一千几百像素，眼睛扫到行尾再跳回下一行的行首就容易串行；输入框同时也被拉
+   成横贯整屏的一条，人刚发出去的那句在屏幕中间，正在写的那句在屏幕两端，视线要
+   横着走一整屏才对得上。两处用同一个值，气泡和输入框才在同一条竖直轴上。
+
+   上限加在**里面的内容**上，不加在 .sw-thread / .sw-composer 这两个外壳上：
+   外壳继续占满，滚动条才照旧贴着窗口右沿（把上限加在滚动容器自己身上，滚动条会
+   跟着缩到内容边上去）；左右的最小留白也还是外壳那份 padding 在给，窄屏上内容
+   贴边的问题不会因为这条上限冒出来。 */
+.gw-chat { --sw-chat-max: 920px; }
+.sw-thread > *,
+.sw-composer > * {
+  /* border-box 不能省：这一层里有自带边框和内边距的（输入框那个盒子、底下那行提示），
+     content-box 下 width: 100% 是算在**内容**上的，边框和 padding 再往外加，于是窄屏上
+     它比外壳的可用宽度还宽一圈，右边直接顶出去。 */
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--sw-chat-max);
+  margin-inline: auto;
+}
+
 /* ── 消息流 ────────────────────────────────────────────────────────── */
 .sw-thread {
   flex: 1;
@@ -116,7 +138,7 @@
 .sw-daydiv {
   display: flex;
   justify-content: center;
-  margin: var(--space-1) 0;
+  margin-block: var(--space-1);
   font-size: 12px;
   color: var(--muted-foreground);
 }
@@ -130,7 +152,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin: var(--space-3) 0;
+  margin-block: var(--space-3);
   color: var(--muted-foreground);
   font-size: 12px;
 }
@@ -1092,8 +1114,30 @@
   text-align: left;
   cursor: pointer;
 }
-.sw-ws-row:hover { background: var(--secondary); }
+/* 行 + 行末那颗删除。整行本身是按钮，所以那一颗只能是它的兄弟（见 chat.js 的
+   wsDelBtn），这一层是把两者摆回同一行的容器。 */
+.sw-ws-item { display: flex; align-items: center; min-width: 0; }
+.sw-ws-item .sw-ws-row { flex: 1; min-width: 0; }
+/* 底色跟着整行走，不只跟着那颗大按钮：鼠标挪到删除上时行还亮着，删的是哪一行才清楚。 */
+.sw-ws-item:hover .sw-ws-row { background: var(--secondary); }
 .sw-ws-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* 平时透明但**位置一直占着**：改 display 的话，鼠标一进来名字就被挤短一截，
+   读到一半的文件名会当场跳一下。 */
+.sw-ws-del {
+  flex: none;
+  padding: 4px;
+  margin-right: 2px;
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.sw-ws-item:hover .sw-ws-del,
+.sw-ws-del:focus-visible { opacity: 1; }
+.sw-ws-del:hover { color: var(--color-accent-700); }
+/* 触屏上没有 hover 这回事——不给这一条，那颗按钮在手机上永远不出现。 */
+@media (hover: none) {
+  .sw-ws-del { opacity: 1; }
+}
 .sw-ws-caret { flex: none; display: inline-flex; color: var(--muted-foreground); }
 /* 名字要能被截断，不能把整栏撑开——工作区里的文件名常常很长。 */
 .sw-ws-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1252,6 +1296,28 @@
 .sw-nodeploy p { margin: 0; font-size: 13px; line-height: 1.7; color: var(--muted-foreground); }
 .sw-nodeploy .btn { margin-top: var(--space-2); }
 .sw-nodeploy-hint { font-size: 12px !important; }
+
+/* ── 安装进度 ─────────────────────────────────────────────────────────
+   建完 Bot 之后那一屏。条子按**步数**走，不按时间：几步的时长差着一个数量级，
+   按时间摊出来的匀速条会在装桌面那一步停住不动（见 chat.js 的 installProgressBody）。
+   管家报不出第几步时整根条子不画——一根不动的条比没有条更像卡住了。 */
+.sw-install-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--muted, rgba(127, 127, 127, 0.18));
+  overflow: hidden;
+}
+.sw-install-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-accent-500, var(--foreground));
+  /* 步与步之间平滑地推过去。跳变会让人以为刷新了一次页面。 */
+  transition: width 0.4s ease;
+}
+.sw-install-step { margin: 0; font-size: 13px !important; color: var(--color-text) !important; }
+.sw-install-since { margin: 0; font-size: 12px !important; }
 
 /* 已经发出去、还没收到回执的那一条。淡一档：它是真的在路上，不是画着玩的，所以要
    看得见；但和已经落库的消息不能长得一模一样。 */

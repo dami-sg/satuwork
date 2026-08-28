@@ -222,6 +222,17 @@ const state = {
   logLines: [],
   logError: '',
   deployHint: '',
+  /**
+   * 正在装的那颗 Bot 的安装进度：
+   * `{ botId, status, phase, elapsedMs, since, lastError, stale, step: {…} | null }`。
+   *
+   * **带着 botId**：这一份是轮询回来的，人在两次回执之间换了 Bot 是常事，不认名字就会
+   * 把上一个 Bot 的进度画在这一页上（见 chat.js 的 deployProgressNow）。
+   *
+   * `since` 是**本地**锚点（`Date.now() - elapsedMs`，收到那一刻算一次）。服务端给的是
+   * 年龄不是时刻——两台钟差几分钟是常事，而读秒正是个时间问题（见 pollDeployProgress）。
+   */
+  deployProgress: null,
   releases: [],
   latestRelease: null,
   updatingRuntime: false,
@@ -265,6 +276,15 @@ const state = {
   wsDirs: {},
   wsOpen: {},
   wsSession: '',
+  /**
+   * 每一层「第几茬」：路径 → 一个只增不减的计数。删掉一层就给它和它的上一层各 +1。
+   *
+   * 在途的那一趟回来时要对一次（见 loadWorkspaceDir）。**只看会话不够**：删一个目录
+   * 和「刷新正在取它」撞在一起时会话根本没变，那一趟回来会把刚删掉的那份内容原样
+   * 写回缓存——人看不见（那一行已经没了），直到 Bot 又建出一个同名目录，展开它看到
+   * 的是上一茬的文件，点开全是「文件不存在」。
+   */
+  wsGen: {},
   /**
    * 日常任务（右栏那一列）。`routinesBotId` 记着这几条是谁的——换 Bot 时先按它清空，
    * 免得上一颗 Bot 的任务留在屏上被人点。

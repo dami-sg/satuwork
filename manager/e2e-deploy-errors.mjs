@@ -5,9 +5,10 @@
  *
  * 放 manager/ 而不是 e2e/：和别的探针同一个理由，裸导入按文件所在目录往上找。
  */
+import { readFileSync } from 'node:fs'
 import { classifyHolder } from './src/reclaim.ts'
-import { pruneRetired } from './src/seats.ts'
-import { tailError } from './src/run.ts'
+import { pruneRetired, stepOf } from './src/seats.ts'
+import { run, tailError } from './src/run.ts'
 
 /**
  * 端口被占着时，管家决定「敢不敢清」的那一步（reclaim.ts 的 classifyHolder）。
@@ -51,6 +52,43 @@ function pruning() {
   return { pruneChanged: changed, pruneLeft: Object.keys(reg), pruneNoop: untouched }
 }
 
+/**
+ * 安装进度：脚本报的那几行，管家读得出来吗。
+ *
+ * **半行切分是这条路最容易错的地方**：一次 stdout 事件切在行中间是常态，按 \n 直接
+ * 切会把那一行劈成两半——而进度那条恰恰是整行才有意义的。所以这里故意把一行切开发。
+ */
+async function progress() {
+  const seen = []
+  const script = 'printf "@@step 1/7 创建席位账号\n@@st"; sleep 0.05; printf "ep 2/7 安装桌面组件\nchrome: 已在位\n"'
+  const r = await run('bash', ['-c', script], {
+    timeout: 10_000,
+    onLine: (line) => {
+      const hit = stepOf(line)
+      if (hit) seen.push(`${hit.step}/${hit.total} ${hit.label}`)
+    },
+  })
+  return {
+    steps: seen,
+    stepCode: r.code,
+    // 不是这个形状的一律不认：报进度这条路宁可什么都不说，也不能说一个编出来的数。
+    stepBad: [stepOf('随便一行'), stepOf('@@step 9/7 越界'), stepOf('@@step x/7 坏数'), stepOf('@@step 1/0 零总数')],
+  }
+}
+
+/**
+ * 脚本里那几个 `step` 调用和 `STEPS` 对不对得上。
+ *
+ * 加一步却忘了改 `STEPS`，进度条会在中途就走到头然后停住——那正是它要治的病。这条
+ * 检查很便宜，而它防的是一个只在真机上装十分钟才看得见的错。
+ */
+function scriptSteps() {
+  const src = readFileSync(new URL('./src/seat/deploy-seat.sh', import.meta.url), 'utf8')
+  const total = Number(/^STEPS=(\d+)$/m.exec(src)?.[1])
+  const nums = [...src.matchAll(/^step (\d+) "([^"]+)"$/gm)].map((m) => Number(m[1]))
+  return { scriptTotal: total, scriptNums: nums }
+}
+
 const long = (tag, n) => Array.from({ length: n }, (_, i) => `${tag}-${i}`).join(' ')
 
 const out = {
@@ -65,5 +103,7 @@ const out = {
   code0: tailError({ code: 0, stdout: '', stderr: '' }, '兜底'),
   ...verdicts(),
   ...pruning(),
+  ...scriptSteps(),
+  ...(await progress()),
 }
 console.log('__RESULT__' + JSON.stringify(out))

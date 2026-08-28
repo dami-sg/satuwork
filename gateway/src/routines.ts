@@ -19,6 +19,14 @@
  *    然后这里等到超时，界面上是一条永远转着的圈，而事情其实早就做完了
  * 4. 等到**自己那一轮**的 `turn/end`，记 ok；超时或者出错，记 error 并把原因写进流水
  *    （「自己那一轮」这几个字是要紧的，见下面 readTurnEnd）
+ *
+ * ## 砸了会自己再来三次
+ *
+ * 记下 error 之后还有一句：够得着补救的那几类失败，隔 5 分钟、15 分钟、30 分钟各补跑
+ * 一次，三次都不成就停（`RETRY_DELAYS_MS`、`armRetry`、`tickRetries`）。欠着的那次补跑
+ * 存在 `routines.retryAt`，和排期的 `nextRunAt` 各占一格——人设的「每天 21:00」不会
+ * 因为一次失败就被挪走。哪些失败不补（人按了停止、等结果超时、有交接单挡着），见
+ * 下面 `settle` 那一段。
  */
 import type { Db, Routine, RoutineRun, RoutineRunTrigger } from './db.ts'
 import { nextRunAtOf } from './lib/schedule.ts'
@@ -38,6 +46,34 @@ const TICK_MS = Math.max(0, Math.trunc(Number(process.env.GATEWAY_ROUTINE_TICK_M
 const RUN_TIMEOUT_MS = Math.max(60_000, Math.trunc(Number(process.env.GATEWAY_ROUTINE_TIMEOUT_MS ?? 20 * 60_000)))
 /** 一轮扫最多处理几条。多了就下一轮再来，别让一次 tick 卡在网络上。 */
 const BATCH = 20
+
+/**
+ * 跑砸了之后隔多久再试一次：5 分钟、15 分钟、30 分钟，然后**不再试**。
+ *
+ * 为什么是退避而不是等距：定时任务失败最常见的原因是那一刻够不着席位——机器还没开、
+ * 正在换版、网断了一分钟。这类事多半几分钟内自己就好了，所以第一次补得早；真没好，
+ * 那多半不是「再等一会儿」能解决的，越往后越该拉开距离，而不是每五分钟去撞一次同一
+ * 堵墙（还每次都在那条会话里留一条红的）。
+ *
+ * 为什么到三次就停：再往下就是「一整天都在重试」，而这条任务明天还会到点。一件事
+ * 连着四次都做不成，要的是有人去看一眼，不是机器接着敲。
+ *
+ * 环境变量给的是**毫秒的逗号串**，只为把这几十分钟压到 e2e 等得起的量级；写坏了一律
+ * 退回默认那三档，不接受「配了一个空表 = 关掉重试」——那是个太容易手滑出来的行为。
+ */
+const RETRY_DELAYS_MS = parseRetryDelays(process.env.GATEWAY_ROUTINE_RETRY_MS)
+
+function parseRetryDelays(raw: string | undefined): number[] {
+  const fallback = [5 * 60_000, 15 * 60_000, 30 * 60_000]
+  const parts = String(raw ?? '')
+    .split(',')
+    .map((x) => Math.trunc(Number(x.trim())))
+    .filter((n) => Number.isFinite(n) && n > 0)
+  return parts.length ? parts : fallback
+}
+
+/** 最多补跑几次。界面上那句「第 N 次，共 M 次」里的 M。 */
+export const ROUTINE_RETRY_MAX = RETRY_DELAYS_MS.length
 
 /** 正在等结果的那几条。进程要停时全部掐掉，不然 fetch 吊着事件循环不退出。 */
 const watching = new Set<AbortController>()
@@ -252,6 +288,26 @@ function turnFailure(kind: string): string {
 }
 
 /**
+ * 这一次砸了，排下一次补跑。
+ *
+ * **`retryCount` 从库里现读**，不用手上那份快照：这一轮可能跑了二十分钟，中间人改过
+ * 这条任务，而"补到第几次了"这一格是调度器自己在写的，快照上那个值早过期了。
+ *
+ * 两种情况到此为止，一格不留（`clearRoutineRetry`）：三次补跑用完了，以及跑的过程中
+ * 人把这条任务停用了——它现在的意思是「别自己动」，五分钟后自己动起来正是他刚关掉的
+ * 那件事。
+ */
+async function armRetry(db: Db, routineId: string): Promise<void> {
+  const fresh = await db.routine(routineId)
+  if (!fresh) return
+  if (!fresh.active || fresh.retryCount >= RETRY_DELAYS_MS.length) {
+    await db.clearRoutineRetry(routineId)
+    return
+  }
+  await db.armRoutineRetry(routineId, Date.now() + RETRY_DELAYS_MS[fresh.retryCount], fresh.retryCount + 1)
+}
+
+/**
  * 真正跑一次。**先把流水记成 `running` 再发消息**：发出去之后进程被杀，库里留着一条
  * 「不知道结果」也比什么都没有强——后者会让人以为那天晚上根本没触发。
  *
@@ -265,6 +321,28 @@ export async function runRoutine(db: Db, routine: Routine, trigger: RoutineRunTr
     companyId: routine.companyId,
     trigger,
   })
+  /**
+   * 记下这一次的结局，**顺手决定还补不补**。
+   *
+   * `retryable` 是「这件事再试一次有希望吗」，不是「它失败了吗」——够不着席位、席位
+   * 那一跳报错、模型那一轮出错，都算；下面三种明写着不补：
+   *
+   * - **人按了停止**（`aborted`）：他要的就是别跑，五分钟后自己跑起来是最糟的回应
+   * - **等结果超时**：那不是失败，是**结果不明**（见 RUN_TIMEOUT_MS）——那一轮很可能
+   *   还在席位上跑着，这时候再发一条进同一条会话，就是同一件事做两遍
+   * - **有一件转人工的事挡着**：五分钟后它照样挡着，而每补一次就多一张单、多一次通知
+   *
+   * 手动那条路（试跑）**一次都不补**：人就坐在屏幕前，他要的是看这一下成没成，不是
+   * 接下来五十分钟里再自己跑三遍。跑成了也不动重试那两格——他手点的这一下，不该把
+   * 到点那条链子上欠着的补跑抹掉。
+   */
+  const settle = async (patch: { status: 'ok' | 'error'; error?: string | null; sessionId?: string | null }, retryable = false) => {
+    await db.finishRoutineRun(run.id, patch)
+    if (trigger === 'manual') return
+    await (patch.status === 'ok' || !retryable ? db.clearRoutineRetry(routine.id) : armRetry(db, routine.id)).catch((e: Error) => {
+      console.error(`satuwork-gateway: 日常任务 ${routine.id} 的重试没排上：${e.message}`)
+    })
+  }
   void (async () => {
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(), RUN_TIMEOUT_MS)
@@ -286,7 +364,7 @@ export async function runRoutine(db: Db, routine: Routine, trigger: RoutineRunTr
         (h) => h.blocking && (h.state === 'open' || h.state === 'claimed'),
       )
       if (blocking) {
-        await db.finishRoutineRun(run.id, {
+        await settle({
           status: 'error',
           error: `这一次没跑：还有一件转人工的事等着人处理（${blocking.ask.slice(0, 60) || '没写要做什么'}）`,
           sessionId,
@@ -314,19 +392,26 @@ export async function runRoutine(db: Db, routine: Routine, trigger: RoutineRunTr
       })) as { steered?: boolean } | null
       // `steered` = 插进了正在跑的那一轮，等的就是那一轮的收口；否则我们会另起一轮。
       const kind = await readTurnEnd(reader, !posted?.steered, routine.instruction)
-      await db.finishRoutineRun(run.id, {
-        status: kind === 'completed' ? 'ok' : 'error',
-        error: kind === 'completed' ? null : turnFailure(kind),
-        sessionId,
-      })
+      await settle(
+        {
+          status: kind === 'completed' ? 'ok' : 'error',
+          error: kind === 'completed' ? null : turnFailure(kind),
+          sessionId,
+        },
+        // 人按了停止的那一轮不补，别的收场都补（认不出来的 kind 也补：它是一次失败）。
+        kind !== 'completed' && kind !== 'aborted',
+      )
     } catch (e) {
       const aborted = ac.signal.aborted
-      await db
-        .finishRoutineRun(run.id, {
+      await settle(
+        {
           status: 'error',
           error: aborted ? '等结果超时，这一次的结果不明' : (e as Error).message.slice(0, 300),
-        })
-        .catch(() => {})
+        },
+        // 抛到这儿的多半是「够不着席位」：机器还没开、正在换版、网断了一下——**正是
+        // 重试最该管的那一类**。超时那一岔除外（结果不明，见 settle）。
+        !aborted,
+      ).catch(() => {})
     } finally {
       clearTimeout(timer)
       // **等到了也要掐。** 那条 SSE 是席位主动保活的，读到 turn/end 之后它不会自己
@@ -361,7 +446,40 @@ async function noteMissed(db: Db, routine: Routine, dueAt: number): Promise<void
 }
 
 /**
- * 扫一轮：到点的抢过来，抢到的就跑。
+ * 欠着的那几次补跑，到点了就跑。
+ *
+ * 和到点那条路的三处不同：
+ *
+ * - **抢之前先看有没有在跑**（到点那条是先抢后看）。这一条不能反过来：抢到手就等于
+ *   把 `retryAt` 抹掉了，而这一次又没跑成，那次补跑就凭空少了一回。留着不抢，等在跑
+ *   的那一轮自己收场——跑成了它清掉这串，砸了它排下一次，两条路都收得干净。
+ * - **迟太久的直接作废**，不像到点那条还在流水上记一笔「错过了」。停机四小时之后补上
+ *   一次四小时前该做的事，和补一份昨天的日报是同一件不该做的事；而那次失败本来就
+ *   在运行记录里红着，静静地不补不会让人以为一切正常。
+ * - **指令空了就把这串清掉**：人把内容删干净了，等于这条任务现在什么都不做。
+ */
+async function tickRetries(db: Db, now: number): Promise<number> {
+  let fired = 0
+  for (const routine of await db.dueRoutineRetries(now, BATCH)) {
+    if (routine.retryAt == null) continue
+    if (!routine.instruction.trim() || now - routine.retryAt > LATE_MS) {
+      await db.clearRoutineRetry(routine.id).catch((e: Error) => {
+        console.error(`satuwork-gateway: 日常任务 ${routine.id} 的重试清不掉：${e.message}`)
+      })
+      continue
+    }
+    if (await db.routineRunning(routine.id)) continue
+    if (!(await db.claimRoutineRetry(routine.id, routine.retryAt))) continue
+    fired++
+    await runRoutine(db, routine, 'retry').catch((e: Error) => {
+      console.error(`satuwork-gateway: 日常任务 ${routine.id} 的重试起不来：${e.message}`)
+    })
+  }
+  return fired
+}
+
+/**
+ * 扫一轮：到点的抢过来，抢到的就跑；**上一次砸了、欠着补跑的，也在这一轮里补**。
  *
  * **抢是一条带旧值的 update**（见 db.claimRoutine）：两个 Gateway 进程同时扫到同一条
  * 时，只有一个人的 rowCount 是 1。升级换版那几十秒里新旧两代会同时在跑，没有这一句，
@@ -369,6 +487,10 @@ async function noteMissed(db: Db, routine: Routine, dueAt: number): Promise<void
  *
  * 补跑不做，而且**错过太久的连这一次都不跑**（见 LATE_MS）——但会在流水上留一条，
  * 静静地跳过等于让人以为它跑过了。下一次的时间一律从**现在**往后算。
+ *
+ * 「不补跑」和「失败了重试」不矛盾，两句话说的是不同的事：前者是**这一次压根没触发**
+ * （机器那会儿关着），补上去只会在开机那一刻涌出一堆没人要的东西；后者是这一次**触发
+ * 了、也确实去做了、砸在了半路**，而人是奔着结果设的它。
  */
 export async function tickRoutines(db: Db, now = Date.now()): Promise<number> {
   const due = await db.dueRoutines(now, BATCH)
@@ -402,7 +524,7 @@ export async function tickRoutines(db: Db, now = Date.now()): Promise<number> {
       console.error(`satuwork-gateway: 日常任务 ${routine.id} 起不来：${e.message}`)
     })
   }
-  return fired
+  return fired + (await tickRetries(db, now))
 }
 
 /**

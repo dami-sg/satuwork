@@ -1,7 +1,7 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import { createReadStream, createWriteStream, type WriteStream } from 'node:fs'
-import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, extname, join, relative, resolve, sep } from 'node:path'
+import { lstat, mkdir, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
 import { satuworkHome } from '../home.ts'
 
@@ -170,6 +170,47 @@ export class WorkspaceService extends Service {
     )
     // 截断要说出来。闷声少列几条，看的人只会以为那个文件根本不存在。
     return { path: here, entries, more: raw.length - shown.length }
+  }
+
+  /**
+   * 删掉工作区里的一个文件或目录（目录连里面的东西一起删）。
+   *
+   * 界面上那颗按钮是**人的意思**，不是模型的：模型删东西走的是 `terminal`，那条路
+   * 有它自己的确认。这条只服务右栏那棵树——在此之前，工作区里躺着的东西只进不出，
+   * 传错的那份附件、跑废的那版报表，除了让 Bot 去 `rm` 没有别的办法。
+   *
+   * **先 lstat，不是 stat。** 差别在符号链接上：`stat` 跟着链接走，看到的是链接指向
+   * 的那个东西，于是「这是目录吗」问的是外面那个目录，而 `rm -r` 删的却是链接本身
+   * ——两处对不上就够别扭了。而且 list 一开始就不列符号链接（跟着它能走出工作区），
+   * 树上根本点不到，这里索性一并拒掉：能删的必须是这一屏真的画出来过的东西。
+   *
+   * 根目录单独挡一道：`resolve('')` 和 `resolve('.')` 都合法地落在根上，不挡的话
+   * 一次手滑就是把整个工作区连同别的会话的东西一起清空。
+   *
+   * **路上那几段也要认一遍，不能只认最后一段。** `resolve()` 是纯字符串解析、从不
+   * realpath（见它自己的注释），所以 `mem/sessions.db` 这种路径——`mem` 是一条指向
+   * 工作区外面的符号链接——拼出来照样落在根以内，而末段 lstat 看到的是一个规规矩矩
+   * 的文件，上面那道判断一点都不响。别的接口顶多因此**读**到外面的东西，这一条是
+   * 删：一条 `work/mem -> ~/.satuwork` 就够把会话记录连同那个 SQLite 一起删掉，而
+   * 「根不设在 $SATUWORK_HOME」这个决定的全部意义就是不让手伸到那儿去。
+   *
+   * 所以 rm 之前把**父目录** realpath 一次，拿真身再判一次边界。根自己也要 realpath
+   * 过再比：临时目录（`/var/folders/…`）、`/home` 挂在别处的机器上，根本身就常常是
+   * 一条链接，拿没解过的根去比，正经的删除会被自己挡掉。
+   */
+  async remove(path?: string) {
+    const target = this.resolve(path)
+    if (target === this.root) throw new WorkspaceError('不能删掉整个工作区。')
+    const info = await lstat(target)
+    if (info.isSymbolicLink()) throw new WorkspaceError(`${this.show(target)} 是符号链接，不能删。`)
+    const [rootReal, parentReal] = await Promise.all([realpath(this.root), realpath(dirname(target))])
+    if (parentReal !== rootReal && !parentReal.startsWith(rootReal + sep)) {
+      throw new WorkspaceError(`路径越界：${path}。它经过一条指向工作区外面的符号链接。`)
+    }
+    // force 不给：文件在这一趟之前被别人删掉了，那是「已经不在了」，得让上面回 404，
+    // 而不是安安静静地报成功——人看着那一行消失，会以为是自己刚才那一下删掉的。
+    await rm(target, { recursive: info.isDirectory() })
+    return { path: this.show(target), dir: info.isDirectory() }
   }
 
   /** 读一个文件用来预览。返回 Web 流，不进内存。 */

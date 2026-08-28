@@ -14,6 +14,15 @@ export const MIN_MANAGER_PROTOCOL = 1
  */
 export const MIN_DESKTOP_PROTOCOL = 2
 
+/**
+ * 会报安装进度（`/seats/:id/progress`）的管家协议。**只用来省一次白问**：低于它的
+ * 管家上没有这条路，问了也只是一个 404，而问的时机恰恰是每两秒一次。
+ *
+ * 老管家上进度不是没有，只是粗一档——「已经装了几分钟」由 Gateway 自己的
+ * `deployStartedAt` 算得出来，一个字都不靠机器。
+ */
+export const MIN_PROGRESS_PROTOCOL = 3
+
 export interface SeatPorts {
   display: number
   vncPort: number
@@ -268,6 +277,7 @@ export function publicSeatRuntime(
   row: SeatRuntime,
   managerHost: string | null,
   opts: { includePassword: boolean; ticket?: string },
+  now = Date.now(),
 ) {
   const ports = portsOf(row.slot)
   return {
@@ -287,6 +297,19 @@ export function publicSeatRuntime(
     deployedAt: row.deployedAt,
     updatedAt: row.updatedAt,
     botVersion: row.botVersion ?? null,
+    /**
+     * 正在装的话，装到哪一档、**已经装了多久**（毫秒）。装完（ready / error）都是 null。
+     *
+     * **给年龄，不给时刻**——和 heartbeatAge / telemetryAge 一个规矩（理由见
+     * publicMachine 里那段）：员工的电脑和 Gateway 差几分钟是常事，而这一格恰恰是个
+     * 时间问题。发绝对时刻、让界面自己减本地时钟的话，一台快十分钟的电脑会在人刚按下
+     * 「创建」的那一秒写出「已经装了 10:03」——正好是这一屏要打消的那个念头。
+     *
+     * 界面拿到之后**自己锚一次**（`Date.now() - deployAge`），此后每秒往前走的是它自己
+     * 的时钟差值，不再和 Gateway 比对——那样既准又不会每两秒跳一下。
+     */
+    deployPhase: row.deployPhase,
+    deployAge: row.deployStartedAt == null ? null : Math.max(0, now - row.deployStartedAt),
     // 席位自报的模版版本。和 botVersion 并排给出来，界面上那两个「版本」问的是两件事：
     // 装的是哪个发布包、跑的是哪一版模版。
     tplVersion: row.tplVersion ?? null,
@@ -518,40 +541,208 @@ export interface DeployResult {
 }
 
 /**
+ * 这一次部署失败了。**`busy` 是第三种结局**，不是失败的一种。
+ *
+ * 挑出来单独命名，是因为下面这三条路（同步部署、后台自动部署、批量更新）的调用方都
+ * 要按同一套字段说话。
+ */
+export interface DeployFailure {
+  ok: false
+  status: number
+  error: string
+  runtime: SeatRuntime | undefined
+  /**
+   * 席位上有人正在说话，管家等过了也没等到，于是什么都没动。
+   *
+   * **必须是一个字段，不能让调用方拿 409 反推**——这条路上有六处 409（管家版本过旧、
+   * 架构不匹配、槽位用尽、没有发布版本、公司没配对机器，以及这一条），含义天差地别。
+   * 反推的代价是真的：批量更新会把「这台机器的管家太旧」整片报成「大家在忙，晚点再
+   * 来」，而且因为一个失败都没有，那句提示还是绿的——真正的原因从此浮不出来。
+   */
+  busy?: boolean
+}
+
+export type DeployOutcome = { ok: true; result: DeployResult } | DeployFailure
+
+/**
+ * 「登记」这一段的产物：槽位定了、行写下了（`deploying`），机器上还一个字节没动。
+ *
+ * 部署被切成**登记**和**安装**两段，是为了「建完 Bot 自动装」这条路：安装要十几分钟，
+ * 不可能挂在建 Bot 那条 HTTP 请求上；而登记必须在回执发出去之前做完——不然人跳进对话
+ * 页的那一瞬间，库里还没有任何一行说「这颗 Bot 正在装」，界面只好照旧劝他去点「部署
+ * 这个 Bot」，而机器上其实已经开工了。两个按钮打架，比慢一点糟得多。
+ */
+interface DeployPlan {
+  account: Account
+  companyId: string
+  botId: string
+  machine: Machine
+  release: BotRelease
+  version: string
+  /** 刚写下的那一行（`deploying`）。 */
+  row: SeatRuntime
+  /** 这次之前的那一行。失败要回退成它，成功要接着它的 deployedAt。 */
+  existing: SeatRuntime | undefined
+  vncPassword: string
+  interrupt: boolean
+  drainMs: number
+  timeoutMs?: number
+}
+
+type Reservation =
+  /** 已经是这个版本、而且好着，这次什么都不用做。 */
+  | { ok: true; done: DeployResult }
+  | { ok: true; plan: DeployPlan }
+  | DeployFailure
+
+/**
  * 分配（或复用）一个槽，把这个席位部署出去。
  *
  * Stub：`SATUWORK_DEPLOY_STUB=1` 直接写 ready，不联系管家。
  * Live：`PUT {machine.host}/seats/{seatId}`，机器上的活儿全由管家做。
+ *
+ * **整段是同步的**：调用方要一直等到机器上装完（最长 DEPLOY_TIMEOUT_MS）。要「先回执、
+ * 后台装」的那条路走 startSeatDeploy。
  */
 export async function deploySeat(
   db: Db,
   keys: JwtKeys,
   account: Account,
-  opts: {
-    botId: string
-    version?: string
-    update?: boolean
-    force?: boolean
-    /**
-     * 打断正在跑的那一轮。默认跟着 `force` 走——人手工按「重新部署」时要的就是「现在
-     * 就重铺」。模版下发那条路带着 force（为了穿过「版本没变就跳过」那道门）却**不**
-     * 想打断谁，它显式传 false。
-     */
-    interrupt?: boolean
-    timeoutMs?: number
-  },
-): Promise<
-  | { ok: true; result: DeployResult }
+  opts: DeployOpts,
+): Promise<DeployOutcome> {
+  // **从登记就开始记**，不是等到真的开装：这中间隔着几次查库，而进度那条路每两秒问一
+  // 次，问在这个缝里就会得到一句「没人在装」——界面据此改口，人手上多出一颗不该点的
+  // 「重新部署」。
+  const release = markDeploying(seatKeyOf(account.id, (opts.botId || '').trim()))
+  try {
+    const res = await reserveSeat(db, account, opts)
+    if (!res.ok) return res
+    if ('done' in res) return { ok: true, result: res.done }
+    return await installSeat(db, res.plan)
+  } finally {
+    release()
+  }
+}
+
+export interface DeployOpts {
+  botId: string
+  version?: string
+  update?: boolean
+  force?: boolean
   /**
-   * `busy` 是**第三种结局**：席位上有人正在说话，管家等过了也没等到，于是什么都没动。
-   *
-   * **必须是一个字段，不能让调用方拿 409 反推**——这个函数有六处 409（管家版本过旧、
-   * 架构不匹配、槽位用尽、没有发布版本、公司没配对机器，以及这一条），含义天差地别。
-   * 反推的代价是真的：批量更新会把「这台机器的管家太旧」整片报成「大家在忙，晚点再
-   * 来」，而且因为一个失败都没有，那句提示还是绿的——真正的原因从此浮不出来。
+   * 打断正在跑的那一轮。默认跟着 `force` 走——人手工按「重新部署」时要的就是「现在
+   * 就重铺」。模版下发那条路带着 force（为了穿过「版本没变就跳过」那道门）却**不**
+   * 想打断谁，它显式传 false。
    */
-  | { ok: false; status: number; error: string; runtime: SeatRuntime | undefined; busy?: boolean }
-> {
+  interrupt?: boolean
+  timeoutMs?: number
+}
+
+/**
+ * 这一刻**这个进程里**正在装的席位。key 是 `accountId:botId`。
+ *
+ * 两个用处，缺一个都会在界面上变成一句假话：
+ *
+ * 1. **挡住重复的自动部署**（见 startSeatDeploy）。建 Bot 那一屏上双击一下、或者人在
+ *    装到一半时刷新页面又触发一次，两次登记会各自分一个槽、各自往机器上铺同一个
+ *    seatId——管家那头虽然按 seatId 排队（withSeatLock），但库里已经先被后写的那次盖
+ *    过一遍了，进度和结局都会开始骗人。
+ * 2. **认出「装到一半没人管了」**（见 deployInFlight 和 `/runtime/deploy/progress`）。
+ *    装现在跑在后台，Gateway 一重启，那一行就永远停在 `deploying`：机器上什么都没在
+ *    装，而界面上那个读秒会一直往上走，人守着一屏永远不会完成的进度，连一颗能按的
+ *    按钮都没有。库里看不出这件事——`deploying` 那一行在两种情况下长得一模一样，只有
+ *    进程自己知道手上有没有这活儿。
+ */
+const inFlightDeploys = new Map<string, number>()
+
+/**
+ * 标记「这个席位这会儿有人在装」。**计数，不是布尔**：手工重铺和自动部署完全可能叠在
+ * 一起，用布尔的话先结束的那个会把还在跑的那个也一起抹掉——而那正好会让界面把一个装
+ * 得好好的席位说成「装到一半没人管了」。
+ */
+function markDeploying(key: string): () => void {
+  inFlightDeploys.set(key, (inFlightDeploys.get(key) ?? 0) + 1)
+  let done = false
+  return () => {
+    if (done) return
+    done = true
+    const n = (inFlightDeploys.get(key) ?? 1) - 1
+    if (n > 0) inFlightDeploys.set(key, n)
+    else inFlightDeploys.delete(key)
+  }
+}
+
+const seatKeyOf = (accountId: string, botId: string) => accountId + ':' + botId
+
+/**
+ * **先登记，后台装。** 登记那一段（挑机器、定槽位、写下 `deploying` 那一行）等着做完
+ * 才返回，机器上那十几分钟丢进后台。
+ *
+ * 建完 Bot 自动部署走的就是这条：人不该为了「能用」去点第二个按钮，也不该盯着一个转
+ * 十几分钟的圈等 HTTP 回执——那条请求活不了那么久，中间任何一次网络抖动都会让界面以为
+ * 部署失败了，而机器上装得好好的。
+ *
+ * 后台那一段的结局落在席位行上（`ready` / `error` + lastError），界面照旧从
+ * `/runtime/desktop` 读——**不需要有人接着这个 promise**。
+ */
+export async function startSeatDeploy(
+  db: Db,
+  account: Account,
+  opts: DeployOpts,
+): Promise<{ ok: true; runtime: SeatRuntime; installing: boolean } | DeployFailure> {
+  const botId = (opts.botId || '').trim()
+  const key = seatKeyOf(account.id, botId)
+  if (inFlightDeploys.has(key)) {
+    const row = await db.seatRuntime(account.id, botId)
+    // 已经在装了就当这次也算数：调用方要的是「它在装」，而它确实在装。
+    if (row) return { ok: true, runtime: row, installing: true }
+  }
+  const release = markDeploying(key)
+  let handedOff = false
+  try {
+    const res = await reserveSeat(db, account, opts)
+    if (!res.ok) return res
+    if ('done' in res) return { ok: true, runtime: res.done.runtime, installing: false }
+    const plan = res.plan
+    handedOff = true
+    void installSeat(db, plan)
+      .then((out) => {
+        if (!out.ok) {
+          // 失败已经写进席位行了（lastError），这里只留一行日志：后台没有调用方，
+          // 不打的话这台机器上发生过什么在进程外一个字都看不到。
+          console.warn(`satuwork-gateway: 席位 ${plan.row.seatId} 自动部署失败：${out.error}`)
+        }
+      })
+      .catch((e) => {
+        console.warn(`satuwork-gateway: 席位 ${plan.row.seatId} 自动部署异常：${e instanceof Error ? e.message : String(e)}`)
+      })
+      // 后台那一段跑完才松手——「有没有人在装」这个问题，答的就是它。
+      .finally(release)
+    return { ok: true, runtime: plan.row, installing: true }
+  } finally {
+    if (!handedOff) release()
+  }
+}
+
+/**
+ * 这个席位此刻有没有一次部署真的在跑（**这个进程里**）。
+ *
+ * 进度那条路靠它把两种 `deploying` 分开：一种是机器上正在装，另一种是上一次装到一半、
+ * Gateway 重启了，库里那一行再也没人来收。前者要接着等，后者要当场说清楚并给一颗
+ * 「重新部署」——两者在库里长得一模一样。
+ */
+export function deployInFlight(accountId: string, botId: string): boolean {
+  return inFlightDeploys.has(seatKeyOf(accountId, botId))
+}
+
+/**
+ * 登记：挑机器、挑版本、定槽位，把席位行写成 `deploying`。**不碰机器。**
+ *
+ * 六个 4xx 出口全在这一段——所有「这次根本装不成」的理由（没配对机器、管家太旧、架构
+ * 不对、没发布包、槽位用尽、没有这颗 Bot）在这里就答得出来，所以后台那条路也能当场
+ * 把它们原样回给调用方。
+ */
+async function reserveSeat(db: Db, account: Account, opts: DeployOpts): Promise<Reservation> {
   const companyId = account.companyId
   if (!companyId) return { ok: false, status: 403, error: '没有公司席位', runtime: undefined }
   const botId = (opts.botId || '').trim()
@@ -625,7 +816,7 @@ export async function deploySeat(
   // 席位状态 ready、版本没变，正是那种情况最典型的样子（VNC 口令没同步、dock 少一格、
   // 桌面服务还是老进程）。这道门把唯一的自助修复手段变成了一个安慰剂。
   if (existing?.status === 'ready' && existing.botVersion === version && !opts.update && !opts.force) {
-    return { ok: true, result: { runtime: existing, machine } }
+    return { ok: true, done: { runtime: existing, machine } }
   }
 
   const vncPassword = existing?.vncPassword || randomVncPassword()
@@ -659,6 +850,12 @@ export async function deploySeat(
             // 让这个对象是一整行；upsert 的列表里没有它们，写不进去也盖不掉。
             tplVersion: existing?.tplVersion ?? null,
             tplSyncedAt: existing?.tplSyncedAt ?? null,
+            /**
+             * 进度从这一刻开始计时。**每次重铺都重写**——界面上那句「已经装了 X 分钟」
+             * 说的是这一次，接着上一次的时刻算出来的数字只会吓人。
+             */
+            deployPhase: 'queued',
+            deployStartedAt: now,
           })
         })
         break
@@ -673,6 +870,27 @@ export async function deploySeat(
   }
   if (!row) return { ok: false, status: 500, error: '无法分配席位槽', runtime: existing }
 
+  return {
+    ok: true,
+    plan: { account, companyId, botId, machine, release, version, row, existing, vncPassword, interrupt, drainMs, timeoutMs: opts.timeoutMs },
+  }
+}
+
+/** 装完之后这一行还在吗。不在 = 部署期间这颗 Bot 被删了（见 installSeat 的收尾）。 */
+async function seatStillThere(db: Db, plan: DeployPlan): Promise<boolean> {
+  const row = await db.seatRuntime(plan.account.id, plan.botId)
+  return Boolean(row && row.seatId === plan.row.seatId)
+}
+
+/**
+ * 安装：把规格发给管家，等它把机器上的事做完，然后落一行结局。
+ *
+ * 这一段可以跑十几分钟（第一次要 apt 装一整套桌面栈），所以 `deployPhase` 在发出去之前
+ * 就写成 `installing`——界面上那句「正在装」和机器上真的在装，指的必须是同一段时间。
+ */
+async function installSeat(db: Db, plan: DeployPlan): Promise<DeployOutcome> {
+  const { account, companyId, botId, machine, release, version, row, existing, vncPassword } = plan
+
   if (process.env.SATUWORK_DEPLOY_STUB === '1') {
     const ready = await db.upsertSeatRuntime({
       ...row,
@@ -681,6 +899,8 @@ export async function deploySeat(
       deployedAt: Date.now(),
       updatedAt: Date.now(),
       botVersion: version,
+      deployPhase: null,
+      deployStartedAt: null,
     })
     await db.upsertInstance({
       accountId: account.id,
@@ -695,32 +915,18 @@ export async function deploySeat(
   // openRelease 在下发时现取，本机**本来就没有** .tgz。以前这里无条件 existsSync，
   // 于是一旦最新版本是远程登记的，所有席位的部署都会卡在「发布包文件不存在」。
   if (!release.url && !existsSync(botReleaseFile(version))) {
-    const failed = await db.upsertSeatRuntime({
-      ...row,
-      status: 'error',
-      lastError: '发布包文件不存在',
-      updatedAt: Date.now(),
-    })
-    return { ok: false, status: 502, error: '发布包文件不存在', runtime: failed }
+    return await failSeat(db, plan, 502, '发布包文件不存在')
   }
 
   const secrets = await db.ensureAccountSecrets(account.id)
-  if (!secrets) {
-    const failed = await db.upsertSeatRuntime({
-      ...row,
-      status: 'error',
-      lastError: '没有席位密钥',
-      updatedAt: Date.now(),
-    })
-    return { ok: false, status: 500, error: '没有席位密钥', runtime: failed }
-  }
+  if (!secrets) return await failSeat(db, plan, 500, '没有席位密钥')
 
   const spec: SeatSpec = {
-    seatId,
-    linuxUser,
-    homeDir: homeDirOf(linuxUser),
-    workDir: workDirOf(linuxUser),
-    seatDir: seatDirOf(linuxUser, seatId),
+    seatId: row.seatId,
+    linuxUser: row.linuxUser,
+    homeDir: homeDirOf(row.linuxUser),
+    workDir: workDirOf(row.linuxUser),
+    seatDir: seatDirOf(row.linuxUser, row.seatId),
     botId,
     botVersion: version,
     vncPassword,
@@ -730,22 +936,23 @@ export async function deploySeat(
     ports: portsOf(row.slot),
     // 人手工按的「重新部署」才打断正在跑的那一轮，别的（自动跟版、模版下发）都要等
     // 席位把手上的活干完，见 manager/src/seats.ts 的 drainSeat。
-    ...(interrupt ? { interrupt: true } : { drainMs }),
+    ...(plan.interrupt ? { interrupt: true } : { drainMs: plan.drainMs }),
   }
+  const sending = await db.upsertSeatRuntime({ ...row, updatedAt: Date.now(), deployPhase: 'installing' })
   try {
-    await managerDeploy(machine, spec, opts.timeoutMs)
+    await managerDeploy(machine, spec, plan.timeoutMs)
   } catch (e) {
     /**
      * 席位上有会话在跑，管家等过了也没等到它结束。**这不是失败**：机器上一个字节都
      * 没动，席位还是原来那个版本、还在好好地跑。
      *
-     * 所以状态要**放回去**，不能留在上面那一步写下的 `deploying`——那一行会让界面
+     * 所以状态要**放回去**，不能留在登记那一步写下的 `deploying`——那一行会让界面
      * 一直显示「部署中」，而机器上根本没有任何事情在进行；也不能标成 `error`，那是
      * 一行红字加一个「重新部署」的暗示，而正确的动作是「等会儿再来，或者按强制」。
      */
     if (e instanceof SeatBusyError) {
       const kept = await db.upsertSeatRuntime({
-        ...row,
+        ...sending,
         status: existing?.status ?? 'ready',
         // **这一句不写进 lastError。** 席位卡里那一格出错时画的是 lastError、平时画的是
         // 版本号（见 ui/pages-machines.js），把一句「等会儿再来」摆进去，会在之后的每
@@ -756,35 +963,63 @@ export async function deploySeat(
         deployedAt: existing?.deployedAt ?? null,
         updatedAt: Date.now(),
         botVersion: existing?.botVersion ?? null,
+        deployPhase: null,
+        deployStartedAt: null,
       })
       return { ok: false, status: 409, error: e.message, runtime: kept, busy: true }
     }
-    const message = sanitizeError(e, [machine.token, secrets.accessToken, secrets.apiKey, vncPassword])
-    const failed = await db.upsertSeatRuntime({
-      ...row,
-      status: 'error',
-      lastError: message,
-      updatedAt: Date.now(),
+    return await failSeat(db, plan, 502, sanitizeError(e, [machine.token, secrets.accessToken, secrets.apiKey, vncPassword]))
+  }
+
+  /**
+   * **装的过程中这颗 Bot 被删了。**
+   *
+   * 后台部署把这个窗口从「零点几秒」拉长到十几分钟，于是它从理论问题变成了会真的发生
+   * 的事：人建完一颗 Bot、看着进度觉得建错了、当场删掉，而机器上那一套正装到一半。
+   * 删除那条路（purgeBot）拆的是它当时看得见的席位行，拆完行就没了；这里要是照旧把
+   * `ready` 写回去，库里会凭空长出一行指向一颗不存在的 Bot 的席位，机器上那套 systemd
+   * 单元也永远没人来收——占着槽位和端口，而再没有任何东西指向它。
+   *
+   * 所以：行不在了就把机器上刚铺好的那套拆掉，什么都不写。
+   */
+  if (!(await seatStillThere(db, plan))) {
+    await managerRemoveSeat(machine, row.seatId).catch((e) => {
+      console.warn(`satuwork-gateway: 席位 ${row.seatId} 部署途中 Bot 被删，拆除失败：${e instanceof Error ? e.message : String(e)}`)
     })
-    return { ok: false, status: 502, error: message, runtime: failed }
+    return { ok: false, status: 409, error: '这个 Bot 在部署过程中被删掉了', runtime: undefined }
   }
 
   const ready = await db.upsertSeatRuntime({
-    ...row,
+    ...sending,
     status: 'ready',
     lastError: null,
     deployedAt: Date.now(),
     updatedAt: Date.now(),
     botVersion: version,
+    deployPhase: null,
+    deployStartedAt: null,
   })
   await db.upsertInstance({
     accountId: account.id,
     botId,
     companyId,
     // 反代地址，不是 bot 的直连地址。席位端口只听 127.0.0.1，只有管家够得着。
-    host: botBaseOf(machine.host, seatId),
+    host: botBaseOf(machine.host, row.seatId),
   })
   return { ok: true, result: { runtime: ready, machine } }
+}
+
+/** 失败的那一行：状态标红、写清理由、进度清空。 */
+async function failSeat(db: Db, plan: DeployPlan, status: number, message: string): Promise<DeployFailure> {
+  const failed = await db.upsertSeatRuntime({
+    ...plan.row,
+    status: 'error',
+    lastError: message,
+    updatedAt: Date.now(),
+    deployPhase: null,
+    deployStartedAt: null,
+  })
+  return { ok: false, status, error: message, runtime: failed }
 }
 
 /** Gateway 下发给管家的席位规格。字段和 manager/src/seats.ts 的 SeatSpec 一一对应。 */
@@ -1003,6 +1238,44 @@ export async function managerHealth(
     return { ok: true, body: (await res.json()) as Record<string, unknown> }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** 管家报上来的一步：脚本自己写的中文短句，Gateway 一个字都不解释。 */
+export interface SeatStep {
+  step: number
+  total: number
+  label: string
+  at: number
+}
+
+/**
+ * 问管家「这个席位装到第几步了」。**问不到一律回 undefined**，不是错误。
+ *
+ * 这条路上「问不到」有一大把正常成因：管家太旧（没这条路）、脚本还没报出第一行、这一
+ * 刻机器上根本没在装、网络抖了一下。它们对调用方是同一个决定——退回到粗进度，照旧
+ * 把「已经装了几分钟」画出来。分开报只会让一屏等待的界面上多出几种吓人的说法。
+ *
+ * 超时压到 3 秒：这是每两秒问一次的东西，等一个卡住的管家没有任何意义。
+ */
+export async function seatStepOf(machine: Machine, seatId: string, timeoutMs = 3000): Promise<SeatStep | undefined> {
+  if (!machinePaired(machine) || machine.protocol < MIN_PROGRESS_PROTOCOL) return undefined
+  try {
+    const res = await fetch(`${machine.host!.replace(/\/$/, '')}/seats/${encodeURIComponent(seatId)}/progress`, {
+      headers: { ...managerHeaders(machine.token), authorization: 'Bearer ' + machine.token },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!res.ok) return undefined
+    const body = (await res.json()) as { progress?: unknown }
+    const p = body?.progress as Record<string, unknown> | null | undefined
+    if (!p) return undefined
+    const step = Number(p.step)
+    const total = Number(p.total)
+    const at = Number(p.at)
+    if (!Number.isFinite(step) || !Number.isFinite(total) || total <= 0 || step <= 0 || step > total) return undefined
+    return { step, total, label: String(p.label ?? '').slice(0, 80), at: Number.isFinite(at) ? at : Date.now() }
+  } catch {
+    return undefined
   }
 }
 

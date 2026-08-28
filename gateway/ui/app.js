@@ -117,6 +117,11 @@ async function runConfirm() {
       flash('ok', '席位已清理')
       render()
       return
+    } else if (c.kind === 'ws-del') {
+      // 自己管提示与重取（见 chat.js 的 deleteWorkspaceEntry）：删完只重取上一层，
+      // 而这里的兜底是整页 render——两者一起做的话，那一屏会先闪一次旧内容。
+      await deleteWorkspaceEntry(c.path, c.name)
+      return
     } else if (c.kind === 'routine-delete') {
       await deleteRoutineNow(c.id)
       return
@@ -637,6 +642,36 @@ document.getElementById('app').addEventListener('click', async (e) => {
     await refreshWorkspaceTree()
     return
   }
+  /**
+   * 树上那颗删除。**先弹框**：工作区没有回收站，删掉就没了，而这颗按钮就贴在
+   * 「点开预览」那一行的末尾，指头偏一点就是另一件事。
+   *
+   * 框里要写全名字和后果——目录那句尤其：人点的是一个文件夹图标，脑子里未必装着
+   * 它底下那几十个文件。
+   */
+  if (act === 'ws-del') {
+    const path = btn.getAttribute('data-path') || ''
+    const name = btn.getAttribute('data-name') || path
+    const dir = Boolean(btn.getAttribute('data-dir'))
+    state.confirm = {
+      title: dir ? t('删掉这个文件夹？', 'Delete this folder?') : t('删掉这个文件？', 'Delete this file?'),
+      body: dir
+        ? t(
+            `「${name}」连同它底下的所有文件都会从工作区里删掉，删掉就找不回来了。`,
+            `"${name}" and everything inside it is removed from the workspace. This cannot be undone.`,
+          )
+        : t(
+            `「${name}」会从工作区里删掉，删掉就找不回来了。对话里提到过它的地方点开会变成「文件不存在」。`,
+            `"${name}" is removed from the workspace. This cannot be undone, and links to it in the conversation will stop opening.`,
+          ),
+      label: '删除',
+      kind: 'ws-del',
+      path,
+      name,
+    }
+    render()
+    return
+  }
   if (act === 'runtime-redeploy') {
     const id = btn.getAttribute('data-bot') || ''
     const bot = (state.runtimeBots || []).find((b) => b.id === id)
@@ -1058,8 +1093,22 @@ document.getElementById('app').addEventListener('click', async (e) => {
       })
       state.newBot = null
       state.busy = false
+      /**
+       * 建完就在装了（服务端顺手开的，见 routes/runtime.ts 的 POST /runtime/bots），
+       * 所以这里把那份进度先摆上——**不等第一轮轮询**。差的那两秒里，屏幕上会是一句
+       * 「还没有部署」外加一颗按钮，而机器上已经开工了：人多半会去按它。
+       */
+      state.deployProgress = data.deploy && data.deploy.started
+        ? { botId: data.bot.id, status: 'deploying', phase: 'queued', since: Date.now(), lastError: null, step: null }
+        : null
+      /**
+       * 装不成的理由要说出来，**但不能让建 Bot 这件事看起来失败了**：Bot 建好了，
+       * 只是这会儿没机器可装（公司还没配机器、没发布过版本、槽位满了）。那一屏上
+       * 「还没有部署」底下的那行小字就是给这句话留的。
+       */
+      state.deployHint = data.deploy && !data.deploy.started ? data.deploy.error || '' : ''
       await loadRuntimeBots().catch(() => {})
-      // 直接进它的对话页：那儿有「部署这个 Bot」，也是建完之后人真正要去的地方。
+      // 直接进它的对话页：装好之后那一页会自己变成对话（见 chat.js 的 ensureDeployWatch）。
       go('/a/' + data.bot.id)
     } catch (err) {
       state.newBotError = err.message

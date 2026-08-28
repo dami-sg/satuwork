@@ -45,6 +45,7 @@ import { runToolCalls } from './toolcalls.mjs'
 import { runShutdown } from './shutdown.mjs'
 import { runGuards } from './guards.mjs'
 import { runHandoff } from './handoff.mjs'
+import { runRoutineRetry } from './routine-retry.mjs'
 import { runBrowser } from './browser.mjs'
 import { runMounted } from './mounted.mjs'
 import { runSetup } from './setup.mjs'
@@ -3307,6 +3308,7 @@ async function main() {
     await suite('toolcalls', () => runToolCalls({ root, test, assert, log }))
     await suite('guards', () => runGuards({ root, test, assert, log }))
     await suite('handoff', () => runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('routine-retry', () => runRoutineRetry({ gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('browser', () => runBrowser({ root, test, assert, log }))
     await suite('mounted', () => runMounted({ root, test, assert, log }))
     // 关进程那条放在最后：它把 Gateway 起起来又掐掉，后面再挂用例只会跟它抢端口。
