@@ -1559,6 +1559,30 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   })
 
   /**
+   * 删掉这条会话所在席位的工作区里的一个文件或目录（树上那颗删除）。
+   *
+   * 和上面那条列目录同一道门、同一个 path 语义，只是方法不同——**归属判断不能松**：
+   * 这是这几条里唯一不可逆的一条，`seatTargetForSession` 证明的正是「这个人有权打
+   * 这台席位」，越界与「能不能删」由席位那头说了算。
+   */
+  router.delete('/runtime/sessions/:id/workspace', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const target = await seatTargetForSession(db, account, req.params.id)
+    const path = req.query.get('path') ?? ''
+    // 空 path 在席位那头会落到工作区根上（那条自己也挡了一道）。这里先挡是为了别把
+    // 一次「按钮没带上路径」的前端 bug 变成一次打到席位的删除请求。
+    if (!path.trim()) throw new HttpError(400, 'path 不能为空')
+    await proxyJson(
+      res,
+      'DELETE',
+      `${target.host}/api/workspace/file?path=${encodeURIComponent(path)}`,
+      undefined,
+      await seatBearer(db, account.id),
+      target.machineToken,
+    )
+  })
+
+  /**
    * 预览（或下载）这条会话所在席位的工作区里的一个文件。
    *
    * 上传进来的和 Bot 自己写出来的走同一条路——它们本来就在同一个目录里。越界检查在

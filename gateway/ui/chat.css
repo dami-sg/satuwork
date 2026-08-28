@@ -1114,8 +1114,30 @@
   text-align: left;
   cursor: pointer;
 }
-.sw-ws-row:hover { background: var(--secondary); }
+/* 行 + 行末那颗删除。整行本身是按钮，所以那一颗只能是它的兄弟（见 chat.js 的
+   wsDelBtn），这一层是把两者摆回同一行的容器。 */
+.sw-ws-item { display: flex; align-items: center; min-width: 0; }
+.sw-ws-item .sw-ws-row { flex: 1; min-width: 0; }
+/* 底色跟着整行走，不只跟着那颗大按钮：鼠标挪到删除上时行还亮着，删的是哪一行才清楚。 */
+.sw-ws-item:hover .sw-ws-row { background: var(--secondary); }
 .sw-ws-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* 平时透明但**位置一直占着**：改 display 的话，鼠标一进来名字就被挤短一截，
+   读到一半的文件名会当场跳一下。 */
+.sw-ws-del {
+  flex: none;
+  padding: 4px;
+  margin-right: 2px;
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.sw-ws-item:hover .sw-ws-del,
+.sw-ws-del:focus-visible { opacity: 1; }
+.sw-ws-del:hover { color: var(--color-accent-700); }
+/* 触屏上没有 hover 这回事——不给这一条，那颗按钮在手机上永远不出现。 */
+@media (hover: none) {
+  .sw-ws-del { opacity: 1; }
+}
 .sw-ws-caret { flex: none; display: inline-flex; color: var(--muted-foreground); }
 /* 名字要能被截断，不能把整栏撑开——工作区里的文件名常常很长。 */
 .sw-ws-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
