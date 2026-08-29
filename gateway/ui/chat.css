@@ -1815,3 +1815,18 @@
   padding-left: var(--space-2);
 }
 .sw-trace-out[data-failed='1'] { border-left-color: var(--color-accent-800); }
+/* 替人发话的那条消息：看板卡 / 日常任务落在主会话里的任务交底。角标挂在气泡上沿，
+   CSS 画（rowShell 只跑一次，updateRow 不用管它）。 */
+.sw-msg[data-via] .sw-bubble::before {
+  display: inline-block;
+  margin: 0 0 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  background: var(--color-accent-100);
+  color: var(--color-accent-800);
+}
+.sw-msg[data-via="kanban"] .sw-bubble::before { content: '看板任务'; }
+.sw-msg[data-via="routine"] .sw-bubble::before { content: '日常任务'; }

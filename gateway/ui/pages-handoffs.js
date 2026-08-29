@@ -212,21 +212,6 @@ const ICON_HANDOFF = [
  * **只对公司里的人出现**：owner 没有席位、也没有 Bot，那一侧永远是 0。
  * 数字为 0 时按钮照样在——待办入口消失的话，人只能靠记性想起来去哪儿找它。
  */
-/**
- * 顶栏那颗看板按钮。
- *
- * 和交接单那颗并排，**不共用一个入口**：那个数是两件事加起来的，但点进去要去两个
- * 地方——合成一个按钮的话，人点开待办页看到三张单，而真正卡住的是板上那张卡。
- */
-function kanbanBell() {
-  if (!state.me || isOwner() || !state.me.account || !state.me.account.companyId) return ''
-  const label = t('看板', 'Boards')
-  return `<button type="button" class="btn btn-ghost btn-icon" style="flex: none;"
-    data-act="go" data-href="/kanban" aria-label="${esc(label)}" title="${esc(label)}">
-    ${svg(['M4 5h16v14H4z', 'M9 5v14', 'M15 5v14'], 17)}
-  </button>`
-}
-
 function handoffBell() {
   if (!state.me || isOwner() || !state.me.account || !state.me.account.companyId) return ''
   const n = Number(state.handoffCount) || 0

@@ -309,6 +309,9 @@ const state = {
   kanbanBoard: null,
   kanbanCardId: '',
   kanbanCard: null,
+  /** 「开一张任务卡」弹窗。null = 收着；开着时记报错和提交中的状态，字段值不进 state
+   * ——提交前整页不会重绘，表单元素自己留着自己的值（同 submitKanban 收在 submit 上的理由）。 */
+  kanbanNewCard: null,
   /** 要人管的卡有几张。和交接单那个数**加在一起**显示——对人是同一件事。 */
   kanbanBlocked: 0,
   handoffCount: 0,
@@ -497,7 +500,9 @@ function allowedHrefs() {
   // 转人工待办的入口在**顶栏**那颗按钮上，不在侧栏菜单里（员工那份菜单是空的，
   // 见 MEMBER_NAV）。所以这里单独放行，否则点那颗按钮会被 pathAllowed 踢回首页。
   if (!isOwner()) set.add('/handoffs')
-  // 看板的入口也在顶栏那一侧，不在侧栏菜单里（同上一行的理由）。
+  // 看板的入口在侧栏名单底下那颗「任务看板」（render.js，挨着「插件」），不在
+  // navForRole() 里——MEMBER_NAV 是空的，这条单独放行，否则点那颗按钮会被
+  // pathAllowed 踢回首页。
   if (!isOwner()) set.add('/kanban')
   return set
 }
@@ -635,6 +640,22 @@ function crumbsOf(path) {
     const id = sessionIdOfPath(path)
     const one = row && (row.sessionId || row.id) === id ? row : null
     return { href: '/audit', parent: t('审计'), current: one?.title || t('对话') }
+  }
+  /**
+   * 看板的三屏共用 `/kanban` 一个地址（见 data.js 那段复位注释），分不出层级——只能
+   * 问内存里停在哪个屏。板屏的上一级是板列表，卡屏的上一级是那块板；上一级是板时
+   * 返回得走 `kanban-board` 动作（不是 go），所以多带 act/id，渲染那边照此出按钮。
+   */
+  if (path === '/kanban') {
+    const card = state.kanbanCard?.card
+    if (state.kanbanCardId && card) {
+      const b = state.kanbanBoard?.board?.id === card.boardId ? state.kanbanBoard.board : null
+      return { href: '/kanban', act: 'kanban-board', id: card.boardId, parent: b?.name || t('看板'), current: card.title || t('（没写标题）', '(untitled)') }
+    }
+    if (state.kanbanBoardId && state.kanbanBoard) {
+      return { href: '/kanban', parent: t('看板'), current: state.kanbanBoard.board?.name || t('（没起名字）', '(unnamed)') }
+    }
+    return null
   }
   return null
 }

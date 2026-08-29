@@ -15,6 +15,7 @@
 
 /** 一张卡现在算哪一态，说给人听。列表上要一眼扫过。 */
 function cardStateTag(c) {
+  if (c.state === 'pending') return `<span class="tag tag-neutral">${t('待定', 'Pending')}</span>`
   if (c.state === 'running') return `<span class="tag tag-accent">${t('在跑', 'Running')}</span>`
   if (c.state === 'ready') return `<span class="tag tag-accent-2">${t('待派', 'Ready')}</span>`
   if (c.state === 'todo') return `<span class="tag tag-neutral">${t('等依赖', 'Waiting')}</span>`
@@ -35,11 +36,14 @@ function cardModelLine(c) {
   return `<div class="satu-kanban-why">${esc(c.modelRole)}${esc(down)} · ${esc(c.modelReason || '')}</div>`
 }
 
-/** 板上那一列里的一张卡。 */
+/** 板上那一列里的一张卡。**待定的可拖**：拖进「待派」这一列就是把它派出去。 */
 function cardChip(c, bots) {
   const who = c.assigneeBotId ? bots.get(c.assigneeBotId) || c.assigneeBotId : t('没人认领', 'unassigned')
   const stuck = c.state === 'blocked' && c.blockedReason ? `<div class="satu-kanban-why">${esc(c.blockedReason)}</div>` : ''
-  return `<button type="button" class="satu-kanban-card" data-act="kanban-card" data-id="${esc(c.id)}">
+  const draggable = c.state === 'pending'
+  return `<button type="button" class="satu-kanban-card${draggable ? ' satu-kanban-drag' : ''}" data-act="kanban-card" data-id="${esc(c.id)}"${
+    draggable ? ` draggable="true" data-state="pending" title="${esc(t('拖到「待派」就开始执行', 'Drag to Ready to start'))}"` : ''
+  }>
     <div class="satu-kanban-title">${esc(c.title || t('（没写标题）', '(untitled)'))}</div>
     <div class="satu-kanban-meta">${esc(who)}</div>
     ${cardModelLine(c)}
@@ -82,7 +86,7 @@ function kanbanListPage() {
         ${flashes()}
         <form data-act="kanban-new-board" style="display: flex; gap: var(--space-2); flex-wrap: wrap;">
           <input class="input" name="name" placeholder="${esc(t('新板叫什么', 'New board name'))}" style="max-width: 260px;" />
-          <button type="submit" class="btn btn-secondary">${t('建一块板', 'New board')}</button>
+          <button type="submit" class="btn btn-primary">${t('建一块板', 'New board')}</button>
         </form>
         <div class="satu-kanban-boards">${rows}</div>
       </div>
@@ -95,9 +99,9 @@ function kanbanBoardPage() {
   if (!d) return `<div class="gw-page"><div class="gw-page-inner">${t('正在打开…', 'Opening…')}</div></div>`
   const bots = new Map((d.members || []).map((m) => [m.botId, m.name || m.botId]))
   const cards = d.cards || []
-  const col = (key, label) => {
+  const col = (key, label, drop = false) => {
     const list = cards.filter((c) => c.state === key)
-    return `<div class="satu-kanban-col">
+    return `<div class="satu-kanban-col"${drop ? ' data-drop="ready"' : ''}>
       <div class="satu-kanban-colhead">${label}<span>${list.length}</span></div>
       ${list.map((c) => cardChip(c, bots)).join('') || `<div class="satu-kanban-empty">—</div>`}
     </div>`
@@ -109,23 +113,21 @@ function kanbanBoardPage() {
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
-        <div>
-          <button type="button" class="btn btn-ghost" data-act="go" data-href="/kanban">${t('← 所有板', '← All boards')}</button>
-          <h1 style="font-size: 24px; margin: 8px 0 4px;">${esc(d.board.name || t('（没起名字）', '(unnamed)'))}</h1>
-          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(d.board.brief || '')}</p>
-          <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted-foreground);">${t('板上的 Bot：', 'Bots: ')}${members || t('还没加人', 'none yet')}</p>
+        ${/* 板名和「开一张任务卡」一行：开卡是这一屏的主动作，按钮跟标题站在同一行右端，
+              和「建一块板」那颗一样用主按钮样式。 */ ''}
+        <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;">
+          <div>
+            <h1 style="font-size: 24px; margin: 0 0 4px;">${esc(d.board.name || t('（没起名字）', '(unnamed)'))}</h1>
+            <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(d.board.brief || '')}</p>
+            <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted-foreground);">${t('板上的 Bot：', 'Bots: ')}${members || t('还没加人', 'none yet')}</p>
+          </div>
+          <button type="button" class="btn btn-primary" data-act="kanban-card-open">${t('开一张任务卡', 'New task card')}</button>
         </div>
         ${flashes()}
-        <form data-act="kanban-new-card" data-board="${esc(d.board.id)}" style="display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center;">
-          <input class="input" name="title" placeholder="${esc(t('要做的一件事', 'Something to do'))}" style="flex: 1; min-width: 220px;" />
-          <select class="input" name="assignee" style="max-width: 180px;">
-            <option value="">${esc(t('交给哪颗 Bot', 'Assign to'))}</option>
-            ${(d.members || []).map((m) => `<option value="${esc(m.botId)}">${esc(m.name || m.botId)}</option>`).join('')}
-          </select>
-          <button type="submit" class="btn btn-secondary">${t('开一张卡', 'Add card')}</button>
-        </form>
         <div class="satu-kanban-cols">
-          ${col('ready', t('待派', 'Ready'))}
+          ${/* 待定排在最前：开卡先落这儿，人从这里把它拖进「待派」才开始跑。 */ ''}
+          ${col('pending', t('待定', 'Pending'))}
+          ${col('ready', t('待派', 'Ready'), true)}
           ${col('running', t('在跑', 'Running'))}
           ${col('blocked', t('要人管', 'Needs you'))}
           ${col('done', t('做完了', 'Done'))}
@@ -140,6 +142,90 @@ function kanbanBoardPage() {
         }
       </div>
     </div>`
+}
+
+// 名字带前缀：这些脚本全是普通 <script>，顶层 const 共享同一个全局作用域——
+// pages-bots.js 里已经有同名的 CLOSE_ICON / UPLOAD_ICON，撞名会把整个文件炸掉
+// （表现是「别的页面都好，只有看板整页空白」）。
+const KANBAN_CLOSE_ICON = ['M18 6 6 18', 'M6 6l12 12']
+const KANBAN_UPLOAD_ICON = ['M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4', 'm7 9 5-5 5 5', 'M12 4v12']
+
+/**
+ * 「开一张任务卡」弹窗。
+ *
+ * 组件和「新建 Skill」是同一套（pages-bots.js 的 skillDialogView）：gw-modal 直接架在
+ * form 上、右上角关闭、`.field` + `.input`、挑选用 `.satu-assignee` 药丸。不再自造
+ * 控件——两扇弹窗长得不一样，人就会疑心它们不是一回事。
+ *
+ * **没有标题栏**：标题是 utility 模型从需求正文里总结出来的（后端建卡时生成），人只
+ * 写需求——两件事别让同一个人做两遍。正文因此是这一屏的主角，输入框给到够高。
+ *
+ * 指派是药丸 chips 不是 `<select>`：select 画不了头像。选中态只改 DOM
+ * （data-act="kanban-card-pick"），**不走 render**——一 render，正文和已选的文件就没了。
+ */
+function kanbanCardModal() {
+  const m = state.kanbanNewCard
+  if (!m) return ''
+  const board = state.kanbanBoard?.board
+  if (!board) return ''
+  const bots = state.runtimeBots || []
+  const memberIds = new Set((state.kanbanBoard?.members || []).map((x) => x.botId))
+  const picked = m.assignee || ''
+  const err = m.error
+    ? `<div style="font-size: 13px; color: var(--color-accent-800); background: var(--color-accent-100); border-radius: var(--radius-sm); padding: 10px var(--space-3);">${esc(m.error)}</div>`
+    : ''
+  const chip = (id, inner) =>
+    `<button type="button" class="satu-assignee" style="padding: 5px 12px 5px 6px;" aria-pressed="${String(picked === id)}" data-act="kanban-card-pick" data-id="${esc(id)}">${inner}</button>`
+  const botChips = [
+    chip('', `<span class="satu-botpick-none" aria-hidden="true">—</span>${esc(t('暂不派发，先放着', 'Leave unassigned'))}`),
+    ...bots.map((b) =>
+      chip(
+        b.id,
+        `${botAvatar(b.icon, 20, b.origin)}<span>${esc(b.name || b.id)}</span>${
+          memberIds.has(b.id) ? '' : `<em style="font-style: normal; font-size: 11px; color: var(--muted-foreground);">${esc(t('会加进这块板', 'will join'))}</em>`
+        }`,
+      ),
+    ),
+  ].join('')
+  return `<div class="gw-modal-backdrop" data-act="kanban-card-close">
+    <form data-act="kanban-new-card" data-board="${esc(board.id)}" class="gw-modal" style="max-width: 560px; max-height: 88vh; overflow-y: auto;" data-stop>
+      <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4);">
+        <div>
+          <h2 style="font-size: 20px; margin: 0 0 4px;">${t('开一张任务卡', 'New task card')}</h2>
+          <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">
+            ${t(`写清楚要做的事，派给一颗 Bot。标题会按需求自动生成。`, `Describe the task and assign it to a bot. The title is generated from your description.`)}
+          </p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-icon" aria-label="${esc(t('关闭'))}" data-act="kanban-card-close">${svg(KANBAN_CLOSE_ICON, 16)}</button>
+      </div>
+      <div class="field">
+        <label for="kc-body">${t('任务需求', 'Requirements')}</label>
+        <textarea class="input" id="kc-body" name="body" rows="10" style="border-radius: var(--radius-md); resize: vertical;" placeholder="${esc(t('写成做这张卡的 Bot 拿到手就能开工的程度：要什么、交到哪、有什么约束。', 'Write it so the bot can start right away: what to produce, where to put it, what to watch out for.'))}">${esc(m.body || '')}</textarea>
+      </div>
+      <div class="field">
+        <label for="kc-file">${t('附件（可选）', 'Attachments (optional)')}</label>
+        ${/* 一颗紧凑的小按钮，不是一整块投放区：附件在这张卡上是配角。input 带
+              multiple，一次可以挑好几个。 */ ''}
+        <label class="satu-drop" style="min-height: 0; flex-direction: row; justify-content: flex-start; padding: 8px var(--space-3); gap: var(--space-2);">
+          <input type="file" multiple style="position: absolute; inset: 0; opacity: 0; cursor: pointer;" data-kanban-files>
+          <span class="satu-dropicon" style="width: 26px; height: 26px;">${svg(KANBAN_UPLOAD_ICON, 14)}</span>
+          <span style="font-size: 13px; font-weight: 600;">${t('添加附件', 'Add attachments')}</span>
+          <span style="font-size: 12px; color: var(--muted-foreground);">${t('可多选，单个不超过 10 MB，随卡送到席位。', 'Multiple allowed, up to 10 MB each. They travel with the card.')}</span>
+        </label>
+        <p class="satu-kanban-filelist" style="margin: 6px 0 0; font-size: 12px; color: var(--muted-foreground);" hidden></p>
+      </div>
+      <div class="field">
+        <label>${t('指派 Bot', 'Assign to')}</label>
+        ${bots.length ? `<div style="display: flex; flex-wrap: wrap; gap: var(--space-2);">${botChips}</div>` : `<p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">${t('你还没有 Bot。先在侧栏「新建 Bot」建一颗，再来开卡。', 'You have no bots yet. Create one from the sidebar first.')}</p>`}
+        <span style="font-size: 12px; color: var(--muted-foreground);">${t('不在板上的会自动加进成员，下一次开卡就能直接选。', 'Bots not on this board join it automatically and stay selectable.')}</span>
+      </div>
+      ${err}
+      <div style="display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2);">
+        <button type="button" class="btn btn-secondary" data-act="kanban-card-close">${t('取消')}</button>
+        <button type="submit" class="btn btn-primary" ${m.busy ? 'disabled' : ''}>${m.busy ? t('开卡中…') : t('开出这张卡', 'Create card')}</button>
+      </div>
+    </form>
+  </div>`
 }
 
 /** 一张卡：正文 + 依赖 + 一条时间线（评论和系统行混排）+ 每次跑的流水。 */
@@ -161,7 +247,9 @@ function kanbanCardPage() {
   const acts =
     c.state === 'running'
       ? `<button type="button" class="btn btn-ghost" data-act="kanban-abort" data-id="${esc(c.id)}">${t('停止', 'Stop')}</button>`
-      : [
+      : c.state === 'pending'
+        ? `<button type="button" class="btn btn-primary" data-act="kanban-promote" data-id="${esc(c.id)}">${t('派出去，开始执行', 'Dispatch now')}</button>`
+        : [
           c.state === 'blocked'
             ? `<button type="button" class="btn btn-primary" data-act="kanban-unblock" data-id="${esc(c.id)}">${t('我处理好了，接着跑', 'Unblock')}</button>`
             : '',
@@ -180,13 +268,19 @@ function kanbanCardPage() {
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
-        <button type="button" class="btn btn-ghost" data-act="kanban-board" data-id="${esc(c.boardId)}">${t('← 回到板上', '← Back to board')}</button>
         <div>
-          <h1 style="font-size: 22px; margin: 8px 0 4px;">${esc(c.title)}</h1>
+          <h1 style="font-size: 22px; margin: 0 0 4px;">${esc(c.title)}</h1>
           <div style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${cardStateTag(c)}${cardModelLine(c)}</div>
         </div>
         ${flashes()}
         ${c.body ? `<div class="satu-kanban-body">${esc(c.body)}</div>` : ''}
+        ${
+          (d.files || []).length
+            ? `<div><strong style="font-size: 13px;">${t('随卡的附件', 'Attachments')}</strong><ul class="satu-kanban-line">${d.files
+                .map((f) => `<li>${esc(f.name)}<span>· ${Math.ceil(f.size / 1024)} KB</span></li>`)
+                .join('')}</ul></div>`
+            : ''
+        }
         ${c.blockedReason ? `<div class="satu-kanban-body"><strong>${t('卡在：', 'Stuck: ')}</strong>${esc(c.blockedReason)}</div>` : ''}
         ${c.summary ? `<div class="satu-kanban-body"><strong>${t('结论：', 'Result: ')}</strong>${esc(c.summary)}</div>` : ''}
         <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">${acts}</div>
@@ -267,6 +361,61 @@ function kanbanHasRunning() {
   return (state.kanbanBoards || []).some((b) => (b.counts || {}).running)
 }
 
+/** 板上还有没走到终点的卡（待定、待派、在跑、要人管、等依赖）。轮询快慢看它。 */
+function kanbanHasLive() {
+  const live = (c) => !['done', 'archived', 'cancelled', 'blocked'].includes(c.state)
+  if (state.kanbanCard) return live(state.kanbanCard.card)
+  if (state.kanbanBoard) return (state.kanbanBoard.cards || []).some(live)
+  return (state.kanbanBoards || []).some((b) => {
+    const n = b.counts || {}
+    return (n.pending || 0) + (n.todo || 0) + (n.ready || 0) + (n.running || 0) > 0
+  })
+}
+
+/**
+ * 「待定 → 待派」的拖拽。
+ *
+ * 只有**待定的卡**拿得起来（draggable 只画在它身上），也只有**待派那一列**收得下
+ * （data-drop 只画在它身上）——其余每一态都是算出来的（依赖、调度、成败），人拖不动，
+ * 那就不给拖的假象。拖的时候画一道虚线框在目标列上，让人知道松手会落在哪儿。
+ */
+let kanbanDragId = ''
+document.addEventListener('dragstart', (e) => {
+  const card = e.target && e.target.closest && e.target.closest('.satu-kanban-card[data-state="pending"]')
+  if (!card) return
+  kanbanDragId = card.getAttribute('data-id')
+  try {
+    e.dataTransfer.setData('text/plain', kanbanDragId)
+    e.dataTransfer.effectAllowed = 'move'
+  } catch {}
+})
+document.addEventListener('dragover', (e) => {
+  const col = e.target && e.target.closest && e.target.closest('.satu-kanban-col[data-drop="ready"]')
+  if (!col || !kanbanDragId) return
+  e.preventDefault()
+  col.classList.add('satu-kanban-over')
+})
+document.addEventListener('dragleave', (e) => {
+  const col = e.target && e.target.closest && e.target.closest('.satu-kanban-col[data-drop="ready"]')
+  if (col) col.classList.remove('satu-kanban-over')
+})
+document.addEventListener('drop', async (e) => {
+  const col = e.target && e.target.closest && e.target.closest('.satu-kanban-col[data-drop="ready"]')
+  const id = kanbanDragId
+  if (col) col.classList.remove('satu-kanban-over')
+  if (!col || !id) return
+  e.preventDefault()
+  kanbanDragId = ''
+  try {
+    await api('POST', `/kanban/cards/${encodeURIComponent(id)}/promote`)
+    if (state.kanbanBoardId) await loadKanbanBoard(state.kanbanBoardId)
+    render()
+    kanbanPoll()
+  } catch (err) {
+    flash('err', (err && err.message) || t('没派出去', 'Dispatch failed'))
+  }
+})
+
 /** 这一屏现在长什么样，压成一个字符串。变了才画。 */
 function kanbanShot() {
   if (state.kanbanCard) return JSON.stringify(state.kanbanCard)
@@ -278,7 +427,9 @@ let kanbanTimer = 0
 function kanbanPoll() {
   clearTimeout(kanbanTimer)
   if (state.path !== '/kanban' || document.hidden) return
-  const wait = kanbanHasRunning() ? 5000 : 30_000
+  // 在跑 5 秒；没在跑但还有活（待定等拖、待派等调度）10 秒——**状态流转要看得见**，
+  // 全静止才退到 30 秒。
+  const wait = kanbanHasRunning() ? 5000 : kanbanHasLive() ? 10_000 : 30_000
   kanbanTimer = setTimeout(async () => {
     const before = kanbanShot()
     try {
@@ -311,13 +462,71 @@ async function submitKanban(e, kind) {
       await loadKanban()
       await loadKanbanBoard(out.board.id)
     } else if (kind === 'kanban-new-card') {
-      const title = String(data.get('title') || '').trim()
-      if (!title) return
+      const body = String(data.get('body') || '').trim()
+      // 选中态以 DOM 为准（aria-pressed 那颗），state 只是出错重绘时的备忘——
+      // pick 是异步委托写的，点完立刻提交的话 state 可能还没落。
+      const assignee =
+        form.querySelector('.satu-assignee[aria-pressed="true"]')?.getAttribute('data-id') ||
+        state.kanbanNewCard?.assignee ||
+        ''
       const boardId = form.getAttribute('data-board') || ''
-      await api('POST', `/kanban/boards/${encodeURIComponent(boardId)}/cards`, {
-        title,
-        assigneeBotId: String(data.get('assignee') || ''),
-      })
+      if (!body) {
+        if (state.kanbanNewCard) {
+          // 报错要重绘，重绘会把表单换掉——已写的字先收回 state，弹窗重开时填回去。
+          // 文件收不回来（input 的值存不进 state），重选一次，别为此把弹窗做复杂。
+          state.kanbanNewCard = { error: t('先把任务需求写清楚', 'Describe the task first'), busy: false, body, assignee }
+          render()
+        }
+        return
+      }
+      /**
+       * 派发对象必须是板成员（后端 assertBoardMember 硬性要求），而弹窗里的名单是
+       * 自己名下全部 Bot——选了不在板上的那颗，就在这儿顺手加进去。人不需要知道
+       * 「板成员」这个概念，他只知道「派给了谁」。
+       */
+      if (assignee && !(state.kanbanBoard?.members || []).some((x) => x.botId === assignee)) {
+        await api('POST', `/kanban/boards/${encodeURIComponent(boardId)}/members`, { botId: assignee })
+      }
+      let cardId = ''
+      try {
+        const out = await api('POST', `/kanban/boards/${encodeURIComponent(boardId)}/cards`, {
+          body,
+          assigneeBotId: assignee,
+        })
+        cardId = out.card.id
+      } catch (err) {
+        // 开卡失败把错留在弹窗里——弹窗还开着，flash 在它后面看不见。
+        if (state.kanbanNewCard) {
+          state.kanbanNewCard = {
+            error: (err && err.message) || t('这一下没成', 'That did not go through'),
+            busy: false,
+            body,
+            assignee,
+          }
+          await loadKanbanBoard(boardId).catch(() => {})
+          render()
+          return
+        }
+        throw err
+      }
+      // 标题是后端用 utility 模型生成的；附件跟在卡后头传，一份失败不连累卡——
+      // 卡已经在了，少一份材料时间线上会说。
+      const input = form.querySelector('input[type="file"]')
+      for (const f of (input ? [...input.files] : [])) {
+        const r = await fetch(`/kanban/cards/${encodeURIComponent(cardId)}/files`, {
+          method: 'POST',
+          headers: authHeaders({
+            'content-type': 'application/octet-stream',
+            'x-filename': encodeURIComponent(f.name),
+          }),
+          body: f,
+        }).catch(() => null)
+        if (!r || !r.ok) {
+          const text = r ? await r.text().catch(() => '') : ''
+          flash('err', `${f.name}：${text.slice(0, 120) || t('没传上去', 'upload failed')}`)
+        }
+      }
+      state.kanbanNewCard = null
       await loadKanbanBoard(boardId)
     } else {
       const body = String(data.get('body') || '').trim()

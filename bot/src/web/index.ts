@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { stat } from 'node:fs/promises'
 import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
-import { CommandError, QUIET_MESSAGE, type CardSpec, type ImageRef, type Mention } from '../agent/index.ts'
+import { CommandError, QUIET_MESSAGE, type CardSpec, type ImageRef, type Mention, type MessageSource } from '../agent/index.ts'
 import { expiredMessage, returnMessage, type Disposition, type HandoffActor } from '../policy/handoff.ts'
 import { readTodos } from '../tools/todo.ts'
 
@@ -161,6 +161,13 @@ export function apply(ctx: Context, _config: Config = {}) {
       brief: String(body.brief ?? ''),
       parents: Array.isArray(body.parents) ? body.parents : [],
       comments: Array.isArray(body.comments) ? body.comments : [],
+      // 附件（base64）。Gateway 那头已经闸过单份和总量，这里不再验大小——只把形状
+      // 不对的条目扔掉，缺名字或缺内容的那份本来也没法落盘。
+      files: Array.isArray(body.files)
+        ? body.files
+            .filter((f: any) => f && typeof f === 'object' && typeof f.name === 'string' && typeof f.content === 'string')
+            .map((f: any) => ({ name: String(f.name), content: String(f.content) }))
+        : [],
       attempt: Number(body.attempt) || 0,
       lastFailure: String(body.lastFailure ?? ''),
       modelRole: body.modelRole === 'utility' ? 'utility' : 'daily',
@@ -334,8 +341,18 @@ export function apply(ctx: Context, _config: Config = {}) {
        * 的开关，为它把一条本该跑起来的定时任务顶回去不划算。
        */
       modelRole?: unknown
+      /**
+       * 日常任务（Gateway 的调度器发来的）带身份：这一条要被画成「日常任务」而不是
+       * 人打的一句话。看板卡不走 /messages——它有自己的一条路，标识在席位那头打。
+       */
+      routine?: unknown
     }
     const modelRole = body.modelRole === 'utility' || body.modelRole === 'daily' ? body.modelRole : undefined
+    const routine = body.routine && typeof body.routine === 'object' ? (body.routine as { id?: unknown; name?: unknown }) : null
+    // 谁在说话。kind 认得出「不是人打的」——界面照 source.plugin 画角标（见 chat.js 的 fold）。
+    const source = routine
+      ? ({ kind: 'plugin', plugin: 'routine', form: String(routine.id ?? '') } as MessageSource)
+      : ({ kind: 'user' } as MessageSource)
     let images: ImageRef[]
     try {
       images = await imageRefs(ctx, body.images)
@@ -387,7 +404,7 @@ export function apply(ctx: Context, _config: Config = {}) {
        * 不为它另开一轮：一条会话里两轮抢着说话，出来的东西谁也不认（见 routines.ts），
        * 而这个开关是省钱，不是正确性。
        */
-      if (await ctx.agents.steer(req.params.id, body.text ?? '', images)) {
+      if (await ctx.agents.steer(req.params.id, body.text ?? '', images, source)) {
         res.json({ steered: true })
         return
       }
@@ -408,7 +425,7 @@ export function apply(ctx: Context, _config: Config = {}) {
       return
     }
     // 不等 turn 跑完就返回：结果通过 SSE 推，HTTP 只负责「收到了」。
-    void ctx.agents.send(req.params.id, body.text ?? '', images, mentions, { kind: 'user' }, modelRole).catch((e: Error) => {
+    void ctx.agents.send(req.params.id, body.text ?? '', images, mentions, source, modelRole).catch((e: Error) => {
       console.error(`satuwork: agents.send 失败：${e.message}`)
       ctx.logger?.warn?.(`agents.send 失败：${e.message}`)
     })

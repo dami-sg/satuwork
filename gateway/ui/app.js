@@ -495,6 +495,25 @@ document.getElementById('app').addEventListener('click', async (e) => {
     void loadKanbanBoard(id).then(render).then(kanbanPoll).catch((e) => flash('err', e.message))
     return
   }
+  if (act === 'kanban-card-open') {
+    // 只在板屏上可开：弹窗里的派发表单要的是这块板的数据。
+    state.kanbanNewCard = { error: '', busy: false }
+    render()
+    return
+  }
+  if (act === 'kanban-card-close') {
+    state.kanbanNewCard = null
+    render()
+    return
+  }
+  if (act === 'kanban-card-pick') {
+    // 挑人**只改 DOM，不走 render**：一 render，正文和已选的文件就全没了。
+    // state 里记一份是为了出错重绘时还能画回选中态。
+    const list = btn.parentElement
+    if (list) for (const b of list.querySelectorAll('[data-act="kanban-card-pick"]')) b.setAttribute('aria-pressed', String(b === btn))
+    if (state.kanbanNewCard) state.kanbanNewCard.assignee = btn.getAttribute('data-id') || ''
+    return
+  }
   if (act === 'kanban-card') {
     const id = btn.getAttribute('data-id') || ''
     void loadKanbanCard(id).then(render).then(kanbanPoll).catch((e) => flash('err', e.message))
@@ -503,6 +522,15 @@ document.getElementById('app').addEventListener('click', async (e) => {
   if (act === 'kanban-open-run') {
     // 流水那一行点得进会话全文——那是席位上的东西，走已有的会话页。
     go('/s/' + encodeURIComponent(btn.getAttribute('data-id') || ''))
+    return
+  }
+  if (act === 'kanban-promote') {
+    const id = btn.getAttribute('data-id') || ''
+    void api('POST', `/kanban/cards/${encodeURIComponent(id)}/promote`)
+      .then(() => loadKanbanCard(id))
+      .then(render)
+      .then(kanbanPoll)
+      .catch((e) => flash('err', e.message))
     return
   }
   if (act === 'kanban-abort' || act === 'kanban-unblock' || act === 'kanban-cancel' || act === 'kanban-archive') {
@@ -2237,6 +2265,17 @@ document.getElementById('app').addEventListener('input', (e) => {
 
 document.getElementById('app').addEventListener('change', async (e) => {
   const el = e.target
+  // 开卡弹窗里的文件选择：把挑了哪些就地写出来。不走 render 的理由同上——一走，
+  // 已经挑好的 input 就被清空了。
+  if (el instanceof HTMLInputElement && el.getAttribute('data-kanban-files') != null) {
+    const out = el.closest('.field')?.querySelector('.satu-kanban-filelist')
+    if (out) {
+      const names = [...(el.files || [])].map((f) => f.name)
+      out.textContent = names.length ? names.join('、') : ''
+      out.hidden = !names.length
+    }
+    return
+  }
   /**
    * 日常任务的名字、指令与用哪个模型。**收在 change 而不是 input 上**：保存都要 render()
    * （列表里那一行、下一次的时间都跟着变），而 render 会把输入框换掉——边打边存

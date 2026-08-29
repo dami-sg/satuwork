@@ -112,6 +112,7 @@ interface RemoteBoard {
 }
 
 const STATE_LABEL: Record<string, string> = {
+  pending: '待定（等人拖到待派）',
   todo: '等依赖',
   ready: '待派',
   running: '在跑',

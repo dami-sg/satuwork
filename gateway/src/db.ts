@@ -3,8 +3,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
-import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Board, type BoardMember, type Card, type CardBlockedKind, type CardComment, type CardNotify, type CardRun, type CardRunStatus, type CardState, CARD_MAX_STEPS, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, boardOf, boardMemberOf, cardOf, cardCommentOf, cardRunOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
+import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Board, type BoardMember, type Card, type CardBlockedKind, type CardComment, type CardFile, type CardNotify, type CardRun, type CardRunStatus, type CardState, CARD_MAX_STEPS, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, boardOf, boardMemberOf, cardOf, cardCommentOf, cardFileOf, cardRunOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -4083,6 +4083,36 @@ export class Db {
       [row.id, row.cardId, row.kind, row.authorAccountId, row.authorBotId, row.body, row.createdAt],
     )
     return row
+  }
+
+  async cardFiles(cardId: string): Promise<CardFile[]> {
+    const rows = await this.many('select * from card_files where "cardId" = ? order by "createdAt"', [cardId])
+    return rows.map(cardFileOf)
+  }
+
+  async insertCardFile(input: { cardId: string; name: string; size: number; path: string }): Promise<CardFile> {
+    const row: CardFile = {
+      id: randomUUID(),
+      cardId: input.cardId,
+      name: input.name,
+      size: input.size,
+      path: input.path,
+      createdAt: Date.now(),
+    }
+    await this.run(
+      'insert into card_files (id, "cardId", name, size, path, "createdAt") values (?,?,?,?,?,?)',
+      [row.id, row.cardId, row.name, row.size, row.path, row.createdAt],
+    )
+    return row
+  }
+
+  /** 一块板的全部附件落盘路径（删板时连字节一起清掉用）。 */
+  async cardFilePathsOfBoard(boardId: string): Promise<string[]> {
+    const rows = await this.many(
+      'select card_files.path as path from card_files join cards on cards.id = card_files."cardId" where cards."boardId" = ?',
+      [boardId],
+    )
+    return rows.map((r) => str(r.path))
   }
 
   async cardRuns(cardId: string, limit = 10): Promise<CardRun[]> {

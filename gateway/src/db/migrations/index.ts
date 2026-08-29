@@ -19,6 +19,8 @@ import { SQL as m0018 } from './0018-memories.ts'
 import { SQL as m0019 } from './0019-seat-deploy-progress.ts'
 import { SQL as m0020 } from './0020-routine-retry.ts'
 import { SQL as m0021 } from './0021-kanban.ts'
+import { SQL as m0022 } from './0022-kanban-files.ts'
+import { SQL as m0023 } from './0023-card-pending.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -83,6 +85,8 @@ export const MIGRATIONS: Migration[] = [
   // 日常任务退避，让路排到它们后面。这一条还没合进 main，除了 e2e 那几个用完就丢的
   // schema 没有任何库应用过旧编号，改号是安全的。
   { id: '0021-kanban', name: '多 Bot 看板：板、成员、卡、依赖、时间线、执行流水', sql: m0021 },
+  { id: '0022-kanban-files', name: '看板卡的附件清单（字节落盘在 gateway home 的 kanban/ 下）', sql: m0022 },
+  { id: '0023-card-pending', name: '看板卡状态枚举加待定（pending）：人开卡先停在待定', sql: m0023 },
 ]
 
 /**

@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseWebTools, Board, BoardMember, Card, CardComment, CardRun, parseCardBlockedKind, parseCardNotify, parseCardRunStatus, parseCardState } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseWebTools, Board, BoardMember, Card, CardComment, CardFile, CardRun, parseCardBlockedKind, parseCardNotify, parseCardRunStatus, parseCardState } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -650,6 +650,17 @@ export function cardCommentOf(r: Row): CardComment {
     authorAccountId: strOrNull(r.authorAccountId),
     authorBotId: strOrNull(r.authorBotId),
     body: str(r.body),
+    createdAt: num(r.createdAt),
+  }
+}
+
+export function cardFileOf(r: Row): CardFile {
+  return {
+    id: str(r.id),
+    cardId: str(r.cardId),
+    name: str(r.name),
+    size: num(r.size),
+    path: str(r.path),
     createdAt: num(r.createdAt),
   }
 }

@@ -485,7 +485,10 @@ function fold(events, live) {
        * 突然自己开口接着干活，而上一句是几小时前它说"等人接手"。
        */
       const src = data.source || {}
-      if (src.kind && src.kind !== 'user' && !(src.kind === 'plugin' && src.plugin === 'handoff')) continue
+      // **替人发话的两种也画**：看板卡和日常任务落进主会话的那条任务交底，带着
+      // `source.plugin` 身份——滤掉的话，人看到 Bot 突然开口干活，却找不到是因为什么。
+      const via = src.kind === 'plugin' && (src.plugin === 'kanban' || src.plugin === 'routine' || src.plugin === 'handoff') ? src.plugin : ''
+      if (src.kind && src.kind !== 'user' && !via) continue
       assistant = null
       tools = []
       const raw = messageText(data.message) || data.text || ''
@@ -499,6 +502,9 @@ function fold(events, live) {
         // 不是输入框上一个发完就没的装饰。丢掉的话翻上去看昨天那条，「@ 了谁」就消失了，
         // 而那正是「它为什么去读了我的邮箱」的唯一答案。
         mentions: messageMentions(data.message),
+        // **这行话是谁让说的。** '看板任务' / '日常任务' 画在气泡上的角标（rowShell 的
+        // data-via），人一眼分得出派来的活和自己打的话。
+        via,
         // **raw 不能省。** mergePending 靠「文字一模一样」认回执，而它手上那份是
         // 拼好的完整正文。只留拆过的 text，带附件的消息就永远认不回来——那条 pending
         // 销不掉，界面会一直挂着「正在思考」。
@@ -2876,7 +2882,7 @@ function rowShell(b, key) {
   // 而 rowShell 只在节点新建时跑一次，盯不住这个变化。
   const time = '<time class="sw-time" hidden></time>'
   return (
-    `<div class="sw-msg" data-role="${b.kind}" data-key="${key}"${b.pending ? ' data-pending="1"' : ''}>` +
+    `<div class="sw-msg" data-role="${b.kind}" data-key="${key}"${b.via ? ` data-via="${esc(b.via)}"` : ''}${b.pending ? ' data-pending="1"' : ''}>` +
     `<div class="sw-msg-avatar" aria-hidden="true">${avatar}</div>` +
     `<div class="sw-msg-col">` +
     `<div class="sw-bubble" data-role="${b.kind}"><div class="sw-md"></div><div class="sw-chips" hidden></div></div>` +

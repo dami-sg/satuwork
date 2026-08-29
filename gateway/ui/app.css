@@ -396,3 +396,11 @@ aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; ov
 /* 系统写的那几行比人的评论淡一档：一条时间线上混排，得分得出谁在说话。 */
 .satu-kanban-sys { color: var(--muted-foreground); }
 .satu-kanban-line span { color: var(--muted-foreground); margin-right: var(--space-2); }
+/* 开卡弹窗「暂不派发」那颗药丸里的小圆点。其余挑人样式就是 .satu-assignee 药丸
+   （shell.css），和「新建 Skill」的创建方式那排同一个组件，不再自造一份。 */
+.satu-botpick-none { width: 20px; height: 20px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: var(--muted); color: var(--muted-foreground); font-size: 12px; }
+/* 待定的卡：拿得起来的那一个。抓手 + 虚线边，和其余「看着就行」的卡区分开。 */
+.satu-kanban-drag { cursor: grab; border-style: dashed; }
+.satu-kanban-drag:active { cursor: grabbing; }
+/* 拖着卡悬在「待派」列上时的落点提示。 */
+.satu-kanban-col.satu-kanban-over { outline: 2px dashed var(--color-accent-400); outline-offset: 2px; border-radius: var(--radius-sm); }

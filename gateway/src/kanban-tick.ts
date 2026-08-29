@@ -29,6 +29,8 @@ import {
 } from './db.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
 import { notifyBlocked, reportToOwner } from './kanban-notify.ts'
+import { gatewayHome } from './home.ts'
+import { readFile } from 'node:fs/promises'
 
 /** 席位多久没报心跳就算它死了。**主要的回收路径就是这一条。** */
 const STALE_MS = Math.max(60_000, Math.trunc(Number(process.env.GATEWAY_KANBAN_STALE_MS ?? 3 * 60_000)))
@@ -223,6 +225,19 @@ async function packOf(db: Db, card: Card) {
   const parents = await db.cardParents(card.id)
   const timeline = await db.cardComments(card.id)
   const runs = card.attempt > 0 ? await db.cardRuns(card.id, 1) : []
+  /**
+   * 附件跟着执行包走：字节从 gateway home 读出来，base64 进包，席位落进那棵共享的
+   * `~/work`（见席位 runCard）。读不出来的（被人手删了、盘换了）**不挡派卡**——材料
+   * 缺一份，时间线上说一声，比这张卡永远停在 ready 强。
+   */
+  const files: { name: string; content: string }[] = []
+  for (const f of await db.cardFiles(card.id)) {
+    try {
+      files.push({ name: f.name, content: (await readFile(gatewayHome(f.path))).toString('base64') })
+    } catch (e) {
+      await sysLine(db, card.id, `附件 ${f.name} 读不出来，这次没带上：${(e as Error).message}`)
+    }
+  }
   return {
     cardId: card.id,
     boardId: card.boardId,
@@ -232,6 +247,7 @@ async function packOf(db: Db, card: Card) {
     parents: parents.map((p) => ({ id: p.id, title: p.title, summary: p.summary, metadata: p.metadata })),
     // 系统那几行不带：模型要的是人和别的 Bot 说过的话，不是「第 1 次失败」这种流水账。
     comments: timeline.filter((t) => t.kind === 'comment').map((t) => ({ author: t.authorBotId ?? '人', body: t.body })),
+    files,
     attempt: card.attempt,
     lastFailure: runs[0]?.error ?? '',
     modelRole: card.modelRole,

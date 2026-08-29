@@ -388,7 +388,13 @@ export async function runRoutine(db: Db, routine: Routine, trigger: RoutineRunTr
          * `daily` 这一档故意**不发**任何东西：它的意思是「跟这个 Bot 平时一样」，
          * 而那正是席位不带覆盖时的行为。
          */
-        body: { text: routine.instruction, ...(routine.modelRole === 'utility' ? { modelRole: 'utility' } : {}) },
+        body: {
+          text: routine.instruction,
+          ...(routine.modelRole === 'utility' ? { modelRole: 'utility' } : {}),
+          // **带身份**：席位会把这一条标成「日常任务」画在对话里（见 bot 的 /messages），
+          // 人分得出哪句是自己说的、哪句是到点自己来跑的。
+          routine: { id: routine.id, name: routine.name },
+        },
       })) as { steered?: boolean } | null
       // `steered` = 插进了正在跑的那一轮，等的就是那一轮的收口；否则我们会另起一轮。
       const kind = await readTurnEnd(reader, !posted?.steered, routine.instruction)

@@ -1337,9 +1337,14 @@ export const CARD_DEDUPE_WINDOW_MS = 5 * 60_000
 export const CARD_SEAT_CONCURRENCY = 1
 export const CARD_ACCOUNT_CONCURRENCY = 3
 
-export type CardState = 'todo' | 'ready' | 'running' | 'blocked' | 'done' | 'archived' | 'cancelled'
+/**
+ * `pending`（待定）是人开卡的落点：写完需求先停在这里，等人把它拖进「待派」才真正
+ * 会上路。**只有人建卡走这一态**——模型自己开的卡（runtime/kanban）本来就带着明确的
+ * 执行意图，落 ready 直接进调度（见 routes/kanban.ts 建卡与 lib/kanban.ts initialCardState）。
+ */
+export type CardState = 'pending' | 'todo' | 'ready' | 'running' | 'blocked' | 'done' | 'archived' | 'cancelled'
 
-const CARD_STATES: CardState[] = ['todo', 'ready', 'running', 'blocked', 'done', 'archived', 'cancelled']
+const CARD_STATES: CardState[] = ['pending', 'todo', 'ready', 'running', 'blocked', 'done', 'archived', 'cancelled']
 
 /** 认不出来的当 `todo`——它是唯一一个「什么都还没发生」的状态，读错也不会误导人。 */
 export function parseCardState(v: unknown): CardState {
@@ -1437,6 +1442,17 @@ export interface CardComment {
   authorAccountId: string | null
   authorBotId: string | null
   body: string
+  createdAt: number
+}
+
+/** 卡上的一份附件。字节在 gateway home 的 `kanban/<cardId>/` 下，这里只是登记。 */
+export interface CardFile {
+  id: string
+  cardId: string
+  name: string
+  size: number
+  /** 相对 gateway home 的落盘路径。 */
+  path: string
   createdAt: number
 }
 

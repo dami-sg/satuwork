@@ -16,6 +16,11 @@ import { abortOnSeat } from '../kanban-tick.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { requireInternalCaller, requireSeatOnly, requireUser, type InternalCaller } from '../lib/guards.ts'
+import { gatewayHome } from '../home.ts'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import type { Llm } from '../llm.ts'
 import {
   BOARD_BRIEF_MAX,
   BOARD_NAME_MAX,
@@ -46,6 +51,78 @@ import {
 
 /** 卡详情里带多少条流水。再多就不是「最近跑得怎么样」了。 */
 const RUNS_SHOWN = 10
+
+/** 一份附件的上限。任务材料是文档、表格这一类东西，10 MB 已经很宽裕。 */
+const CARD_FILE_MAX = 10 * 1024 * 1024
+/** 一张卡的附件总量。执行包要把它们整个背在身上送到席位，不能没有总数闸。 */
+const CARD_FILES_TOTAL_MAX = 30 * 1024 * 1024
+
+/** 附件落盘前的名字清洗：路径段只留安全字符，其余压成下划线。 */
+function safeFileName(name: string): string {
+  const base = (name.split(/[\\/]/).pop() || '').replace(/[^\p{L}\p{N}._ -]+/gu, '_').trim()
+  return (base || '附件').slice(0, 120)
+}
+
+function publicCardFile(f: { id: string; name: string; size: number; createdAt: number }) {
+  return { id: f.id, name: f.name, size: f.size, createdAt: f.createdAt }
+}
+
+/**
+ * 标题不让人手写：把需求正文交给**公司的 utility 模型**压成一句标题。
+ *
+ * **任何失败都退回「正文第一行截断」**：utility 模型没配、密钥不在、超时——标题生成
+ * 是锦上添花，不该让它挡住开卡。那次调用也不记账（同 probe：这类的平台侧零星调用
+ * 不走计费账本，卡的执行才走）。
+ */
+async function summarizeCardTitle(llm: Llm, db: Db, companyId: string, body: string): Promise<string> {
+  const fallback = body.replace(/\s+/g, ' ').trim().slice(0, 40)
+  try {
+    // 公司钉的优先，没钉的跟平台——和 Bot 拿模型的那套级联同源（defaultBotModel），
+    // 两处各走各的口径的话，标题用的模型和执行用的就对不上了。
+    const company = await db.settings(companyId)
+    const utility = company.utility.provider && company.utility.model ? company.utility : (await db.platformSettings()).utility
+    if (!utility.provider || !utility.model) return fallback
+    let found = await llm.find(companyId, utility.model, utility.provider)
+    if (!found) {
+      // 平台钉的那一对和目录里登记的大小写对不上（钉的是小写、目录里是驼峰）是常态，
+      // find() 是精确匹配——这里兜一层大小写无关的扫描。宁可多扫一遍，别让标题悄悄
+      // 退回正文截断。
+      const list = await llm.catalog(companyId)
+      found =
+        list.find((m) => m.provider === utility.provider && m.id.toLowerCase() === utility.model.toLowerCase()) ??
+        list.find((m) => m.id.toLowerCase() === utility.model.toLowerCase())
+    }
+    if (!found) return fallback
+    const secret = await llm.secret(companyId, found.provider)
+    const piModel = llm.piModel(found.provider, found.id)
+    if (!secret || !piModel) return fallback
+    const abort = AbortSignal.timeout(20_000)
+    const message = await (llm as unknown as {
+      models: { completeSimple: (m: unknown, p: unknown, o: unknown) => Promise<any> }
+    }).models.completeSimple(
+      piModel,
+      {
+        messages: [
+          {
+            role: 'user',
+            timestamp: Date.now(),
+            content: `把下面这段任务需求总结成一张任务卡的标题。要求：不超过 20 个字、一行、不带引号和句号、只输出标题本身。\n\n${body.slice(0, 2000)}`,
+          },
+        ],
+      } as unknown,
+      { apiKey: secret, maxTokens: 40, temperature: 0, signal: abort },
+    )
+    if (message?.stopReason === 'aborted' || abort.aborted) return fallback
+    const text = (Array.isArray(message?.content) ? message.content : [])
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('')
+    const title = text.replace(/\s+/g, ' ').replace(/^["'「『]+|["'」』。.]+$/g, '').trim()
+    return (title || fallback).slice(0, CARD_TITLE_MAX)
+  } catch {
+    return fallback
+  }
+}
 
 function publicBoard(board: Board, counts?: Record<string, number>) {
   return {
@@ -148,7 +225,7 @@ async function sysLine(db: Db, cardId: string, body: string) {
 }
 
 export function attachKanban(router: Router, ctx: RouteCtx) {
-  const { db, keys } = ctx
+  const { db, keys, llm } = ctx
 
   // ── 板 ────────────────────────────────────────────────────────────────
 
@@ -212,7 +289,11 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
   router.delete('/kanban/boards/:id', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const board = await ownBoardOf(db, account, req.params.id)
+    // 卡删了行就跟着 cascade，但**字节不会自己走**：先把这一板全部附件的落盘路径抄下来，
+    // 删完库再清目录。清不动（权限、只读盘）也不拦删除——残骸好过删不了板。
+    const paths = await db.cardFilePathsOfBoard(board.id)
     await db.deleteBoard(board.id)
+    await Promise.all(paths.map((p) => rm(gatewayHome(p), { force: true }).catch(() => {})))
     await db.audit({
       companyId: account.companyId!,
       accountId: account.id,
@@ -260,7 +341,16 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     const board = await ownBoardOf(db, account, req.params.id)
     const body = bodyOf(req)
-    const title = strField(body, 'title').slice(0, CARD_TITLE_MAX)
+    /**
+     * **标题不让人手写**：需求正文是必填的，标题由公司的 utility 模型当场压成一句。
+     * 人写需求，模型写标题——两件事别让同一个人做两遍。正文也没有的时候才真挡下来。
+     */
+    const cardBody = strField(body, 'body', false).slice(0, CARD_BODY_MAX)
+    let title = strField(body, 'title', false).slice(0, CARD_TITLE_MAX)
+    if (!title) {
+      if (!cardBody) throw new HttpError(400, '任务需求不能为空：写清楚要做什么，标题会自动生成')
+      title = await summarizeCardTitle(llm, db, board.companyId, cardBody)
+    }
     const assignee = strField(body, 'assigneeBotId', false)
     if (assignee) await assertBoardMember(db, board, assignee)
     const model = resolveModelRole(body.modelRole, strField(body, 'modelReason', false))
@@ -269,12 +359,14 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
       accountId: board.accountId,
       companyId: board.companyId,
       title,
-      body: strField(body, 'body', false).slice(0, CARD_BODY_MAX),
+      body: cardBody,
       assigneeBotId: assignee || null,
       // 人建的卡不参与去重（dedupeKeyOf 的 bot 传 null）：他刚敲完标题、看着屏幕，
       // 重复不重复自己知道；把他挡在唯一键上，是拿一个防模型的机制去管人。
       dedupeKey: null,
-      state: initialCardState(0),
+      // **人开的卡落「待定」**：写完需求先停一拍，等人在板上把它拖进「待派」才开始跑。
+      // 模型自己开的卡（/runtime/kanban）照旧 initialCardState——它带着执行意图。
+      state: 'pending',
       priority: Math.trunc(Number(body.priority) || 0),
       needsBrowser: body.needsBrowser === true,
       maxSteps: Math.max(1, Math.trunc(Number(body.maxSteps) || CARD_MAX_STEPS)),
@@ -292,9 +384,43 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
       card: publicCard(card),
       parents: (await db.cardParents(card.id)).map(publicCard),
       children: (await db.cardChildren(card.id)).map(publicCard),
+      files: (await db.cardFiles(card.id)).map(publicCardFile),
       timeline: (await db.cardComments(card.id)).map(publicComment),
       runs: (await db.cardRuns(card.id, RUNS_SHOWN)).map(publicRun),
     })
+  })
+
+  /**
+   * 给卡传一份附件。字节落在 `$SATUWORK_GATEWAY_HOME/kanban/<cardId>/`，派卡时随执行包
+   * 一起下去（见 kanban-tick 的 packOf）。和会话文件同一条形状：postRaw + x-filename。
+   *
+   * 闸有两道：单份 10 MB、整卡 30 MB。超限就地拒绝——执行包要整个背在身上，总数必须
+   * 有人看着。
+   */
+  router.postRaw('/kanban/cards/:id/files', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const card = await ownCardOf(db, account, req.params.id)
+    const rawName = req.headers['x-filename']
+    const name = safeFileName(typeof rawName === 'string' ? decodeURIComponent(rawName) : '')
+    const chunks: Buffer[] = []
+    let size = 0
+    for await (const chunk of req) {
+      size += (chunk as Buffer).length
+      if (size > CARD_FILE_MAX) throw new HttpError(413, `单份附件不能超过 ${Math.round(CARD_FILE_MAX / 1024 / 1024)} MB`)
+      chunks.push(chunk as Buffer)
+    }
+    if (!size) throw new HttpError(400, '附件是空的')
+    const existing = await db.cardFiles(card.id)
+    if (existing.reduce((n, f) => n + f.size, 0) + size > CARD_FILES_TOTAL_MAX) {
+      throw new HttpError(413, `这张卡的附件总量不能超过 ${Math.round(CARD_FILES_TOTAL_MAX / 1024 / 1024)} MB`)
+    }
+    const rel = join('kanban', card.id, `${randomUUID()}-${name}`)
+    const abs = gatewayHome(rel)
+    await mkdir(join(abs, '..'), { recursive: true })
+    await writeFile(abs, Buffer.concat(chunks))
+    const row = await db.insertCardFile({ cardId: card.id, name, size, path: rel })
+    await sysLine(db, card.id, `上传了附件：${name}（${Math.ceil(size / 1024)} KB）`)
+    json(res, 201, { file: publicCardFile(row) })
   })
 
   /**
@@ -357,6 +483,23 @@ export function attachKanban(router: Router, ctx: RouteCtx) {
    * 可能被人打回重做。写死 `ready` 就是让它插到自己的依赖前面去跑，拿的还是那份作废的
    * 输入——而 `promoteReadyCards` 只推 todo → ready，推不回来。
    */
+  /**
+   * 「待定 → 待派」：人在板上把卡拖过去（或卡页上按「派出去」）走的就是这条。
+   *
+   * 只收 `pending` 一态：其余每一态都是**算出来的**（依赖、调度、成败），人拖不动；
+   * 这是人手上唯一的状态决定权，也是这条路由存在的全部理由。派出去记一行系统流水，
+   * 「这张卡为什么开始跑了」在时间线上要查得回来。
+   */
+  router.post('/kanban/cards/:id/promote', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const card = await ownCardOf(db, account, req.params.id)
+    if (card.state !== 'pending') throw new HttpError(409, `只有待定的卡能派出去，这张现在是「${card.state}」`)
+    await db.updateCard(card.id, { state: 'ready', retryAfter: null })
+    await sysLine(db, card.id, '人把它派了出去，等着调度')
+    const next = await db.card(card.id)
+    json(res, 200, { card: next ? publicCard(next) : publicCard(card) })
+  })
+
   router.post('/kanban/cards/:id/unblock', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const card = await ownCardOf(db, account, req.params.id)

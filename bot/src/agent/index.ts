@@ -10,6 +10,8 @@ import type {
   StreamChunk,
   Usage,
 } from '../session/types.ts'
+// web/index.ts 那条 /messages 也要给来源打标，从这儿转一手，别让它反过来依赖 session/types。
+export type { MessageSource }
 import type { ReassignedItem, WorkspaceFile } from '../tools/index.ts'
 import { browserOf, memoryOf, type BotRecord } from '../registry/index.ts'
 import { cachedMemories, cachedSkill, cachedSkills, type CachedMemory, type CachedSkill } from '../catalog/index.ts'
@@ -80,6 +82,11 @@ export interface CardSpec {
   /** 上游卡的**结论和交付证据，不带过程**——这正是看板的全部价值所在。 */
   parents: { id: string; title: string; summary: string; metadata: unknown }[]
   comments: { author: string; body: string }[]
+  /**
+   * 随执行包下来的附件（base64）。开卡时人在板上传的材料——席位把它们写进工作区的
+   * `kanban/<cardId>/`，模型拿到的就是普通文件路径，和工作区里其它东西一个读法。
+   */
+  files: { name: string; content: string }[]
   attempt: number
   /** 上一次是怎么失败的。**必须带**，不然第二次会一字不差地重演第一次。 */
   lastFailure: string
@@ -627,6 +634,10 @@ export class AgentService extends Service {
 
   /** 席位上正在跑的卡。换版排空、进程关停时要等它们（它们进 live，busy() 自动算上）。 */
   private cards = new Map<string, CardRow>()
+  /** 排着等主会话的卡，按会话分桶（一颗 Bot 一条主会话）。 */
+  private cardQueue = new Map<string, CardSpec[]>()
+  /** 每张在跑（含排队中）的卡一个心跳定时器。收口或被掐时清掉。 */
+  private cardBeats = new Map<string, ReturnType<typeof setInterval>>()
 
   /**
    * 那块屏现在有没有人在驱动。
@@ -643,8 +654,12 @@ export class AgentService extends Service {
     return this.live.size === 0
   }
 
-  /** 按卡号掐掉那一轮。人在板上按停止时走这条。 */
+    /** 按卡号掐掉那一轮。人在板上按停止时走这条。**排着还没上场的也摘掉**，否则停止之后它还会从队列里蹦出来跑。 */
   abortCard(cardId: string): boolean {
+    for (const q of this.cardQueue.values()) {
+      const at = q.findIndex((s) => s.cardId === cardId)
+      if (at >= 0) q.splice(at, 1)
+    }
     for (const [sessionId, row] of this.cards) {
       if (row.cardId === cardId) return this.abort(sessionId)
     }
@@ -933,28 +948,23 @@ export class AgentService extends Service {
   /**
    * 跑一张看板卡。
    *
-   * 和 `runTask` 最大的三处不同，每一处都来自同一句话——**没有人在等着看**：
+   * 卡在**主会话**里跑——人看得见的那条长会话。任务作为一条带标识的用户消息落进去
+   * （`source: plugin: 'kanban'`），Bot 的回复和工具调用全画在主会话里；人不用翻别处
+   * 就知道它在干什么。收口判据照旧：**`kanban_complete` 那次调用本身**（模型 complete
+   * 之后还可能接着说话，所以收口由工具当场上报，这里只兜「一句收口的话都没说」）。
    *
-   * | | 委派 | 卡 |
-   * |---|---|---|
-   * | 谁在等 | 主轮 `await` 在那次工具调用上 | 没人。所以这个方法**不被任何一轮 await** |
-   * | 结论去哪 | 回给主代理那次调用 | 回到卡上（席位打 Gateway 的 `/result`） |
-   * | 收口判据 | 这个方法返回 | **`kanban_complete` 那次调用本身** |
-   *
-   * 最后一条要紧：模型 `complete` 之后还可能接着说两句、还可能撞上步数上限被截断，
-   * 那时收口已经发生了。所以收口由工具当场上报，这个方法只负责「跑完之后如果它一句
-   * 收口的话都没说，报一次失败」（docs/kanban.md §9.4）。
+   * 这层壳只管两件事：心跳和排队。真正那一轮在 `runCardTurn` 里。
    */
   async runCard(spec: CardSpec): Promise<void> {
-    const { sessions, llm } = this.ctx
+    const { sessions } = this.ctx
     const botId = (process.env.SATUWORK_BOT_ID || '').trim()
     const bot = this.ctx.roster?.get?.(botId)
     const startedAt = Date.now()
     /**
      * 没钉 Bot 就当场报回去，别往下走。
      *
-     * 再往下一句 `sessions.create` 也会抛，但抛出来的是「创建会话必须带 botId」——那句话
-     * 对着板上那张红卡的人毫无意义。这条路上唯一有用的信息是「这台席位装歪了」。
+     * 那句话对着板上那张红卡的人毫无意义，但它是这条路上唯一有用的信息——「这台席位
+     * 装歪了」。
      */
     if (!bot?.id && !botId) {
       await this.ctx.kanban?.report(spec.cardId, { runId: spec.runId, status: 'error', error: '这台席位没钉 Bot（缺 SATUWORK_BOT_ID），跑不了卡' })
@@ -962,30 +972,100 @@ export class AgentService extends Service {
     }
 
     /**
-     * 这颗 Bot 那条人看得见的长会话，**在开跑之前先问出来**。
-     *
-     * 两处要它，而且两处都不能等到跑完再找：审批卡要投在它上面（见 `cardHomeOf`——投在
-     * 卡片会话上就是投进一间没有门的屋子），后台进程移交也要投在它上面（下面 finally
-     * 里那一句，本来就在找同一条会话）。一次查询，两处共用。
-     *
-     * 查不到不算错：席位刚起来、这颗 Bot 一条会话都还没建过。那时审批退回卡片会话自己，
-     * 行为和这个字段出现之前一模一样。
+     * 找主会话。查不到（这台席位一次都没被聊过）就当场开一条，和第一次聊天同一条路
+     * （registry.ensureSession）——「从没聊过所以卡永远跑不了」不是能接受的行为。
      */
-    const roster = await sessions.list().catch(() => null)
-    const home = roster?.find((row) => row.botId === (bot?.id ?? botId))?.id
+    let home = (await sessions.list().catch(() => null))?.find((row) => row.botId === (bot?.id ?? botId))?.id
+    if (!home) {
+      try {
+        home = (await this.ctx.roster.ensureSession(bot?.id ?? botId)).sessionId
+      } catch (e) {
+        await this.ctx.kanban?.report(spec.cardId, { runId: spec.runId, status: 'error', error: `开不出主会话：${(e as Error).message}` })
+        return
+      }
+    }
 
-    const child = await sessions.create({
-      botId: bot?.id ?? botId,
-      origin: bot?.origin,
-      remoteId: bot?.remoteId,
-      // 标题写清自己是什么：万一哪天回滚一版、过滤没了，它会出现在侧栏里（见
-      // session/types.ts 的 kind）——那时至少读得懂。
-      title: `卡：${spec.title.slice(0, 30)}`,
-      kind: 'card',
-      // 卡不是某次工具调用开出来的，所以只有卡号；没有「回到哪条会话」这回事。
-      parent: { sessionId: '', callId: '', taskId: spec.cardId },
+    /**
+     * 心跳**先进场**，而且每张卡只有一个、队列里也照跳：Gateway 的失联判据只看心跳，
+     * 卡排在队列里等主会话空出来的时候不跳的话，三分钟就被判死重派了。清掉的唯一时机
+     * 是那一轮真正收口（下面 finally）或这张卡被掐（abortCard）。
+     */
+    if (!this.cardBeats.has(spec.cardId)) {
+      const beat = setInterval(() => {
+        void this.ctx.kanban?.beat(spec.cardId, spec.runId).then((alive) => {
+          if (!alive) {
+            this.ctx.logger?.warn?.(`agents: 卡 ${spec.cardId} 在 Gateway 那边已经不在了，掐掉这一轮`)
+            this.abortCard(spec.cardId)
+          }
+        })
+      }, CARD_HEARTBEAT_MS)
+      beat.unref?.()
+      this.cardBeats.set(spec.cardId, beat)
+    }
+
+    /**
+     * **一颗 Bot 一个任务队列。**
+     *
+     * 主会话同一时刻只跑一轮：人在说话、日常任务在跑、另一张卡在收口，都算占着。撞上
+     * 的卡排进 FIFO，当前那一轮收口后（runTurn / runCardTurn 的收尾都会来 pump）依次
+     * 上场。先来先服务——后到的没有任何东西比先来的更急。
+     */
+    if (this.live.has(home)) {
+      const q = this.cardQueue.get(home) ?? []
+      if (!q.some((s) => s.cardId === spec.cardId)) {
+        q.push(spec)
+        this.cardQueue.set(home, q)
+        this.ctx.logger?.info?.(`agents: 卡 ${spec.cardId} 在主会话排队（前面还有 ${q.length - 1} 张）`)
+      }
+      return
+    }
+    try {
+      await this.runCardTurn(home, spec, bot, startedAt)
+    } finally {
+      this.clearCardBeat(spec.cardId)
+      this.pumpCards(home)
+    }
+  }
+
+  /** 主会话空下来了、队列里还有排着的卡，放下一张进场。启动失败也要继续放人。 */
+  private pumpCards(sessionId: string): void {
+    if (this.live.has(sessionId)) return
+    const q = this.cardQueue.get(sessionId)
+    const next = q?.shift()
+    if (!next) return
+    if (q && !q.length) this.cardQueue.delete(sessionId)
+    this.ctx.logger?.info?.(`agents: 排队的卡 ${next.cardId} 上场`)
+    void this.runCard(next).catch((e: Error) => {
+      this.ctx.logger?.warn?.(`agents: 卡 ${next.cardId} 出队启动失败：${e.message}`)
+      this.pumpCards(sessionId)
     })
-    this.cards.set(child, { cardId: spec.cardId, boardId: spec.boardId, title: spec.title, runId: spec.runId, settled: false, homeSessionId: home })
+  }
+
+  private clearCardBeat(cardId: string): void {
+    const beat = this.cardBeats.get(cardId)
+    if (beat) {
+      clearInterval(beat)
+      this.cardBeats.delete(cardId)
+    }
+  }
+
+  /**
+   * 卡的那一轮，落在主会话上。
+   *
+   * 骨架和普通对话轮（runTurn）同源：live 占位、projector 写进同一条会话日志、轮号接着
+   * 排。**刻意不改调 runTurn**：卡的提示词要减掉 escalate、工具表要换成带
+   * kanban_complete / kanban_block 的那张、上下文只要这张卡的简报不带聊天历史——任务是
+   * 独立交办的，混进人的聊天记录只会把两边都弄脏。
+   */
+  private async runCardTurn(
+    sessionId: string,
+    spec: CardSpec,
+    bot: ReturnType<AgentService['botOf']>,
+    startedAt: number,
+  ): Promise<void> {
+    const { sessions, llm } = this.ctx
+    const child = sessionId
+    this.cards.set(child, { cardId: spec.cardId, boardId: spec.boardId, title: spec.title, runId: spec.runId, settled: false, homeSessionId: child })
 
     const pinned = this.roleModel(spec.modelRole)
     const provider = pinned?.provider ?? bot?.provider?.trim() ?? this.provider
@@ -994,13 +1074,31 @@ export class AgentService extends Service {
 
     const system = this.cardSystem(bot, spec)
     const toolSchemas = this.cardTools(bot)
-    const brief = cardBrief(spec)
+    // 附件先落工作区，再把路径写进简报。**落盘失败不挡跑**：材料没到，卡上说得清楚，
+    // 让模型拿「附件读不到」当事实去应对，好过这张卡永远进不了执行。
+    const filePaths: string[] = []
+    for (const f of spec.files ?? []) {
+      try {
+        const bytes = Buffer.from(f.content || '', 'base64')
+        if (!bytes.length || !f.name) continue
+        const saved = await this.ctx.workspace.saveBytes(`kanban/${spec.cardId}`, f.name, bytes)
+        filePaths.push(saved.path)
+      } catch (e) {
+        this.ctx.logger?.warn?.(`卡 ${spec.cardId} 的附件 ${f.name} 落工作区失败：${(e as Error).message}`)
+      }
+    }
+    const brief = cardBrief(spec, filePaths)
 
+    // 轮号接着主会话排：这一轮在人那条会话里是第几轮，就写第几轮（failBeforeTurn 同款数法）。
+    const history = await sessions.events(child)
+    const turn = history.filter((ev) => ev.type === 'turn/start').length + 1
+    // **带身份的那条用户消息**：界面上按 source.plugin 画「看板任务」角标（见 chat.js 的
+    // fold），分得出这是派来的活、不是人打的一句话。
     await sessions.append(child, 'user/message', {
       message: { id: randomUUID(), role: 'user', content: [{ type: 'text', text: brief }] },
       source: { kind: 'plugin', plugin: 'kanban', form: spec.cardId },
     })
-    await sessions.append(child, 'turn/start', { turn: 1 })
+    await sessions.append(child, 'turn/start', { turn })
 
     let steps = 0
     let toolCalls = 0
@@ -1029,7 +1127,7 @@ export class AgentService extends Service {
     this.live.set(child, agent)
     const isMcp = (t: { name: string }) => t.name.startsWith('mcp_')
     const off = agent.subscribe(
-      this.projector(child, 1, {
+      this.projector(child, turn, {
         provider,
         model: modelId,
         system: system.text,
@@ -1046,10 +1144,8 @@ export class AgentService extends Service {
     )
 
     /**
-     * 席位这一层的墙钟。
-     *
-     * Gateway 那边还有一道（超过就当失败收掉），**两层都要有**：这一层负责把进程收
-     * 干净，那一层负责让卡不要永远停在 running——机器整个掉线时，唯一还醒着的是它。
+     * 席位这一层的墙钟。Gateway 那边还有一道，**两层都要有**：这一层负责把进程收干净，
+     * 那一层负责让卡不要永远停在 running。
      */
     let timedOut = false
     const timer = setTimeout(
@@ -1061,27 +1157,8 @@ export class AgentService extends Service {
     )
     timer.unref?.()
 
-    /**
-     * 心跳：每 60 秒替这张卡报一次「还活着」。**模型不管这件事。**
-     *
-     * Gateway 那边的主要回收路径就是它——席位被 kill 之后心跳当场停，三分钟内那张卡
-     * 就会被收掉重派；只看墙钟的话要干等一小时，而那一小时里界面上是一张正在跑的卡。
-     *
-     * 报不上去（卡被人撤了、板删了）就掐掉这一轮：继续跑一个没人认领的活，钱照花，
-     * 而产出没有任何一条路回到人手上。
-     */
-    const beat = setInterval(() => {
-      void this.ctx.kanban?.beat(spec.cardId, spec.runId).then((alive) => {
-        if (!alive) {
-          this.ctx.logger?.warn?.(`agents: 卡 ${spec.cardId} 在 Gateway 那边已经不在了，掐掉这一轮`)
-          this.abort(child)
-        }
-      })
-    }, CARD_HEARTBEAT_MS)
-    beat.unref?.()
-
     let failure = ''
-    this.ctx.logger?.info?.(`agents: 卡 ${spec.cardId} 开跑（${provider}/${modelId}，最多 ${spec.maxSteps} 步）`)
+    this.ctx.logger?.info?.(`agents: 卡 ${spec.cardId} 在主会话开跑（${provider}/${modelId}，最多 ${spec.maxSteps} 步）`)
     try {
       await agent.prompt(stampUser(brief, Date.now()))
       failure = this.aborting.has(child) ? '' : ((agent.state as any)?.errorMessage ?? '')
@@ -1089,33 +1166,23 @@ export class AgentService extends Service {
       failure = this.aborting.has(child) ? '' : (e as Error).message
     } finally {
       clearTimeout(timer)
-      clearInterval(beat)
       off()
       this.live.delete(child)
       const aborted = this.aborting.delete(child)
       await sessions.append(child, 'turn/end', {
-        turn: 1,
+        turn,
         reason: failure ? 'error' : aborted ? 'aborted' : capped ? 'capped' : 'completed',
       })
-      /**
-       * 它起的后台进程要移交，否则那条会话一收口，进程就没有任何人看得见、也没有任何
-       * 人杀得掉了（同 docs/delegation.md §7.3）。卡片会话没有「主人」，所以改挂到这颗
-       * Bot 的长会话上——那是这台席位上唯一一条人看得见的会话。
-       */
-      // 上面开跑前已经问过一次（`home`），这里不再查第二遍——中途新建一条长会话不是这个
-      // 席位会发生的事（一个 Bot 一条，见 registry 的 ensureSession）。
-      if (home) await this.ctx.tools.reassign(child, home).catch(() => [])
     }
 
     /**
-     * **跑完了但一句收口的话都没说** —— 也就是既没 `kanban_complete` 也没 `kanban_block`。
+     * **跑完了但一句收口的话都没说** —— 既没 `kanban_complete` 也没 `kanban_block`。
      *
-     * 报一次失败，把最后那段话原样附上。**不把它当成结论收成 done**：那是编，而且比
-     * 委派那边更糟——下游卡会拿这段编出来的东西当交底书继续做。
+     * 报一次失败，把最后那段话原样附上。**不把它当成结论收成 done**：那是编，下游卡会
+     * 拿这段编出来的东西当交底书继续做。
      */
     if (this.markCardSettled(child)) {
-      const events = await sessions.events(child)
-      const said = lastAssistantText(events)
+      const said = lastAssistantText(await sessions.events(child))
       const why = timedOut
         ? '超过墙钟被掐掉'
         : failure
@@ -1977,6 +2044,8 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
       this.ctx.logger?.info?.(
         `agents: 会话 ${sessionId} 第 ${turn} 轮结束（${reason}，${Date.now() - startedAt}ms）`,
       )
+      // 主会话空下来了：排着的看板卡可以进场（没有排队的这就是一次空查）。
+      this.pumpCards(sessionId)
       // 压缩放在**回复送出之后**：它自己也要跑一次模型，摆在轮首用户就得干等。
       // 不 await——这一轮已经结束了，压缩失败也只是下一轮再试。
       // 同上：压缩改的是这条共用会话，一律按 Bot 自己那个模型的窗口算。
@@ -3409,10 +3478,15 @@ function todoBlock(): string {
  * 做这张卡的 Bot 看不见任何一段对话——上游卡的结论、人留的评论、上一次为什么失败，
  * 全在这一段里。少一样，它就得靠猜。
  */
-function cardBrief(spec: CardSpec): string {
+function cardBrief(spec: CardSpec, filePaths: string[] = []): string {
   const lines = [`# ${spec.title}`, '']
   if (spec.brief) lines.push('## 这块板在干什么', spec.brief, '')
   if (spec.body) lines.push('## 这张卡要做什么', spec.body, '')
+  if (filePaths.length) {
+    // 附件已经写在你的工作区里（和人聊天上传的文件是同一棵树）。给的是路径不是内容：
+    // 材料多大都读得开，要哪段读哪段。
+    lines.push('## 随卡带来的材料', ...filePaths.map((p) => `- \`${p}\``), '')
+  }
   if (spec.parents.length) {
     lines.push('## 上游卡的结论')
     for (const p of spec.parents) {
@@ -3445,7 +3519,7 @@ function cardBlock(spec: CardSpec): string {
   return [
     '## 你在做板上的一张卡',
     '',
-    `卡号 \`${spec.cardId}\`。这不是一次对话——**你面前没有人**，问不了问题，也没有人会追问你。`,
+    `卡号 \`${spec.cardId}\`。这不是一次对话——**这一轮是板上派下来的活**，提问得不到回答，也不会有人来追问你；有说不清的走 kanban_block，不要自己编。`,
     '',
     '**做完了调 `kanban_complete`**：把结论写清楚（做了什么、结果是什么、还有什么没做），',
     '产出的文件路径写进 `metadata.changed_files`——**下游那张卡靠它找东西**，不是靠猜一个约定俗成的目录。',
@@ -3620,7 +3694,9 @@ export const name = 'satu-agent'
 // without inject`，于是任何一条带图的历史都会让 toAgentMessages 抛，整轮静默丢掉。
 // 装载顺序不看 cordis.yml 的行序、只看 inject（见那份文件开头的说明），所以这一行
 // 就是「workspace 必须排在我前面」的全部声明，不用再动 yml。
-export const inject = ['sessions', 'llm', 'tools', 'storage', 'catalog', 'workspace', 'kanban']
+// 'roster' 是给 runCard 用的：派卡要认出「这颗席位钉的是哪颗 Bot」——不列会被 cordis
+// 直接抛 `cannot get property "roster" without inject`，卡在席位侧当场崩（走报错回报）。
+export const inject = ['sessions', 'llm', 'tools', 'storage', 'catalog', 'workspace', 'kanban', 'roster']
 
 export function apply(ctx: Context, config: Config = {}) {
   ctx.plugin(AgentService, config)
