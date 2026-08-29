@@ -520,8 +520,19 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'kanban-open-run') {
-    // 流水那一行点得进会话全文——那是席位上的东西，走已有的会话页。
-    go('/s/' + encodeURIComponent(btn.getAttribute('data-id') || ''))
+    /**
+     * 流水那一行点得进过程，而过程就在**这颗 Bot 的对话**里：卡是当成一条带标识的
+     * 用户消息发进主会话跑的（见 agent 的 runCard），它说的话和调的工具全画在那儿。
+     *
+     * 原来这里跳 `/s/<sessionId>`。前端没有这条路由——pathOf 认不出就退回 `/`，
+     * 于是点「看过程」的人被静静地送回了首页。
+     */
+    const bot = btn.getAttribute('data-bot') || ''
+    if (!bot) {
+      flash('err', t('这一次执行没记下是哪颗 Bot 跑的，过程翻不出来', "This run didn't record which bot ran it"))
+      return
+    }
+    go('/a/' + encodeURIComponent(bot))
     return
   }
   if (act === 'kanban-promote') {

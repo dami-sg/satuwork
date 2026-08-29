@@ -184,6 +184,11 @@ function chatRosterNav() {
                  不用把视线甩到行尾去找。 */ ''}
             <span class="satu-botdot" data-state="${sum.state}" title="${esc(botStateLabel(sum.state))}" aria-label="${esc(botStateLabel(sum.state))}"></span>
             <span class="satu-botname">${esc(b.name || b.id)}</span>
+            ${/* 「有事等你」的图标。一颗 8px 的点在一列名字里太容易滑过去，而这一格说的
+                 是「你不点它就一直停在那儿」——确认那一路是真的有一轮停在席位上等着。 */ ''}
+            <span class="satu-botneed" data-need="${esc(sum.need || '')}" title="${esc(botNeedLabel(sum.need))}" aria-label="${esc(
+              botNeedLabel(sum.need),
+            )}"${sum.need ? '' : ' hidden'}>${botNeedIcon(sum.need)}</span>
             <time class="satu-bottime">${esc(sum.lastAt ? chatClock(sum.lastAt) : '')}</time>
           </span>
           ${/* 没有消息就不留这一行——空着一道灰边比少一行更碍眼。
@@ -216,6 +221,26 @@ function botStateLabel(state) {
   return t('空闲')
 }
 
+/**
+ * 名单上那个「有事等你」的图标，说给人听。
+ *
+ * **和那颗点分开说**：点答的是「这一颗现在什么状态」，这个图标答的是「你得去点一下」
+ * ——而这两件事人要做的动作完全不同，混成一个琥珀点的话，人还得点进去才知道是要拍板
+ * 还是要接手。
+ */
+function botNeedLabel(need) {
+  if (need === 'approval') return t('在等你拍板', 'Waiting for your approval')
+  if (need === 'handoff') return t('在等人接手', 'Waiting to be picked up')
+  return ''
+}
+
+/** 拍板用盾牌（和确认卡上那张同一个），接手用那只举起来的手（和顶栏那颗同一个）。 */
+function botNeedIcon(need) {
+  if (need === 'approval') return ICON_SHIELD
+  if (need === 'handoff') return svg(ICON_HANDOFF, 13)
+  return ''
+}
+
 /** 就地更新名单的状态点/时间/摘要。不重绘整页——那会把正在打字的输入框一起换掉。 */
 function paintRoster() {
   for (const row of document.querySelectorAll('[data-bot-row]')) {
@@ -235,6 +260,15 @@ function paintRoster() {
       dot.title = botStateLabel(sum.state)
       dot.setAttribute('aria-label', botStateLabel(sum.state))
     }
+    const need = row.querySelector('.satu-botneed')
+    if (need && need.getAttribute('data-need') !== (sum.need || '')) {
+      const label = botNeedLabel(sum.need)
+      need.setAttribute('data-need', sum.need || '')
+      need.innerHTML = botNeedIcon(sum.need)
+      need.hidden = !sum.need
+      need.title = label
+      need.setAttribute('aria-label', label)
+    }
     const time = row.querySelector('.satu-bottime')
     if (time) time.textContent = sum.lastAt ? chatClock(sum.lastAt) : ''
     const snip = row.querySelector('.satu-botsnip')
@@ -243,6 +277,13 @@ function paintRoster() {
       snip.hidden = !sum.lastText
     }
   }
+  /**
+   * 顶栏那个数里有「等你拍板」这一项，而它随事件走（见 needCount）。名单本来就每帧
+   * 都画，顺手把它对一遍——为它另开一条定时器的话，那个数会比名单上的图标慢几秒，
+   * 而两者说的是同一件事。
+   */
+  paintHandoffBadge()
+  repaintAskPanel()
 }
 
 function flashes() {

@@ -241,6 +241,9 @@ a:hover { color: var(--color-accent-600); }
 .tag-accent-2 { background: var(--color-accent-2-100); color: var(--color-accent-2-800); }
 .tag-neutral { background: var(--secondary); color: var(--secondary-foreground); }
 .tag-outline { border: 1px solid var(--color-accent-300); color: var(--color-accent-700); }
+/* 「要人管」那一档。看板上卡住的卡、待办页上等人拍板的那几行都用它——原来只写了
+   `tag tag-warn`，而这条规则一直不存在：那颗标签和「做完了」长得一模一样。 */
+.tag-warn { background: var(--color-warn-100); color: var(--color-warn-800); }
 
 /* forms */
 .field { display: flex; flex-direction: column; gap: 6px; }

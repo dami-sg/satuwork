@@ -95,7 +95,35 @@ function resetBotStream(row) {
  */
 function settleDot(sum) {
   const waiting = (sum.openIds ? sum.openIds.size : 0) + (sum.snapIds ? sum.snapIds.size : 0)
-  sum.state = sum.asking || waiting ? 'review' : sum.busy ? 'busy' : 'idle'
+  const asking = sum.asks ? sum.asks.size : 0
+  sum.state = asking || waiting ? 'review' : sum.busy ? 'busy' : 'idle'
+  /**
+   * **「在等你」还要分得出是哪一种。** 一颗点只说得出「有事」，而这两件事人要做的
+   * 动作完全不同：拍板是当场点一下（那一轮真的停在席位上等着，5 分钟就超时按拒绝
+   * 收口），接手是领一张能挂几天的单。名单上那个图标照这一格画。
+   *
+   * 两样都有时报拍板：它有钟在走，另一张单不会因为晚看十分钟就作废。
+   */
+  sum.need = asking ? 'approval' : waiting ? 'handoff' : ''
+}
+
+/**
+ * 名单上所有 Bot 此刻正等着人拍板的确认，摊平成一张表。
+ *
+ * **数据源是名单那几条流**（warmBotStreams 给每颗 Bot 都开了一条），不是 Gateway：
+ * 确认停在席位的内存里，压根没上过 Gateway（见 docs/handoff.md §2——它和交接单的
+ * 时间尺度、存活方式都不一样，不该塞进那张表）。所以「谁在等你拍板」这个问题，
+ * 浏览器这边是唯一答得上来的地方。
+ */
+function pendingApprovals() {
+  const out = []
+  for (const [botId, row] of botStreams.entries()) {
+    const asks = row && row.sum && row.sum.asks
+    if (!asks || !asks.size) continue
+    for (const a of asks.values()) out.push({ ...a, botId })
+  }
+  // 新的排前面：一个刚弹出来的确认后面多半还有人在等着看结果。
+  return out.sort((x, y) => (y.at || 0) - (x.at || 0))
 }
 
 /**
@@ -169,12 +197,28 @@ function noteBotEvent(botId, ev) {
   // 第三态：不是在跑，也不是跑完了，而是**在等你**——而人多半正在别的 Bot 那一屏，
   // 名单是他唯一会瞥到的地方。
   else if (ev.type === 'tool/approval') {
-    // 终态**只把 review 翻回 busy**，不碰别的状态。无条件写 busy 是错的：点了停止那一
-    // 下，`agent.abort()` 不等已经开跑的工具（见 bot 的 bridgeTools），于是 turn/end
-    // 完全可能排在这条终态前面到达——那样这颗点会从「空闲」被翻回「正在执行」，然后
-    // 一直停在那儿，直到下一轮开始。
-    if ((ev.data || {}).state === 'pending') sum.asking = (sum.asking || 0) + 1
-    else if (sum.asking) sum.asking--
+    /**
+     * **按 callId 记，不是计数**（同上面 openIds 那条）。原来这里是 `asking++/--`，
+     * 而加加减减迟早会漂：重放段和实时段重叠一条 pending 就多加一次，那颗点从此
+     * 永远亮着「在等你」，人点完了也灭不掉。
+     *
+     * 终态只删这一条，别的状态不碰——点了停止那一下，`agent.abort()` 不等已经开跑的
+     * 工具（见 bot 的 bridgeTools），`turn/end` 完全可能排在终态**前面**到达；
+     * 状态由 settleDot 从几个计数现算，就没有这个先后问题。
+     */
+    const d = ev.data || {}
+    const asks = sum.asks || (sum.asks = new Map())
+    if (!d.callId) {
+      /* 老日志里可能没有 callId：认不回来的一条宁可不记，也不要记成一个销不掉的。 */
+    } else if (d.state === 'pending') {
+      asks.set(d.callId, {
+        callId: d.callId,
+        name: d.name || '',
+        reason: d.reason || '',
+        at: Number(ev.time) || 0,
+        seq: Number(ev.seq) || 0,
+      })
+    } else asks.delete(d.callId)
     settleDot(sum)
   } else if (ev.type === 'user/message' || ev.type === 'assistant/message') {
     const text = messageText((ev.data || {}).message) || (ev.data || {}).text || ''
@@ -3353,7 +3397,7 @@ function taskRowHtml(task) {
 
 function taskDetailHtml(task) {
   const summary = task.summary
-    ? `<div class="sw-task-summary">${window.satuMd ? window.satuMd(task.summary) : esc(task.summary)}</div>`
+    ? `<div class="sw-task-summary sw-md">${window.satuMd ? window.satuMd.render(task.summary) : esc(task.summary)}</div>`
     : `<p class="sw-task-empty">${esc(t('还没有结论', 'No conclusion yet'))}</p>`
   const files = (task.files || []).length
     ? `<div class="sw-task-files">${task.files.map(fileChipHtml).join('')}</div>`

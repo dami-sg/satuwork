@@ -322,6 +322,63 @@ aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; ov
   white-space: nowrap;
 }
 .satu-botrow[aria-current="true"] .satu-botname { font-weight: 600; }
+/* 「有事等你」的图标。**点之外还要有它**：8px 的状态点在一列名字里太容易滑过去，
+   而这一格说的是「你不去点，那一轮就一直停在席位上等着」。
+
+   **画成一颗实心徽章，不是一个描边图形。** 13px 的细描边压在奶油底上，和旁边那颗
+   同样琥珀的状态点糊成一团——远看就是两个小点，人扫过去根本不会停。填满之后它是这
+   一列里唯一的色块。
+   
+   底色用 500、图形用 100：这套色阶在深色主题里是**翻过来的**（100 是深的、800 是浅
+   的），所以 500 底 + 100 图形是唯一一组两个主题下都够对比的搭配——写死白色的话，
+   深色主题里就是浅琥珀底压白图形。 */
+.satu-botneed {
+  /* 底色和图形色走两个变量：选中的那一行要整组换掉（见下面那条），而光晕的颜色
+     跟着底色走——写死 warn-500 的话，翻过来的那一行会甩出一圈琥珀光晕。 */
+  --need-ink: var(--color-warn-500);
+  --need-glyph: var(--color-warn-100);
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--need-ink);
+  color: var(--need-glyph);
+  animation: satu-need-pulse 1.5s ease-in-out infinite;
+}
+/**
+ * **选中的那一行要翻过来。**
+ *
+ * 那一行整条染成品牌赭红（`[aria-current]`），琥珀压在上面几乎看不见——而人正看着的
+ * 那颗 Bot 恰恰最可能是在等他的那一颗。翻成浅底 + 琥珀图形，两种底色下都立得住。
+ * 这就是那颗状态点的注释里说的「压在品牌色上的纯色差别更难分」，同一个坑。
+ */
+.satu-botrow[aria-current="true"] .satu-botneed {
+  --need-ink: var(--color-bg);
+  --need-glyph: var(--color-warn-500);
+}
+.satu-botneed[hidden] { display: none; }
+.satu-botneed svg { display: block; width: 10px; height: 10px; }
+/**
+ * 一圈往外推的光晕 + 一档很浅的呼吸。
+ *
+ * **不做「闪没」那种闪烁**：透明度掉到看不见的那半拍里，这颗徽章等于不存在，而人的
+ * 视线正好可能在那半拍扫过去。亮度只压到 0.72，一直看得见，动的是外面那圈光晕——
+ * 会动的东西在余光里比会消失的东西显眼得多。
+ */
+@keyframes satu-need-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--need-ink) 55%, transparent); }
+  70% { opacity: 0.72; box-shadow: 0 0 0 5px color-mix(in srgb, var(--need-ink) 0%, transparent); }
+}
+/* 关了动效的人**不能因此少看见一件事**：动画去掉，徽章本身照旧是实心亮色。 */
+@media (prefers-reduced-motion: reduce) {
+  .satu-botneed { animation: none; }
+}
+/* 侧栏收起来只剩头像，这个图标跟着收——挤在图标旁边只会让头像看着歪（同 botdot）。 */
+.satu-rail .satu-botneed { display: none; }
 .satu-bottime { flex: none; font-size: 11px; opacity: 0.6; font-variant-numeric: tabular-nums; }
 /* 摘要只给一行。多行会让每一行的高度随内容跳，整份名单看着就散了。 */
 .satu-botsnip {
@@ -384,18 +441,48 @@ aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; ov
 }
 .satu-kanban-card:hover { border-color: var(--ring); }
 .satu-kanban-title { font-size: 14px; line-height: 1.35; }
-.satu-kanban-meta { font-size: 12px; color: var(--muted-foreground); margin-top: 2px; }
+.satu-kanban-meta {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2);
+  font-size: 12px; color: var(--muted-foreground); margin-top: 2px;
+}
+.satu-kanban-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.satu-kanban-meta time { flex: none; font-variant-numeric: tabular-nums; }
 /* 档位那句理由、卡住的原因：一行小字，长了截断——卡片上放不下一整段。 */
 .satu-kanban-why {
   font-size: 12px; color: var(--muted-foreground); margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .satu-kanban-empty { font-size: 12px; color: var(--muted-foreground); padding: var(--space-2); }
-.satu-kanban-body { font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
-.satu-kanban-line { margin: var(--space-2) 0 0; padding-left: var(--space-4); font-size: 13px; line-height: 1.7; }
+/* ── 一张卡那一屏 ─────────────────────────────────────────────────────
+   分区用的是这套界面自己的 Card：`.satu-panel` + `.satu-panel-title`（账号详情、机器
+   详情、审计详情用的同一个壳）。这一屏上的东西长短差得极远——一句「做完了」和一屏
+   带列表的结论排在一起，只靠间距分的话，短的那几段会连成一片。 */
+.satu-kanban-acts { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+/* 「卡在哪儿」是唯一一块要人当场做点什么的：左沿一道重点色，扫一眼就落得到。 */
+.satu-kanban-stuck { border-left: 3px solid var(--color-accent-500); }
+/* 卡上的长文走气泡那套 .sw-md，只把字号收到这一屏的一档。 */
+.satu-kanban-md { font-size: 14px; line-height: 1.7; }
+.satu-kanban-plain { margin: 0; white-space: pre-wrap; }
+.satu-kanban-say { display: flex; gap: var(--space-2); }
+.satu-kanban-say .input { flex: 1; min-width: 0; }
+/* 时间线、附件、依赖、流水共用这一张表：**一行一条，右端一个时刻**。
+   记号去掉了——原来那颗圆点后面跟着一个常常是空的作者名，于是「做完了」这类系统行
+   缩进得莫名其妙，看着像是谁的回复。 */
+.satu-kanban-line { margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 1.7; }
+.satu-kanban-line li {
+  display: flex; align-items: baseline; gap: var(--space-3);
+  padding: 6px 0; border-bottom: 1px solid var(--border);
+}
+.satu-kanban-line li:first-child { padding-top: 0; }
+.satu-kanban-line li:last-child { padding-bottom: 0; border-bottom: 0; }
+.satu-kanban-evtext { flex: 1; min-width: 0; overflow-wrap: anywhere; text-align: left; }
+.satu-kanban-evtext b { font-weight: 500; color: var(--muted-foreground); margin-right: var(--space-2); }
+.satu-kanban-line time,
+.satu-kanban-line .satu-kanban-side { flex: none; font-size: 12px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+.satu-kanban-line .satu-linkbtn { flex: none; font-size: 12px; }
 /* 系统写的那几行比人的评论淡一档：一条时间线上混排，得分得出谁在说话。 */
 .satu-kanban-sys { color: var(--muted-foreground); }
-.satu-kanban-line span { color: var(--muted-foreground); margin-right: var(--space-2); }
+
 /* 开卡弹窗「暂不派发」那颗药丸里的小圆点。其余挑人样式就是 .satu-assignee 药丸
    （shell.css），和「新建 Skill」的创建方式那排同一个组件，不再自造一份。 */
 .satu-botpick-none { width: 20px; height: 20px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: var(--muted); color: var(--muted-foreground); font-size: 12px; }

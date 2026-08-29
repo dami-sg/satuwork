@@ -36,16 +36,70 @@ function cardModelLine(c) {
   return `<div class="satu-kanban-why">${esc(c.modelRole)}${esc(down)} · ${esc(c.modelReason || '')}</div>`
 }
 
+/**
+ * 卡上的时刻，说成「多久以前」。
+ *
+ * 板上一屏几十张卡，绝对时刻得一个数字一个数字地读，而人在板前问的只有一句「这张
+ * 躺了多久」。超过一周才换回绝对时刻——到那时候「9 天前」已经不回答任何问题了。
+ * 绝对的那份挂在 title 上，鼠标停一下就有。
+ */
+function cardAgo(ms) {
+  if (!ms) return ''
+  const d = Date.now() - ms
+  if (d < 60000) return t('刚刚', 'just now')
+  const min = Math.floor(d / 60000)
+  if (min < 60) return t(`${min} 分钟前`, `${min} min ago`)
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return t(`${hr} 小时前`, `${hr} h ago`)
+  const day = Math.floor(hr / 24)
+  if (day < 7) return t(`${day} 天前`, `${day} d ago`)
+  return fmtTime(ms)
+}
+
+/** 跑了多久。**秒起步**：一张 40 秒跑完的卡写「0 分钟」等于没写。 */
+function cardDur(from, to) {
+  if (!from || !to || to < from) return ''
+  const sec = Math.round((to - from) / 1000)
+  if (sec < 60) return t(`${sec} 秒`, `${sec}s`)
+  const min = Math.floor(sec / 60)
+  if (min < 60) return t(`${min} 分 ${sec % 60} 秒`, `${min}m ${sec % 60}s`)
+  const hr = Math.floor(min / 60)
+  return t(`${hr} 小时 ${min % 60} 分`, `${hr}h ${min % 60}m`)
+}
+
+/**
+ * 卡上的长文（正文、结论、卡住的原因）**按 Markdown 画**。
+ *
+ * 这几段是模型写出来的，天生带 `**加粗**`、`- 列表`、行内代码。原来这里是 esc() 加
+ * `white-space: pre-wrap`，于是星号和减号原样摊在屏幕上——一屏结论读起来像日志。
+ * 渲染器就是气泡里那一份（markdown.js：原始 HTML 一律转义、链接只放行白名单协议），
+ * 它没加载出来就退回纯文本，页面不会坏。
+ */
+function cardMd(src) {
+  const s = String(src ?? '')
+  if (!s.trim()) return ''
+  return `<div class="sw-md satu-kanban-md">${window.satuMd ? window.satuMd.render(s) : `<p class="satu-kanban-plain">${esc(s)}</p>`}</div>`
+}
+
 /** 板上那一列里的一张卡。**待定的可拖**：拖进「待派」这一列就是把它派出去。 */
 function cardChip(c, bots) {
   const who = c.assigneeBotId ? bots.get(c.assigneeBotId) || c.assigneeBotId : t('没人认领', 'unassigned')
   const stuck = c.state === 'blocked' && c.blockedReason ? `<div class="satu-kanban-why">${esc(c.blockedReason)}</div>` : ''
   const draggable = c.state === 'pending'
+  /**
+   * 时刻取的是**这张卡最近一次动**：在跑的取开跑那一刻（人要的是「跑了多久」），
+   * 收了口的取收口那一刻，其余的取开卡那一刻。一律取 createdAt 的话，一张排了三天
+   * 队、今天早上才跑完的卡，上面写着「3 天前」——而它三分钟前刚出结论。
+   */
+  const at = c.state === 'running' ? c.startedAt || c.createdAt : c.endedAt || c.createdAt
   return `<button type="button" class="satu-kanban-card${draggable ? ' satu-kanban-drag' : ''}" data-act="kanban-card" data-id="${esc(c.id)}"${
     draggable ? ` draggable="true" data-state="pending" title="${esc(t('拖到「待派」就开始执行', 'Drag to Ready to start'))}"` : ''
   }>
     <div class="satu-kanban-title">${esc(c.title || t('（没写标题）', '(untitled)'))}</div>
-    <div class="satu-kanban-meta">${esc(who)}</div>
+    <div class="satu-kanban-meta">
+      <span>${esc(who)}</span>
+      ${at ? `<time data-at="${at}" title="${esc(fmtTime(at))}">${esc(cardAgo(at))}</time>` : ''}
+    </div>
     ${cardModelLine(c)}
     ${stuck}
   </button>`
@@ -228,17 +282,59 @@ function kanbanCardModal() {
   </div>`
 }
 
-/** 一张卡：正文 + 依赖 + 一条时间线（评论和系统行混排）+ 每次跑的流水。 */
+/**
+ * 一张卡：交底 + 结论 + 依赖 + 一条时间线（评论和系统行混排）+ 每次跑的流水。
+ *
+ * **每一块都是一张 `.satu-panel`**——和账号详情、机器详情、审计详情用的是同一个壳
+ * （这套界面里的 Card：`--card` 底、`--border` 边、`--radius-lg` 角，标题一律
+ * `.satu-panel-title`）。原来这一屏是一堆裸 `<div>` 加行内 style 平铺，一句「做完了」
+ * 和一屏带列表的结论挨在一起，中间只有间距——短的那几段会连成一片。
+ *
+ * 顺序按**人打开这一屏是来干什么的**排：先看它现在怎么了（状态、时刻、能按的按钮），
+ * 再看它交出了什么（结论 / 卡在哪儿），最后才是当初交代了什么、路上发生过什么。
+ */
 function kanbanCardPage() {
   const d = state.kanbanCard
   if (!d) return `<div class="gw-page"><div class="gw-page-inner">${t('正在打开…', 'Opening…')}</div></div>`
   const c = d.card
-  const line = (x) =>
-    `<li class="${x.kind === 'system' ? 'satu-kanban-sys' : ''}"><span>${esc(x.authorBotId || (x.kind === 'system' ? '' : t('我', 'me')))}</span>${esc(x.body)}</li>`
-  const runRow = (r) =>
-    `<li>${t(`第 ${r.attempt + 1} 次`, `try ${r.attempt + 1}`)} · ${esc(r.status)}${r.steps ? ` · ${r.steps} ${t('步', 'steps')}` : ''}${
-      r.error ? ` · ${esc(r.error)}` : ''
-    }${r.sessionId ? ` · <a href="#" data-act="kanban-open-run" data-id="${esc(r.sessionId)}">${t('看过程', 'transcript')}</a>` : ''}</li>`
+  const panel = (title, inner, cls = '') =>
+    `<div class="satu-panel${cls ? ` ${cls}` : ''}"><span class="satu-panel-title">${title}</span>${inner}</div>`
+  const kv = (k, v) => (v ? `<div class="satu-kv"><span>${k}</span><span>${v}</span></div>` : '')
+  /**
+   * 时间线上的一行。**时刻要跟着每一条**：「派给了 X（第 1 次）」「做完了」单独看
+   * 都对，但人在这一屏要判的是「它停在哪一步、停了多久」，而那个问题只有时刻答得了。
+   */
+  const line = (x) => {
+    const who = x.authorBotId || (x.kind === 'system' ? '' : t('我', 'me'))
+    return `<li${x.kind === 'system' ? ' class="satu-kanban-sys"' : ''}>
+      <span class="satu-kanban-evtext">${who ? `<b>${esc(who)}</b>` : ''}${esc(x.body)}</span>
+      ${x.createdAt ? `<time data-at="${x.createdAt}" title="${esc(fmtTime(x.createdAt))}">${esc(cardAgo(x.createdAt))}</time>` : ''}
+    </li>`
+  }
+  const runRow = (r) => {
+    const bits = [
+      t(`第 ${r.attempt + 1} 次`, `try ${r.attempt + 1}`),
+      esc(r.status),
+      r.steps ? `${r.steps} ${t('步', 'steps')}` : '',
+      cardDur(r.startedAt, r.endedAt),
+      r.error ? esc(r.error) : '',
+    ].filter(Boolean)
+    /**
+     * 「看过程」落在**这颗 Bot 的对话**上：卡就是在主会话里跑的（见 agent 的 runCard
+     * ——它把卡当成一条带标识的用户消息发进主会话），说的话和调的工具全画在那条会话里。
+     *
+     * 原来这里指向 `/s/<sessionId>`，而前端根本没有这条路由：pathOf 认不出就退回 `/`，
+     * 点一下「看过程」等于被静静送回首页。
+     */
+    const trace = r.botId
+      ? `<button type="button" class="satu-linkbtn" data-act="kanban-open-run" data-bot="${esc(r.botId)}">${t('看过程', 'transcript')}</button>`
+      : ''
+    return `<li>
+      <span class="satu-kanban-evtext">${bits.join(' · ')}</span>
+      ${r.startedAt ? `<time data-at="${r.startedAt}" title="${esc(fmtTime(r.startedAt))}">${esc(cardAgo(r.startedAt))}</time>` : ''}
+      ${trace}
+    </li>`
+  }
   /**
    * `running` 的卡只有「停止」一颗按钮，停完了才出现「撤销」。
    *
@@ -265,44 +361,81 @@ function kanbanCardPage() {
         ]
           .filter(Boolean)
           .join('')
+  /**
+   * 概况那一格。**在跑的那张用「到现在」当终点**：一张跑了四十分钟的卡，人第一眼要的
+   * 就是这个数，而它在收口之前一个字都没有。那个数字自己会走（见 paintKanbanTimes），
+   * 所以挂个 `data-since` 的记号。
+   */
+  const running = c.state === 'running'
+  const took = cardDur(c.startedAt, c.endedAt || (running ? Date.now() : 0))
+  const facts = [
+    kv(t('状态', 'State'), cardStateTag(c)),
+    kv(t('开卡', 'Created'), c.createdAt ? esc(fmtTime(c.createdAt)) : ''),
+    kv(t('开跑', 'Started'), c.startedAt ? esc(fmtTime(c.startedAt)) : ''),
+    kv(t('收口', 'Ended'), c.endedAt ? esc(fmtTime(c.endedAt)) : ''),
+    kv(
+      running ? t('已经跑了', 'Running for') : t('用时', 'Took'),
+      took ? (running ? `<time data-since="${c.startedAt}">${esc(took)}</time>` : esc(took)) : '',
+    ),
+    kv(t('重试', 'Retries'), c.attempt ? String(c.attempt) : ''),
+    kv(
+      t('档位', 'Model'),
+      c.modelRole
+        ? `${esc(c.modelRole)}${c.modelDowngraded ? esc(t('（降下来的，不是它选的）', ' (downgraded)')) : ''}${
+            c.modelReason ? ` · ${esc(c.modelReason)}` : ''
+          }`
+        : '',
+    ),
+  ].join('')
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
         <div>
-          <h1 style="font-size: 22px; margin: 0 0 4px;">${esc(c.title)}</h1>
-          <div style="display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap;">${cardStateTag(c)}${cardModelLine(c)}</div>
+          <h1 style="font-size: 24px; margin: 0 0 4px;">${esc(c.title)}</h1>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('看板任务卡', 'Task card')}</p>
         </div>
         ${flashes()}
-        ${c.body ? `<div class="satu-kanban-body">${esc(c.body)}</div>` : ''}
+        ${acts ? `<div class="satu-kanban-acts">${acts}</div>` : ''}
+        ${panel(t('概况', 'Overview'), facts)}
+        ${c.blockedReason ? panel(t('卡在哪儿', 'Stuck on'), cardMd(c.blockedReason), 'satu-kanban-stuck') : ''}
+        ${c.summary ? panel(t('结论', 'Result'), cardMd(c.summary)) : ''}
+        ${c.body ? panel(t('这张卡要做什么', 'The ask'), cardMd(c.body)) : ''}
         ${
           (d.files || []).length
-            ? `<div><strong style="font-size: 13px;">${t('随卡的附件', 'Attachments')}</strong><ul class="satu-kanban-line">${d.files
-                .map((f) => `<li>${esc(f.name)}<span>· ${Math.ceil(f.size / 1024)} KB</span></li>`)
-                .join('')}</ul></div>`
+            ? panel(
+                t('随卡的附件', 'Attachments'),
+                `<ul class="satu-kanban-line">${d.files
+                  .map((f) => `<li><span class="satu-kanban-evtext">${esc(f.name)}</span><span class="satu-kanban-side">${Math.ceil(f.size / 1024)} KB</span></li>`)
+                  .join('')}</ul>`,
+              )
             : ''
         }
-        ${c.blockedReason ? `<div class="satu-kanban-body"><strong>${t('卡在：', 'Stuck: ')}</strong>${esc(c.blockedReason)}</div>` : ''}
-        ${c.summary ? `<div class="satu-kanban-body"><strong>${t('结论：', 'Result: ')}</strong>${esc(c.summary)}</div>` : ''}
-        <div style="display: flex; gap: var(--space-2); flex-wrap: wrap;">${acts}</div>
         ${
           (d.parents || []).length
-            ? `<div><strong style="font-size: 13px;">${t('要等这几张', 'Waits on')}</strong><ul class="satu-kanban-line">${d.parents
-                .map((p) => `<li><a href="#" data-act="kanban-card" data-id="${esc(p.id)}">${esc(p.title)}</a> · ${esc(p.state)}</li>`)
-                .join('')}</ul></div>`
+            ? panel(
+                t('要等这几张', 'Waits on'),
+                `<ul class="satu-kanban-line">${d.parents
+                  .map(
+                    (p) =>
+                      `<li><button type="button" class="satu-linkbtn satu-kanban-evtext" data-act="kanban-card" data-id="${esc(p.id)}">${esc(
+                        p.title,
+                      )}</button><span class="satu-kanban-side">${esc(p.state)}</span></li>`,
+                  )
+                  .join('')}</ul>`,
+              )
             : ''
         }
-        <form data-act="kanban-comment" data-id="${esc(c.id)}" style="display: flex; gap: var(--space-2);">
-          <input class="input" name="body" placeholder="${esc(t('留一句话——做这张卡的 Bot 开工时读得到', 'Leave a note — the bot reads it before starting'))}" style="flex: 1;" />
-          <button type="submit" class="btn btn-secondary">${t('留言', 'Comment')}</button>
-        </form>
-        <div><strong style="font-size: 13px;">${t('这张卡发生过什么', 'Timeline')}</strong><ul class="satu-kanban-line">${(d.timeline || [])
-          .map(line)
-          .join('')}</ul></div>
-        ${
-          (d.runs || []).length
-            ? `<div><strong style="font-size: 13px;">${t('跑过几次', 'Runs')}</strong><ul class="satu-kanban-line">${d.runs.map(runRow).join('')}</ul></div>`
-            : ''
-        }
+        ${panel(
+          t('这张卡发生过什么', 'Timeline'),
+          `<form data-act="kanban-comment" data-id="${esc(c.id)}" class="satu-kanban-say">
+            <input class="input" name="body" placeholder="${esc(
+              t('留一句话——做这张卡的 Bot 开工时读得到', 'Leave a note — the bot reads it before starting'),
+            )}" />
+            <button type="submit" class="btn btn-secondary">${t('留言', 'Comment')}</button>
+          </form>
+          <ul class="satu-kanban-line">${(d.timeline || []).map(line).join('')}</ul>`,
+        )}
+        ${(d.runs || []).length ? panel(t('跑过几次', 'Runs'), `<ul class="satu-kanban-line">${d.runs.map(runRow).join('')}</ul>`) : ''}
       </div>
     </div>`
 }
@@ -416,6 +549,17 @@ document.addEventListener('drop', async (e) => {
   }
 })
 
+/**
+ * 只把时刻刷一遍。**不碰别的**——整页重绘会把正在打字的留言框换掉（同日常任务
+ * 详情页那次）。`data-at` 是「那一刻」，`data-since` 是「从那一刻到现在」。
+ */
+function paintKanbanTimes() {
+  const root = document.getElementById('app')
+  if (!root) return
+  for (const el of root.querySelectorAll('time[data-at]')) el.textContent = cardAgo(Number(el.getAttribute('data-at')) || 0)
+  for (const el of root.querySelectorAll('time[data-since]')) el.textContent = cardDur(Number(el.getAttribute('data-since')) || 0, Date.now())
+}
+
 /** 这一屏现在长什么样，压成一个字符串。变了才画。 */
 function kanbanShot() {
   if (state.kanbanCard) return JSON.stringify(state.kanbanCard)
@@ -439,7 +583,16 @@ function kanbanPoll() {
     } catch {
       /* 保持上一份 */
     }
+    /**
+     * 数据没变就**只刷时刻，不整页重画**。
+     *
+     * 这一屏上的时刻（「已经跑了 8 分钟」「3 分钟前」）是拿 Date.now() 算的，一个字节
+     * 的数据都不依赖——不刷的话，一张跑了半小时的卡上永远写着「刚刚」。而 render() 是
+     * 整页 innerHTML 换掉：为了这个数字每 5 秒重画一次，正在写留言的人每 5 秒被清空
+     * 一次。所以走一个只改文字的小画笔。
+     */
     if (kanbanShot() !== before) render()
+    else paintKanbanTimes()
     kanbanPoll()
   }, wait)
 }
