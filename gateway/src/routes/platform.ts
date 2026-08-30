@@ -6,6 +6,7 @@ import { CUSTOM_APIS, type CustomProviderDef, DefError, parseProviderDef } from 
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { billingOf, enabledModelsOf, modelPricingOf, modelProviderCreds, modelRoleOf, priceMultiplierOf, publicPlatformCred, publicSettings } from '../lib/org.ts'
+import { refreshDiscovered, REFRESH_MS } from '../model-discovery.ts'
 import { isVendor } from '../connectors/index.ts'
 import { rangeQuery, requireOwner, requireUser } from '../lib/guards.ts'
 import { WEB_BACKENDS, WEB_DOCUMENT, type PlatformSettings, emptyWebTools, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from '../db.ts'
@@ -594,5 +595,61 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
       throw new HttpError(402, result.error, { provider: result.provider })
     }
     json(res, 200, result)
+  })
+
+  // ── 模型自动发现 ───────────────────────────────────────────────────
+
+  /**
+   * 目录发现的状态。页面拿它显示「上次刷新于……」和失败原因——不给这个的话，
+   * 「新模型怎么还没出来」就只能靠翻网关日志回答。
+   */
+  router.get('/platform/models/discovery', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const snap = await db.discoveredModels()
+    json(res, 200, {
+      fetchedAt: snap.fetchedAt || null,
+      attemptedAt: snap.attemptedAt || null,
+      lastError: snap.lastError || null,
+      // models.dev 收录的可用模型总数，和真正补进目录的数量不是一回事：绝大多数
+      // 早就在内置快照里了，补进去的只有差集。
+      upstream: snap.entries.length,
+      added: await llm.syncDiscovered(),
+      deny: snap.deny,
+      intervalMs: REFRESH_MS,
+    })
+  })
+
+  /** 立即刷新。等不到下一个 tick 的时候用（比如上游刚上了模型，现在就要）。 */
+  router.post('/platform/models/discovery/refresh', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const result = await refreshDiscovered(db, { force: true })
+    if (result.error) throw new HttpError(502, `models.dev 拉取失败：${result.error}`)
+    const snap = await db.discoveredModels()
+    json(res, 200, { fetchedAt: snap.fetchedAt, upstream: snap.entries.length, added: await llm.syncDiscovered() })
+  })
+
+  /**
+   * 把某个自动发现的模型按下去 / 放回来。
+   *
+   * 存在的理由是真事：pi 的生成脚本里有几张写死的排除表（xAI 那几个、opencode 的
+   * gpt-5.3-codex-spark），排除理由没写在代码里，多半是实测调不通。我们这边靠
+   * models.dev 的元数据看不出这类问题，只能等它在探测里露馅，然后按下去。
+   */
+  router.post('/platform/models/discovery/deny', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOwner(account)
+    const body = bodyOf(req)
+    const provider = strField(body, 'provider')
+    const model = strField(body, 'model')
+    const key = `${provider}/${model}`
+    const snap = await db.discoveredModels()
+    const on = body.denied !== false
+    const deny = new Set(snap.deny)
+    if (on) deny.add(key)
+    else deny.delete(key)
+    await db.putDiscoveredModels({ ...snap, deny: [...deny] })
+    json(res, 200, { model: key, denied: on, added: await llm.syncDiscovered() })
   })
 }

@@ -198,6 +198,9 @@ async function publicModels(llm: Llm, companyId: string | null) {
     reasoning: m.reasoning,
     input: m.input && m.input.length ? m.input : ['text'],
     cost: m.cost,
+    // 'discovered' = 内置快照里没有、运行时从 models.dev 补进来的。页面据此打标：
+    // 这类模型没经过 pi 的逐个实测，用户有权知道自己点的是哪一种。
+    source: m.source,
   }))
 }
 

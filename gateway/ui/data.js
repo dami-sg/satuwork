@@ -81,6 +81,7 @@ function groupCatalog(rows) {
       contextWindow: m.context_window,
       maxTokens: m.max_tokens,
       cost: m.cost,
+      source: m.source || 'builtin',
     })
   }
   return [...map.values()]
@@ -121,6 +122,18 @@ async function loadMe() {
 async function loadCatalog() {
   const data = await api('GET', '/v1/models')
   state.catalog = groupCatalog(data.data || [])
+}
+
+/**
+ * 模型自动发现的状态。**owner 才有这个接口**，所以失败一律吞掉当没有——
+ * 管理员进模型页时拿不到它是正常的，不该在页面上弹一条红。
+ */
+async function loadDiscovery() {
+  try {
+    state.discovery = await api('GET', '/platform/models/discovery')
+  } catch {
+    state.discovery = null
+  }
 }
 
 /** 当前月份，YYYY-MM。月份选择器留空时用它。 */
@@ -830,7 +843,7 @@ async function loadPage() {
         await loadChatPage()
       }
     } else if (state.path === '/models') {
-      await Promise.all([loadCatalog(), loadCreds(), loadSettings()])
+      await Promise.all([loadCatalog(), loadCreds(), loadSettings(), loadDiscovery()])
       const configured = configuredSet()
       if (!state.selectedProvider || !configured.has(state.selectedProvider)) {
         const dailyP = state.settings.daily?.provider

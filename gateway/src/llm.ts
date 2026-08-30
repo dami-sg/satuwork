@@ -1,5 +1,7 @@
+import type { Provider } from '@earendil-works/pi-ai'
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Db } from './db.ts'
+import { overlayProvider, resolveOverlay, type DiscoverySnapshot } from './model-discovery.ts'
 import { buildProvider, customEnvVar, isModelId, parseProviderDef, PROVIDER_ID_RE, type CustomProviderDef } from './providers.ts'
 
 export interface CatalogModel {
@@ -12,7 +14,7 @@ export interface CatalogModel {
   reasoning?: boolean
   input?: ('text' | 'image')[]
   cost?: unknown
-  source: 'builtin' | 'company' | 'custom'
+  source: 'builtin' | 'company' | 'custom' | 'discovered'
 }
 
 export interface ModelRef {
@@ -81,7 +83,21 @@ export class Llm {
   private registered = new Set<string>()
   private fingerprint = ''
 
-  constructor(private db: Db) {}
+  /**
+   * 内置 provider 的原件。套壳前先留一份，因为补模型是 `setProvider(套壳后的)`——
+   * 不留原件的话，第二次同步就会拿**上一层壳**再套一层，壳叠壳，上一轮补进去的
+   * 模型也会跟着漏到下一轮，撤不掉。
+   */
+  private readonly originals = new Map<string, Provider>()
+  /** 当前被套了壳的 provider。发现结果变空时要按这个名单还原。 */
+  private overlaid = new Set<string>()
+  private discoveryFingerprint = ''
+  /** `provider/id`，catalog() 拿它给这些模型打「自动发现」的标。 */
+  private discoveredKeys = new Set<string>()
+
+  constructor(private db: Db) {
+    for (const p of this.models.getProviders()) this.originals.set(p.id, p)
+  }
 
   isBuiltinProvider(id: string): boolean {
     return this.builtinIds.has(id)
@@ -121,8 +137,53 @@ export class Llm {
     return defs
   }
 
+  /**
+   * 把库里那份「自动发现」的快照铺到注册表上（见 model-discovery.ts）。
+   *
+   * 和 syncCustomProviders 一样每次都读库、按指纹决定要不要重建：写这一行的是
+   * 后台刷新任务，多进程部署时它可能跑在**另一个网关进程**里，只靠进程内的通知
+   * 一定会漏。
+   */
+  async syncDiscovered(): Promise<number> {
+    let snap: DiscoverySnapshot
+    try {
+      snap = await this.db.discoveredModels()
+    } catch {
+      // 读不到就当没有。自动发现是锦上添花，不能因为它让整个目录塌掉。
+      return this.discoveredKeys.size
+    }
+    // 指纹里要带上自定义供应商的那一份：它们也会改变注册表，而推导是拿注册表当
+    // 输入的。只按快照做指纹的话，新加一个自定义供应商之后就不会重新推导。
+    const fp = `${snap.fetchedAt}|${snap.entries.length}|${snap.deny.join(',')}|${this.fingerprint}`
+    if (fp === this.discoveryFingerprint) return this.discoveredKeys.size
+
+    // 传 originals 而不是 this.models：只往内置 provider 上补（自定义供应商的模型
+    // 是人手录进去的，那份定义就是权威），而且基线必须是没套过壳的——理由见
+    // resolveOverlay 的注释，那是个会让目录来回跳的坑。
+    const { extras } = resolveOverlay(this.originals.values(), snap.entries, new Set(snap.deny))
+    const keys = new Set<string>()
+    for (const [providerId, add] of extras) {
+      const base = this.originals.get(providerId)!
+      this.models.setProvider(overlayProvider(base, add))
+      for (const m of add) keys.add(`${providerId}/${m.id}`)
+    }
+    for (const id of this.overlaid) {
+      if (extras.has(id)) continue
+      const base = this.originals.get(id)
+      if (base) this.models.setProvider(base)
+    }
+    this.overlaid = new Set(extras.keys())
+    this.discoveredKeys = keys
+    this.discoveryFingerprint = fp
+    return keys.size
+  }
+
   async catalog(companyId: string | null): Promise<CatalogModel[]> {
     const custom = new Set((await this.syncCustomProviders()).map((d) => d.id))
+    // 必须排在 syncCustomProviders 后面：发现结果的指纹里带着自定义供应商那一份，
+    // 反过来的话这一轮读到的是上一轮的旧指纹，注册表已经变了却不会重新推导。
+    await this.syncDiscovered()
+    const discovered = this.discoveredKeys
     const out: CatalogModel[] = []
     const seen = new Set<string>()
     for (const p of this.models.getProviders()) {
@@ -142,7 +203,7 @@ export class Llm {
             ? ((m as { input: ('text' | 'image')[] }).input.filter((x) => x === 'text' || x === 'image'))
             : ['text'],
           cost: (m as { cost?: unknown }).cost,
-          source: custom.has(p.id) ? 'custom' : 'builtin',
+          source: custom.has(p.id) ? 'custom' : discovered.has(key) ? 'discovered' : 'builtin',
         })
       }
     }
