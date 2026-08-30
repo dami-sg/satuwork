@@ -33,6 +33,7 @@ import { nextRunAtOf } from './lib/schedule.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
 import { sweepHandoffs } from './handoff-sweep.ts'
 import { tickKanban } from './kanban-tick.ts'
+import { refreshDiscovered } from './model-discovery.ts'
 
 /** 调度器多久看一眼。设成 0 就不起调度器（e2e 里有几条不需要它自己跑）。 */
 const TICK_MS = Math.max(0, Math.trunc(Number(process.env.GATEWAY_ROUTINE_TICK_MS ?? 30_000)))
@@ -569,6 +570,15 @@ export function startRoutineScheduler(db: Db): () => void {
        * 的周期一样（半分钟量级的粗节拍），而多一个定时器就多一处关停时要记得清的东西。
        */
       .then(() => tickKanban(db))
+      /**
+       * 模型目录的自动发现（见 model-discovery.ts）。**同样不新起定时器**——理由和
+       * 上面两处一样。它自己按 GATEWAY_MODEL_DISCOVERY_MS 节流（默认 6 小时），
+       * 所以挂在这个半分钟的粗节拍上不会真的每半分钟去拉一次。
+       */
+      .then(() => refreshDiscovered(db).then((r) => {
+        if (r.error) console.error(`satuwork-gateway: 模型目录刷新失败：${r.error}`)
+        else if (r.ran) console.log(`satuwork-gateway: 模型目录已刷新，models.dev 收录 ${r.added} 个可用模型`)
+      }))
       .catch((e: Error) => console.error(`satuwork-gateway: 日常任务扫描失败：${e.message}`))
       .finally(() => {
         running = false

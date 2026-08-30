@@ -1459,6 +1459,23 @@ document.getElementById('app').addEventListener('click', async (e) => {
     render()
     return
   }
+  if (act === 'discovery-refresh') {
+    state.busy = true
+    render()
+    try {
+      const r = await api('POST', '/platform/models/discovery/refresh')
+      // 目录本身要跟着重读：补进去的模型现在就该出现在下面那张表里，让人再刷一次
+      // 页面才看得见，等于这颗按钮只做了一半。
+      await Promise.all([loadDiscovery(), loadCatalog()])
+      flash('ok', t(`模型目录已刷新，补进 ${r.added} 个内置目录里没有的模型`, `Catalog refreshed; ${r.added} models added on top of the built-in catalog`))
+    } catch (e) {
+      flash('err', e.message || '刷新失败')
+    } finally {
+      state.busy = false
+      render()
+    }
+    return
+  }
   if (act === 'set-role') {
     const role = btn.getAttribute('data-role')
     const provider = btn.getAttribute('data-provider')

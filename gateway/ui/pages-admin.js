@@ -228,6 +228,7 @@ function modelsPage() {
           ${rolePanel('utility', t('Utility 模型'), t('用于轻量、快速的任务。'))}
         </div>
         ${isOwner() ? pricePanel() : ''}
+        ${discoveryPanel()}
         <div style="display: flex; flex-direction: column; gap: var(--space-3);">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;">
             <div style="display: flex; align-items: baseline; gap: var(--space-3);">
@@ -249,6 +250,43 @@ function modelsPage() {
       </div>
     </div>
     ${modelPriceModal()}`
+}
+
+/**
+ * 自动发现的状态条。
+ *
+ * 存在的理由和改价那张表一样，是同一件真事的两面：**上游上了新模型，不该等
+ * pi-ai 发版才用得上**。改价解决的是「价变了」，这里解决的是「模型多了」。
+ *
+ * 把「上次刷新于」摆出来，是因为这件事一旦不灵，症状只有一个——「新模型怎么还没
+ * 出来」。没有这一行，回答它就只能去翻网关日志。
+ */
+function discoveryPanel() {
+  const d = state.discovery
+  if (!isOwner() || !d) return ''
+  const hours = Math.round((d.intervalMs || 0) / 36e5)
+  const cadence = d.intervalMs
+    ? t(`每 ${hours} 小时自动拉一次`, `auto-refreshed every ${hours}h`)
+    : t('自动刷新已关闭', 'auto-refresh is off')
+  return `
+    <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2);">
+      <div style="display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;">
+        <h2 style="font-size: 16px; margin: 0;">${t('模型自动发现', 'Model discovery')}</h2>
+        <button type="button" class="satu-linkbtn" data-act="discovery-refresh" ${state.busy ? 'disabled' : ''}>${t('立即刷新', 'Refresh now')}</button>
+      </div>
+      <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">
+        ${t('内置目录是编译进 pi-ai 的静态快照，上游上新模型它不会自己更新。这里按同一个数据源（models.dev）在运行时把差集补进目录，只加不改——内置目录里已有的模型一律不碰。', 'The built-in catalog is a static snapshot compiled into pi-ai and never updates itself. This pulls the same source pi uses (models.dev) at runtime and adds only what the snapshot is missing; models already in the catalog are never touched.')}
+      </p>
+      <div style="font-size: 13px;">
+        ${d.lastError
+          ? `<span style="color: var(--color-warn-800);">${t('上次刷新失败', 'Last refresh failed')}：${esc(d.lastError)}</span>`
+          : `<span style="color: var(--muted-foreground);">${t('上次刷新', 'Last refreshed')}：${esc(fmtTime(d.fetchedAt))} · ${esc(cadence)}</span>`}
+      </div>
+      <div style="font-size: 13px; color: var(--muted-foreground);">
+        ${t(`models.dev 收录 ${d.upstream} 个可用模型，其中 ${d.added} 个是内置目录里没有的，已补进目录并标为「自动发现」。`,
+             `models.dev lists ${d.upstream} usable models; ${d.added} of them are missing from the built-in catalog and have been added, tagged "discovered".`)}
+      </div>
+    </div>`
 }
 
 /**

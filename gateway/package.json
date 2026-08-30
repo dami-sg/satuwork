@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.84.4",
     "pg": "^8.23.0"
   },
   "devDependencies": {

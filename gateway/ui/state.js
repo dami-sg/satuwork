@@ -18,6 +18,8 @@ const state = {
   error: '',
   notice: '',
   catalog: [],
+  /** 模型自动发现的状态；null = 没拿到（非 owner，或接口挂了）。 */
+  discovery: null,
   creds: [],
   settings: { daily: { provider: '', model: '' }, utility: { provider: '', model: '' } },
   selectedProvider: '',
@@ -396,6 +398,10 @@ function capTags(m) {
   if (m.reasoning) tags.push(`<span class="tag tag-neutral">${t('推理')}</span>`)
   if (vision) tags.push(`<span class="tag tag-neutral">${t('识图')}</span>`)
   if (!tags.length) tags.push(`<span class="tag tag-neutral">${t('对话')}</span>`)
+  // 「自动发现」不是能力，是**来源**：这条不在 pi-ai 的内置快照里，是运行时从
+  // models.dev 补进来的，没经过 pi 的逐个实测。挨着能力标签放，是因为选模型的人
+  // 就在这一行做决定，让他当场看见比藏进详情页有用。
+  if (m.source === 'discovered') tags.push(`<span class="tag tag-warn" title="${t('目录里没有、运行时从 models.dev 发现的。参数按同供应商同协议的模型推导，建议先做一次连通性测试。', 'Not in the built-in catalog; discovered from models.dev at runtime. Its settings are inferred from a sibling model on the same provider and protocol, so probe it before relying on it.')}">${t('自动发现', 'discovered')}</span>`)
   return tags.join('')
 }
 

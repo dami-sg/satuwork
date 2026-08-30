@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
+import { type DiscoverySnapshot, emptySnapshot, parseDiscoverySnapshot } from './model-discovery.ts'
 import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Board, type BoardMember, type Card, type CardBlockedKind, type CardComment, type CardFile, type CardNotify, type CardRun, type CardRunStatus, type CardState, CARD_MAX_STEPS, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
 import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, boardOf, boardMemberOf, cardOf, cardCommentOf, cardFileOf, cardRunOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
@@ -3060,6 +3061,30 @@ export class Db {
       [payload, now],
     )
     return this.platformSettings()
+  }
+
+  /**
+   * 自动发现的模型快照。
+   *
+   * 借 platform_settings 那张表另开一行（id='discovered'），不新建表也就不用加迁移：
+   * 那张表本来就是 `(id, payload jsonb, updatedAt)` 的通用键值，platform 只是它的
+   * 一个键。**不能塞进 platform 那一行**——putPlatformSettings 是整条 payload 重写的，
+   * 它已经漏掉过三次字段（见那个函数里的注释），再往里加一个由后台任务写、由页面
+   * 顺手覆盖的字段，就是给同一个坑再挖一遍。
+   */
+  async discoveredModels(): Promise<DiscoverySnapshot> {
+    const r = await this.one("select payload from platform_settings where id = 'discovered'")
+    if (!r) return emptySnapshot()
+    return parseDiscoverySnapshot(r.payload)
+  }
+
+  async putDiscoveredModels(next: DiscoverySnapshot): Promise<DiscoverySnapshot> {
+    const clean = parseDiscoverySnapshot(next)
+    await this.run(
+      "insert into platform_settings (id, payload, \"updatedAt\") values ('discovered', ?, ?) on conflict (id) do update set payload=excluded.payload, \"updatedAt\"=excluded.\"updatedAt\"",
+      [JSON.stringify(clean), Date.now()],
+    )
+    return clean
   }
 
   /**
