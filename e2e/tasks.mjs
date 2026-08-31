@@ -9,15 +9,21 @@
  * 不变量 1 的实现——所以这里对着几条最像的路径各打一枪，全都得是 404。
  *
  * **用线上的默认参数**，不靠调小上限把测试凑出来。
+ *
+ * 端口向内核要（`freePort`），不写死。写死那一版是从删掉的 kanban.mjs 抄来的 18993，
+ * 而 skills.mjs 也写着同一个数——两套一前一后跑，前一套的网关只要慢一拍还没死透，后一套
+ * 的 `waitHttp` 探到的就是它：接着整套用例一起红，报的却是「已经有系统管理员了」。
+ * 见 e2e/ports.mjs 开头那段。
  */
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
+import { freePort } from './ports.mjs'
 
 export async function runTasks({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-tasks')
-  const GW_PORT = 18993
+  const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })
