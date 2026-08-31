@@ -1,0 +1,65 @@
+# Satuwork Gateway 的 TLS + HTTP/2 反代（nginx 版；部署机是 Debian，这份更常用）。
+#
+# 为什么非要它、以及 flush / 缓冲为什么是命门，见同目录的 Caddyfile.example 开头。
+#
+# **上线前先在本地验一遍这几行真的生效**（不需要证书，攒不攒和 TLS 无关）：
+#   node gateway/deploy/check-sse.mjs origin &
+#   nginx -p /tmp/sse-check -c "$PWD/gateway/deploy/nginx.local.conf" &
+#   node gateway/deploy/check-sse.mjs check http://127.0.0.1:8080/sse
+# 细节见 nginx.local.conf 开头。
+#
+#   sudo cp nginx.conf.example /etc/nginx/sites-available/satuwork
+#   sudo ln -s /etc/nginx/sites-available/satuwork /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+
+# 桌面那条 WebSocket（/desktop/<seatId>/…）要靠它把 Upgrade 传下去。
+map $http_upgrade $connection_upgrade {
+	default upgrade;
+	''      '';
+}
+
+server {
+	listen 443 ssl;
+	listen [::]:443 ssl;
+	# nginx ≥ 1.25 用这一行；1.24 及以前写成 `listen 443 ssl http2;`。
+	# **漏了它整份配置就白做**：没有 h2 就还是 6 条连接那一套。
+	http2 on;
+
+	server_name satuwork.example.com;
+
+	ssl_certificate     /etc/letsencrypt/live/satuwork.example.com/fullchain.pem;
+	ssl_certificate_key /etc/letsencrypt/live/satuwork.example.com/privkey.pem;
+
+	# 发布包上传走这条（默认 256 MiB，见 GATEWAY_RELEASE_MAX_BYTES）。
+	client_max_body_size 256m;
+
+	location / {
+		proxy_pass http://127.0.0.1:3080;
+		proxy_http_version 1.1;
+
+		proxy_set_header Host              $host;
+		proxy_set_header X-Real-IP         $remote_addr;
+		proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Proto $scheme;
+		proxy_set_header Upgrade           $http_upgrade;
+		proxy_set_header Connection        $connection_upgrade;
+
+		# ── 下面四行是 SSE 的命门，少一行就会出「历史缺一截 + 永远正在处理」 ──
+		#
+		# 缓冲会把席位那条 `replay/done` 连同重放的尾巴一起攒住，而一条安静下来的
+		# 会话再也不会有新字节把它顶出去。gzip 同理：压缩缓冲一样会攒。
+		proxy_buffering off;
+		proxy_cache off;
+		gzip off;
+		# 长连接别按默认那 60 秒的空闲超时掐。
+		proxy_read_timeout 1h;
+		proxy_send_timeout 1h;
+	}
+}
+
+server {
+	listen 80;
+	listen [::]:80;
+	server_name satuwork.example.com;
+	return 301 https://$host$request_uri;
+}

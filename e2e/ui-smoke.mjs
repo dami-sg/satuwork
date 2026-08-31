@@ -16,6 +16,7 @@ import { createCompany } from './org.mjs'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
 import { el, fakeSse } from './ui-dom.mjs'
+import { catchUpFrames, newCatchUp, remember } from '../gateway/src/lib/roster-filter.ts'
 import { readFileSync } from 'node:fs'
 import { freePort } from './ports.mjs'
 
@@ -2459,7 +2460,7 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
 
     await test('后台那几条流断了，不许占用正在看的那条对话的横幅', async () => {
       /**
-       * 名单上每个 Bot 都挂着一条流（warmBotStreams），任何一条断掉都会走到认输那一
+       * 切过 Bot 之后手上会留着前几条对话流，任何一条断掉都会走到认输那一
        * 支。它要是把「连接断开」摆到横幅上，说的却是另一个 Bot 的事：屏幕上这条对话
        * 好好的，人却被告知断了，点「重新连接」重连的还是另一条流。更实在的是那一下
        * 会**整页重绘**——正在打字的人当场丢焦点，起因却是他没在看的一个 Bot。
@@ -2621,9 +2622,9 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       const thread = ui.stubs.get('chat-thread')
       ui.state.chatSessionId = 's-paint'
       const run = ui.startChatStream('s-paint')
-      // **先把历史放完。** 开流后的第一批事件属于重放，那一段是故意不画的（见上面
-      // 「重放历史时不画中间态」）。这里要测的是历史之后**真正的流式输出**——用户发完
-      // 消息、模型一个 token 一个 token 吐出来的那一段，它必须逐帧画。
+      // **先把历史放完。** 开流后的第一批事件属于重放，那一段的状态是被摁住的（见下面
+      // 「重放历史时不闪「正在处理」」）。这里要测的是历史之后**真正的流式输出**——用户
+      // 发完消息、模型一个 token 一个 token 吐出来的那一段，它必须逐帧画。
       sse.push({ type: 'replay/done' })
       for (let i = 0; i < 100 && ui.state.chatReplaying; i++) await new Promise((r) => setTimeout(r, 5))
       const before = thread.writes
@@ -2644,14 +2645,27 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.stopChatStream()
     })
 
-    await test('重放历史时不画中间态：不闪「正在处理」，消息也不逐条冒', async () => {
+    await test('重放历史时不闪「正在处理」，但也不留一片空白', async () => {
       // 打开一条会话时，SSE 把**全部历史**从头推一遍，和实时事件走同一个通道。一条
-      // 8 轮的真实对话是 789 条事件。以前每收到一条就重绘一次：
+      // 8 轮的真实对话是 789 条事件。最早每收到一条就重绘一次：
       //   · O(n²)——每次都 fold 全量、比对整棵 DOM、重渲染最后那段 Markdown
       //   · 状态还是错的——重放到某轮的 turn/start 就显示「正在处理」，要等重放出配对
       //     的 turn/end 才消失。拿真实数据量过，789 帧里有 772 帧（98%）挂着「正在
       //     处理」，而那期间什么都没在跑。
-      // 用户看到的就是「卡在正在处理，消息一条条往外冒」。
+      //
+      // 后来改成「重放期间一帧都不画」，两条都治住了，却换来第三个毛病：闸要等
+      // replay/done、或者静默 120ms、或者 4 秒硬上限才开，而刷新页面时这条流正在跟别
+      // 的请求抢连接槽，事件断断续续地来——静默判定被一次次推后，屏幕上整整四秒什么
+      // 都没有。「刷新之后消息迟迟不出来」说的就是这一段。
+      //
+      // 现在两头都要：**照画**（合并重绘由 rAF 管），而状态在 paintChat 里被摁成
+      // 「没在跑」，直到席位自己表态。这个测就钉这两句话。
+      //
+      // 「画了没有」怎么观测：**拿 state.chatStatus 当哨兵**。paintChat 每跑一次都会
+      // 写它一遍，而且写在 `if (!thread) return` **前面**——先塞一个哨兵值进去，之后
+      // 它要是被抹成 '' 就说明这期间画过，而且画出来的状态不是「正在处理」。一条断言
+      // 同时钉住两件事。（垫片里的 #chat-thread 只是个计数桩，撑不起真正的 syncThread，
+      // 所以不走 DOM 那条路观测。）
       const sse = fakeSse()
       const ui = loadApp({
         appPath,
@@ -2664,22 +2678,41 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       const run = ui.startChatStream('s-replay')
       assert(ui.state.chatReplaying, '开流就该拉闸')
 
-      // 三轮都已收口的历史。中间那些 turn/start 正是以前让界面「忙」起来的东西。
       let seq = 0
       const push = (type, data) => sse.push({ seq: ++seq, time: 1, type, data: data || {} })
-      for (let turn = 1; turn <= 3; turn++) {
+      const settled = (turn) => {
         push('user/message', { message: { content: [{ type: 'text', text: '问题' + turn }] }, source: { kind: 'user' } })
         push('turn/start', { turn })
         for (let i = 0; i < 5; i++) push('assistant/chunk', { chunk: { type: 'text-delta', text: 'x' } })
         push('assistant/message', { turn, message: { content: [{ type: 'text', text: '回答' + turn }] } })
         push('turn/end', { turn, reason: 'completed' })
       }
+
+      // **停在一轮的半当中**：第二轮的 turn/start 灌出来了，配对的 turn/end 还没到。
+      // 这正是以前让界面挂上「正在处理」的那一帧——只灌完整的轮次是测不到它的。
+      ui.state.chatStatus = '哨兵'
+      settled(1)
+      push('user/message', { message: { content: [{ type: 'text', text: '问题2' }] }, source: { kind: 'user' } })
+      push('turn/start', { turn: 2 })
+      for (let i = 0; i < 5; i++) push('assistant/chunk', { chunk: { type: 'text-delta', text: 'x' } })
       for (let i = 0; i < 200 && ui.state.chatEvents.length < seq; i++) await new Promise((r) => setTimeout(r, 5))
       assert(ui.state.chatEvents.length === seq, `事件没收全：${ui.state.chatEvents.length}/${seq}`)
+      // 合并重绘是延后的（一帧一次），这里要多等一拍，否则测的是「还没来得及画」。
+      await new Promise((r) => setTimeout(r, 60))
 
-      // 关键断言：灌的过程中一次都没画过，所以中间那些 turn/start 没能把界面点亮。
       assert(ui.state.chatReplaying, '历史还在灌，闸不该开')
-      assert(ui.state.chatStatus === '', `重放期间画了中间态：chatStatus=${JSON.stringify(ui.state.chatStatus)}`)
+      assert(
+        ui.state.chatStatus === '',
+        ui.state.chatStatus === '哨兵'
+          ? '重放期间一次都没画——刷新之后屏幕会空着等闸开'
+          : `重放期间闪了中间态：chatStatus=${JSON.stringify(ui.state.chatStatus)}`,
+      )
+
+      // 把这一轮收口，再补第三轮，凑够断言用的六条消息。
+      push('assistant/message', { turn: 2, message: { content: [{ type: 'text', text: '回答2' }] } })
+      push('turn/end', { turn: 2, reason: 'completed' })
+      settled(3)
+      for (let i = 0; i < 200 && ui.state.chatEvents.length < seq; i++) await new Promise((r) => setTimeout(r, 5))
 
       // 静默兜底：连着灌完一停，就认为历史放完了（老 bot 不发 replay/done 也能收敛）。
       await new Promise((r) => setTimeout(r, 350))
@@ -3406,6 +3439,184 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.stopChatStream()
     })
 
+    await test('桶淘汰不许动正看着的那条会话的事件数组', async () => {
+      /**
+       * `state.chatEvents` 和某一行的 `row.events` 是**同一个数组对象**（见
+       * ensureChatSession 那三处赋值）。桶淘汰要是把它换成新数组，别名就断了：新事件
+       * 落进新数组，屏幕上那份还指着旧的——**正在看的对话静默停止更新**，而且不报错、
+       * 刷新之前一直如此。所以清空只许 `length = 0`，而且正看着的那一行压根不能碰。
+       *
+       * 会撞上的场景很具体：那条流断在重连间隙（`ac` 为 null），别的 Bot 这时开了流、
+       * 顺手调了 trimBotStreams——`keepId` 挡不住它，keepId 是那个别的 Bot。
+       */
+      const ui = await boot(adminToken)
+      const msg = (seq) => ({ seq, time: seq, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'x' }] } } })
+      for (let i = 0; i < ui.BOT_BUCKET_MAX + 2; i++) {
+        const r = ui.botStreamOf('cold-' + i)
+        r.events.push(msg(1))
+        r.sum.lastAt = i + 10
+      }
+      // 正看着的那个：ac 为 null（断在重连间隙），lastAt 最小所以排在淘汰队首。
+      const cur = ui.botStreamOf('bot-cur')
+      cur.events.push(msg(1))
+      cur.sum.lastAt = 1
+      ui.state.chatEvents = cur.events
+
+      ui.trimBotStreams('some-other-bot')
+
+      assert(ui.state.chatEvents === ui.botStreamOf('bot-cur').events, 'events 被换成新数组了——那条对话从此不再更新')
+      assert(ui.state.chatEvents.length === 1, `正看着的那条会话被清空了：${ui.state.chatEvents.length}`)
+      // 该淘汰的还是要淘汰掉，否则这个测只是把闸关死了。
+      const left = Array.from({ length: ui.BOT_BUCKET_MAX + 2 }, (_, i) => ui.botStreamOf('cold-' + i)).filter((r) => r.events.length)
+      assert(left.length === ui.BOT_BUCKET_MAX, `冷桶没按上限淘汰：还剩 ${left.length}`)
+    })
+
+    await test('席位重建会话：清掉能点的那几样，但别把侧栏那一行抹白', async () => {
+      /**
+       * `sum` 现在归名单通道管，而通道只在**变化时**发帧。整个换成空的等于把侧栏那一行
+       * 抹白，然后要等这颗 Bot 下次开口才回得来——而换版重启恰恰是人最想从名单上看出
+       * 「谁回来了」的时候。
+       *
+       * 但能点的那几样必须清：它们记的是**这条会话**上还等着人处理的东西，会话都换了，
+       * 终态事件永远不会来，留着就是一颗永远灭不掉的「在等你」。
+       */
+      const ui = await boot(adminToken)
+      const row = ui.botStreamOf('bot-restart')
+      row.sum.lastText = '上一句话'
+      row.sum.lastAt = 123
+      row.sum.asks = new Map([['c1', { callId: 'c1' }]])
+      row.sum.busy = true
+      ui.settleDot(row.sum)
+      assert(row.sum.state === 'review', `前置没成立：${row.sum.state}`)
+
+      ui.resetBotStream(row)
+
+      assert(row.sum.lastText === '上一句话', '摘要被抹白了——通道只发变化，这一行要等下次开口才回来')
+      assert(row.sum.lastAt === 123, '时间被抹掉了')
+      assert(!row.sum.asks || row.sum.asks.size === 0, '旧会话的确认还留着——那颗「在等你」永远灭不掉')
+      assert(row.sum.state === 'idle', `状态没重算：${row.sum.state}`)
+    })
+
+    await test('追平集重建出来的名单状态，和一路听下来的一模一样', async () => {
+      /**
+       * 一套上游按账号共享之后，**每一次刷新都是「中途接上」**：新页面连上来时，之前
+       * 那些帧早就发过了。Gateway 为此留了一份追平集（roster-filter.ts 的 CatchUp），
+       * 先补发再转直播。
+       *
+       * 这个测把两条路摆在一起跑：一路把全部帧喂给客户端（相当于一直连着的那个页面），
+       * 另一路只喂追平集（相当于刷新之后接上的页面），**折出来的 sum 必须一致**。
+       * 不一致的后果很具体——刷新之后侧栏那颗点、那行摘要、那个「在等你」的角标，会和
+       * 没刷新的另一个标签页显示得不一样，而没有任何东西会来纠正它。
+       */
+      const ui = await boot(adminToken)
+      const seq = (botId) => [
+        { type: 'roster/ev', botId, ev: { type: 'user/message', seq: 1, time: 100, data: { message: { content: [{ type: 'text', text: '去查一下' }] } } } },
+        { type: 'roster/ev', botId, ev: { type: 'turn/start', seq: 2, time: 101, data: { turn: 1 } } },
+        { type: 'roster/ev', botId, ev: { type: 'human/handoff', seq: 3, time: 102, data: { id: 'h1', state: 'open' } } },
+        { type: 'roster/ev', botId, ev: { type: 'human/handoff', seq: 4, time: 103, data: { id: 'h1', state: 'done' } } },
+        // h2 **不收口**：留着才验得到「追平集真的把还开着的那张单带过去了」。只放 h1
+        // 那种开了又关的话，两条路都是「没有单」，留存整个坏掉也测不出来。
+        { type: 'roster/ev', botId, ev: { type: 'human/handoff', seq: 5, time: 104, data: { id: 'h2', state: 'open' } } },
+        { type: 'roster/ev', botId, ev: { type: 'assistant/message', seq: 6, time: 105, data: { message: { content: [{ type: 'text', text: '查完了' }] } } } },
+        // 折过的 chunk tick：一轮跑着的时候它是唯一在推「最近活动」那个钟的东西。
+        // 序列里必须有它，否则这条等价保证盖不到「刷新之后钟倒退」那个毛病。
+        { type: 'roster/ev', botId, ev: { type: 'assistant/chunk', seq: 7, time: 110 } },
+        { type: 'roster/ev', botId, ev: { type: 'turn/end', seq: 8, time: 111, data: { turn: 1 } } },
+        { type: 'roster/live', botId, live: false },
+      ]
+      const shot = (botId) => {
+        const sum = ui.botStreamOf(botId).sum
+        return JSON.stringify({ state: sum.state, need: sum.need, lastText: sum.lastText, lastAt: sum.lastAt })
+      }
+
+      // 一直连着的那个页面：每一帧都收到了。
+      for (const f of seq('bot-live')) ui.noteRosterFrame(f)
+
+      // 刷新之后接上的页面：只收到追平集。
+      const cu = newCatchUp()
+      for (const f of seq('bot-catch')) remember(cu, f)
+      for (const f of catchUpFrames(new Map([['bot-catch', cu]]))) ui.noteRosterFrame(f)
+
+      assert(shot('bot-live') === shot('bot-catch'), `追平和直播折出来不一样：\n  直播 ${shot('bot-live')}\n  追平 ${shot('bot-catch')}`)
+      // 顺带钉住这一份到底该长什么样，免得两边一起错还判成「一致」。
+      const sum = ui.botStreamOf('bot-catch').sum
+      assert(sum.state === 'review' && sum.need === 'handoff', `那颗点该是「在等人接手」，实际 ${sum.state}/${sum.need}`)
+      assert(sum.lastText === '查完了', `摘要不对：${JSON.stringify(sum.lastText)}`)
+      assert(sum.lastAt === 110, `「最近活动」该停在那条 tick 上，实际 ${sum.lastAt}`)
+    })
+
+    await test('名单一条通道管所有 Bot：十几个 Bot 也只开一条连接', async () => {
+      /**
+       * 这里以前是**一个 Bot 一条 SSE**，两笔代价都很重：
+       *
+       * · 连接槽——HTTP/1.1 下浏览器每个源只给 6 条，而 SSE 是永不结束的 fetch，开着
+       *   就占死一条。十几个 Bot 把槽占光，画出正文的那条 history 排在后面干等，刷新
+       *   一次十几秒才见到消息，而且每次不一样（谁抢到槽是随机的）。
+       * · token 洪流——那几条流拿的是全量事件，包括每个 token 一条的 chunk。
+       *
+       * 现在 Gateway 扇入，浏览器只连一条（过滤规则另有 e2e/roster-stream.mjs 钉着）。
+       * 这个测钉住浏览器这一头的两件事：**只开一条**，以及**那一条真的把每个 Bot 的
+       * 状态喂进了名单**——十几个 Bot 都要看得见状态变化，靠的就是它。
+       */
+      const streams = []
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          if (path.includes('/roster/stream')) {
+            const sse = fakeSse()
+            streams.push(sse)
+            return sse.response
+          }
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      const ids = Array.from({ length: 15 }, (_, i) => 'bot-' + i)
+      ui.state.runtimeBots = ids.map((id) => ({ id, name: id.toUpperCase() }))
+      try {
+        ui.stopRosterStream()
+        streams.length = 0
+        void ui.startRosterStream()
+        for (let i = 0; i < 100 && !streams.length; i++) await new Promise((r) => setTimeout(r, 5))
+        assert(streams.length === 1, `15 个 Bot 开了 ${streams.length} 条连接——回到一个 Bot 一条那套了`)
+
+        // 再叫一次也不该再开一条：整页重绘、切页、切 Bot 都会走到那句 startRosterStream。
+        void ui.startRosterStream()
+        await new Promise((r) => setTimeout(r, 20))
+        assert(streams.length === 1, `重复调用又开了一条：${streams.length}`)
+
+        // 每个 Bot 的状态都要能经这一条喂进名单。挑最后一个——它正是「一个 Bot 一条
+        // 流」时代最先被上限挡在外面、看不到状态的那一批。
+        const last = ids[ids.length - 1]
+        streams[0].push({ type: 'roster/ev', botId: last, ev: { type: 'turn/start', seq: 1, time: 1 } })
+        streams[0].push({
+          type: 'roster/ev',
+          botId: last,
+          ev: { type: 'assistant/message', seq: 2, time: 2, data: { message: { content: [{ type: 'text', text: '干完了' }] } } },
+        })
+        for (let i = 0; i < 100 && !ui.botStreamOf(last).sum.lastText; i++) await new Promise((r) => setTimeout(r, 5))
+        const sum = ui.botStreamOf(last).sum
+        assert(sum.lastText === '干完了', `第 15 个 Bot 的摘要没喂进来：${JSON.stringify(sum.lastText)}`)
+        assert(sum.state === 'busy', `turn/start 之后那颗点该是「正在执行」，实际 ${sum.state}`)
+
+        // 席位表的态压过扫出来的结论——席位崩在半路时日志里有 turn/start 没 turn/end，
+        // 只扫事件的话那颗点会永远转下去。
+        streams[0].push({ type: 'roster/live', botId: last, live: false })
+        for (let i = 0; i < 100 && ui.botStreamOf(last).sum.state === 'busy'; i++) await new Promise((r) => setTimeout(r, 5))
+        assert(ui.botStreamOf(last).sum.state !== 'busy', 'roster/live 说没在跑，那颗点还转着')
+
+        // **名单的帧绝不能进事件桶**：它是过滤过的，凑不成一条会话，进了的话点进那个
+        // Bot 会看到一段缺了正文的历史。
+        assert(ui.botStreamOf(last).events.length === 0, '名单的帧落进事件桶了——点进去会看到缺了正文的历史')
+      } finally {
+        ui.stopRosterStream()
+        for (const s of streams) s.close()
+        ui.stopChatStream()
+      }
+    })
+
     await test('侧栏预热流先到：认领它，别让正文空着', async () => {
       const sse = fakeSse()
       let release = null
@@ -3427,9 +3638,8 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       })
       await ui.boot()
 
-      // loadPage 里那句 `void warmBotStreams()` 跑在 loadChatPage 前面，正在打开的这个
-      // Bot 也在名单里。于是同一条会话有两个人去开流：预热那边先建上（那会儿它还只是
-      // 后台流，chatStreamId 没设），ensureChatSession 随后才把这条会话认成当前的。
+      // 同一条会话可能有两个人去开流：某条重连路径先把流建上——那会儿它还不是当前会话，
+      // chatStreamId 没设——ensureChatSession 随后才把这条会话认成当前的。
       const pending = ui.ensureChatSession('bot-a')
       await new Promise((r) => setTimeout(r, 10))
       void ui.startChatStream('s-a', 0, 'bot-a')

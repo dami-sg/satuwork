@@ -997,13 +997,31 @@ function sse(
         const live = ctx.agents.isRunning(sessionId)
         // 「界面为什么一直显示正在处理」全靠这一行断案：live 是 true 就是真在跑，
         // 是 false 而界面还挂着，那就是前端的事。
+        /**
+         * **续传那一支不报「还有更早的」。**
+         *
+         * `firstSeq` / `hasMore` 只有「打开页面取最近几轮」那一支算得出来；续传时它们
+         * 停在初始的 `null` / `false`，照着打就是一句**假结论**——日志上写着
+         * 「还有更早的=false」，而那条会话前面明明还有几千条。排查刷新卡顿时，这一行
+         * 会把人引到「是不是重放了全部消息」上去，而续传只发了游标之后的那几条。
+         *
+         * 帧里也一并省掉：客户端那边 `noteChatPage` 是按「有没有带这两个值」判的
+         * （见 gateway/ui/chat.js），不带就不会覆盖它已经知道的分页游标。
+         */
+        const resuming = after > 0
         ctx.logger?.info?.(
-          `sse: 会话 ${sessionId} 接上，after=${after}，tail=${tail}，重放 ${replayed} 条，live=${live}，还有更早的=${hasMore}`,
+          `sse: 会话 ${sessionId} 接上，after=${after}，tail=${tail}，重放 ${replayed} 条，live=${live}` +
+            (resuming ? '（续传）' : `，还有更早的=${hasMore}`),
         )
         controller.enqueue(
           encoder.encode(
             // 队列一起带上：刷新页面之后 dock 要能原样回来。
-            `data: ${JSON.stringify({ type: 'replay/done', live, firstSeq, hasMore, queued: ctx.agents.queued(sessionId) })}\n\n`,
+            `data: ${JSON.stringify({
+              type: 'replay/done',
+              live,
+              ...(resuming ? {} : { firstSeq, hasMore }),
+              queued: ctx.agents.queued(sessionId),
+            })}\n\n`,
           ),
         )
 

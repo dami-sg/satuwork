@@ -1,0 +1,42 @@
+# Satuwork Gateway 的 TLS + HTTP/2 反代（Caddy 版）。
+#
+# **为什么非要它**：浏览器在 HTTP/1.1 下对同一个源只给 6 条连接，而每条 SSE 是一个
+# 永不结束的 fetch，开着就占死一条。名单那条通道 + 正在看的那条对话已经收成两条了
+# （见 docs/gateway-runtime.md §12），但这一页还有一串 XHR 要跑——正文的 history、
+# 待办、确认、交接、日常任务、`@` 候选——6 条连接仍然是个会硌人的数。h2 一条 TCP
+# 多路复用上百条流，这件事就不用再算了。
+#
+# Caddy 自动申请证书、自动开 h2，所以这份配置只有一件正事：**别缓冲 SSE**。
+#
+# **上线前先在本地验一遍**（不需要证书，攒不攒和 TLS 无关）：
+#   node gateway/deploy/check-sse.mjs origin &
+#   caddy reverse-proxy --from :8080 --to 127.0.0.1:9099 &
+#   node gateway/deploy/check-sse.mjs check http://127.0.0.1:8080/sse
+#
+#   sudo caddy run --config /etc/caddy/Caddyfile
+#
+# 换成你自己的域名（证书按它签），Gateway 仍然只听 127.0.0.1:3080。
+
+satuwork.example.com {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:3080 {
+		# **这一行是命门。** -1 = 拿到什么就立刻冲出去，不攒。
+		#
+		# 攒着的后果很特别：席位把整段历史 enqueue 完会立刻发一条 `replay/done`，
+		# 客户端全靠它才知道「历史放完了、这条会话此刻在不在跑」。它要是连同尾巴一起
+		# 压在反代的缓冲里，界面就会缺一截历史、而且永远挂着「正在处理」——连接看着
+		# 还开着，也不会重连。哪条会话中招取决于字节数落在缓冲边界的哪一侧，所以刷
+		# 一次换一个，看着像见了鬼。席位每 15 秒发的那条 `: ping` 是兜底，不是解法。
+		flush_interval -1
+
+		# SSE 是长连接，别按普通请求的空闲超时掐。
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}
+
+# 桌面那条 WebSocket（/desktop/<seatId>/…，见 docs/gateway-runtime.md §7）走的是同一个
+# 源、同一条反代，Caddy 自己认得 Upgrade，不用额外配置。
