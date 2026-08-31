@@ -227,6 +227,28 @@ export class Db {
     await this.pool.end()
   }
 
+  /**
+   * 事务级排他锁。**「先查一遍，没有再插」那一类要它。**
+   *
+   * `db.tx` 跑在 PG 默认的 READ COMMITTED 上：两条并发事务各自 `select` 到「还没有」，
+   * 然后各插一行，两边都提交成功——「抢在事务里再查一遍」这句话在这个隔离级别下根本
+   * 不成立，它只是把窗口缩小到看起来不会发生。CI 上那次「并发点两次创建也只成一个」
+   * 报 201/201，就是窗口没缩住。
+   *
+   * 锁跟着事务走（commit / rollback 自动放），所以调用方不用记得解锁；**但它必须在
+   * `db.tx` 里调**，事务外的 xact 锁当场就放了，等于没锁。
+   *
+   * 每一处各取一个常数，别复用同一个数：两件不相干的事排在一条队上，是最难查的那种慢。
+   *
+   * **锁是整个库的，不分 schema。** e2e 那几十套共用一个 Postgres（各占一个 schema），
+   * 两份并行的 e2e 会在同一个号上互相等一下——等的是一次 insert 的工夫，可以接受；要是
+   * 哪天有一处锁里带上了慢活，那时再把 schema 名折进第二个参数。
+   */
+  async lockExclusive(key: number): Promise<void> {
+    if (!this.txClient.getStore()) throw new Error('lockExclusive 必须在 db.tx 里调——事务外的锁当场就放了')
+    await this.one('select pg_advisory_xact_lock(?)', [key])
+  }
+
   async tx<T>(fn: () => Promise<T> | T): Promise<T> {
     const existing = this.txClient.getStore()
     // 已经在事务里就直接跑，不开嵌套事务。
