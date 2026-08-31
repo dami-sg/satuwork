@@ -247,8 +247,26 @@ function taskShot() {
 let taskTimer = 0
 function tasksPoll() {
   clearTimeout(taskTimer)
-  if (state.path !== '/tasks' || document.hidden) return
+  if (state.path !== '/tasks') return
   taskTimer = setTimeout(async () => {
+    /**
+     * **判据在这儿再走一遍，不能只在排的时候判。**
+     *
+     * 排下去和真的响之间隔着 30 秒，人早走开了：照「只在排的时候判」写的话，这一响
+     * 仍然会去打一次接口、还可能 render() 整页——而人此刻正站在别的页上填表单，输入框
+     * 当场被换掉。e2e 里更狠：那一响落在下一个套件中间，而它拿到的是一个连
+     * querySelectorAll 都没有的 DOM 垫片，未捕获的异常直接把整个 node 进程带走
+     * （整场 e2e 停在那儿，剩下十几个套件根本没跑）。
+     */
+    if (state.path !== '/tasks') return
+    /**
+     * 标签页在后台：**只重排，不请求**。
+     *
+     * `return` 掉的话这条轮询就此永远停了——人切回来看到的是一屏他离开时的样子，而且
+     * 再也不会自己变。空转一次的代价只有一个定时器，浏览器还会把后台的定时器节流到
+     * 分钟级。
+     */
+    if (document.hidden) return tasksPoll()
     const before = taskShot()
     try {
       await loadTasks()
@@ -266,7 +284,9 @@ function tasksPoll() {
 
 function paintTaskTimes() {
   const root = document.getElementById('app')
-  if (!root) return
+  // 拿不到、或者拿到的是个查不了的壳（e2e 那层 DOM 垫片）：这一笔不画。它只是把
+  // 「3 分钟前」刷新一下，值不上为它抛一个没人接的异常。
+  if (!root || typeof root.querySelectorAll !== 'function') return
   for (const el of root.querySelectorAll('.satu-task-card time[data-at]')) {
     el.textContent = taskAgo(Number(el.getAttribute('data-at')) || 0)
   }

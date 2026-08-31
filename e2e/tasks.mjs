@@ -317,6 +317,15 @@ export async function runTasks({ root, gwRoot, test, req, start, waitHttp, asser
       const after = (await req(base, 'GET', `/tasks/${row.id}`, { token: meTok })).json.task
       assert(after.state === 'done', `界面上改状态该落库：${after.state}`)
       assert(after.humanFields.includes('state'), '人改过的那一格要记下来，抽取器之后绕开它')
+      /**
+       * **走之前把这一页的轮询停掉。**
+       *
+       * 那条 30 秒的定时器活在垫片里，套件结束它照样在排——响的时候已经是下一个套件，
+       * 而它拿到的 DOM 是个查不了的壳。第一次跑完整 e2e 就是这么死的：整场停在 manager
+       * 中间，后面十几个套件根本没跑，而屏幕上只有一句 querySelectorAll is not a function。
+       * 页面那侧也修了（轮询在响的时候再判一次路径），这里再明说一遍。
+       */
+      ui.state.path = '/'
     })
 
     await test('界面：超过一页时给得出「加载更多」，而且真的接得上', async () => {
@@ -341,6 +350,8 @@ export async function runTasks({ root, gwRoot, test, req, start, waitHttp, asser
       // **追加，不是覆盖**；而且不能把上一页重复追一遍。
       const ids = new Set(ui.state.tasks.map((x) => x.id))
       assert(ids.size === ui.state.tasks.length, '翻页翻出了重复的行')
+      // 同上：别把一条还在排的轮询留给下一个套件。
+      ui.state.path = '/'
     })
 
     await test('没有任何一条路能让一条任务跑起来', async () => {
