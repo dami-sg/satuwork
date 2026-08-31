@@ -11,10 +11,11 @@
  * **用线上的默认参数**，不靠调小上限把测试凑出来。
  */
 import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
 
-export async function runTasks({ gwRoot, test, req, start, waitHttp, assert, log }) {
+export async function runTasks({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-tasks')
   const GW_PORT = 18993
   const base = `http://127.0.0.1:${GW_PORT}`
@@ -239,6 +240,58 @@ export async function runTasks({ gwRoot, test, req, start, waitHttp, assert, log
       assert(r.status === 200, `delete ${r.status} ${r.text}`)
       const after = await req(base, 'GET', `/tasks/${row.id}`, { token: meTok })
       assert(after.status === 404, `删完该 404：${after.status}`)
+    })
+
+    await test('界面：一屏四列，人只能改状态 / 改标题 / 删除 / 打开原对话', async () => {
+      const { loadApp, el } = await import('./ui-dom.mjs')
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base, token: meTok })
+      await ui.boot()
+      // 侧栏那颗入口进得去：`/tasks` 不在 MEMBER_NAV 里，靠 allowedHrefs 单独放行——
+      // 漏了这一行的表现是点一下被踢回首页。
+      assert(ui.pathAllowed('/tasks'), '/tasks 该放行')
+      assert(ui.html().includes('data-href="/tasks"'), '侧栏没有「任务看板」入口')
+
+      /**
+       * **直接摆好 state 再 render**，不走 `go()`：`go` 是 `loadPage().then(render)`，
+       * 那一拍之后才画得出来，在这儿等它等于给测试加一个时序赌注。这一条验的是
+       * 「同样的数据画成什么」和「点下去干了什么」，路由那一半上面那句已经验过。
+       */
+      ui.state.path = '/tasks'
+      ui.state.tasks = (await list()).tasks
+      ui.state.taskCounts = (await list()).counts
+      ui.render()
+      const html = ui.html()
+      assert(['提案', '进行中', '完成'].every((x) => html.includes(x)), `三列该都在：${html.slice(html.indexOf('gw-body'), html.indexOf('gw-body') + 400)}`)
+      assert(html.includes('draggable="true"'), '每一条都该拿得起来——这一版的状态是判断，人有权纠正')
+      /**
+       * **执行面的按钮一个都不许有。** 这一条和下面那条「没有那种路由」是一对：路由没了
+       * 而界面上还留着按钮，人点下去看到的是一次 404，比没有按钮更糟。
+       */
+      for (const gone of ['data-act="task-run"', 'data-act="task-assign"', '重跑', '派给']) {
+        assert(!html.includes(gone), `界面上不该还有「${gone}」`)
+      }
+
+      /**
+       * 点开一条、改一档状态都要先去一趟 Gateway，而那两个动作是 `void … .then(render)`
+       * ——**不等就读，读到的是上一拍**。这里等条件成立，不是等一个拍脑袋的毫秒数。
+       */
+      const settle = async (what, ok) => {
+        for (let i = 0; i < 40; i++) {
+          if (await ok()) return
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        throw new Error(what)
+      }
+
+      const row = ui.state.tasks.find((x) => x.state !== 'dropped' && x.state !== 'done')
+      await ui.fire('click', el('button', { 'data-act': 'task-open', 'data-id': row.id }))
+      await settle('点一条该开详情', async () => ui.html().includes('gw-modal'))
+      assert(ui.html().includes('打开这段对话'), '详情里该有回到原对话那条路——摘要错了只有原文能纠')
+      await ui.fire('click', el('button', { 'data-act': 'task-state', 'data-id': row.id, 'data-state': 'done' }))
+      await settle('界面上改状态该落库', async () => (await req(base, 'GET', `/tasks/${row.id}`, { token: meTok })).json.task.state === 'done')
+      const after = (await req(base, 'GET', `/tasks/${row.id}`, { token: meTok })).json.task
+      assert(after.state === 'done', `界面上改状态该落库：${after.state}`)
+      assert(after.humanFields.includes('state'), '人改过的那一格要记下来，抽取器之后绕开它')
     })
 
     await test('没有任何一条路能让一条任务跑起来', async () => {

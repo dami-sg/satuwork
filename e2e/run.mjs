@@ -3288,7 +3288,7 @@ async function main() {
     await suite('skills-bot', () => runSkillsBot({ root, test, assert, log }))
     await suite('memory-bot', () => runMemoryBot({ root, test, assert, log }))
     await suite('memory', () => runMemory({ root, gwRoot, test, req, start, waitHttp, assert, log }))
-    await suite('tasks', () => runTasks({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('tasks', () => runTasks({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('task-extract', () => runTaskExtract({ root, test, assert, log }))
     await suite('bot-template', () => runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager', () => runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }))
