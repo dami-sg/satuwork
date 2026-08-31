@@ -15,6 +15,7 @@ import { MEMORY_PIN_MAX, MEMORY_TEXT_MAX, memoryExpiresAt, memoryKey, memoryKind
 import { WebToolError } from '../web-tools.ts'
 import { runExtract, runSearch } from '../web-service.ts'
 import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
+import { rosterStream } from '../lib/roster-stream.ts'
 
 /**
  * 一个人最多建几个 Bot。
@@ -1385,6 +1386,28 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const bot = await visibleBotOf(db, account, req.params.id)
     const { pinned, tpl } = await botContext(db, account.companyId)
     json(res, 200, { bot: { ...publicBot(bot, pinned, tpl), runtime: await pairRuntime(db, account, bot.id) } })
+  })
+
+  /**
+   * 名单那一条实时通道：**一个人一条，不是一个 Bot 一条**。
+   *
+   * 只转发名单真正要的那几种事件，`assistant/chunk` 在 Gateway 这一层就折成一个节流过
+   * 的时间戳——理由、边界和取舍全写在 lib/roster-stream.ts 开头。
+   *
+   * **它喂的是摘要，不是正文。** 客户端拿它更新侧栏那一行，绝不能倒进事件桶；正文照旧
+   * 走下面那条 per-session 的流，人点进哪个 Bot 才开哪一条。
+   *
+   * **路径叫 `stream` 不叫 `events`，是故意的。** 会话那条是 `…/sessions/:id/events`，
+   * 而这一层前后有好几处（含测试的 fetch 桩）拿 `path.includes('/events')` 认流——两条
+   * 路径撞上同一个子串的话，名单这条会被当成某条会话的流数进去、掐掉、或者接管。
+   */
+  router.get('/runtime/roster/stream', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireSeat(account)
+    // 名单就是侧栏那一份（和 `/runtime/bots` 同一个来源），不是「这个账号的所有席位」
+    // ——后者会把已经删掉的 Bot 留下的残行也算进来。
+    const bots = await db.botsFor(account.companyId, account.id)
+    await rosterStream(req, res, db, account, bots.map((b) => b.id))
   })
 
   router.get('/runtime/sessions/:id/events', async (req, res) => {

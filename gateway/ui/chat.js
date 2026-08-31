@@ -35,8 +35,25 @@ let sessionGaveUp = false
  */
 const botStreams = new Map()
 
-/** 同时开着的流的上限。名单通常只有两三个 Bot，这道闸是防意外，不是常态。 */
-const BOT_STREAM_MAX = 8
+/**
+ * **同时开着的对话流的上限。**
+ *
+ * 这里数的只剩「对话流」了：名单的实时状态已经收进一条通道（见 startRosterStream），
+ * 不再是一个 Bot 一条。人切 Bot 时上一条不掐（它可能正在干活，而切回去就不用重放
+ * 历史），于是会攒——这道闸就是那个上限。
+ *
+ * 3 条：当前这条 + 最近待过的两条。每条 SSE 都是一个永不结束的 fetch，HTTP/1.1 下
+ * 还各占死一个连接槽（浏览器每个源只给 6 条）；上线挂了 h2 反代之后这个上限不再是
+ * 硬墙（见 docs/gateway-runtime.md §7.1），但攒着的每一条同样占着一台席位的连接和
+ * 一份事件桶，没有理由留更多。
+ */
+const BOT_STREAM_MAX = 3
+
+/**
+ * 留在内存里的事件桶上限。**和上面那道闸是两回事**：桶占的是内存，流占的是连接，
+ * 而流关掉之后桶还留着——切回那个 Bot 时不用再重放一遍历史。
+ */
+const BOT_BUCKET_MAX = 8
 
 function botStreamOf(botId) {
   let row = botStreams.get(botId)
@@ -63,8 +80,9 @@ function botStreamOf(botId) {
  *   「别拉两遍」的闸会把新会话挡在门外，并且返回旧会话那只 promise；旧的一醒来发现
  *   串台就自己走了，于是**新会话的历史从此没人去拉**，界面永远停在流垫的那一轮。
  *
- * 数据那三样漏清也各有症状：漏 sum 是名单上挂着上一条会话的摘要，漏 hydrated 是
- * 新会话永远不去拉历史。
+ * 漏清 hydrated 的症状是新会话永远不去拉历史。
+ *
+ * **`sum` 只清能点的那几样，不整个换掉**——理由见下面那一段。
  */
 function resetBotStream(row) {
   if (row.ac) {
@@ -81,7 +99,23 @@ function resetBotStream(row) {
   }
   row.hydrating = null
   row.events.length = 0
-  row.sum = { state: 'idle', lastAt: 0, lastText: '' }
+  /**
+   * **摘要不整个换掉，只清「能点的」那几样。**
+   *
+   * `sum` 已经不是这条对话流的派生物了——它归名单通道管（见 startRosterStream）。整个
+   * 换成空的等于把侧栏那一行抹白，而通道只在**变化时**发帧，不会因为你丢了状态就重发
+   * 一遍：那一行要等这颗 Bot 下次开口才回得来。换版重启时每一颗被重置的 Bot 都会这样
+   * 白一次，而换版恰恰是人最想从名单上看出「谁回来了」的时候。
+   *
+   * 但 `openIds` / `asks` 必须清：它们记的是「**这条会话**上还等着人处理的单子和确认」，
+   * 会话都换了，它们的终态事件永远不会来，留着就是一颗永远灭不掉的「在等你」。
+   * `lastText` / `lastAt` 只是一行灰字，旧一点也诚实，通道下一帧就盖掉了。
+   */
+  row.sum.openIds = null
+  row.sum.snapIds = null
+  row.sum.asks = null
+  row.sum.busy = false
+  settleDot(row.sum)
   row.hydrated = false
 }
 
@@ -110,7 +144,7 @@ function settleDot(sum) {
 /**
  * 名单上所有 Bot 此刻正等着人拍板的确认，摊平成一张表。
  *
- * **数据源是名单那几条流**（warmBotStreams 给每颗 Bot 都开了一条），不是 Gateway：
+ * **数据源是名单那条通道**（startRosterStream，一条管所有 Bot），不是 Gateway：
  * 确认停在席位的内存里，压根没上过 Gateway（见 docs/handoff.md §2——它和交接单的
  * 时间尺度、存活方式都不一样，不该塞进那张表）。所以「谁在等你拍板」这个问题，
  * 浏览器这边是唯一答得上来的地方。
@@ -300,15 +334,58 @@ function closeAllBotStreams() {
   botStreams.clear()
 }
 
-/** 超出上限就先关最久没动静的那条，事件也一并丢掉。 */
+/**
+ * 开着的流有几条。
+ *
+ * **闸要按这个数把，不能按 `botStreams.size`。** 后者是「攒过几个 Bot 的事件桶」，
+ * 流关掉之后桶还留着（切回去不用再重放历史），拿它当连接数会算多——而算多的方向
+ * 恰恰是「以为已经超了」，于是该开的流反倒开不出来。
+ */
+function openBotStreams() {
+  let n = 0
+  for (const row of botStreams.values()) if (row.ac) n++
+  return n
+}
+
+/**
+ * 超出上限就先关最久没动静的那条；桶另算一道闸。
+ *
+ * **只关空闲的**：一条正在跑的对话流断掉，那一轮的正文就没人接了。名单上那颗点不受
+ * 影响——它现在归名单通道管（startRosterStream），跟这个 Bot 有没有开着对话流无关。
+ *
+ * 关流**不丢桶**：切回那个 Bot 时还有历史可看。桶多到 BOT_BUCKET_MAX 才清事件，
+ * 而且**只清事件、不删这一行**（行上挂着名单要的 sum）。
+ */
 function trimBotStreams(keepId) {
-  if (botStreams.size <= BOT_STREAM_MAX) return
-  const rows = [...botStreams.entries()].filter(([id, r]) => id !== keepId && r.sum.state === 'idle')
+  const rows = [...botStreams.entries()].filter(([id, r]) => id !== keepId && r.ac && r.sum.state === 'idle')
   rows.sort((a, b) => a[1].sum.lastAt - b[1].sum.lastAt)
-  while (botStreams.size > BOT_STREAM_MAX && rows.length) {
-    const [id] = rows.shift()
-    closeBotStream(id)
-    botStreams.delete(id)
+  while (openBotStreams() > BOT_STREAM_MAX && rows.length) closeBotStream(rows.shift()[0])
+  /**
+   * 桶占的是内存，另算一道闸。**但只清事件，不删这一行**——行上还挂着 `sum`，那是
+   * 名单上那一行灰字（在不在跑、最近说了什么）唯一的落脚处，而它现在由名单通道喂，
+   * 跟这个 Bot 有没有开过对话流没关系。删掉行等于把侧栏那几行清空，而且再也不会
+   * 自己长回来（通道只在**变化时**发帧，不会因为你丢了状态就重发一遍）。
+   */
+  /**
+   * **两道守卫，各挡一种翻车法，缺一不可。**
+   *
+   * · `r.events !== state.chatEvents`——`state.chatEvents` 和某一行的 `events` 是**同
+   *   一个数组对象**（见 ensureChatSession 那三处赋值）。正看着的那个 Bot 的流断在
+   *   重连间隙时 `ac` 是 null，不挡住的话它会被当成冷桶清掉，而清的正是屏幕上那份。
+   *   `keepId` 挡不住它：trim 是别的 Bot 开流时调的，keepId 是那个 Bot。
+   * · **清是 `length = 0`，不是 `= []`。** 换数组会把上面那个别名切断：新事件落进新
+   *   数组，`state.chatEvents` 还指着旧的，于是那条对话静默停止更新，连
+   *   hydrateChat 也救不回来（它填的也是新数组）。全文清空一律用这个写法。
+   */
+  const fat = [...botStreams.entries()].filter(
+    ([id, r]) => id !== keepId && r.events.length && !r.ac && !r.hydrating && r.events !== state.chatEvents,
+  )
+  if (fat.length <= BOT_BUCKET_MAX) return
+  fat.sort((a, b) => a[1].sum.lastAt - b[1].sum.lastAt)
+  for (const [, row] of fat.slice(0, fat.length - BOT_BUCKET_MAX)) {
+    row.events.length = 0
+    // 桶空了就得允许下次重新补历史，否则点进去只剩流垫的那一轮。
+    row.hydrated = false
   }
 }
 
@@ -458,8 +535,8 @@ const CHAT_TAIL_TURNS = 20
  *   · 点进一个 Bot 的**第一帧**要有东西可看。历史那次 HTTP 还在路上时，屏幕上先有
  *     最后一问一答，比空白诚实。
  *
- * 为什么不是 20：名单上每个 Bot 都挂一条流（warmBotStreams），二十轮乘几个 Bot，
- * 全在主线程上 JSON.parse——而那一堆事件最后只换来侧栏的一行字。
+ * 为什么不是 20：这一轮是给「点进去的第一帧」垫的，二十轮那份由 hydrateChat 走 HTTP
+ * 拉，两条路各司其职（见 docs/gateway-runtime.md §12）。
  */
 const STREAM_TAIL_TURNS = 1
 
@@ -847,8 +924,8 @@ function fold(events, live) {
  * 整页才回得来。
  */
 function releaseChatStream(ac, owner) {
-  // 还要把 Bot 那一行的 ac 清掉：它是「这条流还活着」的唯一判据——warmBotStreams 靠它
-  // 决定要不要补一条，ensureChatSession 的热路径靠它决定要不要直接把正文接回去。留着
+  // 还要把 Bot 那一行的 ac 清掉：它是「这条流还活着」的唯一判据——ensureChatSession 的
+  // 热路径靠它决定要不要直接把正文接回去，chatStreamAlive 靠它决定发消息前要不要重连。留着
   // 一个已经死掉的 ac，那两处就都以为流还在跑，于是谁也不再重连：切回这个 Bot 只会接到
   // 一个空的事件桶，刷新整页才回得来。
   const row = owner ? botStreams.get(owner) : null
@@ -1347,59 +1424,174 @@ async function loadChatPage() {
     })
     .catch(() => {})
   // loadRuntimeBots 由 loadPage 统一拉（名单是全局侧栏，不只这一页要）。
-  await loadRuntimeMachine()
   // 上下文占比要知道模型的窗口有多大。新日志的 request/header 自带，老日志没有，
   // 目录是那种情况下的唯一来源。**不 await，也不让它的失败冒出来**——一条灰字的提示
   // 不值得把整页的加载拖住或者拖挂。
   if (!(state.catalog || []).length) void loadCatalog().catch(() => {})
   const botId = chatBotIdOf(state.path)
-  await loadDesktopRuntime(botId)
+  /**
+   * **会话不排在这两跳后面。**
+   *
+   * 机器信息（抬头那盏灯）和桌面运行时（右栏那块屏）跟正文没有任何关系，可它们原来是
+   * 一条一条 `await` 下来的，而 ensureChatSession 排在最后——刷新一次，正文要等这两个
+   * 来回都走完才开始去拿会话。两跳都是 Gateway → 管家 → 席位，各自还带着几次
+   * Postgres 查询（见 lib/runtime.ts 的 seatTargetFor），白挡在最要紧的那条路前面。
+   *
+   * 三条一起发，正文只等它自己那条。这一页仍然等齐了才返回，所以 loadPage 之后那次
+   * render() 该有的东西一样不少。
+   */
+  const chrome = Promise.all([loadRuntimeMachine(), loadDesktopRuntime(botId)]).catch(() => {})
   // 右栏那一列日常任务。**不 await**：它只画右栏，不该让正文晚一个 RTT 才出来。
   void loadRoutines(botId)
-  if (botId) await ensureChatSession(botId)
-  // 名单上每个 Bot 都挂一条流。刷新页面之后也能立刻看出谁在干活、谁最近说了什么——
-  // 只连当前这一个的话，那两列信息要等人挨个点进去才出得来。
-  void warmBotStreams()
+  try {
+    if (botId) await ensureChatSession(botId)
+  } finally {
+    // 抬头和右栏那两份照旧要等齐了才返回（loadPage 之后那次 render 要用），
+    // 会话这一跳抛出来时也一样——`finally` 就是为这一条。
+    await chrome
+  }
+  // 名单那一条通道（一条管所有 Bot，见 startRosterStream）。已经开着就是空操作——
+  // 它由 loadPage 在每一页统一起，这里只是补一次「直接落在对话页」的情况。
+  void startRosterStream()
+}
+
+/* ══ 名单那一条实时通道 ═══════════════════════════════════════════════
+   侧栏名单要的是每个 Bot「在不在跑 / 最近说了什么 / 是不是在等你」。这三样以前是
+   **一个 Bot 一条 SSE** 拿回来的，两笔代价都很重：
+
+     · 连接槽——HTTP/1.1 下浏览器每个源只给 6 条，而 SSE 是永不结束的 fetch，开着就
+       占死一条。十几个 Bot 直接把槽占光，画出正文的那条 history 排在后面干等。
+     · token 洪流——那几条流拿的是**全量**事件，包括每个 token 一条的 chunk。十个 Bot
+       同时干活就是十路 token 流在主线程上 JSON.parse，画的是侧栏十行灰字。
+
+   现在换成 Gateway 扇入、浏览器只连一条（见 gateway/src/lib/roster-stream.ts）：加上
+   正在看的那条对话，**稳定态一共两条连接，跟 Bot 数无关**。
+
+   **它喂的是摘要，不是正文。** 帧里的事件是过滤过的（只有名单消费的那六种），凑不成
+   一条完整的会话——所以只喂 noteBotEvent，**绝不进事件桶**：进了的话点进那个 Bot 会
+   看到一段缺了正文的历史。正文照旧由 ensureChatSession 在人点进去时另开一条。
+   ══════════════════════════════════════════════════════════════════ */
+
+/** 断了之后的退避档位（毫秒）。到顶就一直用最后那一档——名单这条不认输，理由见下。 */
+const ROSTER_BACKOFF = [500, 1000, 2000, 4000, 8000, 15_000, 30_000]
+let rosterAbort = null
+let rosterTimer = null
+
+async function startRosterStream(attempt = 0) {
+  // 已经有一条在跑就别再开。整页重绘、切页、切 Bot 都会走到这儿。
+  if (attempt === 0 && rosterAbort) return
+  clearTimeout(rosterTimer)
+  const ac = new AbortController()
+  rosterAbort = ac
+  const t = token()
+  let res
+  try {
+    res = await fetch('/runtime/roster/stream', {
+      headers: { accept: 'text/event-stream', ...(t ? { authorization: 'Bearer ' + t } : {}) },
+      signal: ac.signal,
+    })
+  } catch {
+    return retryRosterStream(ac, attempt + 1)
+  }
+  /**
+   * 401 / 403 当场认输：票没了、或者这个账号根本没有席位（owner）。重试只会白敲。
+   * 404 也在内（老 Gateway 没有这条路由）——但那种情况下前端和 Gateway 是一起发的，
+   * 真出现了说明部署错了，重试同样没有意义。
+   */
+  if (res.status === 401 || res.status === 403 || res.status === 404) {
+    if (rosterAbort === ac) rosterAbort = null
+    return
+  }
+  if (!res.ok || !res.body) return retryRosterStream(ac, attempt + 1)
+  /**
+   * 下一次重连用哪个档位，判据是**这次连接活了多久**，不是「有没有连上」——和
+   * startChatStream 那套一字不差（见 CHAT_ALIVE_MS 上面那段）。不这么算的话，早期
+   * 几次失败把档位推到顶之后，哪怕这条流健康地跑了几小时再断，下一次也要等满 30 秒
+   * 才重连，而那半分钟里名单上每一颗点都是冻着的。
+   */
+  const openedAt = Date.now()
+  const nextAttempt = () => (Date.now() - openedAt >= CHAT_ALIVE_MS ? 0 : attempt + 1)
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (ac.signal.aborted || rosterAbort !== ac) break
+      buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+      let idx
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, idx)
+        buf = buf.slice(idx + 2)
+        for (const line of frame.split('\n')) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            noteRosterFrame(JSON.parse(line.slice(6)))
+          } catch {
+            /* 半截帧 / 不认识的形状：跳过，别把整条流带下去 */
+          }
+        }
+      }
+    }
+  } catch {
+    if (ac.signal.aborted) {
+      if (rosterAbort === ac) rosterAbort = null
+      return
+    }
+  }
+  if (ac.signal.aborted || rosterAbort !== ac) return
+  return retryRosterStream(ac, nextAttempt())
 }
 
 /**
- * 给名单上的每个 Bot 都开一条流（当前这个除外，它自己会开）。
+ * 断了自己接回来，**而且不认输**。
  *
- * 这些流**只为侧栏那一行字**：在不在跑、最近说了什么、什么时候说的。所以它们垫的
- * 历史是 STREAM_TAIL_TURNS（一轮），不是打开对话要看的那二十轮——那二十轮改由
- * hydrateChat 在人真的点进去时才拉。
- *
- * 串着来、不并发：拿 sessionId 那一跳是每个 Bot 一个请求，几个 Bot 同时发会跟正文
- * 抢席位那边的连接，而这些数据只是侧栏上的一行字。
+ * 认输的代价在这条通道上特别隐蔽：名单上那颗点会停在断掉那一刻的样子——「正在执行」
+ * 一直转下去，而那台 Bot 可能十分钟前就干完了。没有任何东西会来纠正它，人也不会想到
+ * 去刷新（他看到的是「在跑」，不是「断了」）。所以退避到 30 秒一档之后就一直重试。
  */
-async function warmBotStreams() {
-  for (const b of state.runtimeBots || []) {
-    if (!b || !b.id) continue
-    // 当前这个由 ensureChatSession 开（它还要接正文），这里只管别的。
-    if (b.id === state.chatBotId && botStreams.get(b.id)?.ac) continue
-    const row = botStreams.get(b.id)
-    if (row && row.ac) continue
-    await warmOneBotStream(b.id)
+function retryRosterStream(ac, attempt) {
+  if (rosterAbort !== ac) return
+  rosterAbort = null
+  const wait = ROSTER_BACKOFF[Math.min(attempt, ROSTER_BACKOFF.length - 1)]
+  clearTimeout(rosterTimer)
+  rosterTimer = setTimeout(() => void startRosterStream(attempt), wait)
+}
+
+function stopRosterStream() {
+  clearTimeout(rosterTimer)
+  const ac = rosterAbort
+  rosterAbort = null
+  if (ac) {
+    try {
+      ac.abort()
+    } catch {}
   }
 }
 
-/**
- * 悄悄给某个 Bot 挂一条后台流：拿会话、必要时清场、开流。
- *
- * **不碰当前这一屏**——名单上那几个 Bot 的流只为侧栏那一行字（在不在跑、最近说了
- * 什么），走 ensureChatSession 的话会把「当前 Bot」直接改成它，人正看着的对话会被
- * 拽到别处去。
- */
-async function warmOneBotStream(botId) {
-  try {
-    const data = await api('GET', '/runtime/bots/' + encodeURIComponent(botId) + '/session')
-    if (!data.sessionId) return
-    const r = botStreamOf(botId)
-    if (r.sessionId && r.sessionId !== data.sessionId) resetBotStream(r)
-    r.sessionId = data.sessionId
-    void startChatStream(data.sessionId, 0, botId)
-  } catch {
-    // 席位没上线之类——名单上这一行就没有时间和摘要，不该让整页跟着出错。
+/** 名单通道的一帧。形状见 gateway/src/lib/roster-stream.ts。 */
+function noteRosterFrame(msg) {
+  if (!msg || typeof msg !== 'object' || !msg.botId) return
+  if (msg.type === 'roster/ev') {
+    // **只更新摘要，不进事件桶**（见这一段开头）。botStreamOf 顺手把这一行建出来：
+    // 没有它 noteBotEvent 会直接 return，而刷新之后每一行本来都还没建。
+    botStreamOf(msg.botId)
+    noteBotEvent(msg.botId, msg.ev || {})
+    return
+  }
+  if (msg.type === 'roster/live' && typeof msg.live === 'boolean') {
+    /**
+     * 席位表的态，压过按事件扫出来的结论——和正文那边 chatLive 治的是同一个病：
+     * 席位崩在半路时日志里有 turn/start 没 turn/end，只扫事件的话那颗点永远转下去。
+     *
+     * **改 busy 再让 settleDot 去算，不直接写 state**：那是派生量，还要把「等审批 /
+     * 等接手」一起算进去（见 settleDot）。
+     */
+    const sum = botStreamOf(msg.botId).sum
+    sum.busy = msg.live
+    settleDot(sum)
+    scheduleRosterPaint()
   }
 }
 
@@ -1455,9 +1647,9 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
     if (row && row.sessionId === sessionId && row.ac) {
       // 但**必须把它认领成当前那条**，不能只是 return。
       //
-      // 它很可能是 warmBotStreams 当后台流开的——loadPage 里那句 `void warmBotStreams()`
-      // 跑在 loadChatPage 前面，正在打开的这个 Bot 也在名单里。开的时候它还不是当前会
-      // 话，chatAbort / chatStreamId 都没设。随后 ensureChatSession 把 chatSessionId 指
+      // 它很可能是上一次待在这个 Bot 上时留下的（换 Bot 不掐流），或者是某条重连路径
+      // 刚刚接回来的。那会儿它不是当前会话，chatAbort / chatStreamId 都没设。随后
+      // ensureChatSession 把 chatSessionId 指
       // 过来，这条流在读循环里就同时满足了「是当前会话」和「chatStreamId 对不上」——那
       // 正是「人已经切走了」的判据，于是它自己收摊；retryChatStream 又拿同一把闩去认它，
       // 一次都不重连。结果就是正文一片空白、名单上没时间没摘要，切走再切回来还是空的
@@ -1610,17 +1802,21 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
       // **不再因为「不是当前会话」就收摊**：后台那几条流正是名单上时间、摘要和转圈的
       // 唯一来源。只有当前这条要盯 chatStreamId（重连时它会被换掉）。
       if (isActive() && chatStreamId !== sessionId) break
-      armStall()
       // 任何字节都算脉搏——`: ping` 不是事件、下面的解析会跳过它，但它证明这条链活着。
+      // **看门狗不在这里续命**（见下面的 sawData）：「这条链活着」和「重放在推进」是
+      // 两件事，混成一件的后果写在 REPLAY_STALL_MS 上面。
       notePulse(ac, sessionId, owner)
       buf += decoder.decode(value, { stream: true })
       buf = buf.replace(/\r\n/g, '\n')
       let idx
+      /** 这一批字节里有没有真事件。**只有它给看门狗续命**，`: ping` 不算。 */
+      let sawData = false
       while ((idx = buf.indexOf('\n\n')) >= 0) {
         const frame = buf.slice(0, idx)
         buf = buf.slice(idx + 2)
         for (const line of frame.split('\n')) {
           if (!line.startsWith('data: ')) continue
+          sawData = true
           let ev
           try {
             ev = JSON.parse(line.slice(6))
@@ -1741,10 +1937,16 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
             state.chatEvents.push(ev)
           }
           if (!isActive()) continue
+          // 重放还在继续：把「静默」判定往后推。**但照画**——合并重绘由 rAF 管，
+          // 状态由 paintChat 摁着不会说假话（两处都见重放闸那段说明）。以前这里是
+          // 「重放期间一帧都不画」，代价是刷新之后最长四秒屏幕上什么都没有。
           if (state.chatReplaying) bumpReplayQuiet()
-          else schedulePaintChat()
+          schedulePaintChat()
         }
       }
+      // 重放在推进，就把看门狗往后推一格。**放在解析之后**：这一批里要是有
+      // replay/done，sawDone 已经置位，armStall 自己会空转。
+      if (sawData) armStall()
     }
   } catch (err) {
     disarmStall()
@@ -1812,14 +2014,14 @@ function retryChatStream(sessionId, ac, attempt) {
 /**
  * 「这条流断了」摆到界面上。
  *
- * **只有人正看着的那一条有资格占用那条横幅。** 名单上每个 Bot 都挂着一条流（见
- * warmBotStreams），其中任何一条断掉都会走到这里——而它说的是另一个 Bot 的事：屏幕上
+ * **只有人正看着的那一条有资格占用那条横幅。** 切过 Bot 之后手上会留着前几条对话流
+ * （见 BOT_STREAM_MAX），其中任何一条断掉都会走到这里——而它说的是另一个 Bot 的事：屏幕上
  * 那条对话好好的，却被扣上一句「连接断开」，人会去点那颗「重新连接」，重连的也是另一
  * 条流。更实在的代价是**那一下是整页重绘**：正在打字的人当场丢焦点和光标位置，而起因
  * 是他根本没在看的一个 Bot。
  *
- * 后台流断了就安静地放手：名单上那一行停在最后一次摘要上，人点进去时 ensureChatSession
- * 会重新拿会话、重新开流。
+ * 留着的那几条断了就安静地放手：名单上那一行照旧由名单通道维护，人点进去时
+ * ensureChatSession 会重新拿会话、重新开流。
  */
 function noteStreamDown(sessionId, message) {
   if (state.chatSessionId !== sessionId) return
@@ -1967,7 +2169,11 @@ function seatRestarted(botId, sessionId) {
     })
     return
   }
-  void warmOneBotStream(botId)
+  /**
+   * 名单上别的 Bot 换版了：**什么都不用做**。它的状态走名单那条通道（一条管所有
+   * Bot），而那条通道自己会断线重连、重连时带 `after` 把缺的补回来。以前这里要单独
+   * 给它挂一条后台流，正是「一个 Bot 一条流」那套的尾巴。
+   */
 }
 
 /** 这条会话此刻有没有人在听。判据和 startChatStream 那道「已经在跑」的闸一致。 */
@@ -2096,10 +2302,22 @@ function reviveChatStream(sessionId, botId) {
  * 配对的 `turn/end` 才消失。实测 789 帧里有 772 帧（98%）挂着「正在处理」，而那期间
  * 什么都没在跑——它说的是几小时前那一轮。
  *
- * 所以重放期间只收不画，历史放完再画一次。两个判据：
+ * 这道闸原来的做法是**重放期间一帧都不画**，历史放完再画一次。它治住了上面两条，
+ * 却把「闪错状态」换成了更难受的「一片空白」：闸只在 replay/done 到达、或者静默
+ * 120ms、或者 4 秒硬上限时才开，而刷新页面时这条流正在跟别的请求抢连接槽（当年名单上
+ * 是一个 Bot 一条流），事件断断续续地来，静默判定一次次被推后——于是整整四秒，屏幕上
+ * 什么都没有。
+ *
+ * 现在两头都要：
+ *   · **照画。** rAF 已经把一帧里的若干条合并成一次重绘（见 schedulePaintChat），
+ *     O(n²) 那笔账本来就不该由这道闸来还。
+ *   · **状态由 paintChat 摁住**：重放期间席位还没表态，一律按「没在跑」，扫描扫出来
+ *     的那个中间态一眼都不会露出来。
+ *
+ * 闸本身留着，它现在只回答「席位表态了没有」这一件事。三个判据照旧：
  *   1. bot 发的 `replay/done`（准确，但要 bot 也升级）
  *   2. 静默 120ms（兜底：重放是连续灌的，一停就是灌完了）
- * 外加 4 秒硬上限，免得某条流一直断续把闸卡死。
+ *   3. 4 秒硬上限，免得某条流一直断续把闸卡死
  */
 /**
  * 重放停在半路多久算「卡住了」。
@@ -2110,8 +2328,25 @@ function reviveChatStream(sessionId, botId) {
  *
  * 到点就带着游标重连——bot 会把缺的那截补上，`replay/done` 也跟着来。比干等强，
  * 也比整页刷新强：刷新是从 0 再放一遍，缓冲边界照样可能卡在同一个地方。
+ *
+* **4 秒，而不是原来的 8 秒。**
+ *
+ * 能缩短，是因为上面那条 sawData 把这道闸的判据修对了：它现在量的是「**重放有没有在
+ * 推进**」——只有真事件给它续命，`: ping` 不算。所以「N 秒内一条事件都没来、而
+ * replay/done 也没到」就是货真价实的卡住，不必留那么宽的余量。判据没修之前不敢缩：
+ * 那会儿它量的是「有没有收到字节」，一次慢一点的重放就会被误杀。
+ *
+ * **为什么不是反过来、让那条 15 秒的 ping 先去顶。** ping 存在的理由确实是把压在下游
+ * 缓冲里的尾巴顶出去（见 bot 的 web/index.ts），闸拉到 20 秒就能等到它。可席位那条
+ * `setInterval` 是从开流那一刻起算的，第一条 ping 稳稳落在 15 秒——**比现在这条重连
+ * 路径还慢**。线上那份日志里，相隔整 8 秒的那次重连（`tail=1` 之后紧跟一条
+ * `after=<游标>`）是**成功**的：补上之后就不再卡了。既然重连本来就管用，就让它快一点。
+ *
+ * 缩到 4 秒之后，人看到的那段空白从 8 秒变成 4 秒。至于 replay/done 一开始为什么会
+ * 丢——那是下游哪一跳在攒帧的问题，得用 gateway/deploy/check-sse.mjs 逐跳打出来，
+ * 不在这道闸的职责里。
  */
-const REPLAY_STALL_MS = 8000
+const REPLAY_STALL_MS = 4000
 const REPLAY_QUIET_MS = 120
 const REPLAY_MAX_MS = 4000
 let replayQuietTimer = null
@@ -3844,7 +4079,23 @@ function nearBottom(el) {
 
 function paintChat() {
   const thread = document.getElementById('chat-thread')
-  const folded = mergePending(fold(state.chatEvents, chatLive.get(state.chatSessionId)), state.chatSessionId)
+  /**
+   * 「这一轮在不在跑」。席位表过态就听它的；**没表态而正在重放，一律按「没在跑」**。
+   *
+   * 重放是把历史从头灌一遍，而扫描对半截历史毫无抵抗力：灌到某轮的 `turn/start` 就是
+   * 「正在处理」，要等配对的 `turn/end` 也灌出来才落下。拿真实数据量过，789 帧里有
+   * 772 帧挂着「正在处理」，那期间什么都没在跑。这正是重放期间原来干脆一帧都不画的
+   * 理由——可那个办法是拿「几秒钟一片空白」去换「不闪错状态」，而空白更难受。
+   *
+   * 摁在这里，两样就都拿到了：消息随着重放长出来，状态一眼假话都不说。`replay/done`
+   * 一到，chatLive 里就是权威答案了（见流里那一支），这条兜底自然让位。
+   */
+  const live = chatLive.has(state.chatSessionId)
+    ? chatLive.get(state.chatSessionId)
+    : state.chatReplaying
+      ? false
+      : undefined
+  const folded = mergePending(fold(state.chatEvents, live), state.chatSessionId)
   state.chatStatus = folded.status
   if (!thread) return
   // 正文里的文件名要接回哪几个文件，整条会话算一次（见 chatFileCands）。
