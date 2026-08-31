@@ -56,6 +56,29 @@ class FakeCatalog extends Service {
 }
 
 const ctx = new Context()
+/**
+ * 假名册。**runCard 只用它两处**：`get(botId)` 拿这颗 Bot 的记录（provider/model 的
+ * 兜底和提示词要），`ensureSession(botId)` 找不到主会话时开一条。
+ *
+ * 为什么不装真的 registry：它 inject 了 `server`，而这个探针连 HTTP 都不起。别的探针
+ * 也是这么办的（e2e-guards / e2e-skills 里都有 `ctx.provide('roster', …)`）。
+ *
+ * **这一条是补上去的，不是一开始就有。** `roster` 是后来才进 agent 的 inject 列表的
+ * （22a3d1e「fix kanban issue」），而那次没动这个探针——cordis 缺一个依赖就**静默地
+ * 不 apply 这个插件**，于是 `ctx.agents` 一直是 undefined，探针在第一次用它的时候才
+ * 以 `Cannot read properties of undefined` 炸掉，而错误指向的是 runCard 那一行，跟真正
+ * 的原因隔着十万八千里。往 agent 的 inject 里加东西时，这里要跟着加。
+ */
+ctx.provide('roster', {
+  get: (id) => (id === 'bot-1' ? { id: 'bot-1', name: '出图的' } : undefined),
+  list: () => [{ id: 'bot-1', name: '出图的' }],
+  /** 契约照抄真名册：有就复用，没有才造一条（registry 的 ensureSession）。 */
+  async ensureSession(id) {
+    const mine = (await ctx.sessions.list()).find((row) => row.botId === id)
+    if (mine) return { sessionId: mine.id, created: false }
+    return { sessionId: await ctx.sessions.create({ title: id, botId: id }), created: true }
+  },
+})
 ctx.plugin(storagePlugin, { path: join(home, 'db.sqlite') })
 ctx.plugin(sessionsPlugin, { root: join(home, 'sessions') })
 ctx.plugin(workspacePlugin, { root: work })
