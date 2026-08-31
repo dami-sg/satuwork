@@ -30,13 +30,28 @@ const DEBOUNCE_MS = 20_000
 const MIN_INTERVAL_MS = 90_000
 /** 每条会话每天最多抽几次。**这是失控时的闸，不是为省钱设计的。** */
 const DAILY_MAX = 60
-/** 喂给模型的上限。超了从最早那一轮开始丢——新的那几轮才是这次要判的。 */
+/**
+ * 喂给模型的上限。
+ *
+ * **超了就只喂装得下的那几轮，而且从最老的那一轮开始装。** 反过来（留最新的、丢最老的）
+ * 会静静吃掉一整段对话：水位随后一次推到窗口末尾，被丢掉的那几轮再没有任何一次抽取会
+ * 看到它们——而最老那几轮里放的恰恰是「人当初要求了什么」。装不下的留给下一次，那时
+ * 水位已经往前挪过，它们就是新的窗口开头。
+ */
 const INPUT_MAX = 6000
 /** 水位丢了（席位重装、`$SATUWORK_HOME` 被清）从最后几轮开始，**不回溯整条会话**。 */
 const TAIL_TURNS = 8
 const TIMEOUT_MS = 30_000
-/** 失败之后隔多久再试。三次之后放弃这一段——下一轮 turn/end 还会再来，那时窗口更大。 */
+/** 失败之后隔多久再试。 */
 const BACKOFF_MS = [60_000, 4 * 60_000, 15 * 60_000]
+/**
+ * 退避走完之后、或者撞上一个重试没有意义的拒绝（4xx）时，这条会话歇多久。
+ *
+ * **不能是 0。** 归零的那一版是这样死的：`nextTry` 一清，之后每一轮 turn/end 都会重新
+ * 走一遍「调模型 → 报上去 → 被拒」，而钱在第一步就花掉了。一条挂满 60 条任务的会话
+ * （Gateway 一律回 409）于是变成一台按对话轮数计费的抽水机，没有任何一道闸拦得住它。
+ */
+const COOLDOWN_MS = 60 * 60_000
 /**
  * **动手**了的工具，结果摘一小段给模型；其余的**一个字都不摘**。
  *
@@ -47,6 +62,22 @@ const BACKOFF_MS = [60_000, 4 * 60_000, 15 * 60_000]
 const RESULT_EXCERPT = 80
 
 const COLLECTION = 'task-extract'
+
+/**
+ * 上报失败。`retryable` 回答的是**再报一次有没有希望**——见 `report()` 上那段。
+ *
+ * 这个类是从删掉的 kanban-report.ts 搬过来的，一字未改：那条教训（分不开就会重试到死）
+ * 在这儿一模一样地成立，只是这次烧的是模型调用而不是席位的步数。
+ */
+class ReportError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message)
+    this.name = 'ReportError'
+  }
+}
 
 /** 每条会话一行水位。**存在席位本地**——Gateway 那边没有这个概念。 */
 interface Mark {
@@ -74,10 +105,32 @@ interface Turn {
   turn: number
   startSeq: number
   endSeq: number
+  /** 这一轮的**要求**：人打的，或者日常任务 / 交还回来的交接单替人下的那一条。 */
   user: string[]
+  /**
+   * 那条要求是谁下的。**要进提示词**：一件事是人当场交代的，还是每天早上自动跑的，
+   * 对「这算不算一件任务」没有区别，但对模型怎么写标题有区别。
+   */
+  by: 'user' | 'routine' | 'handoff'
   say: string
   calls: { name: string; risk: string[]; result: string }[]
 }
+
+/**
+ * 哪些 `source` 算「有人要求了一件事」。
+ *
+ * **日常任务必须算。** 它那条消息挂的是 `plugin: 'routine'`（见 bot/src/web/index.ts 的
+ * `/api/messages`），照「只认 kind === 'user'」写的话，一颗专职跑日常任务的 Bot——每天早上
+ * 自动对账、自动发报表——板上会**一条任务都没有**，而它恰恰是最该被总结的那一类：人根本
+ * 没在看，只能靠这块板知道昨天办成了没有。
+ *
+ * 顺带它还修掉一个更隐蔽的：那种会话每一轮都判「不值得抽」，而不值得抽的窗口不推水位，
+ * 于是水位永久停在 0，每一轮 turn/end 都要把整条会话从头解析一遍。
+ *
+ * `handoff` 同理（人做完交回来那一句）。剩下的 plugin 源——运行时快照、Skill 目录、工作区
+ * 指令、审批通知——都不是要求，照旧滤掉。
+ */
+const ASKED_BY: Record<string, Turn['by']> = { routine: 'routine', handoff: 'handoff' }
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -252,13 +305,33 @@ export class TaskExtractService extends Service {
     // 成功返回看不出来，而那正是判「做完没有」的唯一证据。
     const cut = [...window].reverse().find((e) => e.type === 'turn/end')
     if (!cut) return 'idle'
-    const turns = turnsOf(window.filter((e) => e.seq <= cut.seq), (n) => this.ctx.tools.riskOf(n))
+    const all = turnsOf(window.filter((e) => e.seq <= cut.seq), (n) => this.ctx.tools.riskOf(n))
+    /**
+     * **只吃装得下的那几轮，从最老的开始。**
+     *
+     * 装不下的留在水位后面，下一次接着来——这一步和下面那句「水位只推到真的喂进去的
+     * 那一轮」是一对，缺任何一半都会让一段对话被静静吃掉。
+     */
+    const fitted = fitWindow(all)
+    const turns = fitted.turns
 
     /**
      * 先用规则挡掉大部分（§6.1）。**跳过的时候不推水位**——这一段多半是下一件事的前半截
      * （「查邮件」之后才有「回信」），水位推过去，那段上下文就此丢了。
+     *
+     * **只有一个例外：后面还排着装不下的那些。** 不推的话，这一段会永远挡在前面——每次
+     * 都挑中它、每次都判不值得、后面新发生的事一辈子轮不到。那时把水位推过这一段是两害
+     * 相权：丢掉的是 6000 字符的只读翻查（人一共没说满 20 个字），换回来的是后面那些真
+     * 办了事的轮次抽得成。
      */
-    if (!worthExtracting(turns)) return 'skipped'
+    if (!worthExtracting(turns)) {
+      if (fitted.truncated) {
+        this.marks().put(sessionId, { ...mark, upto: fitted.upto })
+        this.ctx.logger?.info?.(`task-extract: ${sessionId} 这一段不值得抽，但后面还排着，水位往前挪`)
+        this.schedule(sessionId)
+      }
+      return 'skipped'
+    }
 
     const picked = this.model()
     if (!picked) {
@@ -269,6 +342,14 @@ export class TaskExtractService extends Service {
     }
 
     this.running.add(sessionId)
+    /**
+     * **模型这一跳一花钱就记账**，不管后面成没成。
+     *
+     * `runs` 原来只在成功那条路上 +1，于是 DAILY_MAX 这道「失控时的闸」对一条永远失败
+     * 的会话完全不起作用——而那正是最需要它的情形。
+     */
+    const spent = { ...mark, at: Date.now(), runs: mark.runs + 1 }
+
     try {
       const text = await this.complete(picked, renderWindow(turns, mark.open))
       const parsed = jsonOf(text) as { tasks?: unknown[] } | null
@@ -278,20 +359,35 @@ export class TaskExtractService extends Service {
       const open = await this.report(sessionId, {
         sessionId,
         botId: (root?.data as { botId?: string } | undefined)?.botId ?? '',
-        upto: cut.seq,
+        // **只推到真的喂进去的那一轮**，不是窗口末尾（见 fitWindow）。
+        upto: fitted.upto,
         model: `${picked.provider}/${picked.model}`,
         version: VERSION,
         tasks,
       })
-      this.marks().put(sessionId, { ...mark, upto: cut.seq, at: Date.now(), runs: mark.runs + 1, fails: 0, nextTry: 0, open })
+      this.marks().put(sessionId, { ...spent, upto: fitted.upto, fails: 0, nextTry: 0, open })
       if (tasks.length) this.ctx.logger?.info?.(`task-extract: ${sessionId} 认出 ${tasks.length} 件事`)
+      /**
+       * 这一次没吃完：**当场再排一次**，别等下一轮对话。
+       *
+       * 不排的话，剩下那几轮要等人再说一句话才轮得上；而一个刚交代完一长串、然后走开的
+       * 人，恰恰是最不会再说话的那一个。MIN_INTERVAL_MS 仍然拦着，所以最快也是 90 秒
+       * 一段，不会连成一串。
+       */
+      if (fitted.truncated) this.schedule(sessionId)
       return 'ok'
     } catch (e) {
       const fails = mark.fails + 1
-      const wait = BACKOFF_MS[Math.min(fails, BACKOFF_MS.length) - 1]
-      // 三次之后不再排队等：水位仍然不推，下一轮 turn/end 会再来一次，那时窗口更大。
-      this.marks().put(sessionId, { ...mark, fails, nextTry: fails > BACKOFF_MS.length ? 0 : Date.now() + wait })
-      this.ctx.logger?.warn?.(`task-extract: ${sessionId} 第 ${fails} 次没抽成：${(e as Error).message}`)
+      const hopeless = e instanceof ReportError && !e.retryable
+      /**
+       * **退避永远不归零。** 走完三档、或者撞上一个再报也没用的 4xx，就让这条会话歇一
+       * 小时——水位仍然不推，一小时后连同这期间新的几轮一起再抽一次。
+       */
+      const wait = hopeless || fails > BACKOFF_MS.length ? COOLDOWN_MS : BACKOFF_MS[fails - 1]
+      this.marks().put(sessionId, { ...spent, fails, nextTry: Date.now() + wait })
+      this.ctx.logger?.warn?.(
+        `task-extract: ${sessionId} 第 ${fails} 次没抽成（${Math.round(wait / 60_000)} 分钟后再试）：${(e as Error).message}`,
+      )
       return 'skipped'
     } finally {
       this.running.delete(sessionId)
@@ -343,6 +439,11 @@ export class TaskExtractService extends Service {
    *
    * 走 `/internal`：这是**这台机器在汇报**，和会话索引、用量同一类。走 `/runtime` 的话，
    * 模型有一天就能自己往板上写一条。
+   *
+   * 失败分两类，判据是**再报一次有没有希望**（照抄已经删掉的 kanban-report.ts 那条）：
+   * 连不上 / 超时 / 5xx 有；4xx 没有——那是 Gateway 判出来的（这条会话到了任务上限、
+   * 认不出属于哪颗 Bot），再问一百遍是同一个答案。分不开的话，一个永久的拒绝会让席位
+   * 每一轮重跑一次模型去撞同一堵墙。
    */
   private async report(sessionId: string, body: unknown): Promise<Mark['open']> {
     const base = gatewayUrl()
@@ -356,7 +457,7 @@ export class TaskExtractService extends Service {
     })
     if (!r.ok) {
       const text = await r.text().catch(() => '')
-      throw new Error(`Gateway 返回 HTTP ${r.status}${text ? ` ${text.slice(0, 120)}` : ''}`)
+      throw new ReportError(`Gateway 返回 HTTP ${r.status}${text ? ` ${text.slice(0, 120)}` : ''}`, r.status >= 500)
     }
     const data = (await r.json()) as { open?: { key?: string; title?: string; state?: string }[] }
     return (Array.isArray(data.open) ? data.open : []).map((t) => ({
@@ -380,7 +481,7 @@ export function turnsOf(events: SessionEvent[], riskOf: (name: string) => string
   let cur: Turn | null = null
   const pending = new Map<string, Turn['calls'][number]>()
   const open = (n: number, seq: number): Turn => {
-    const t: Turn = { turn: n, startSeq: seq, endSeq: seq, user: [], say: '', calls: [] }
+    const t: Turn = { turn: n, startSeq: seq, endSeq: seq, user: [], by: 'user', say: '', calls: [] }
     out.push(t)
     return t
   }
@@ -400,10 +501,17 @@ export function turnsOf(events: SessionEvent[], riskOf: (name: string) => string
     if (!cur) cur = open(Number(d.turn) || 1, e.seq)
     cur.endSeq = e.seq
     if (e.type === 'user/message') {
-      // **只要真人说的话。** 插件注入的运行时快照、Skill 目录、工作区指令都挂在
-      // `source` 上（见 docs/session-event-field-map.md），它们不是这个人的要求。
-      const kind = (d.source as { kind?: string } | undefined)?.kind
-      if (!kind || kind === 'user') cur.user.push(textOf((d as { content?: unknown }).content))
+      /**
+       * **只要「有人要求了一件事」那几条。** 插件注入的运行时快照、Skill 目录、工作区
+       * 指令都挂在 `source` 上（见 docs/session-event-field-map.md），它们不是要求；而
+       * 日常任务和交还回来的交接单是（见 ASKED_BY）。
+       */
+      const src = d.source as { kind?: string; plugin?: string } | undefined
+      const by = !src?.kind || src.kind === 'user' ? 'user' : ASKED_BY[String(src.plugin ?? '')]
+      if (by) {
+        cur.by = by
+        cur.user.push(textOf((d as { content?: unknown }).content))
+      }
     } else if (e.type === 'assistant/message') {
       cur.say = textOf((d.message as { content?: unknown } | undefined)?.content)
     } else if (e.type === 'tool/call') {
@@ -443,27 +551,63 @@ export function worthExtracting(turns: Turn[]): boolean {
   return said.length >= 20
 }
 
+/** 谁下的那条要求，说给模型听。 */
+const BY_LABEL: Record<Turn['by'], string> = { user: '用户', routine: '日常任务', handoff: '交接单交还' }
+
+/** 单行上限。比这更长的用户消息是贴进来的一份文档，开头这些字足够说清他要什么。 */
+const LINE_MAX = 600
+
+/** 一轮渲染成几行。**长度判据只有这一处**：fitWindow 按它算，renderWindow 按它拼。 */
+function linesOf(t: Turn): string[] {
+  const lines: string[] = []
+  for (const u of t.user) if (u.trim()) lines.push(`#${t.turn} ${BY_LABEL[t.by]}：${u.trim().slice(0, LINE_MAX)}`)
+  for (const c of t.calls) {
+    lines.push(`#${t.turn} 助理调用：${c.name}（${c.risk.join(',')}）${c.result ? ` → ${c.result}` : ''}`)
+  }
+  if (t.say.trim()) lines.push(`#${t.turn} 助理：${t.say.trim().slice(0, LINE_MAX)}`)
+  return lines
+}
+
+/**
+ * 这一次喂得下哪几轮：**从最老的那一轮开始装，装不下的留给下一次**。
+ *
+ * 两件事一起解决：
+ *
+ * 1. **不再有静默的丢失。** 原来是「渲染完整个窗口，超了从最早那头往下丢」，而水位随后
+ *    一次推到窗口末尾——被丢掉的那几轮再没有任何一次抽取会看到它们，而最老那几轮里放的
+ *    恰恰是「人当初要求了什么」。现在水位只推到**真的喂进去的那一轮**（`upto`），剩下的
+ *    留在水位后面，下一次就是新窗口的开头
+ * 2. **不再有 O(n²)。** 原来每丢一行就把整个数组重新 join 一遍；一个攒了几千行的窗口
+ *    要 join 几千次，每次几百 KB
+ *
+ * **至少装一轮**：一轮自己就超上限时也照装（渲染时按 INPUT_MAX 截一刀）。不然水位推不
+ * 动，这一轮会被反复挑中、反复超限，谁都过不去。
+ */
+export function fitWindow(turns: Turn[]): { turns: Turn[]; upto: number; truncated: boolean } {
+  const kept: Turn[] = []
+  let size = 0
+  for (const t of turns) {
+    const n = linesOf(t).reduce((sum, l) => sum + l.length + 1, 0)
+    if (kept.length && size + n > INPUT_MAX) break
+    kept.push(t)
+    size += n
+  }
+  const picked = kept.length ? kept : turns.slice(0, 1)
+  return {
+    turns: picked,
+    upto: picked[picked.length - 1]?.endSeq ?? 0,
+    truncated: picked.length < turns.length,
+  }
+}
+
 /** 窗口 → 喂给模型的那段文本。**工具结果的正文不进来**，见 RESULT_EXCERPT。 */
 export function renderWindow(turns: Turn[], open: { key: string; title: string; state: string }[]): string {
   const head = open.length
     ? ['【这条对话已经挂着的任务】', ...open.map((t) => `- [${t.state}] ${t.key}：${t.title}`), '']
     : ['【这条对话还没有任何任务】', '']
-  const body: string[] = []
-  for (const t of turns) {
-    for (const u of t.user) if (u.trim()) body.push(`#${t.turn} 用户：${u.trim()}`)
-    for (const c of t.calls) {
-      const risk = c.risk.join(',')
-      body.push(`#${t.turn} 助理调用：${c.name}（${risk}）${c.result ? ` → ${c.result}` : ''}`)
-    }
-    if (t.say.trim()) body.push(`#${t.turn} 助理：${t.say.trim()}`)
-  }
-  // 超了从**最早**那几行开始丢：新的那几轮才是这次要判的。
-  let text = body.join('\n')
-  while (text.length > INPUT_MAX && body.length > 1) {
-    body.shift()
-    text = body.join('\n')
-  }
-  return [...head, '【新的对话】', text].join('\n')
+  // 上限已经由 fitWindow 挑过了；这一刀只兜「一轮自己就超上限」那一种。
+  const body = turns.flatMap(linesOf).join('\n').slice(0, INPUT_MAX)
+  return [...head, '【新的对话】', body].join('\n')
 }
 
 /**

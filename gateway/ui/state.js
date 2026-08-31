@@ -308,6 +308,10 @@ const state = {
   taskCounts: {},
   /** 只看哪颗 Bot 的。空 = 全部。 */
   taskBot: '',
+  /** 下一页的 keyset 游标。空 = 已经到底了（界面据此决定出不出「加载更多」）。 */
+  taskCursor: '',
+  /** 正在加载下一页。按钮据此置灰——连点三下就是三份重复追加。 */
+  taskMore: false,
   /** 打开的那一条（含时间线）。null = 没开弹窗。 */
   taskOpen: null,
   handoffCount: 0,

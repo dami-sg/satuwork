@@ -187,6 +187,23 @@ export async function runTasks({ root, gwRoot, test, req, start, waitHttp, asser
       assert(after.state === 'doing', `状态该跟着抽取器走：${after.state}`)
     })
 
+    await test('提交一个没变的值不算「人碰过」', async () => {
+      const row = one('报价', (await list()).tasks)
+      assert(!row.humanFields.includes('state'), `前提：这条还没被人碰过 ${JSON.stringify(row.humanFields)}`)
+      /**
+       * 详情弹窗把当前那一档画成 primary，人点一下它是想确认——界面上什么都不会变。
+       * 照「提交了就算」写的话，那一次毫无反馈的点击会永久关掉抽取器对这条任务的更新，
+       * 而这件事后来真办完了，板上它还停在原地。
+       */
+      const same = await req(base, 'PATCH', `/tasks/${row.id}`, { token: meTok, body: { state: row.state, title: row.title } })
+      assert(same.status === 200, `patch ${same.status} ${same.text}`)
+      assert(same.json.task.humanFields.length === 0, `没改就不该记：${JSON.stringify(same.json.task.humanFields)}`)
+      // 抽取器照样推得动它。
+      await extract([{ key: 'reply-supplier-quote', title: '回复供应商的报价邮件', state: 'doing', summary: '又聊起来了', evidence: '#20 用户又提了一次', firstSeq: 10, lastSeq: 200 }])
+      const moved = one('报价', (await list()).tasks)
+      assert(moved.state === 'doing', `抽取器该还推得动：${moved.state}`)
+    })
+
     await test('人能把一条推到 dropped', async () => {
       const row = one('会议室', (await list()).tasks)
       const r = await req(base, 'PATCH', `/tasks/${row.id}`, { token: meTok, body: { state: 'dropped' } })
@@ -283,6 +300,14 @@ export async function runTasks({ root, gwRoot, test, req, start, waitHttp, asser
         throw new Error(what)
       }
 
+      /**
+       * 列头那个数**只数画出来的**，另有一行「一共 N 条，还有 M 条没显示」跟着一颗
+       * 「加载更多」。原来列头放的是服务端总数而卡片只有第一页——数对不上，而且多出来的
+       * 那些既看不见也翻不到。
+       */
+      const shown = ui.state.tasks.filter((x) => x.state === 'doing').length
+      assert(html.includes(`>进行中<span>${shown}</span>`) || html.includes(`进行中<span>${shown}</span>`), `列头该只数画出来的 ${shown} 张`)
+
       const row = ui.state.tasks.find((x) => x.state !== 'dropped' && x.state !== 'done')
       await ui.fire('click', el('button', { 'data-act': 'task-open', 'data-id': row.id }))
       await settle('点一条该开详情', async () => ui.html().includes('gw-modal'))
@@ -292,6 +317,30 @@ export async function runTasks({ root, gwRoot, test, req, start, waitHttp, asser
       const after = (await req(base, 'GET', `/tasks/${row.id}`, { token: meTok })).json.task
       assert(after.state === 'done', `界面上改状态该落库：${after.state}`)
       assert(after.humanFields.includes('state'), '人改过的那一格要记下来，抽取器之后绕开它')
+    })
+
+    await test('界面：超过一页时给得出「加载更多」，而且真的接得上', async () => {
+      const { loadApp, el } = await import('./ui-dom.mjs')
+      const ui = loadApp({ appPath: join(root, 'gateway/ui/app.js'), base, token: meTok })
+      await ui.boot()
+      ui.state.path = '/tasks'
+      // 这条会话上面已经灌了几十条，拿一页 5 条来逼出翻页。
+      const first = await req(base, 'GET', '/tasks?limit=5', { token: meTok })
+      assert(first.status === 200, `list ${first.status} ${first.text}`)
+      assert(first.json.cursor, '这么多条了该给出游标')
+      ui.state.tasks = first.json.tasks
+      ui.state.taskCounts = first.json.counts
+      ui.state.taskCursor = first.json.cursor
+      ui.render()
+      assert(ui.html().includes('data-act="task-more"'), '还有没显示的，就该有「加载更多」')
+
+      const before = ui.state.tasks.length
+      await ui.fire('click', el('button', { 'data-act': 'task-more' }))
+      for (let i = 0; i < 40 && ui.state.tasks.length === before; i++) await new Promise((r) => setTimeout(r, 50))
+      assert(ui.state.tasks.length > before, '点了加载更多，列表该变长')
+      // **追加，不是覆盖**；而且不能把上一页重复追一遍。
+      const ids = new Set(ui.state.tasks.map((x) => x.id))
+      assert(ids.size === ui.state.tasks.length, '翻页翻出了重复的行')
     })
 
     await test('没有任何一条路能让一条任务跑起来', async () => {

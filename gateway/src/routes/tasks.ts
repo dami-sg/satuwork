@@ -125,6 +125,11 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
    *
    * 人能推到 `dropped`，抽取器不能（§5）：一件真被放弃的事和一件被忘掉的事，在会话里
    * 长得一模一样。
+   *
+   * **只有真的改了才算「人碰过」。** 提交一个和现在一模一样的值不进 `humanFields`——
+   * 详情弹窗把当前那一档画成 primary，人点一下它是想确认，界面上什么都不会变、时间线上
+   * 也不留痕；照「提交了就算」写的话，那一次毫无反馈的点击会永久关掉抽取器对这条任务的
+   * 更新，而这件事后来真办完了，板上它还停在「进行中」。
    */
   router.patch('/tasks/:id', async (req, res) => {
     const account = await requireUser(req, db, keys)
@@ -137,12 +142,17 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
     if (body.title !== undefined) {
       const title = oneLine(strField(body, 'title'), TASK_TITLE_MAX)
       if (!title) throw new HttpError(400, '标题不能为空')
-      patch.title = title
-      fields = withHumanField(fields, 'title')
+      if (title !== task.title) {
+        patch.title = title
+        fields = withHumanField(fields, 'title')
+      }
     }
     if (body.summary !== undefined) {
-      patch.summary = oneLine(strField(body, 'summary', false), TASK_SUMMARY_MAX)
-      fields = withHumanField(fields, 'summary')
+      const summary = oneLine(strField(body, 'summary', false), TASK_SUMMARY_MAX)
+      if (summary !== task.summary) {
+        patch.summary = summary
+        fields = withHumanField(fields, 'summary')
+      }
     }
     if (body.state !== undefined) {
       const s = strField(body, 'state')
@@ -154,8 +164,8 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
         patch.state = s
         patch.stateAt = Date.now()
         patch.doneAt = s === 'done' ? Date.now() : null
+        fields = withHumanField(fields, 'state')
       }
-      fields = withHumanField(fields, 'state')
     }
     if (fields !== task.humanFields) patch.humanFields = fields
     if (Object.keys(patch).length === 0) {

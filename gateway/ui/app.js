@@ -491,8 +491,22 @@ document.getElementById('app').addEventListener('click', async (e) => {
   }
   if (act === 'task-bot') {
     // 换一颗 Bot 过滤。整屏重拉——列头那几个数是服务端按同一个过滤算的。
+    // **游标跟着清**：留着上一份过滤的游标，翻下一页会翻出别人家的任务。
     state.taskBot = btn.getAttribute('data-id') || ''
+    state.taskCursor = ''
     void loadTasks().then(render).then(tasksPoll).catch((e) => flash('err', e.message))
+    return
+  }
+  if (act === 'task-more') {
+    if (state.taskMore) return
+    state.taskMore = true
+    render()
+    void loadTasks({ more: true })
+      .catch((e) => flash('err', e.message))
+      .finally(() => {
+        state.taskMore = false
+        render()
+      })
     return
   }
   if (act === 'task-open') {

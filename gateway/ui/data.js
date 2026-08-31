@@ -817,6 +817,7 @@ async function loadPage() {
      */
     if (state.path === '/tasks') {
       state.taskOpen = null
+      state.taskCursor = ''
       await loadTasks().catch(() => {})
       tasksPoll()
       return

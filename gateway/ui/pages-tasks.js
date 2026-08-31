@@ -84,13 +84,24 @@ function tasksPage() {
   const filters = [chip('', t('全部 Bot', 'All bots')), ...(state.runtimeBots || []).map((b) => chip(b.id, b.name || b.id))].join('')
   const col = ([key, zh, en]) => {
     const rows = list.filter((x) => x.state === key)
-    // 已放弃这一列没有东西就整列不画：它是收尾档，空着摆在那儿只占地方。
-    if (key === 'dropped' && !rows.length) return ''
+    // 已放弃这一列没有东西就整列不画。**除非还有没加载完的**：那时它可能只是还在后面，
+    // 整列不画会让「拖到已放弃」这个动作凭空消失。
+    if (key === 'dropped' && !rows.length && !state.taskCursor) return ''
+    /**
+     * 列头那个数**只数这一列真的画出来了几张**。
+     *
+     * 原来放的是服务端算的该状态总数，而卡片只有第一页——一个攒了 120 条任务的人，
+     * 列头写着 78、列里只有 30 张，剩下 48 条既看不见也翻不到，他看到的是「我完成的事
+     * 凭空少了一批」。总数改到下面那行「还有 N 条」上说，那儿跟着一颗加载得动的按钮。
+     */
     return `<div class="satu-task-col" data-drop="${key}">
-      <div class="satu-task-colhead">${t(zh, en)}<span>${counts[key] || rows.length}</span></div>
+      <div class="satu-task-colhead">${t(zh, en)}<span>${rows.length}</span></div>
       ${rows.map((x) => taskChip(x, bots)).join('') || `<div class="satu-task-empty">—</div>`}
     </div>`
   }
+  /** 还有多少条没画出来。四列的总数减去手上这一页。 */
+  const total = TASK_COLS.reduce((n, [key]) => n + (Number(counts[key]) || 0), 0)
+  const rest = Math.max(0, total - list.length)
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
@@ -106,6 +117,19 @@ function tasksPage() {
         ${flashes()}
         <div style="display: flex; flex-wrap: wrap; gap: var(--space-2);">${filters}</div>
         <div class="satu-task-cols">${TASK_COLS.map(col).join('')}</div>
+        ${
+          state.taskCursor
+            ? `<div style="display: flex; align-items: baseline; gap: var(--space-3);">
+                <button type="button" class="btn btn-secondary" data-act="task-more"${state.taskMore ? ' disabled' : ''}>${
+                  state.taskMore ? t('加载中…', 'Loading…') : t('加载更多', 'Load more')
+                }</button>
+                <span style="font-size: 13px; color: var(--muted-foreground);">${t(
+                  `一共 ${total} 条，还有 ${rest} 条没显示`,
+                  `${total} in total, ${rest} not shown`,
+                )}</span>
+              </div>`
+            : ''
+        }
         ${
           list.length
             ? ''
@@ -176,14 +200,24 @@ function taskModal() {
 // 文件炸掉（表现是「别的页面都好，只有这一页整页空白」）。
 const TASK_CLOSE_ICON = ['M18 6 6 18', 'M6 6l12 12']
 
-/** 拉一屏。**拉不到就保持上一份**：一块突然空掉的板会让人以为任务都没了。 */
-async function loadTasks() {
+/**
+ * 拉一屏。**拉不到就保持上一份**：一块突然空掉的板会让人以为任务都没了。
+ *
+ * `more` = 接着上一页往下拉（keyset 游标），拉到的**追加**在后面。轮询走的是不带 more
+ * 的那条，它把整份换掉——已经翻开的几页会缩回第一页，这是有意的：轮询要的是「现在是什么
+ * 样」，而不是把一个越滚越长的列表永远留在内存里。
+ */
+async function loadTasks({ more } = {}) {
   if (!state.me || !state.me.account) return
   try {
-    const q = state.taskBot ? `?bot=${encodeURIComponent(state.taskBot)}` : ''
-    const data = await api('GET', `/tasks${q}`)
-    state.tasks = Array.isArray(data.tasks) ? data.tasks : []
+    const q = []
+    if (state.taskBot) q.push(`bot=${encodeURIComponent(state.taskBot)}`)
+    if (more && state.taskCursor) q.push(`cursor=${encodeURIComponent(state.taskCursor)}`)
+    const data = await api('GET', `/tasks${q.length ? `?${q.join('&')}` : ''}`)
+    const rows = Array.isArray(data.tasks) ? data.tasks : []
+    state.tasks = more ? [...state.tasks, ...rows] : rows
     state.taskCounts = data.counts || {}
+    state.taskCursor = data.cursor || ''
   } catch {
     /* 保持上一份 */
   }

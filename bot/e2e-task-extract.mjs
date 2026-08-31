@@ -31,6 +31,8 @@ let modelCalls = 0
 let lastPrompt = ''
 let lastReport = null
 let modelReply = '{"tasks":[]}'
+/** 上报那一跳回什么。**4xx 和 5xx 要分开验**：一个再报没希望、一个值得再试。 */
+let reportStatus = 200
 const server = createServer((req, res) => {
   let body = ''
   req.on('data', (d) => (body += d))
@@ -44,6 +46,11 @@ const server = createServer((req, res) => {
     }
     if (req.url === '/internal/tasks/extract') {
       lastReport = JSON.parse(body)
+      if (reportStatus !== 200) {
+        res.writeHead(reportStatus, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: '这条会话的任务数已经到上限（60）' }))
+        return
+      }
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ tasks: [], open: [{ key: 'reply-mail', title: '回信', state: 'doing' }] }))
       return
@@ -62,7 +69,7 @@ const { Context, Service } = await import('@deepseek-ai/cordis')
 const { StorageService } = await import('./src/storage/index.ts')
 const { SessionService } = await import('./src/session/index.ts')
 const extractPlugin = await import('./src/task-extract/index.ts')
-const { renderWindow, turnsOf, worthExtracting, tailFrom } = extractPlugin
+const { fitWindow, renderWindow, turnsOf, worthExtracting, tailFrom } = extractPlugin
 
 /** 假目录：只管钉不钉 utility 这一件事。 */
 class FakeCatalog extends Service {
@@ -207,6 +214,82 @@ out.没钉档位 = {
   没有拿贵模型顶上: modelCalls === before,
 }
 
+// ── 6.5 日常任务替人下的那条要求，照样算一件事 ─────────────────────────
+//
+// 它那条消息挂的是 `plugin: 'routine'`。照「只认真人」写的话，一颗专职跑日常任务的 Bot
+// 板上一条都不会有——而它恰恰最该被总结：人根本没在看，只能靠这块板知道昨天办成没有。
+const routine = await ctx.sessions.create({ botId: 'bot-1', kind: 'main' })
+await ctx.sessions.append(routine, 'turn/start', { turn: 1 })
+await ctx.sessions.append(routine, 'user/message', {
+  id: 'r1',
+  role: 'user',
+  content: [{ type: 'text', text: '把昨天的对账单发给财务' }],
+  source: { kind: 'plugin', plugin: 'routine', form: 'rt_1' },
+})
+await ctx.sessions.append(routine, 'tool/call', { turn: 1, step: 0, callId: 'rc1', name: 'gmail_send', arguments: {} })
+await ctx.sessions.append(routine, 'tool/result', { turn: 1, step: 0, callId: 'rc1', message: { content: [{ type: 'text', text: 'sent' }] } })
+await ctx.sessions.append(routine, 'assistant/message', { turn: 1, step: 0, message: { content: [{ type: 'text', text: '发了。' }] } })
+await ctx.sessions.append(routine, 'turn/end', { turn: 1, reason: 'completed' })
+modelReply = JSON.stringify({ tasks: [{ key: 'send-statement', title: '把昨天的对账单发给财务', state: 'done', evidence: 'x', turns: [1] }] })
+const routineRun = await ctx.taskExtract.run(routine)
+out.日常任务 = {
+  照抽: routineRun === 'ok',
+  报上去了: lastReport?.sessionId === routine && lastReport.tasks.length === 1,
+  提示词里标明了是日常任务: lastPrompt.includes('#1 日常任务：'),
+  水位推了: (ctx.storage.collection('task-extract').get(routine)?.upto ?? 0) > 0,
+}
+
+// ── 6.6 窗口装不下：只吃最老的那一段，水位只推到那儿 ─────────────────
+//
+// 反过来（留最新的、丢最老的）会静静吃掉一整段对话：水位一次推到窗口末尾，被丢掉的那几轮
+// 再没有任何一次抽取会看到——而最老那几轮里放的恰恰是「人当初要求了什么」。
+const long = await ctx.sessions.create({ botId: 'bot-1', kind: 'main' })
+const pad = (n) => `第${n}轮` + '一二三四五六七八九十'.repeat(60)
+for (let i = 1; i <= 12; i++) {
+  await turn(long, i, { user: pad(i), calls: [{ name: 'gmail_send', result: `sent-${i}` }], say: pad(i) })
+}
+modelReply = JSON.stringify({ tasks: [] })
+const longRun = await ctx.taskExtract.run(long)
+const longEvents = await ctx.sessions.events(long)
+const longEnd = [...longEvents].reverse().find((e) => e.type === 'turn/end')
+const firstPass = { prompt: lastPrompt, upto: lastReport?.upto }
+const markAfterFirst = ctx.storage.collection('task-extract').get(long)
+// 第二段：把最短间隔那道闸按掉（那是时钟的事，不是判据的事），接着抽。
+ctx.storage.collection('task-extract').put(long, { ...markAfterFirst, at: 0 })
+const longRun2 = await ctx.taskExtract.run(long)
+out.切窗 = {
+  抽成了: longRun === 'ok' && longRun2 === 'ok',
+  // 水位是空的，所以窗口从倒数第 8 轮（#5）起——TAIL_TURNS 那条，不是这次要验的东西。
+  第一段从窗口最老那轮开始: firstPass.prompt.includes('#5 用户：'),
+  第一段没吃到最后一轮: !firstPass.prompt.includes('#12 用户：'),
+  水位没有一次推到窗口末尾: firstPass.upto > 0 && firstPass.upto < longEnd.seq,
+  // 第二段从第一段结束的地方开始：第一段那几轮一条都不该再出现。
+  第二段不重复第一段: !lastPrompt.includes('#5 用户：') && lastReport.upto > firstPass.upto,
+  两段合起来吃到了最后: lastPrompt.includes('#12 用户：') && lastReport.upto === longEnd.seq,
+}
+
+// ── 6.7 报上去被 4xx 拒了：**不许每轮再来一次** ────────────────────────
+//
+// 这是最贵的那个 bug：模型那一跳的钱在报上去之前就花掉了，而 4xx 再报一百遍是同一个答案。
+reportStatus = 409
+const denied = await ctx.sessions.create({ botId: 'bot-1', kind: 'main' })
+await turn(denied, 1, { user: '把这份合同发给法务看看', calls: [{ name: 'gmail_send', result: 'sent' }], say: '发了。' })
+modelReply = JSON.stringify({ tasks: [{ key: 'send-contract', title: '把合同发给法务', state: 'done', evidence: 'x', turns: [1] }] })
+const before409 = modelCalls
+const deniedRun = await ctx.taskExtract.run(denied)
+const deniedMark = ctx.storage.collection('task-extract').get(denied)
+// 紧接着再来一轮：不该再花第二次钱。
+const deniedAgain = await ctx.taskExtract.run(denied)
+reportStatus = 200
+out.被拒了 = {
+  没抽成: deniedRun === 'skipped',
+  只花了一次钱: modelCalls === before409 + 1,
+  第二次直接不跑: deniedAgain === 'idle' && modelCalls === before409 + 1,
+  歇够一小时才再试: deniedMark.nextTry - Date.now() > 50 * 60_000,
+  这一次算进了每日额度: deniedMark.runs === 1,
+  水位没推: !deniedMark.upto,
+}
+
 // ── 7. 旁支会话不抽 ───────────────────────────────────────────────────
 const side = await ctx.sessions.create({ botId: 'bot-1', kind: 'task', parent: { sessionId: live, callId: 'c1', taskId: 't1' } })
 await turn(side, 1, { user: '把这封信发出去', calls: [{ name: 'gmail_send', result: 'sent' }], say: '发了。' })
@@ -222,6 +305,8 @@ out.算子 = {
   水位丢了只回溯尾巴: tailFrom(await ctx.sessions.events(live), 1) > 0,
   清单空着也画一行: renderWindow(sample, []).includes('还没有任何任务'),
   清单有东西就列出来: renderWindow(sample, [{ key: 'k', title: '回信', state: 'doing' }]).includes('[doing] k：回信'),
+  // 一轮自己就超上限时也得装得下一轮，否则水位推不动、这一轮会被反复挑中。
+  一轮也超限时照装一轮: fitWindow([{ turn: 1, startSeq: 1, endSeq: 9, user: ['x'.repeat(20000)], by: 'user', say: '', calls: [] }]).turns.length === 1,
 }
 
 console.log('__RESULT__' + JSON.stringify(out))
