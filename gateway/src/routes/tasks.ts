@@ -86,8 +86,14 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     const botId = (req.query.get('bot') || '').trim()
     const state = stateQuery(req.query.get('state'))
-    const asked = Number(req.query.get('limit'))
-    const limit = Math.min(Math.max(Number.isFinite(asked) ? Math.trunc(asked) : TASK_PAGE_DEFAULT, 1), TASK_PAGE_MAX)
+    /**
+     * **`Number(null)` 是 0，不是 NaN。** 直接 `Number(req.query.get('limit'))` 的话，
+     * 没带 limit 的请求会算出 0，再被夹到下限 1——整块板每次只回一条，而它看起来完全
+     * 像是「板上只有一条任务」。先看那个字符串在不在，再转数。
+     */
+    const askedRaw = (req.query.get('limit') || '').trim()
+    const asked = Number(askedRaw)
+    const limit = Math.min(Math.max(askedRaw && Number.isFinite(asked) ? Math.trunc(asked) : TASK_PAGE_DEFAULT, 1), TASK_PAGE_MAX)
     // 多要一条判 hasMore（同会话列表）。卡在 limit 上的话最后一页永远报「还有更多」。
     const rows = await db.tasksOf(account.id, {
       botId: botId || undefined,

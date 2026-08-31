@@ -212,7 +212,6 @@ document.getElementById('app').addEventListener('submit', (e) => {
     return sendChat()
   }
   const kb = form.getAttribute('data-act')
-  if (kb === 'kanban-new-board' || kb === 'kanban-new-card' || kb === 'kanban-comment') return submitKanban(e, kb)
   if (form.getAttribute('data-form') === 'org-profile') return saveOrgProfile(e)
   if (form.getAttribute('data-form') === 'machine') return saveMachine(e)
   if (form.getAttribute('data-form') === 'manager-version') return saveManagerVersion(e)
@@ -490,78 +489,55 @@ document.getElementById('app').addEventListener('click', async (e) => {
     if (bot) go('/a/' + encodeURIComponent(bot))
     return
   }
-  if (act === 'kanban-board') {
-    const id = btn.getAttribute('data-id') || ''
-    void loadKanbanBoard(id).then(render).then(kanbanPoll).catch((e) => flash('err', e.message))
+  if (act === 'task-bot') {
+    // 换一颗 Bot 过滤。整屏重拉——列头那几个数是服务端按同一个过滤算的。
+    state.taskBot = btn.getAttribute('data-id') || ''
+    void loadTasks().then(render).then(tasksPoll).catch((e) => flash('err', e.message))
     return
   }
-  if (act === 'kanban-card-open') {
-    // 只在板屏上可开：弹窗里的派发表单要的是这块板的数据。
-    state.kanbanNewCard = { error: '', busy: false }
+  if (act === 'task-open') {
+    const id = btn.getAttribute('data-id') || ''
+    void loadTask(id).then(render).catch((e) => flash('err', e.message))
+    return
+  }
+  if (act === 'task-close') {
+    state.taskOpen = null
     render()
     return
   }
-  if (act === 'kanban-card-close') {
-    state.kanbanNewCard = null
-    render()
-    return
-  }
-  if (act === 'kanban-card-pick') {
-    // 挑人**只改 DOM，不走 render**：一 render，正文和已选的文件就全没了。
-    // state 里记一份是为了出错重绘时还能画回选中态。
-    const list = btn.parentElement
-    if (list) for (const b of list.querySelectorAll('[data-act="kanban-card-pick"]')) b.setAttribute('aria-pressed', String(b === btn))
-    if (state.kanbanNewCard) state.kanbanNewCard.assignee = btn.getAttribute('data-id') || ''
-    return
-  }
-  if (act === 'kanban-card') {
+  if (act === 'task-state') {
     const id = btn.getAttribute('data-id') || ''
-    void loadKanbanCard(id).then(render).then(kanbanPoll).catch((e) => flash('err', e.message))
+    void patchTask(id, { state: btn.getAttribute('data-state') || '' })
     return
   }
-  if (act === 'kanban-open-run') {
+  if (act === 'task-delete') {
+    const id = btn.getAttribute('data-id') || ''
+    // 删掉是不可逆的（这一条的时间线跟着走），而它就在弹窗里挨着几颗常按的按钮。
+    if (!window.confirm(t('删掉这条任务？它不会再自己回来。', 'Delete this task? It will not come back.'))) return
+    void api('DELETE', `/tasks/${encodeURIComponent(id)}`)
+      .then(() => {
+        state.taskOpen = null
+        return loadTasks()
+      })
+      .then(render)
+      .then(tasksPoll)
+      .catch((e) => flash('err', e.message))
+    return
+  }
+  if (act === 'task-session') {
     /**
-     * 流水那一行点得进过程，而过程就在**这颗 Bot 的对话**里：卡是当成一条带标识的
-     * 用户消息发进主会话跑的（见 agent 的 runCard），它说的话和调的工具全画在那儿。
+     * 「打开这段对话」跳的是**这颗 Bot 的对话**（`/a/<botId>`）。
      *
-     * 原来这里跳 `/s/<sessionId>`。前端没有这条路由——pathOf 认不出就退回 `/`，
-     * 于是点「看过程」的人被静静地送回了首页。
+     * 摘要是模型写的，摘要错了只有原文能纠——没有这条路，人手上就只剩模型的一面之词。
+     * 定位到那一段（`firstSeq`）还没做：chat 那侧现在只会从末尾往前翻，见
+     * docs/task-board.md §17。
      */
     const bot = btn.getAttribute('data-bot') || ''
     if (!bot) {
-      flash('err', t('这一次执行没记下是哪颗 Bot 跑的，过程翻不出来', "This run didn't record which bot ran it"))
+      flash('err', t('这条任务没记下是哪颗 Bot 办的', "This task didn't record which bot did it"))
       return
     }
     go('/a/' + encodeURIComponent(bot))
-    return
-  }
-  if (act === 'kanban-promote') {
-    const id = btn.getAttribute('data-id') || ''
-    void api('POST', `/kanban/cards/${encodeURIComponent(id)}/promote`)
-      .then(() => loadKanbanCard(id))
-      .then(render)
-      .then(kanbanPoll)
-      .catch((e) => flash('err', e.message))
-    return
-  }
-  if (act === 'kanban-abort' || act === 'kanban-unblock' || act === 'kanban-cancel' || act === 'kanban-archive') {
-    const id = btn.getAttribute('data-id') || ''
-    const path = act.slice('kanban-'.length)
-    void api('POST', `/kanban/cards/${encodeURIComponent(id)}/${path}`)
-      .then(() => loadKanbanCard(id))
-      .then(render)
-      .catch((e) => flash('err', e.message))
-    return
-  }
-  if (act === 'kanban-reopen') {
-    const id = btn.getAttribute('data-id') || ''
-    const reason = window.prompt(t('哪儿不对？这句话会进那张卡的正文，做它的 Bot 读得到', 'What was wrong? It goes into the card body'))
-    if (!reason) return
-    void api('POST', `/kanban/cards/${encodeURIComponent(id)}/reopen`, { reason })
-      .then(() => loadKanbanCard(id))
-      .then(render)
-      // 打回到顶（第 3 次）时那边回 409 并把卡转成 blocked——那句话要原样说给人听。
-      .catch((e) => flash('err', e.message))
     return
   }
   if (act === 'handoff-scope') {
@@ -2293,15 +2269,15 @@ document.getElementById('app').addEventListener('input', (e) => {
 
 document.getElementById('app').addEventListener('change', async (e) => {
   const el = e.target
-  // 开卡弹窗里的文件选择：把挑了哪些就地写出来。不走 render 的理由同上——一走，
-  // 已经挑好的 input 就被清空了。
-  if (el instanceof HTMLInputElement && el.getAttribute('data-kanban-files') != null) {
-    const out = el.closest('.field')?.querySelector('.satu-kanban-filelist')
-    if (out) {
-      const names = [...(el.files || [])].map((f) => f.name)
-      out.textContent = names.length ? names.join('、') : ''
-      out.hidden = !names.length
-    }
+  /**
+   * 任务的标题。**收在 change 上，不是 input**：保存要 render（那一列、列头的数都跟着
+   * 变），而 render 会把输入框换掉——边打边存等于每敲一个字丢一次焦点。
+   */
+  if (el instanceof HTMLInputElement && el.getAttribute('data-act') === 'task-title') {
+    const id = el.getAttribute('data-id') || ''
+    const title = el.value.trim()
+    const now = state.taskOpen && state.taskOpen.task.id === id ? state.taskOpen.task : null
+    if (id && title && now && title !== now.title) await patchTask(id, { title })
     return
   }
   /**

@@ -38,10 +38,10 @@ const TIMEOUT_MS = 30_000
 /** 失败之后隔多久再试。三次之后放弃这一段——下一轮 turn/end 还会再来，那时窗口更大。 */
 const BACKOFF_MS = [60_000, 4 * 60_000, 15 * 60_000]
 /**
- * 带写/外呼风险的工具，结果摘一小段给模型；只读的**一个字都不摘**。
+ * **动手**了的工具，结果摘一小段给模型；其余的**一个字都不摘**。
  *
  * 判「做完没有」要的正是前者（`gmail_send` 成功返回就是证据），而它们的返回多半是一句
- * 状态；只读工具的返回是邮件正文、网页正文——那是外部文本，摘进去只是把注入面拉满，
+ * 状态；读类工具的返回是邮件正文、网页正文——那是外部文本，摘进去只是把注入面拉满，
  * 对判断没有任何帮助。
  */
 const RESULT_EXCERPT = 80
@@ -83,6 +83,20 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     taskExtract: TaskExtractService
   }
+}
+
+/**
+ * 这把工具**动手了没有**：`write` 或 `destructive`。
+ *
+ * **`external` 不算动手。** `gmail_search`、`web_extract` 都是 external + read——它们出了
+ * 这台机器，但只是去看了一眼，而「查邮件」恰恰是 §2 那条「中间步骤不单独成条」的原型。
+ * 把 external 算进来，每一次查询都会被当成一件事，板上会长出一串「查了什么」。
+ *
+ * 没标注的工具按 UNKNOWN_RISK（`external, write`）算，于是落在动手这一侧——保守的方向
+ * 对：新工具最没被审视过，宁可多抽一次，也别静静漏掉一件真办了的事。
+ */
+function actsOutward(risk: string[]): boolean {
+  return risk.some((r) => r === 'write' || r === 'destructive')
 }
 
 function dayOf(at: number): string {
@@ -370,10 +384,19 @@ export function turnsOf(events: SessionEvent[], riskOf: (name: string) => string
     out.push(t)
     return t
   }
+  const CONTENT = new Set(['user/message', 'assistant/message', 'tool/call', 'tool/result'])
   for (const e of events) {
     const d = e.data as Record<string, unknown>
     if (e.type === 'turn/start') cur = open(Number(d.turn) || out.length + 1, e.seq)
-    // 窗口是从水位切出来的，第一条很可能不是 turn/start——那一轮的开头在水位之前。
+    /**
+     * 窗口是从水位切出来的，第一条很可能不是 turn/start——那一轮的开头在水位之前，
+     * 得就地开一轮接住它。
+     *
+     * **只有带内容的事件才配开一轮。** 照「任何事件都开」写的话，会话根事件、标题事件、
+     * 压缩事件各自会开出一个空轮次，而那些空轮次会顶掉真正的轮号——模型报的 `#1` 于是
+     * 翻到一段什么都没发生的 seq 上。
+     */
+    if (!cur && !CONTENT.has(e.type)) continue
     if (!cur) cur = open(Number(d.turn) || 1, e.seq)
     cur.endSeq = e.seq
     if (e.type === 'user/message') {
@@ -390,8 +413,8 @@ export function turnsOf(events: SessionEvent[], riskOf: (name: string) => string
       pending.set(String(d.callId ?? ''), call)
     } else if (e.type === 'tool/result') {
       const call = pending.get(String(d.callId ?? ''))
-      // 只读工具的返回一个字都不摘（见 RESULT_EXCERPT 上那段）。
-      if (call && call.risk.some((r) => r !== 'read')) {
+      // 没动手的工具，返回一个字都不摘（见 RESULT_EXCERPT 和 actsOutward 上那两段）。
+      if (call && actsOutward(call.risk)) {
         call.result = textOf((d.message as { content?: unknown } | undefined)?.content).replace(/\s+/g, ' ').trim().slice(0, RESULT_EXCERPT)
       }
     }
@@ -407,11 +430,17 @@ export function turnsOf(events: SessionEvent[], riskOf: (name: string) => string
  */
 export function worthExtracting(turns: Turn[]): boolean {
   const said = turns.flatMap((t) => t.user).join('').trim()
+  // 这一段里人一句话都没说：那不是他要办的事（换版通知、插件注入、自动收口都长这样）。
   if (!said) return false
-  const acted = turns.some((t) => t.calls.some((c) => c.risk.some((r) => r !== 'read')))
-  if (acted) return true
-  // 一次带写/外呼的动作都没有，人也没说几个字：这是一次查询，不是一件事。
-  return said.length >= 40
+  if (turns.some((t) => t.calls.some((c) => actsOutward(c.risk)))) return true
+  /**
+   * 一次动手都没有，就看人交代了多少。
+   *
+   * **20 个字，按字符数**：中文一个字顶英文一个词，「看看这个目录」是 6 个字，而
+   * 「帮我把这周所有客户反馈整理成一份表，按严重程度排序」是 24 个——后者还没动手，但它
+   * 显然是一件事的开头，下一轮才会有动作。门槛定高了，漏掉的正是这一类。
+   */
+  return said.length >= 20
 }
 
 /** 窗口 → 喂给模型的那段文本。**工具结果的正文不进来**，见 RESULT_EXCERPT。 */
