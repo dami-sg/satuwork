@@ -55,13 +55,6 @@ class FakeCatalog extends Service {
 }
 
 const ctx = new Context()
-/**
- * 假名册。**这个探针自己一处都不用它**——补上纯粹是因为 agent 插件的 inject 列表里有
- * `roster`（22a3d1e 加的）。cordis 缺一个依赖就**静默地不 apply 这个插件**：少了它，
- * `ctx.agents` 一直是 undefined，探针要到第一次用它的地方才以「读不到属性」炸掉，而
- * 错误指的位置跟真正的原因隔着十万八千里。往 agent 的 inject 里加东西时，这里要跟着加。
- */
-ctx.provide('roster', { get: () => undefined, list: () => [] })
 ctx.plugin(storagePlugin, { path: join(home, 'db.sqlite') })
 ctx.plugin(sessionsPlugin, { root: join(home, 'sessions') })
 ctx.plugin(workspacePlugin, { root: work })
