@@ -115,12 +115,6 @@ export function agentsOf(ctx: Context):
   | {
       rootOf?: (id: string) => string | undefined
       taskOf?: (id: string) => { taskId: string; goal: string; leases: string[] } | undefined
-      /**
-       * 卡片会话那一份。策略和审批要它：审批卡改投 `cardHomeOf`、连着被挡三次的话术要说
-       * `kanban_block`（`escalate_to_human` 在卡片会话里被摘掉了）。
-       */
-      cardOf?: (id: string) => { cardId: string; title: string } | undefined
-      cardHomeOf?: (id: string) => string | undefined
     }
   | undefined {
   try {

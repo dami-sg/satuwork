@@ -64,8 +64,6 @@ import { runSkills } from './skills.mjs'
 import { runSkillsBot } from './skills-bot.mjs'
 import { runMemoryBot } from './memory-bot.mjs'
 import { runMemory } from './memory.mjs'
-import { runKanban } from './kanban.mjs'
-import { runCard } from './card.mjs'
 import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
@@ -168,7 +166,7 @@ function start(name, args, { cwd, env }) {
     /**
      * 模型自动发现在 e2e 里一律关掉（GATEWAY_MODEL_DISCOVERY_MS=0）。
      *
-     * 它挂在日常任务的那个 tick 上，而 kanban / handoff / routine-retry 几套把 tick
+     * 它挂在日常任务的那个 tick 上，而 handoff / routine-retry 几套把 tick
      * 调到了几百毫秒——不关的话每跑一次 e2e 就会去 models.dev 拉一遍 4MB，测试要联网
      * 才能过，模型目录的条数还会跟着上游天天变。放在这里而不是各文件里，是因为
      * 「e2e 不出网」是整套的口径，不该指望 27 个 spawn 点各自记得写一遍。
@@ -3288,8 +3286,6 @@ async function main() {
     await suite('skills-bot', () => runSkillsBot({ root, test, assert, log }))
     await suite('memory-bot', () => runMemoryBot({ root, test, assert, log }))
     await suite('memory', () => runMemory({ root, gwRoot, test, req, start, waitHttp, assert, log }))
-    await suite('kanban', () => runKanban({ gwRoot, test, req, start, waitHttp, assert, log }))
-    await suite('card', () => runCard({ root, test, assert, log }))
     await suite('bot-template', () => runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager', () => runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager-confirm', () => runManagerConfirm({ root, test, assert, log }))

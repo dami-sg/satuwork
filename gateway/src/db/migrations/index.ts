@@ -21,6 +21,8 @@ import { SQL as m0020 } from './0020-routine-retry.ts'
 import { SQL as m0021 } from './0021-kanban.ts'
 import { SQL as m0022 } from './0022-kanban-files.ts'
 import { SQL as m0023 } from './0023-card-pending.ts'
+import { SQL as m0024 } from './0024-tasks.ts'
+import { SQL as m0025 } from './0025-drop-kanban.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -87,6 +89,9 @@ export const MIGRATIONS: Migration[] = [
   { id: '0021-kanban', name: '多 Bot 看板：板、成员、卡、依赖、时间线、执行流水', sql: m0021 },
   { id: '0022-kanban-files', name: '看板卡的附件清单（字节落盘在 gateway home 的 kanban/ 下）', sql: m0022 },
   { id: '0023-card-pending', name: '看板卡状态枚举加待定（pending）：人开卡先停在待定', sql: m0023 },
+  { id: '0024-tasks', name: '任务看板：从对话里总结出来的任务（tasks / task_events）', sql: m0024 },
+  // 建新的和删旧的**分两条**：中间那一版两套并存，回滚只回滚这一条。见 0025 的头注。
+  { id: '0025-drop-kanban', name: '删掉旧看板：板、成员、卡、依赖、时间线、附件、执行流水', sql: m0025 },
 ]
 
 /**

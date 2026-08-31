@@ -14,7 +14,7 @@ import { attachCompany } from './routes/company.ts'
 import { attachRuntime } from './routes/runtime.ts'
 import { attachHandoffs } from './routes/handoffs.ts'
 import { attachRoutines } from './routes/routines.ts'
-import { attachKanban, attachKanbanRuntime } from './routes/kanban.ts'
+import { attachTasks } from './routes/tasks.ts'
 import { attachCatalog } from './routes/catalog.ts'
 import { attachConnectors } from './routes/connectors.ts'
 import { attachConnectorMcp } from './routes/mcp.ts'
@@ -54,8 +54,7 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   attachRuntime(router, ctx)
   attachHandoffs(router, ctx)
   attachRoutines(router, ctx)
-  attachKanban(router, ctx)
-  attachKanbanRuntime(router, ctx)
+  attachTasks(router, ctx)
   attachCatalog(router, ctx)
   attachConnectors(router, ctx)
   attachConnectorMcp(router, ctx)

@@ -4,8 +4,8 @@ import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
 import { type DiscoverySnapshot, emptySnapshot, parseDiscoverySnapshot } from './model-discovery.ts'
-import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Board, type BoardMember, type Card, type CardBlockedKind, type CardComment, type CardFile, type CardNotify, type CardRun, type CardRunStatus, type CardState, CARD_MAX_STEPS, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, boardOf, boardMemberOf, cardOf, cardCommentOf, cardFileOf, cardRunOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
+import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Task, type TaskEvent, type TaskEventKind, type TaskField, type TaskState, TASK_PAGE_DEFAULT, TASK_PAGE_MAX, parseTaskState, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, taskOf, taskEventOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -3792,177 +3792,128 @@ export class Db {
     return (await this.run('delete from skill_tags where "companyId" = ? and tag = ?', [companyId, tag])) > 0
   }
 
-  // ── 多 Bot 看板：板、成员、卡、依赖、时间线、流水（见 docs/kanban.md）───────
+  // ── 任务看板：从对话里总结出来的任务（见 docs/task-board.md）─────────────
   //
-  // 归属只有一句话：**一块板属于一个员工**。所以这一整段里没有任何一个方法收
-  // `companyId` 当判据——判据一律是 `boards.accountId`，别人一律当成没有（404）。
+  // 归属一句话：**一条任务属于一个员工的一颗 Bot 的一条会话**。所以这一整段里没有一个
+  // 方法收 `companyId` 当判据——判据一律是 `tasks.accountId`，别人一律当成没有（404）。
+  //
+  // **这里没有任何一个方法能让一条任务跑起来。** 原来那一段（选卡、抢卡、收心跳、
+  // 收死的）整个删了，不是移到了别处。
 
-  /** 我的板。别人的看不见，管理员和 owner 也一样（口径〇）。 */
-  async boardsOf(accountId: string, opts: { archived?: boolean } = {}): Promise<Board[]> {
-    const rows = await this.many(
-      `select * from boards where "accountId" = ?${opts.archived ? '' : ' and not archived'} order by "createdAt"`,
-      [accountId],
-    )
-    return rows.map(boardOf)
+  /** 一条任务。别人的、不存在的，判据在 lib/tasks.ts，这里只管取。 */
+  async task(id: string): Promise<Task | undefined> {
+    const r = await this.one('select * from tasks where id = ?', [id])
+    return r ? taskOf(r) : undefined
   }
 
-  async board(id: string): Promise<Board | undefined> {
-    const r = await this.one('select * from boards where id = ?', [id])
-    return r ? boardOf(r) : undefined
-  }
-
-  async insertBoard(input: { accountId: string; companyId: string; name: string; brief?: string }): Promise<Board> {
-    const now = Date.now()
-    const row: Board = {
-      id: randomUUID(),
-      accountId: input.accountId,
-      companyId: input.companyId,
-      name: input.name,
-      brief: input.brief ?? '',
-      archived: false,
-      createdAt: now,
-      updatedAt: now,
+  /**
+   * 板上那一屏。keyset 翻页，排序键 (`stateAt` desc, id desc)。
+   *
+   * **不用 OFFSET**（同会话索引那条）：抽取器随时可能把某条任务的状态推一格，那一行就
+   * 跳到列首，OFFSET 翻页要么漏要么重。
+   */
+  async tasksOf(
+    accountId: string,
+    filter: { botId?: string; state?: TaskState; limit?: number; before?: { stateAt: number; id: string } } = {},
+  ): Promise<Task[]> {
+    let sql = 'select * from tasks where "accountId" = ?'
+    const args: (string | number)[] = [accountId]
+    if (filter.botId) {
+      sql += ' and "botId" = ?'
+      args.push(filter.botId)
     }
-    await this.run(
-      'insert into boards (id, "accountId", "companyId", name, brief, archived, "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?)',
-      [row.id, row.accountId, row.companyId, row.name, row.brief, row.archived, row.createdAt, row.updatedAt],
-    )
-    return row
+    if (filter.state) {
+      sql += ' and state = ?'
+      args.push(filter.state)
+    }
+    if (filter.before) {
+      sql += ' and ("stateAt" < ? or ("stateAt" = ? and id < ?))'
+      args.push(filter.before.stateAt, filter.before.stateAt, filter.before.id)
+    }
+    // 多要一条，路由拿它判 hasMore（同 sessionsPage）。
+    const limit = Math.min(Math.max(Math.trunc(filter.limit ?? TASK_PAGE_DEFAULT), 1), TASK_PAGE_MAX + 1)
+    sql += ' order by "stateAt" desc, id desc limit ?'
+    args.push(limit)
+    const rows = await this.many(sql, args)
+    return rows.map(taskOf)
   }
 
-  /** 只改传了的字段（同 updateRoutine：整行覆盖会让慢到的那次把先到的抹掉）。 */
-  async updateBoard(id: string, patch: { name?: string; brief?: string; archived?: boolean }): Promise<Board | undefined> {
-    const sets: string[] = []
-    const args: unknown[] = []
-    if (patch.name !== undefined) (sets.push('name = ?'), args.push(patch.name))
-    if (patch.brief !== undefined) (sets.push('brief = ?'), args.push(patch.brief))
-    if (patch.archived !== undefined) (sets.push('archived = ?'), args.push(patch.archived))
-    sets.push('"updatedAt" = ?')
-    args.push(Date.now(), id)
-    await this.run(`update boards set ${sets.join(', ')} where id = ?`, args)
-    return this.board(id)
-  }
-
-  async deleteBoard(id: string): Promise<boolean> {
-    return (await this.run('delete from boards where id = ?', [id])) > 0
-  }
-
-  async boardMembers(boardId: string): Promise<BoardMember[]> {
-    const rows = await this.many('select * from board_members where "boardId" = ? order by "addedAt"', [boardId])
-    return rows.map(boardMemberOf)
-  }
-
-  async boardMember(boardId: string, botId: string): Promise<BoardMember | undefined> {
-    const r = await this.one('select * from board_members where "boardId" = ? and "botId" = ?', [boardId, botId])
-    return r ? boardMemberOf(r) : undefined
-  }
-
-  /**
-   * 加一颗 Bot 进板。**归属由调用方验过**（它必须是板主人名下的那几颗之一）——这里
-   * 只落库，因为「这颗 Bot 是不是我的」要读目录，那是 lib/kanban.ts 的活。
-   */
-  async addBoardMember(boardId: string, botId: string, role: string): Promise<BoardMember> {
-    const row: BoardMember = { boardId, botId, role, addedAt: Date.now() }
-    await this.run(
-      'insert into board_members ("boardId", "botId", role, "addedAt") values (?,?,?,?) on conflict ("boardId", "botId") do update set role = excluded.role',
-      [row.boardId, row.botId, row.role, row.addedAt],
-    )
-    return row
-  }
-
-  async removeBoardMember(boardId: string, botId: string): Promise<boolean> {
-    return (await this.run('delete from board_members where "boardId" = ? and "botId" = ?', [boardId, botId])) > 0
-  }
-
-  /**
-   * 这颗 Bot 在哪几块板上。
-   *
-   * 两个用处，而且是同一个事实的两面：目录里那一格 `boards`（席位据此决定注不注册
-   * `kanban_*` 工具），和 `kanban_list` 的返回。**accountId 一起当条件**——botId 是
-   * 请求里带来的，不验归属的话，一个编出来的 id 就能看见别人的板。
-   */
-  async boardsForBot(accountId: string, botId: string): Promise<{ board: Board; role: string }[]> {
+  /** 四列各有几条。界面上的列头，和「我这儿还有几件事悬着」那个数。 */
+  async taskCounts(accountId: string, botId?: string): Promise<Record<TaskState, number>> {
     const rows = await this.many(
-      'select b.*, m.role as "memberRole" from board_members m join boards b on b.id = m."boardId" where m."botId" = ? and b."accountId" = ? and not b.archived order by b."createdAt"',
-      [botId, accountId],
+      `select state, count(*)::int as n from tasks where "accountId" = ?${botId ? ' and "botId" = ?' : ''} group by state`,
+      botId ? [accountId, botId] : [accountId],
     )
-    return rows.map((r) => ({ board: boardOf(r), role: str(r.memberRole) }))
-  }
-
-  async cardsOf(boardId: string): Promise<Card[]> {
-    const rows = await this.many('select * from cards where "boardId" = ? order by priority desc, "createdAt"', [boardId])
-    return rows.map(cardOf)
-  }
-
-  async card(id: string): Promise<Card | undefined> {
-    const r = await this.one('select * from cards where id = ?', [id])
-    return r ? cardOf(r) : undefined
+    const out: Record<TaskState, number> = { proposed: 0, doing: 0, done: 0, dropped: 0 }
+    for (const r of rows) out[parseTaskState(r.state)] = num(r.n)
+    return out
   }
 
   /**
-   * 建一张卡。
+   * 这条会话现在挂着哪些任务。
    *
-   * `state` 由调用方给：**没有父卡的直接 `ready`**，有父卡的才进 `todo`（`todo` 的定义
-   * 就是「还有父卡没做完」，一张没有依赖的卡待在那儿只会让人以为还差点什么）。
-   *
-   * `dedupeKey` 撞唯一键时返回 undefined，由调用方去把已有那张捞回来——**不在这里
-   * 吞掉**：调用方要回给模型的是「合并进了哪一张」，那需要那张卡本身。
+   * 两个用处，而且是同一份事实的两面：抽取时**回喂给模型**那份清单（让它认出「这一段是
+   * 在推进其中某条」而不是又开一条，见 docs/task-board.md §4.3），和那条每会话上限的
+   * 计数。
    */
-  async insertCard(input: {
-    boardId: string
+  async tasksOfSession(sessionId: string): Promise<Task[]> {
+    const rows = await this.many('select * from tasks where "sessionId" = ? order by "firstSeq"', [sessionId])
+    return rows.map(taskOf)
+  }
+
+  async taskByKey(sessionId: string, key: string): Promise<Task | undefined> {
+    const r = await this.one('select * from tasks where "sessionId" = ? and key = ?', [sessionId, key])
+    return r ? taskOf(r) : undefined
+  }
+
+  /**
+   * 新认出来的一件事。
+   *
+   * **撞唯一键回 undefined，不抛**：`unique (sessionId, key)` 是并发下最后那道闸——同一
+   * 条会话的两次抽取重叠时（席位重启后水位倒回去，或者去抖没拦住），两边给的是同一个
+   * key。调用方接住 undefined 之后去 upsert 那一条，而不是把一次正常的竞态报成故障。
+   */
+  async insertTask(input: {
     accountId: string
     companyId: string
+    botId: string
+    sessionId: string
+    key: string
     title: string
-    body?: string
-    assigneeBotId?: string | null
-    state: CardState
-    priority?: number
-    createdByBotId?: string | null
-    modelRole?: RoutineModelRole
-    modelReason?: string
-    modelDowngraded?: boolean
-    needsBrowser?: boolean
-    maxSteps?: number
-    notify?: CardNotify
-    dedupeKey?: string | null
-  }): Promise<Card | undefined> {
+    summary?: string
+    state: TaskState
+    firstSeq: number
+    lastSeq: number
+    evidence?: string
+    extractModel?: string
+    extractVersion?: number
+  }): Promise<Task | undefined> {
     const now = Date.now()
-    const row: Card = {
+    const row: Task = {
       id: randomUUID(),
-      boardId: input.boardId,
       accountId: input.accountId,
       companyId: input.companyId,
+      botId: input.botId,
+      sessionId: input.sessionId,
       title: input.title,
-      body: input.body ?? '',
-      assigneeBotId: input.assigneeBotId ?? null,
+      summary: input.summary ?? '',
       state: input.state,
-      priority: input.priority ?? 0,
-      createdByBotId: input.createdByBotId ?? null,
-      modelRole: input.modelRole ?? 'utility',
-      modelReason: input.modelReason ?? '',
-      modelDowngraded: input.modelDowngraded ?? false,
-      needsBrowser: input.needsBrowser ?? false,
-      maxSteps: input.maxSteps ?? CARD_MAX_STEPS,
-      notify: input.notify ?? 'none',
-      sessionId: null,
-      heartbeatAt: null,
-      attempt: 0,
-      reopens: 0,
-      retryAfter: null,
-      summary: '',
-      metadata: null,
-      blockedKind: null,
-      blockedReason: '',
-      dedupeKey: input.dedupeKey ?? null,
+      key: input.key,
+      firstSeq: input.firstSeq,
+      lastSeq: input.lastSeq,
+      evidence: input.evidence ?? '',
+      humanFields: [],
+      extractModel: input.extractModel ?? '',
+      extractVersion: input.extractVersion ?? 0,
       createdAt: now,
-      startedAt: null,
-      endedAt: null,
       updatedAt: now,
+      stateAt: now,
+      doneAt: input.state === 'done' ? now : null,
     }
     try {
       await this.run(
-        'insert into cards (id, "boardId", "accountId", "companyId", title, body, "assigneeBotId", state, priority, "createdByBotId", "modelRole", "modelReason", "modelDowngraded", "needsBrowser", "maxSteps", notify, "dedupeKey", "createdAt", "updatedAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        [row.id, row.boardId, row.accountId, row.companyId, row.title, row.body, row.assigneeBotId, row.state, row.priority, row.createdByBotId, row.modelRole, row.modelReason, row.modelDowngraded, row.needsBrowser, row.maxSteps, row.notify, row.dedupeKey, row.createdAt, row.updatedAt],
+        'insert into tasks (id, "accountId", "companyId", "botId", "sessionId", title, summary, state, key, "firstSeq", "lastSeq", evidence, "humanFields", "extractModel", "extractVersion", "createdAt", "updatedAt", "stateAt", "doneAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [row.id, row.accountId, row.companyId, row.botId, row.sessionId, row.title, row.summary, row.state, row.key, row.firstSeq, row.lastSeq, row.evidence, JSON.stringify(row.humanFields), row.extractModel, row.extractVersion, row.createdAt, row.updatedAt, row.stateAt, row.doneAt],
       )
     } catch (e) {
       if (isUniqueViolation(e)) return undefined
@@ -3971,39 +3922,29 @@ export class Db {
     return row
   }
 
-  /** 同一块板上这个指纹已经有卡了：把它捞回来，合并进去（见 lib/kanban.ts 的去重）。 */
-  async cardByDedupe(boardId: string, dedupeKey: string): Promise<Card | undefined> {
-    const r = await this.one('select * from cards where "boardId" = ? and "dedupeKey" = ?', [boardId, dedupeKey])
-    return r ? cardOf(r) : undefined
-  }
-
-  async updateCard(
+  /**
+   * 改一条任务。
+   *
+   * **`stateAt` / `doneAt` 由调用方显式传**，这里不替它算：状态没变的那种更新（抽取器
+   * 只是把 `lastSeq` 往后推）绝不能动 `stateAt`，否则界面上「停滞 N 天」永远不会出现
+   * （见 Task.stateAt 上那段）。把这个判断藏进 update 里，两个调用方总有一个会写错。
+   */
+  async updateTask(
     id: string,
     patch: {
       title?: string
-      body?: string
-      assigneeBotId?: string | null
-      state?: CardState
-      priority?: number
-      modelRole?: RoutineModelRole
-      modelReason?: string
-      modelDowngraded?: boolean
-      needsBrowser?: boolean
-      maxSteps?: number
-      notify?: CardNotify
-      sessionId?: string | null
-      heartbeatAt?: number | null
-      attempt?: number
-      reopens?: number
-      retryAfter?: number | null
       summary?: string
-      metadata?: Record<string, unknown> | null
-      blockedKind?: CardBlockedKind | null
-      blockedReason?: string
-      startedAt?: number | null
-      endedAt?: number | null
+      state?: TaskState
+      firstSeq?: number
+      lastSeq?: number
+      evidence?: string
+      humanFields?: TaskField[]
+      extractModel?: string
+      extractVersion?: number
+      stateAt?: number
+      doneAt?: number | null
     },
-  ): Promise<Card | undefined> {
+  ): Promise<Task | undefined> {
     const sets: string[] = []
     const args: unknown[] = []
     const put = (col: string, v: unknown) => {
@@ -4011,296 +3952,55 @@ export class Db {
       args.push(v)
     }
     if (patch.title !== undefined) put('title', patch.title)
-    if (patch.body !== undefined) put('body', patch.body)
-    if (patch.assigneeBotId !== undefined) put('assigneeBotId', patch.assigneeBotId)
-    if (patch.state !== undefined) put('state', patch.state)
-    if (patch.priority !== undefined) put('priority', patch.priority)
-    if (patch.modelRole !== undefined) put('modelRole', patch.modelRole)
-    if (patch.modelReason !== undefined) put('modelReason', patch.modelReason)
-    if (patch.modelDowngraded !== undefined) put('modelDowngraded', patch.modelDowngraded)
-    if (patch.needsBrowser !== undefined) put('needsBrowser', patch.needsBrowser)
-    if (patch.maxSteps !== undefined) put('maxSteps', patch.maxSteps)
-    if (patch.notify !== undefined) put('notify', patch.notify)
-    if (patch.sessionId !== undefined) put('sessionId', patch.sessionId)
-    if (patch.heartbeatAt !== undefined) put('heartbeatAt', patch.heartbeatAt)
-    if (patch.attempt !== undefined) put('attempt', patch.attempt)
-    if (patch.reopens !== undefined) put('reopens', patch.reopens)
-    if (patch.retryAfter !== undefined) put('retryAfter', patch.retryAfter)
     if (patch.summary !== undefined) put('summary', patch.summary)
-    if (patch.metadata !== undefined) put('metadata', patch.metadata == null ? null : JSON.stringify(patch.metadata))
-    if (patch.blockedKind !== undefined) put('blockedKind', patch.blockedKind)
-    if (patch.blockedReason !== undefined) put('blockedReason', patch.blockedReason)
-    if (patch.startedAt !== undefined) put('startedAt', patch.startedAt)
-    if (patch.endedAt !== undefined) put('endedAt', patch.endedAt)
+    if (patch.state !== undefined) put('state', patch.state)
+    if (patch.firstSeq !== undefined) put('firstSeq', patch.firstSeq)
+    if (patch.lastSeq !== undefined) put('lastSeq', patch.lastSeq)
+    if (patch.evidence !== undefined) put('evidence', patch.evidence)
+    if (patch.humanFields !== undefined) put('humanFields', JSON.stringify(patch.humanFields))
+    if (patch.extractModel !== undefined) put('extractModel', patch.extractModel)
+    if (patch.extractVersion !== undefined) put('extractVersion', patch.extractVersion)
+    if (patch.stateAt !== undefined) put('stateAt', patch.stateAt)
+    if (patch.doneAt !== undefined) put('doneAt', patch.doneAt)
     put('updatedAt', Date.now())
     args.push(id)
-    await this.run(`update cards set ${sets.join(', ')} where id = ?`, args)
-    return this.card(id)
+    await this.run(`update tasks set ${sets.join(', ')} where id = ?`, args)
+    return this.task(id)
   }
 
-  async deleteCard(id: string): Promise<boolean> {
-    return (await this.run('delete from cards where id = ?', [id])) > 0
+  /** 认错的那一条，人删得掉。时间线跟着走（外键 on delete cascade）。 */
+  async deleteTask(id: string): Promise<boolean> {
+    return (await this.run('delete from tasks where id = ?', [id])) > 0
   }
 
-  /** 顶栏那个待办计数：我板上要人管的卡。**人自己按停止的那些不算**（口径见 CardBlockedKind）。 */
-  async blockedCardCount(accountId: string): Promise<number> {
-    const r = await this.one(
-      `select count(*)::int as n from cards where "accountId" = ? and state = 'blocked' and coalesce("blockedKind", '') <> 'stopped'`,
-      [accountId],
-    )
-    return r ? num(r.n) : 0
-  }
-
-  async cardParents(cardId: string): Promise<Card[]> {
-    const rows = await this.many(
-      'select c.* from card_links l join cards c on c.id = l."parentId" where l."childId" = ? order by c."createdAt"',
-      [cardId],
-    )
-    return rows.map(cardOf)
-  }
-
-  async cardChildren(cardId: string): Promise<Card[]> {
-    const rows = await this.many(
-      'select c.* from card_links l join cards c on c.id = l."childId" where l."parentId" = ? order by c."createdAt"',
-      [cardId],
-    )
-    return rows.map(cardOf)
-  }
-
-  async linkCards(parentId: string, childId: string): Promise<void> {
-    await this.run('insert into card_links ("parentId", "childId") values (?,?) on conflict do nothing', [parentId, childId])
-  }
-
-  async unlinkCards(parentId: string, childId: string): Promise<boolean> {
-    return (await this.run('delete from card_links where "parentId" = ? and "childId" = ?', [parentId, childId])) > 0
-  }
-
-  async cardComments(cardId: string): Promise<CardComment[]> {
-    const rows = await this.many('select * from card_comments where "cardId" = ? order by "createdAt"', [cardId])
-    return rows.map(cardCommentOf)
-  }
-
-  /**
-   * 时间线上加一行。
-   *
-   * `kind: 'system'` 那些就是「这块板每天发生了什么」的唯一出处——状态变了、失败了、
-   * 被打回了，全写在这儿。审计那一栏不记这些（它回答的是另一个问题：这颗 Bot 会不会
-   * 自己动），所以这一行漏了，事后就查不出来了。
-   */
-  async insertCardComment(input: {
-    cardId: string
-    kind: 'comment' | 'system'
-    authorAccountId?: string | null
-    authorBotId?: string | null
-    body: string
-  }): Promise<CardComment> {
-    const row: CardComment = {
-      id: randomUUID(),
-      cardId: input.cardId,
-      kind: input.kind,
-      authorAccountId: input.authorAccountId ?? null,
-      authorBotId: input.authorBotId ?? null,
-      body: input.body,
-      createdAt: Date.now(),
-    }
-    await this.run(
-      'insert into card_comments (id, "cardId", kind, "authorAccountId", "authorBotId", body, "createdAt") values (?,?,?,?,?,?,?)',
-      [row.id, row.cardId, row.kind, row.authorAccountId, row.authorBotId, row.body, row.createdAt],
-    )
-    return row
-  }
-
-  async cardFiles(cardId: string): Promise<CardFile[]> {
-    const rows = await this.many('select * from card_files where "cardId" = ? order by "createdAt"', [cardId])
-    return rows.map(cardFileOf)
-  }
-
-  async insertCardFile(input: { cardId: string; name: string; size: number; path: string }): Promise<CardFile> {
-    const row: CardFile = {
-      id: randomUUID(),
-      cardId: input.cardId,
-      name: input.name,
-      size: input.size,
-      path: input.path,
-      createdAt: Date.now(),
-    }
-    await this.run(
-      'insert into card_files (id, "cardId", name, size, path, "createdAt") values (?,?,?,?,?,?)',
-      [row.id, row.cardId, row.name, row.size, row.path, row.createdAt],
-    )
-    return row
-  }
-
-  /** 一块板的全部附件落盘路径（删板时连字节一起清掉用）。 */
-  async cardFilePathsOfBoard(boardId: string): Promise<string[]> {
-    const rows = await this.many(
-      'select card_files.path as path from card_files join cards on cards.id = card_files."cardId" where cards."boardId" = ?',
-      [boardId],
-    )
-    return rows.map((r) => str(r.path))
-  }
-
-  async cardRuns(cardId: string, limit = 10): Promise<CardRun[]> {
-    const rows = await this.many('select * from card_runs where "cardId" = ? order by "startedAt" desc limit ?', [
-      cardId,
+  async taskEvents(taskId: string, limit = 50): Promise<TaskEvent[]> {
+    const rows = await this.many('select * from task_events where "taskId" = ? order by "createdAt" limit ?', [
+      taskId,
       Math.max(1, Math.trunc(limit)),
     ])
-    return rows.map(cardRunOf)
+    return rows.map(taskEventOf)
   }
 
-  async insertCardRun(input: {
-    cardId: string
-    attempt: number
-    botId: string
-    sessionId?: string | null
-    machineId?: string | null
-  }): Promise<CardRun> {
-    const row: CardRun = {
+  async insertTaskEvent(input: {
+    taskId: string
+    kind: TaskEventKind
+    fromState?: TaskState | null
+    toState?: TaskState | null
+    note?: string
+  }): Promise<TaskEvent> {
+    const row: TaskEvent = {
       id: randomUUID(),
-      cardId: input.cardId,
-      attempt: input.attempt,
-      sessionId: input.sessionId ?? null,
-      botId: input.botId,
-      machineId: input.machineId ?? null,
-      status: 'running',
-      steps: null,
-      toolCalls: null,
-      error: null,
-      startedAt: Date.now(),
-      endedAt: null,
+      taskId: input.taskId,
+      kind: input.kind,
+      fromState: input.fromState ?? null,
+      toState: input.toState ?? null,
+      note: input.note ?? '',
+      createdAt: Date.now(),
     }
     await this.run(
-      'insert into card_runs (id, "cardId", attempt, "sessionId", "botId", "machineId", status, "startedAt") values (?,?,?,?,?,?,?,?)',
-      [row.id, row.cardId, row.attempt, row.sessionId, row.botId, row.machineId, row.status, row.startedAt],
+      'insert into task_events (id, "taskId", kind, "fromState", "toState", note, "createdAt") values (?,?,?,?,?,?,?)',
+      [row.id, row.taskId, row.kind, row.fromState, row.toState, row.note, row.createdAt],
     )
     return row
   }
-
-  async finishCardRun(
-    id: string,
-    patch: { status: CardRunStatus; steps?: number | null; toolCalls?: number | null; error?: string | null; sessionId?: string | null },
-  ): Promise<void> {
-    await this.run(
-      'update card_runs set status = ?, steps = ?, "toolCalls" = ?, error = ?, "sessionId" = coalesce(?, "sessionId"), "endedAt" = ? where id = ?',
-      [patch.status, patch.steps ?? null, patch.toolCalls ?? null, patch.error ?? null, patch.sessionId ?? null, Date.now(), id],
-    )
-  }
-
-  /** 这张卡还开着的那一次执行。收口和回收都要先找到它。 */
-  async runningCardRun(cardId: string): Promise<CardRun | undefined> {
-    const r = await this.one(`select * from card_runs where "cardId" = ? and status = 'running' order by "startedAt" desc limit 1`, [cardId])
-    return r ? cardRunOf(r) : undefined
-  }
-
-
-  // ── 看板调度：收依赖、收死的、选卡、抢卡 ─────────────────────────────
-
-  /**
-   * 把「父卡全部 done」的 `todo` 卡推成 `ready`。一条 SQL，调度器每一轮的第一步。
-   *
-   * `not exists` 那半句是判据本身：**有任何一张父卡还活着就不动它**。写成「有一张 done
-   * 就推」的话，一条三段的流水线会在第一段做完时整条冲出去。
-   *
-   * **挡路的判据是「还没走到终点」，不是「还没 done」。** 写成后者的话，父卡被撤销
-   * （`cancelled`）或者做完之后被人归档（`archived`）时，子卡会永远停在 `todo`：调度器
-   * 每一轮都因为它不是 `done` 而跳过，而界面上它收在「等依赖」那个折叠区里，人看到的只是
-   * 「还在等」，没有任何一条路能让它继续——卡页上连拆依赖的按钮都没有。`archived` 那一档
-   * 尤其阴险：它是从 `done` 走过来的，产出明明就在。
-   */
-  async promoteReadyCards(): Promise<number> {
-    return this.run(
-      `update cards set state = 'ready', "updatedAt" = ?
-         where state = 'todo'
-           and not exists (
-             select 1 from card_links l join cards p on p.id = l."parentId"
-              where l."childId" = cards.id
-                and p.state not in ('done', 'archived', 'cancelled')
-           )`,
-      [Date.now()],
-    )
-  }
-
-  /**
-   * 该派的那几张：`ready`、过了退避时间。
-   *
-   * **候选要先按账号截一刀，再取前 N 条。**
-   *
-   * 直接 `order by ... limit N` 的写法有一个静默的饥饿：并发闸是在内存里逐条过的，而一个
-   * 人往同一颗 Bot 上排 45 张卡时，每一轮取回来的都是他那 40 张最老的，前几张占满闸、其余
-   * 全被跳过——**别人后建的那张永远排不进这个窗口**，而板上显示的是「待派」，看不出被谁
-   * 挡着。按账号各截 `perAccount` 张之后，谁都占不满整个窗口。
-   *
-   * **但只能截到这一层，不能再按 (账号, Bot) 截成一张。** 那样是把跨账号的饥饿换成同一颗
-   * Bot 内部的**队头阻塞**：排在最前面那张要是这一轮派不出去（`needsBrowser` 而那块屏被
-   * 占着、席位正在排空），调度器连看一眼下一张的机会都没有，而它后面那些本来跑得起来的卡
-   * 会一直等着——同样是静默的，板上同样显示「待派」。给每个账号留一叠而不是一张，循环才
-   * 有得可挑。
-   *
-   * 剩下的并发判定仍然在内存里做（它要数**正在跑**的那些，是另一张结果集）。
-   */
-  async dueCards(now: number, limit = 40, perAccount = 12): Promise<Card[]> {
-    const rows = await this.many(
-      `with spread as (
-         select *, row_number() over (partition by "accountId" order by priority desc, "createdAt") as acct_rn
-           from cards
-          where state = 'ready' and "assigneeBotId" is not null
-            and ("retryAfter" is null or "retryAfter" <= ?)
-       )
-       select * from spread where acct_rn <= ? order by priority desc, "createdAt" limit ?`,
-      [now, Math.max(1, Math.trunc(perAccount)), Math.max(1, Math.trunc(limit))],
-    )
-    return rows.map(cardOf)
-  }
-
-  /** 现在每个 (账号, Bot) 上各有几张卡在跑。两道并发闸都从这一份算。 */
-  async runningCardLoad(): Promise<{ accountId: string; botId: string; n: number }[]> {
-    const rows = await this.many(
-      `select "accountId", coalesce("assigneeBotId", '') as "botId", count(*)::int as n
-         from cards where state = 'running' group by "accountId", "assigneeBotId"`,
-    )
-    return rows.map((r) => ({ accountId: str(r.accountId), botId: str(r.botId), n: num(r.n) }))
-  }
-
-  /**
-   * 抢一张卡：`ready` → `running`，**条件里带上旧状态**。
-   *
-   * 升级换版那几十秒里新旧两代进程会同时扫到同一张，谁都觉得该自己派——CAS 之后只有
-   * 一个人的 rowCount 是 1，另一个拿到 0 就跳过。少了这一句，那一刻的卡会被派两遍，
-   * 而两份执行包会在同一棵 ~/work 上一起写。
-   */
-  async claimCard(id: string, sessionId: string | null = null): Promise<boolean> {
-    const now = Date.now()
-    const n = await this.run(
-      `update cards set state = 'running', "startedAt" = ?, "heartbeatAt" = ?, "sessionId" = ?,
-              "endedAt" = null, "retryAfter" = null, "updatedAt" = ?
-         where id = ? and state = 'ready'`,
-      [now, now, sessionId, now, id],
-    )
-    return n > 0
-  }
-
-  /**
-   * 停在 `running` 上、已经没人在跑的那几张。
-   *
-   * 两条判据管两种死法，**主路是心跳那条**：席位被 kill 之后心跳当场停，而墙钟还有
-   * 五十多分钟才到——那段时间里界面上是一张正在跑的卡，跑它的进程早没了。墙钟管的是
-   * 另一种：进程还活着但那一轮陷进去了，心跳照报，只有它拦得住。
-   */
-  async deadRunningCards(staleBefore: number, timeoutBefore: number, limit = 20): Promise<Card[]> {
-    const rows = await this.many(
-      `select * from cards
-        where state = 'running'
-          and (coalesce("heartbeatAt", "startedAt", 0) <= ? or coalesce("startedAt", 0) <= ?)
-        order by "startedAt" limit ?`,
-      [staleBefore, timeoutBefore, Math.max(1, Math.trunc(limit))],
-    )
-    return rows.map(cardOf)
-  }
-
-  /** 席位报「这张卡还活着」。**只动一列**，不写流水（一张跑一小时的卡会报 60 次）。 */
-  async noteCardHeartbeat(id: string): Promise<boolean> {
-    const now = Date.now()
-    return (await this.run(`update cards set "heartbeatAt" = ?, "updatedAt" = ? where id = ? and state = 'running'`, [now, now, id])) > 0
-  }
-
 }

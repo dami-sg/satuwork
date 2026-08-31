@@ -1254,235 +1254,161 @@ export function canonicalTimezone(raw: string): string {
   }
 }
 
-// ── 多 Bot 看板（见 docs/kanban.md）────────────────────────────────────────
+// ── 任务看板：从对话里总结出来的任务（见 docs/task-board.md）─────────────────
+//
+// 这一段接替了原来那一整套「板 / 卡 / 依赖 / 执行流水」。**没有任何一个类型描述一次
+// 执行**——任务是派生物，它不驱动任何东西（不变量 1）。
 
 /**
- * 一块板归属**一个员工**，成员只能是他自己名下的 Bot。
+ * 任务的状态。四档，其中三档是抽取器能给的。
  *
- * 这一条不是管理功能，是整份设计的地基：板关在一个账号里，于是「文件天然共享」
- * （一个员工的所有 Bot 落在同一台机器、同一个 uid 上，共用一棵 `~/work`）、「没有越权」
- * （连接器绑账号不绑 Bot，A 派给 B 干不成任何 A 自己干不了的事）、「钱对得上」这三件
- * 事全是白捡的。跨员工的板要同时重做这三处，见 docs/kanban.md §20。
+ * **`dropped` 只有人能推**（docs/task-board.md §5）。模型不许靠「后来没再提」推断
+ * 放弃：一件真被放弃的事和一件被忘掉的事，在会话里长得一模一样，而后者恰恰是这块板
+ * 存在的理由。
+ *
+ * **没有 `blocked`**：那是执行面的概念，而谁都不再执行任何东西了。一件卡住的事就是一件
+ * 还没做完的事，它待在 `doing` 里，界面上按 `stateAt` 标一行「停滞 N 天」（只是显示，
+ * 不改状态）。
  */
-export interface Board {
-  id: string
-  accountId: string
-  companyId: string
-  name: string
-  /** 这块板上跑的活是什么。会进每张卡的执行包，当作板级的交底书。 */
-  brief: string
-  archived: boolean
-  createdAt: number
-  updatedAt: number
+export type TaskState = 'proposed' | 'doing' | 'done' | 'dropped'
+
+const TASK_STATES: TaskState[] = ['proposed', 'doing', 'done', 'dropped']
+
+/**
+ * 读库这一路没人接得住异常，一条脏数据不该让整块板打不开（同 routineOf 那条）。
+ *
+ * **兜底给 `doing`，不给 `done`**：认不出来的那一条得留在人眼前。兜底成 `done` 的话，
+ * 一次脏数据的表现是「一件事悄悄从待办里消失了」，而那是这块板最不能出的错。
+ */
+export function parseTaskState(v: unknown): TaskState {
+  const s = String(v ?? '') as TaskState
+  return TASK_STATES.includes(s) ? s : 'doing'
+}
+
+/** 抽取器能写的那三档。`dropped` 不在里面，见 TaskState 上那段。 */
+export function parseExtractedState(v: unknown): TaskState | null {
+  const s = String(v ?? '') as TaskState
+  return s === 'proposed' || s === 'doing' || s === 'done' ? s : null
 }
 
 /**
- * 板上的一颗 Bot。
+ * 人碰过的字段。碰过的抽取器不再覆盖（§9）。
  *
- * **没有 accountId**：成员恒等于板归属那个人名下的 Bot。存一份的话，它和
- * `boards.accountId` 就有了两个事实源，而不一致的那天没有任何东西会响。
+ * **存字段名而不是一个 `humanEdited` 布尔**：人改了标题不该连带把状态也冻住——他改标题
+ * 是因为模型起的名字难看，不是因为他要接管这条任务的状态判断。
  */
-export interface BoardMember {
-  boardId: string
+export type TaskField = 'title' | 'summary' | 'state'
+
+const TASK_FIELDS: TaskField[] = ['title', 'summary', 'state']
+
+export function parseTaskFields(v: unknown): TaskField[] {
+  if (!Array.isArray(v)) return []
+  const out: TaskField[] = []
+  for (const raw of v) {
+    const f = String(raw ?? '') as TaskField
+    if (TASK_FIELDS.includes(f) && !out.includes(f)) out.push(f)
+  }
+  return out
+}
+
+/** 标题要进一行、进侧栏。写长了的那些，全是模型在把摘要写进标题。 */
+export const TASK_TITLE_MAX = 60
+/** 摘要是**派生物，不是正文**（§3）：正文仍然只在席位上，点「看原话」是去那儿拉。 */
+export const TASK_SUMMARY_MAX = 300
+/** 「凭什么判成这个状态」，一句。人核对时先看它，不用点进会话。 */
+export const TASK_EVIDENCE_MAX = 120
+export const TASK_KEY_MAX = 64
+
+/**
+ * 一次抽取最多认几件事。超了截断并告警——抽疯了要看得见。
+ *
+ * 5 这个数和窗口大小是配的：一次只喂增量（几轮对话），几轮里冒出五件以上的新事，更可能
+ * 是模型在把步骤拆成任务（§2 那条「中间步骤不单独成条」），不是真有那么多。
+ */
+export const TASK_EXTRACT_MAX = 5
+
+/**
+ * 一条会话最多挂几条任务。超了**拒收整批**并告警。
+ *
+ * 这是抽取器失控时的闸，不是产品限制：一条正常的长会话跑上几个月也到不了 60。真到了，
+ * 要看的是抽取器为什么在把每一轮都认成新任务，而不是让板继续长。
+ */
+export const TASK_PER_SESSION_MAX = 60
+
+/** `doing` 多久没动就在界面上标「停滞」。**只是显示**，状态不动（§5 规矩 3）。 */
+export const TASK_STALE_MS = 7 * 24 * 3600_000
+
+/** 板上一页几条。翻页是 keyset 的（排序键 `stateAt` desc, id desc），见 db.tasksOf。 */
+export const TASK_PAGE_DEFAULT = 50
+export const TASK_PAGE_MAX = 200
+
+/**
+ * 一条任务 = 某颗 Bot 的某条会话里被认出来的一件事。
+ *
+ * **归属是 (accountId, botId, sessionId) 这一串**，而且三个全由席位票现算，body 里报上来
+ * 的一概不收——不然一台席位就能往别人名下塞任务。
+ */
+export interface Task {
+  id: string
+  accountId: string
+  companyId: string
+  /** 哪颗 Bot 做的。板上按它分组、按它过滤。 */
   botId: string
-  /** 它在这块板上干什么。派活的那颗 Bot 靠它挑人，没有它就只能按名字猜。 */
-  role: string
-  addedAt: number
-}
-
-/**
- * 卡的状态。
- *
- * **没有 `triage`**：那是给自动拆解用的暂存区，而我们这一版不做拆解。一张写得不清楚的
- * 卡就是一张写得不清楚的卡，它该被人改清楚，不该有一个专门的状态来盛放它。
- *
- * **没有 `failed`**：失败两次的卡进 `blocked`。这两个状态对人的意思完全一样——「这儿
- * 停住了，去看看」——而分成两个，人就要学会哪个该管哪个不用管。
- */
-/**
- * 一张卡最多连着跑多少步。
- *
- * 不是委派的 30、也不是主会话的 120：一张卡是被**单独描述清楚**的完整任务（比一段子活
- * 大），但它没有「装环境、跑测试、按报错改再跑」那条主会话才有的长链子。
- */
-export const CARD_MAX_STEPS = 60
-
-/** 一次 kanban_create 最多几张。超了回 400 并说明——模型看得懂，会自己拆成两次。 */
-export const CARD_CREATE_MAX = 5
-
-/** 失败几次进 blocked。抄 Hermes 的 failure_limit。 */
-export const CARD_FAILURE_LIMIT = 2
-
-/** 被打回几次进 blocked。没有这个数，「评审打回 → 重做 → 又打回」是个每轮都在花钱的死循环。 */
-export const CARD_REOPEN_LIMIT = 2
-
-/**
- * 去重窗口：同一颗 Bot、同一块板、同一个标题指纹，这段时间内只建一张。
- *
- * **桶号要进指纹**（见 lib/kanban.ts 的 dedupeKeyOf）：唯一索引是永久约束，而这是一个
- * 窗口。不带桶的话，同一个标题隔一天再建会撞唯一键，而人做的事完全正当。
- */
-export const CARD_DEDUPE_WINDOW_MS = 5 * 60_000
-
-/**
- * 一颗 Bot / 一个账号同时在跑几张卡。
- *
- * 第一道是 1，理由是 `~/work`：委派那边不给工作区加锁，靠的是「一批并发委派的 goal 里
- * 各自划清文件范围」——那句话的前提是同一个主代理一次写出这一批，而板上的卡来自不同的
- * 时候、可能不同的 Bot，没有任何一个环节会去划这个范围。
- *
- * 第二道是因为板整个关在一个账号里，于是一块板的活**全部落在一台机器上**：同时派给三颗
- * Bot，就是三个进程在同一台机器上、同一棵 `~/work` 上一起跑。
- */
-export const CARD_SEAT_CONCURRENCY = 1
-export const CARD_ACCOUNT_CONCURRENCY = 3
-
-/**
- * `pending`（待定）是人开卡的落点：写完需求先停在这里，等人把它拖进「待派」才真正
- * 会上路。**只有人建卡走这一态**——模型自己开的卡（runtime/kanban）本来就带着明确的
- * 执行意图，落 ready 直接进调度（见 routes/kanban.ts 建卡与 lib/kanban.ts initialCardState）。
- */
-export type CardState = 'pending' | 'todo' | 'ready' | 'running' | 'blocked' | 'done' | 'archived' | 'cancelled'
-
-const CARD_STATES: CardState[] = ['pending', 'todo', 'ready', 'running', 'blocked', 'done', 'archived', 'cancelled']
-
-/** 认不出来的当 `todo`——它是唯一一个「什么都还没发生」的状态，读错也不会误导人。 */
-export function parseCardState(v: unknown): CardState {
-  const s = String(v ?? '') as CardState
-  return CARD_STATES.includes(s) ? s : 'todo'
-}
-
-/**
- * 为什么停住了。**给代码判的**，不是给人读的（人读的是 `blockedReason`）。
- *
- * 四条路都通向 `blocked`，但只有前三档要推给人：`stopped` 是**人自己按的停止**，把它
- * 也推出去的话，人点一下停止、下一秒收到一条「你有一张卡卡住了」——他刚按的那一下就是
- * 原因，而系统回头把它当成一件要他处理的事报给他。
- */
-export type CardBlockedKind = 'by-model' | 'failed' | 'reopen-cap' | 'stopped'
-
-const BLOCKED_KINDS: CardBlockedKind[] = ['by-model', 'failed', 'reopen-cap', 'stopped']
-
-export function parseCardBlockedKind(v: unknown): CardBlockedKind | null {
-  const s = String(v ?? '') as CardBlockedKind
-  return BLOCKED_KINDS.includes(s) ? s : null
-}
-
-/** 这三档要推给人（顶栏计数、webhook）；`stopped` 不推。 */
-export function blockedNeedsAttention(kind: CardBlockedKind | null): boolean {
-  return kind !== null && kind !== 'stopped'
-}
-
-/**
- * 做完了要不要吭一声。
- *
- * **`report` 不叫 `owner`**：它发给的是 assignee 那颗 Bot（人看到汇报之后第一句多半是
- * 追问，而唯一还能接住的是刚做完那件事的那颗），而 `owner` 读起来像「发给板主人」，
- * 看代码的人会照着错的那个意思去改。
- */
-export type CardNotify = 'none' | 'report'
-
-export function parseCardNotify(v: unknown): CardNotify {
-  return String(v ?? '') === 'report' ? 'report' : 'none'
-}
-
-/**
- * 一张卡。
- *
- * 正文（title / body / summary）**落在 Gateway**，和会话索引那条口径不同，是有意的：
- * 下游 Bot 在另一个席位上、有自己的 `$SATUWORK_HOME`，读不到上游那条卡片会话，卡上这
- * 几段就是它全部的交底书；而「派卡」发生在 Gateway 的 tick 里，那一刻整台机器可能是
- * 关着的（docs/kanban.md §5）。
- */
-export interface Card {
-  id: string
-  boardId: string
-  /** 从板上冗余下来：选卡那条 SQL 要按账号数并发，不想每次 join。 */
-  accountId: string
-  companyId: string
+  /** 哪条会话。点「看原话」拿它去席位拉；会话没了就把链接灰掉，任务留着。 */
+  sessionId: string
   title: string
-  body: string
-  /** 席位是 (accountId, assigneeBotId) 那一对——账号从板上取，不从这里取。 */
-  assigneeBotId: string | null
-  state: CardState
-  priority: number
-  /** 人建的是 null；Bot 建的记那颗 Bot。 */
-  createdByBotId: string | null
-  modelRole: RoutineModelRole
-  /** 选这一档的理由。**给人看的**，不进模型。 */
-  modelReason: string
-  /** 写了 utility 但没给理由，于是被降成 daily。人要看得出这一档不是模型选的。 */
-  modelDowngraded: boolean
-  needsBrowser: boolean
-  maxSteps: number
-  notify: CardNotify
-  sessionId: string | null
-  /** 席位最后一次报「还活着」。**回收主要看它**，不看 startedAt。 */
-  heartbeatAt: number | null
-  attempt: number
-  reopens: number
-  /** 在这之前别再派。真失败等 5 分钟，busy / 静默只等一个 tick。 */
-  retryAfter: number | null
   summary: string
-  metadata: Record<string, unknown> | null
-  blockedKind: CardBlockedKind | null
-  blockedReason: string
-  dedupeKey: string | null
+  state: TaskState
+  /** 抽取器给的稳定标识，跨轮 upsert 靠它（§4.3）。unique (sessionId, key)。 */
+  key: string
+  /**
+   * 这件事在会话里的哪一段。
+   *
+   * 摘要是模型写的，摘要错了**只有原文能纠**——没有这两个数，人手上就只剩模型的一面
+   * 之词。
+   */
+  firstSeq: number
+  lastSeq: number
+  evidence: string
+  humanFields: TaskField[]
+  /**
+   * 哪个模型、哪一版提示词抽的。
+   *
+   * 抽错一批要能圈出来重抽，也要能回答「换了模型之后是不是变准了」。不记的话，出问题时
+   * 手上一个可分组的维度都没有。
+   */
+  extractModel: string
+  extractVersion: number
   createdAt: number
-  startedAt: number | null
-  endedAt: number | null
   updatedAt: number
-}
-
-/** 时间线上的一行：人写的评论，或者系统写的状态变更。 */
-export interface CardComment {
-  id: string
-  cardId: string
-  kind: 'comment' | 'system'
-  authorAccountId: string | null
-  authorBotId: string | null
-  body: string
-  createdAt: number
-}
-
-/** 卡上的一份附件。字节在 gateway home 的 `kanban/<cardId>/` 下，这里只是登记。 */
-export interface CardFile {
-  id: string
-  cardId: string
-  name: string
-  size: number
-  /** 相对 gateway home 的落盘路径。 */
-  path: string
-  createdAt: number
+  /**
+   * **状态最后一次真的变了**是什么时候。
+   *
+   * 界面上「停滞 N 天」按它算，不按 `updatedAt`：抽取器每次把 `lastSeq` 往后推都会动
+   * `updatedAt`，那样没有一条任务显得停滞过。
+   */
+  stateAt: number
+  doneAt: number | null
 }
 
 /**
- * `stale` = 席位失联（心跳停了），和 `error`（席位报了错）分开。
+ * 任务时间线上的一行：抽取器改的 + 人改的，混在一起按时间排。
  *
- * 前者查不出那一轮做到哪儿了，写成 `error` 是在编——同 delegation 那条 `lost`：
- * 「那件事做没做成，进程死的时候没人知道，事后也查不出来」。
+ * **抽取器每一次改状态都要留一行**：板上一条任务昨天还是提案、今天成了完成，人得查得到
+ * 是哪一轮把它推过去的。
  */
-export type CardRunStatus = 'running' | 'ok' | 'error' | 'stale' | 'aborted'
+export type TaskEventKind = 'extract' | 'human'
 
-const RUN_STATUSES: CardRunStatus[] = ['running', 'ok', 'error', 'stale', 'aborted']
-
-export function parseCardRunStatus(v: unknown): CardRunStatus {
-  const s = String(v ?? '') as CardRunStatus
-  return RUN_STATUSES.includes(s) ? s : 'running'
+export function parseTaskEventKind(v: unknown): TaskEventKind {
+  return String(v ?? '') === 'human' ? 'human' : 'extract'
 }
 
-/** 一次执行。重试时执行包里带上一行，让它看得见上一次是怎么失败的。 */
-export interface CardRun {
+export interface TaskEvent {
   id: string
-  cardId: string
-  attempt: number
-  sessionId: string | null
-  botId: string
-  machineId: string | null
-  status: CardRunStatus
-  steps: number | null
-  toolCalls: number | null
-  error: string | null
-  startedAt: number
-  endedAt: number | null
+  taskId: string
+  kind: TaskEventKind
+  fromState: TaskState | null
+  toState: TaskState | null
+  note: string
+  createdAt: number
 }

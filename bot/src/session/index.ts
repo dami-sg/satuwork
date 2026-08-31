@@ -35,14 +35,14 @@ export interface CreateSession {
   remoteId?: string
   title?: string
   /**
-   * `task` = 一次委派开出来的子会话（docs/delegation.md）；
-   * `card` = 一张看板卡（docs/kanban.md）。默认 `main`。
+   * `task` = 一次委派开出来的子会话（docs/delegation.md）。默认 `main`。
    *
    * **除了 `main` 之外的都不是「这个人的对话」**：不进 list()、不上报会话索引、
    * 不会被 ensureSession 认领成长会话。判据一律写成「是不是 main」，不是「是不是
-   * task」——第三个取值出现时，照后者写的每一处都会静默地把它当成主会话。
+   * task」——老日志里还有 `card` 那一档（看板的卡片会话，见 docs/task-board.md §14），
+   * 照后者写的每一处都会静默地把它当成主会话。
    */
-  kind?: 'main' | 'task' | 'card'
+  kind?: 'main' | 'task'
   /**
    * 谁开的。**非 `main` 的都必须给。**
    *
@@ -93,12 +93,12 @@ export class SessionService extends Service {
     if (opts.kind && opts.kind !== 'main' && !opts.parent) throw new Error('sessions: 非主会话必须带 parent')
     await mkdir(this.root, { recursive: true })
     /**
-     * 主会话 `s-`、委派子会话 `t-`、看板卡 `c-`。
+     * 主会话 `s-`、委派子会话 `t-`（老日志里还有看板卡那批 `c-`）。
      *
      * **只为运维时 `ls` 一眼分得开**，代码里不许拿它做判断——事实源是根事件的 `kind`
      * （见 session/types.ts）。两个判据并存的话，它们迟早会分叉。
      */
-    const id = `${opts.kind === 'task' ? 't' : opts.kind === 'card' ? 'c' : 's'}-${randomUUID()}`
+    const id = `${opts.kind === 'task' ? 't' : 's'}-${randomUUID()}`
     const state: SessionState = { id, events: [], seq: 0, file: join(this.root, `${id}.jsonl`) }
     this.cache.set(id, state)
     await this.append(id, 'session', {
