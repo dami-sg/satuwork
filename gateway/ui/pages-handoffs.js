@@ -259,18 +259,19 @@ function repaintAskPanel() {
 /**
  * 顶栏那个数：**要人做的事一共几件**。
  *
- * **三样加在一起**（见 docs/kanban.md §14 第 2 层）：开着的交接单、卡住的看板卡、
- * 正等着人拍板的确认。对人是同一件事——「有活等着你」。分成三个数字、三页清单的话，
- * 人要学会看三个地方，而他只会记住一个。
+ * **两样加在一起**：开着的交接单、正等着人拍板的确认。对人是同一件事——「有活等着你」。
+ * 分成两个数字、两页清单的话，人要学会看两个地方，而他只会记住一个。
  *
- * 人自己按停止的那些不在里面：Gateway 那侧已经把 `stopped` 那一档排掉了。
+ * **任务看板上那些不算。** 那块板是一面镜子（docs/task-board.md §1）：上面没有一条在等
+ * 人做决定，一条「进行中」躺了十天也不要求他现在做什么。混进这个数的话，这颗徽章就从
+ * 「有活等着你」变成了「有事发生过」，而后者不值得每次都亮。
  *
  * **首绘和重绘共用它**：原来 handoffBell 只数交接单、paintHandoffBadge 数两样，
  * 于是页面刚画出来那一下和第一次重绘之后是两个不同的数字。
  */
 function needCount() {
   const asks = typeof pendingApprovals === 'function' ? pendingApprovals().length : 0
-  return (Number(state.handoffCount) || 0) + (Number(state.kanbanBlocked) || 0) + asks
+  return (Number(state.handoffCount) || 0) + asks
 }
 
 /**

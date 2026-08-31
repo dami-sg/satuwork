@@ -416,78 +416,51 @@ aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; ov
 .satu-statrow:hover { background: var(--card); }
 .satu-stathead:first-child { border-top-left-radius: var(--radius-lg); border-top-right-radius: var(--radius-lg); }
 
-/* ── 看板（见 docs/kanban.md §16）────────────────────────────────────── */
+/* ── 任务看板（见 docs/task-board.md §10）───────────────────────────── */
 
-.satu-kanban-boards { display: flex; flex-direction: column; gap: var(--space-2); }
-.satu-kanban-boardrow {
-  display: flex; justify-content: space-between; align-items: baseline; gap: var(--space-4);
-  padding: var(--space-3) var(--space-4); text-align: left; cursor: pointer;
-  border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover); color: inherit;
-}
-.satu-kanban-boardrow:hover { border-color: var(--ring); }
-.satu-kanban-boardname { font-size: 15px; font-weight: 500; }
-.satu-kanban-boardmeta { font-size: 13px; color: var(--muted-foreground); }
-
-/* 四列并排，窄屏自己折下去——板上的卡本来就常常只有一两列有东西。 */
-.satu-kanban-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-3); }
-.satu-kanban-col { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
-.satu-kanban-colhead {
+/* 四列并排，窄屏自己折下去——常常只有一两列有东西。 */
+.satu-task-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-3); }
+.satu-task-col { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.satu-task-colhead {
   display: flex; justify-content: space-between; font-size: 13px; font-weight: 500;
   color: var(--muted-foreground); padding-bottom: var(--space-1); border-bottom: 1px solid var(--border);
 }
-.satu-kanban-card {
-  display: block; width: 100%; text-align: left; cursor: pointer; padding: var(--space-3);
+/* 每一张都拿得起来：这一版四档全是判断，人有权把任何一条挪到任何一档。 */
+.satu-task-card {
+  display: block; width: 100%; text-align: left; cursor: grab; padding: var(--space-3);
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--popover); color: inherit;
 }
-.satu-kanban-card:hover { border-color: var(--ring); }
-.satu-kanban-title { font-size: 14px; line-height: 1.35; }
-.satu-kanban-meta {
+.satu-task-card:hover { border-color: var(--ring); }
+.satu-task-card:active { cursor: grabbing; }
+.satu-task-title { font-size: 14px; line-height: 1.35; }
+.satu-task-meta {
   display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2);
   font-size: 12px; color: var(--muted-foreground); margin-top: 2px;
 }
-.satu-kanban-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.satu-kanban-meta time { flex: none; font-variant-numeric: tabular-nums; }
-/* 档位那句理由、卡住的原因：一行小字，长了截断——卡片上放不下一整段。 */
-.satu-kanban-why {
+.satu-task-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.satu-task-meta time { flex: none; font-variant-numeric: tabular-nums; }
+/* 摘要：一行小字，长了截断——卡片上放不下一整段，全文在弹窗里。 */
+.satu-task-why {
   font-size: 12px; color: var(--muted-foreground); margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.satu-kanban-empty { font-size: 12px; color: var(--muted-foreground); padding: var(--space-2); }
-/* ── 一张卡那一屏 ─────────────────────────────────────────────────────
-   分区用的是这套界面自己的 Card：`.satu-panel` + `.satu-panel-title`（账号详情、机器
-   详情、审计详情用的同一个壳）。这一屏上的东西长短差得极远——一句「做完了」和一屏
-   带列表的结论排在一起，只靠间距分的话，短的那几段会连成一片。 */
-.satu-kanban-acts { display: flex; gap: var(--space-2); flex-wrap: wrap; }
-/* 「卡在哪儿」是唯一一块要人当场做点什么的：左沿一道重点色，扫一眼就落得到。 */
-.satu-kanban-stuck { border-left: 3px solid var(--color-accent-500); }
-/* 卡上的长文走气泡那套 .sw-md，只把字号收到这一屏的一档。 */
-.satu-kanban-md { font-size: 14px; line-height: 1.7; }
-.satu-kanban-plain { margin: 0; white-space: pre-wrap; }
-.satu-kanban-say { display: flex; gap: var(--space-2); }
-.satu-kanban-say .input { flex: 1; min-width: 0; }
-/* 时间线、附件、依赖、流水共用这一张表：**一行一条，右端一个时刻**。
-   记号去掉了——原来那颗圆点后面跟着一个常常是空的作者名，于是「做完了」这类系统行
-   缩进得莫名其妙，看着像是谁的回复。 */
-.satu-kanban-line { margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 1.7; }
-.satu-kanban-line li {
+/* 「停滞 N 天」。**只是显示**，状态没变（docs/task-board.md §5 规矩 3）——所以是一行
+   淡字，不是一个红角标：它不要求人现在做什么，只是让他知道这条躺了很久。 */
+.satu-task-stale { font-size: 12px; color: var(--color-accent-700); margin-top: 2px; }
+.satu-task-empty { font-size: 12px; color: var(--muted-foreground); padding: var(--space-2); }
+/* 人改过的那几格上那支笔：告诉他「这一格模型不会再改回去」。 */
+.satu-task-human { font-size: 11px; color: var(--muted-foreground); margin-left: 6px; }
+.satu-task-acts { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+/* 时间线：一行一条，右端一个时刻。抽取器改的和人改的混排，靠开头那个名字分。 */
+.satu-task-line { margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 1.7; }
+.satu-task-line li {
   display: flex; align-items: baseline; gap: var(--space-3);
   padding: 6px 0; border-bottom: 1px solid var(--border);
 }
-.satu-kanban-line li:first-child { padding-top: 0; }
-.satu-kanban-line li:last-child { padding-bottom: 0; border-bottom: 0; }
-.satu-kanban-evtext { flex: 1; min-width: 0; overflow-wrap: anywhere; text-align: left; }
-.satu-kanban-evtext b { font-weight: 500; color: var(--muted-foreground); margin-right: var(--space-2); }
-.satu-kanban-line time,
-.satu-kanban-line .satu-kanban-side { flex: none; font-size: 12px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
-.satu-kanban-line .satu-linkbtn { flex: none; font-size: 12px; }
-/* 系统写的那几行比人的评论淡一档：一条时间线上混排，得分得出谁在说话。 */
-.satu-kanban-sys { color: var(--muted-foreground); }
-
-/* 开卡弹窗「暂不派发」那颗药丸里的小圆点。其余挑人样式就是 .satu-assignee 药丸
-   （shell.css），和「新建 Skill」的创建方式那排同一个组件，不再自造一份。 */
-.satu-botpick-none { width: 20px; height: 20px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: var(--muted); color: var(--muted-foreground); font-size: 12px; }
-/* 待定的卡：拿得起来的那一个。抓手 + 虚线边，和其余「看着就行」的卡区分开。 */
-.satu-kanban-drag { cursor: grab; border-style: dashed; }
-.satu-kanban-drag:active { cursor: grabbing; }
-/* 拖着卡悬在「待派」列上时的落点提示。 */
-.satu-kanban-col.satu-kanban-over { outline: 2px dashed var(--color-accent-400); outline-offset: 2px; border-radius: var(--radius-sm); }
+.satu-task-line li:first-child { padding-top: 0; }
+.satu-task-line li:last-child { padding-bottom: 0; border-bottom: 0; }
+.satu-task-evtext { flex: 1; min-width: 0; overflow-wrap: anywhere; text-align: left; }
+.satu-task-evtext b { font-weight: 500; color: var(--muted-foreground); margin-right: var(--space-2); }
+.satu-task-line time { flex: none; font-size: 12px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+/* 拖着一条悬在某一列上时的落点提示。 */
+.satu-task-col.satu-task-over { outline: 2px dashed var(--color-accent-400); outline-offset: 2px; border-radius: var(--radius-sm); }

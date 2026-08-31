@@ -32,7 +32,6 @@ import type { Db, Routine, RoutineRun, RoutineRunTrigger } from './db.ts'
 import { nextRunAtOf } from './lib/schedule.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
 import { sweepHandoffs } from './handoff-sweep.ts'
-import { tickKanban } from './kanban-tick.ts'
 import { refreshDiscovered } from './model-discovery.ts'
 
 /** 调度器多久看一眼。设成 0 就不起调度器（e2e 里有几条不需要它自己跑）。 */
@@ -565,11 +564,6 @@ export function startRoutineScheduler(db: Db): () => void {
        * 定时器就多一处要在关停时记得清的东西——忘了清的表现是进程不退出。
        */
       .then(() => sweepHandoffs(db))
-      /**
-       * 看板的派卡跟着同一个节拍（见 kanban-tick.ts）。**同样不新起定时器**：两件事
-       * 的周期一样（半分钟量级的粗节拍），而多一个定时器就多一处关停时要记得清的东西。
-       */
-      .then(() => tickKanban(db))
       /**
        * 模型目录的自动发现（见 model-discovery.ts）。**同样不新起定时器**——理由和
        * 上面两处一样。它自己按 GATEWAY_MODEL_DISCOVERY_MS 节流（默认 6 小时），
