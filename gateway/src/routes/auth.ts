@@ -9,6 +9,14 @@ import { emailOf, orgSummary, publicAccount, publicCompany, publicPlan, publicSe
 import { headerOf, inviteeOf, issue, noteLogin, requireSeatOrUser, requireUser } from '../lib/guards.ts'
 import { type Account } from '../db.ts'
 
+/**
+ * 建系统管理员那把事务级锁的号。
+ *
+ * 一个随手取的常数，唯一的要求是**别和以后新加的那几处撞上**——两件不相干的事排在
+ * 一条队上，是最难查的那种慢（见 db.lockExclusive）。
+ */
+const SETUP_LOCK = 20260831
+
 export function attachAuth(router: Router, ctx: RouteCtx) {
   const { db, keys } = ctx
 
@@ -35,8 +43,18 @@ export function attachAuth(router: Router, ctx: RouteCtx) {
     if (password.length < MIN_PASSWORD) throw new HttpError(400, `口令至少 ${MIN_PASSWORD} 位`)
     const name = strField(body, 'name', false)
     const passwordHash = await hashPassword(password)
-    // 并发点两次「创建」也只成一个：抢在事务里再查一遍。
+    /**
+     * 并发点两次「创建」也只成一个。
+     *
+     * **光「抢在事务里再查一遍」拦不住**：`db.tx` 是 READ COMMITTED，两条事务各自查到
+     * 「还没有 owner」然后各插一行，两边都 201——库里就有了两个系统管理员，而这套东西
+     * 从头到尾假设只有一个（`/auth/state` 的 needsSetup、平台那一组的鉴权都按它算）。
+     * 那一版只是把窗口缩小到本机上撞不着，CI 一慢就现原形（201/201）。
+     *
+     * 所以先上一把事务级排他锁再查：后到的那条阻塞到前一条提交，然后查到 owner，回 409。
+     */
     const owner = await db.tx(async () => {
+      await db.lockExclusive(SETUP_LOCK)
       if ((await db.owners()).length) throw new HttpError(409, '已经有系统管理员了')
       if (await db.accountByEmail(email)) throw new HttpError(409, '这个邮箱已经注册')
       return db.insertAccount({ companyId: null, email, passwordHash, role: 'owner', name })

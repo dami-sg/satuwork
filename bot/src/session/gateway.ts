@@ -368,10 +368,10 @@ export function apply(ctx: Context) {
    */
   const sessionKind = new Map<string, boolean>()
   /**
-   * 这条会话是不是**旁支**（委派的子会话、看板的卡片会话）——旁支不上报索引。
+   * 这条会话是不是**旁支**（委派的子会话，和老日志里那批看板卡片会话）——旁支不上报索引。
    *
-   * **判据是「不是 main」，不是「是 task」。** 照后者写的话，卡片会话会一条条报上控制面，
-   * 而那份索引回答的是「这个人有哪几条对话」（docs/kanban.md 口径二）。
+   * **判据是「不是 main」，不是「是 task」。** 照后者写的话，那批老会话会一条条报上控制
+   * 面，而那份索引回答的是「这个人有哪几条对话」。
    */
   const isSideSession = async (sessionId: string): Promise<boolean> => {
     const known = sessionKind.get(sessionId)

@@ -135,7 +135,7 @@ const PATHS = {
   '/skills': { title: 'Skill 与 MCP', ownerTitle: '全局 Skill 与 MCP' },
   '/chat': { title: '对话' },
   '/handoffs': { title: '转人工待办' },
-  '/kanban': { title: '看板' },
+  '/tasks': { title: '任务看板' },
 }
 
 const ICONS = {
