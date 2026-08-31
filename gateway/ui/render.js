@@ -30,8 +30,8 @@ function pageView() {
       return accountsPage()
     case '/handoffs':
       return handoffsPage()
-    case '/kanban':
-      return kanbanPage()
+    case '/tasks':
+      return tasksPage()
     case '/audit':
       return auditPage()
     case '/machines':
@@ -144,8 +144,8 @@ function hasAside() {
 function appView() {
   const rail = state.rail
   const crumbs = crumbsOf(state.path)
-  // 一般的上一级是「回某个地址」（go）；看板的卡屏上一级是「回某块板」（kanban-board），
-  // 带的是 id 不是地址——crumbsOf 用 act 区分这两种，这里拼成按钮属性。
+  // 一般的上一级是「回某个地址」（go）；有些屏的上一级要走一个动作，带的是 id 不是
+  // 地址——crumbsOf 用 act 区分这两种，这里拼成按钮属性。
   const crumbBack = crumbs
     ? crumbs.act
       ? `data-act="${esc(crumbs.act)}" data-id="${esc(crumbs.id || '')}"`
@@ -214,11 +214,10 @@ function appView() {
               才做的，属于名单，不属于设置页。点开是弹窗（pluginsModal），不跳页——跳走
               一整页，回来时草稿和滚动位置都没了。owner 没有席位，装了也没人用。 */ ''}
         ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="plugins-open">${svg(ICONS.plugins, 15)} <span>${t('插件', 'Plugins')}</span></button>`}
-        ${/* 「任务看板」紧跟在「插件」下面，替代原先顶栏那颗铃铛（见 pages-handoffs.js
-              的旧 kanbanBell）：入口该在侧栏里和其他页面入口站一排，而不是让顶栏多一颗
-              没有名字的图标。跳页不弹窗——看板是一整屏，和插件弹窗不同。owner 没有公司，
-              没有板可看。aria-current 让人知道自己已经站在这一页上。 */ ''}
-        ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="go" data-href="/kanban" aria-current="${state.path === '/kanban'}">${svg(['M4 5h16v14H4z', 'M9 5v14', 'M15 5v14'], 15)} <span>${t('任务看板', 'Task boards')}</span></button>`}
+        ${/* 「任务看板」紧跟在「插件」下面：入口该在侧栏里和其他页面入口站一排，而不是
+              让顶栏多一颗没有名字的图标。跳页不弹窗——看板是一整屏，和插件弹窗不同。
+              owner 没有席位，也就没有对话可总结。aria-current 让人知道自己站在这一页上。 */ ''}
+        ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="go" data-href="/tasks" aria-current="${state.path === '/tasks'}">${svg(['M4 5h16v14H4z', 'M9 5v14', 'M15 5v14'], 15)} <span>${t('任务看板', 'Task board')}</span></button>`}
         ${
           navHtml
             ? `<div class="satu-navfoot">
@@ -255,7 +254,6 @@ function appView() {
     ${confirmModal()}
     ${newBotModal()}
     ${pluginsModal()}
-    ${kanbanCardModal()}
     ${logsModal()}
     ${previewModal()}
   </div>`

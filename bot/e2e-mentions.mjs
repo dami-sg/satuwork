@@ -21,7 +21,6 @@ import * as agentPlugin from './src/agent/index.ts'
 import { AssistantMessageEventStream, emptyAssistant } from './src/llm/stream.ts'
 import { viaMentionOf } from './src/catalog/index.ts'
 import { SESSION_FORMAT_VERSION } from './src/session/types.ts'
-import * as kanbanReportPlugin from './src/tools/kanban-report.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'satu-mention-'))
 const work = mkdtempSync(join(tmpdir(), 'satu-mention-work-'))
@@ -56,14 +55,6 @@ class FakeCatalog extends Service {
     this.ctx.tools.register({ name, description: name, parameters: { type: 'object', properties: {} }, execute: async () => ({ text: 'ok' }) })
     return true
   }
-  /**
-   * 这颗 Bot 在哪几块板上（docs/kanban.md §10.1）。
-   *
-   * **假目录也要有它**：`toolSchemasFor` 拿它判「看板那几把进不进表」，缺了这一格
-   * 整张工具表当场抛错——表现是这个探针里**每一把工具都不见了**，而报出来的是一句
-   * 和看板毫不相干的话。
-   */
-  boards = []
 
   get servers() {
     return Object.keys(this.tools).map((id) => ({ id, name: id, kind: 'HTTP', enabled: true, connected: true, tools: this.tools[id] }))
@@ -88,12 +79,6 @@ ctx.plugin(workspacePlugin, { root: work })
 ctx.plugin(toolsPlugin)
 ctx.plugin(FakeCatalog)
 ctx.plugin(llmPlugin)
-/**
- * 看板的回报服务。**探针也要挂**：agent 那边 `inject: ['kanban']`（runCard 收尾要用它
- * 报一次失败），不挂的话 agents 服务根本起不来——而报出来的是「探针跑得完」不成立，
- * 一句和看板无关的话。
- */
-ctx.plugin(kanbanReportPlugin)
 ctx.plugin(agentPlugin)
 await new Promise((r) => setTimeout(r, 300))
 

@@ -51,8 +51,6 @@ const TOOLS = [
   'todo', 'delegate_task',
   'skill_view', 'skills_list', 'skill_manage',
   'memory_write', 'memory_list',
-  'kanban_list', 'kanban_create', 'kanban_link', 'kanban_comment',
-  'kanban_show', 'kanban_complete', 'kanban_block',
   'escalate_to_human',
   'browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_press',
   'browser_dialog', 'browser_back', 'browser_scroll', 'browser_read', 'browser_wait_for',

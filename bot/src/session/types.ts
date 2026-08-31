@@ -101,17 +101,16 @@ export interface SessionEventMap {
     /** origin 不是 local 时，Gateway 上的定义 id。M1 用不到。 */
     remoteId?: string
     /**
-     * `task` = 一次委派开出来的子会话（docs/delegation.md）；
-     * `card` = 一张看板卡（docs/kanban.md）。缺省按 `main` 读——老日志里的全是主会话。
+     * `task` = 一次委派开出来的子会话（docs/delegation.md）。缺省按 `main` 读。
      *
-     * **这是事实源，id 前缀不是。** 文件名确实分别以 `t-` / `c-` 开头，那只是给运维
-     * `ls` 一眼分得开；拿前缀做判断，它迟早会和这个字段分叉。
+     * **这是事实源，id 前缀不是。** 文件名确实以 `t-` 开头，那只是给运维 `ls` 一眼分得
+     * 开；拿前缀做判断，它迟早会和这个字段分叉。
      *
-     * **加一个取值不是破坏性变更**（老版本读到不认识的取值会当它是普通字符串），所以
-     * 不动 `SESSION_FORMAT_VERSION`。但读它的每一处判据都要写成「是不是 `main`」——
-     * 写成「是不是 `task`」的那些，在这个取值出现的当天会静默地把卡片会话当成主会话。
+     * 老日志里还有 `card`（看板的卡片会话，那套执行面已经删了，见 docs/task-board.md
+     * §14）。**读它的每一处判据都要写成「是不是 `main`」**——写成「是不是 `task`」的那些
+     * 会把那批老会话当成主会话，一条条报上控制面。
      */
-    kind?: 'main' | 'task' | 'card'
+    kind?: 'main' | 'task'
     /**
      * 谁开的。`kind` 不是 `main` 时才有。
      *
@@ -119,9 +118,6 @@ export interface SessionEventMap {
      * 后台进程改挂全靠它），`callId` 是「哪一次 delegate_task」，`taskId` 是「那一批里
      * 的哪一条」。
      *
-     * **卡片那一档只有 `taskId`（卡号）**：它不是某次工具调用开出来的，是 Gateway 派
-     * 过来的，没有「回到哪条会话」这回事——一张卡的结论回到卡上，不回到任何一条对话里
-     * （docs/kanban.md 口径四）。
      */
     parent?: { sessionId: string; callId: string; taskId: string }
   }

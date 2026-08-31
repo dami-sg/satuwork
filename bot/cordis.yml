@@ -79,17 +79,6 @@
 # 写完之后也要让目录立刻把新的那条拉回来。为什么正文不再全量进提示词见 docs/skills.md。
 - name: './src/tools/skill.ts'
 
-# 看板往 Gateway 回报那条路（收口 + 心跳）。**谁都不 inject**，所以排在最前面：
-# 用它的有两处——卡上那两把收口的工具（在 tools 里）和 runCard 的收尾（在 agent 里），
-# 塞进 tools/kanban.ts 的话，agent 要用它就得 inject 那个插件，而那个插件 inject 着
-# agents，转一个圈谁都起不来。
-- name: './src/tools/kanban-report.ts'
-
-# 看板：kanban_list / kanban_create / kanban_link / kanban_comment（见 docs/kanban.md）。
-# **同样排在 catalog 后面**：这颗 Bot 在哪几块板上是目录下发的，而「不在任何板上就一把
-# 都不注册」正是拿它判的——排在前面的话，它读到的永远是空的，工具永远不出现。
-- name: './src/tools/kanban.ts'
-
 # 长期记忆：memory_write / memory_list（见 docs/memory.md）。
 # **同样排在 catalog 后面**，理由一字不差：读的是目录同步下来的那份缓存，写完也要
 # 让目录立刻把新的那条拉回来。它和 Skill 的分工是「事实 vs 方法」，不是两个档位。
@@ -121,6 +110,12 @@
 # 委派：把一件事交给一个新开的、干净的子代理（docs/delegation.md）。
 # **必须排在 agent 后面**——它 inject 'agents'，子代理的那一轮由 runTask 跑。
 - name: './src/tools/delegate.ts'
+
+# 把对话里办过的事总结成任务（docs/task-board.md）。
+# **排在 agent 和 catalog 后面**：它挂在 turn/end 上，用的是目录下发的 utility 模型；
+# 排在前面的话，第一次抽取时目录还是空的，只会静悄悄地不抽。
+# 它不注册任何工具——模型碰不到这块板，板也驱动不了任何执行（不变量 1）。
+- name: './src/task-extract/index.ts'
 
 # HTTP API（无 SPA）。对话 UI 在 Gateway。
 - name: './src/web/index.ts'

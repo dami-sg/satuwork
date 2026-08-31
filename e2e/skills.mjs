@@ -12,12 +12,13 @@ import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
+import { freePort } from './ports.mjs'
 
 const PLATFORM_TOK = 'e2e-platform-skills'
 
 export async function runSkills({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-skills')
-  const GW_PORT = 18993
+  const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })
