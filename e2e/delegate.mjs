@@ -24,7 +24,32 @@ const each = (test, assert, group, obj) =>
 
 export async function runDelegate({ root, test, assert, log }) {
   log('\n# delegate')
-  const r = await runProbe(root)
+  /**
+   * **探针要包在 test() 里跑**（和 mentions / turn-images / replay-slice 那几套一样）。
+   *
+   * 探针是另起的进程，它崩掉时 runProbe 会抛。抛在 test() 外面的话，`suite()` 会把它
+   * 原样往上扔——**整场跑批就此停住**，排在后面的套件（toolcalls、guards、handoff、
+   * routine-retry、browser、mounted、shutdown）一条都跑不到，而 CI 上只看得见一句
+   * 「探针退出 1」。这条闸把「探针没跑完」变成一条普通的失败：这一套后面全红，别的
+   * 套件照跑。
+   *
+   * 探针崩过一次就是这么被发现的：它在 `byIndex[0].model` 上解引用，而 byIndex 是空的
+   * ——一次行为失败被放大成了「后面八个套件的结果全部看不见」。
+   */
+  let r = null
+  await test('探针跑得完', async () => {
+    r = await runProbe(root)
+    assert(r && r.assert && r.batch && r.model, `结果不完整：${JSON.stringify(r)}`)
+  })
+  /**
+   * 探针没跑完就到此为止。
+   *
+   * 不能往下走：下面那两行 `each(test, assert, …, r.model)` 是在 test() **外面**读
+   * `r.model` 的，`r` 是 null 时当场抛——而抛在 test() 外面就等于把整场跑批带走
+   * （正是这次要治的那件事）。往下走也没意义：一条结果都没有，后面十几条全是同一句
+   * 「r 是 null」，把真正的那一行（探针为什么退出 1）淹掉。
+   */
+  if (!r) return
 
   await test('新增内置工具漏标 delegation：启动就抛，而且点名是哪一把', () => {
     // 这一条是「将来新增工具不会静默走错边」的全部保障（docs/delegation.md §6.1）。
