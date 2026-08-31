@@ -28,6 +28,9 @@ import {
   type TaskState,
 } from '../db.ts'
 
+/** 抽取的响应里回喂给席位多少条。它最终会进模型的提示词，长了只会挤掉正文。 */
+const OPEN_FED_BACK = 20
+
 function publicTask(t: Task) {
   return {
     id: t.id,
@@ -263,6 +266,25 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
         out.push((await mergeExtracted(db, settled, next, { model, version })).task)
       }
     }
-    json(res, 200, { tasks: out.map(publicTask) })
+    /**
+     * 回的是**这条会话现在挂着的全部任务**，不只是这次动过的那几条。
+     *
+     * 席位把它收下来，下一次抽取时回喂给模型——那是「先并、再开」唯一的依据（§4.3）。
+     * 只回这次动过的话，席位手上那份清单会一次比一次残，而模型看不见的那几条，它就会
+     * 用一个新 key 再开一遍。
+     *
+     * 顺带它是**人改动的回流路**：人删掉的、改了标题的、拖到别的列的，下一次抽取时模型
+     * 看到的就是人改过之后的样子。
+     */
+    const open = await db.tasksOfSession(sessionId)
+    json(res, 200, {
+      tasks: out.map(publicTask),
+      // 按最近推进过的排在前面，截到 20 条：一份回喂给模型的清单，长了只会挤掉正文。
+      open: open
+        .filter((t) => t.state !== 'dropped')
+        .sort((a, b) => b.lastSeq - a.lastSeq)
+        .slice(0, OPEN_FED_BACK)
+        .map((t) => ({ key: t.key, title: t.title, state: t.state })),
+    })
   })
 }

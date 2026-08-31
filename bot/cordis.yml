@@ -111,5 +111,11 @@
 # **必须排在 agent 后面**——它 inject 'agents'，子代理的那一轮由 runTask 跑。
 - name: './src/tools/delegate.ts'
 
+# 把对话里办过的事总结成任务（docs/task-board.md）。
+# **排在 agent 和 catalog 后面**：它挂在 turn/end 上，用的是目录下发的 utility 模型；
+# 排在前面的话，第一次抽取时目录还是空的，只会静悄悄地不抽。
+# 它不注册任何工具——模型碰不到这块板，板也驱动不了任何执行（不变量 1）。
+- name: './src/task-extract/index.ts'
+
 # HTTP API（无 SPA）。对话 UI 在 Gateway。
 - name: './src/web/index.ts'
