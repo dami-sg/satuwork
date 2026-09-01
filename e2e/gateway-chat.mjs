@@ -552,8 +552,9 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       assert(bare.json.routine.nextRunAt === null, `bare nextRunAt ${bare.json.routine.nextRunAt}`)
       await req(gwBase, 'DELETE', `/runtime/routines/${bare.json.routine.id}`, { token: adminTok })
 
+      // 同一条路也要认当前 Bot 的席位票：Agent 的 routine_manage 就从这里进。
       const r = await req(gwBase, 'POST', `/runtime/bots/${botId}/routines`, {
-        token: adminTok,
+        token: seatAccess,
         body: { name: '每日简报', tz: 'UTC', triggers: [{ kind: 'schedule', every: 'day', at: '09:00', weekday: 1, day: 1 }] },
       })
       assert(r.status === 201, `create ${r.status} ${r.text}`)
@@ -567,8 +568,8 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
     })
 
     await test('改时间：下一次跟着重算，算的是那个时区的那个点', async () => {
-      const r = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}`, {
-        token: adminTok,
+      const r = await req(gwBase, 'PATCH', `/runtime/routines/${routineId}?botId=${encodeURIComponent(botId)}`, {
+        token: seatAccess,
         body: { instruction: 'ping', triggers: [{ kind: 'schedule', every: 'day', at: '21:30', weekday: 1, day: 1, tz: 'UTC' }] },
       })
       assert(r.status === 200, `patch ${r.status} ${r.text}`)
@@ -578,6 +579,20 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
       const want = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 21, 30)
       const expect = want > now.getTime() ? want : want + 86400000
       assert(r.json.routine.nextRunAt === expect, `nextRunAt ${new Date(r.json.routine.nextRunAt).toISOString()} != ${new Date(expect).toISOString()}`)
+    })
+
+    await test('席位票只管理当前 Bot 的日常任务', async () => {
+      const list = await req(gwBase, 'GET', `/runtime/bots/${botId}/routines`, { token: seatAccess })
+      assert(list.status === 200 && (list.json.routines || []).some((x) => x.id === routineId), `席位列表 ${list.status} ${list.text}`)
+      // 按 routine id 的路由没有 botId 就拒：账号的席位票能覆盖多颗 Bot，不能只按 accountId 猜。
+      const missing = await req(gwBase, 'GET', `/runtime/routines/${routineId}`, { token: seatAccess })
+      assert(missing.status === 400, `席位没带 botId 不该放行 ${missing.status} ${missing.text}`)
+      const wrong = await req(gwBase, 'GET', `/runtime/routines/${routineId}?botId=${encodeURIComponent('not-this-bot')}`, { token: seatAccess })
+      assert(wrong.status === 404, `席位冒充别的 Bot 不该放行 ${wrong.status} ${wrong.text}`)
+      const own = await req(gwBase, 'GET', `/runtime/routines/${routineId}?botId=${encodeURIComponent(botId)}`, { token: seatAccess })
+      assert(own.status === 200 && own.json.routine.id === routineId, `席位看自己的详情 ${own.status} ${own.text}`)
+      const noDelete = await req(gwBase, 'DELETE', `/runtime/routines/${routineId}?botId=${encodeURIComponent(botId)}`, { token: seatAccess })
+      assert(noDelete.status === 401, `席位票不该获得删除能力 ${noDelete.status} ${noDelete.text}`)
     })
 
     await test('停用就不排下一次，重新启用又排上', async () => {
@@ -644,7 +659,7 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
     })
 
     await test('试跑：消息真的进了席位的会话，那一轮的结局照实记下来', async () => {
-      const started = await req(gwBase, 'POST', `/runtime/routines/${routineId}/run`, { token: adminTok, body: {} })
+      const started = await req(gwBase, 'POST', `/runtime/routines/${routineId}/run?botId=${encodeURIComponent(botId)}`, { token: seatAccess, body: {} })
       assert(started.status === 200, `run ${started.status} ${started.text}`)
       assert(started.json.run.status === 'running' && started.json.run.trigger === 'manual', `run ${JSON.stringify(started.json.run)}`)
       const deadline = Date.now() + 30000

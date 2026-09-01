@@ -4,11 +4,17 @@
  * 归属只有一句话：**routine 属于建它的那个人在那颗 Bot 上**。所以每条路由都先按
  * accountId 认一次，不属于自己的一律当成没有（404，不是 403——「有这东西但轮不到你」
  * 本身就是一句多余的话）。
+ *
+ * 查看、新建、修改、试跑同时认登录 JWT 和席位票：前者是人在右栏操作，后者是当前 Bot
+ * 的内置工具操作。删除仍然只认登录 JWT——Agent 没有删除工具，也不该因为共用路由顺带
+ * 拿到一把会级联清掉运行流水的能力。
+ * 席位票那一路还必须带 botId，并再次校验 routine.botId——账号票本身能覆盖这个人的多颗
+ * Bot，只按 accountId 判断会让一颗 Bot 猜中 id 后改到另一颗 Bot 的日常任务。
  */
 import type { RouteCtx } from './ctx.ts'
-import { HttpError, json, type Router } from '../http.ts'
+import { bearer, HttpError, json, type Req, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
-import { requireUser } from '../lib/guards.ts'
+import { requireSeatOrUser, requireUser } from '../lib/guards.ts'
 import { visibleBotOf } from '../lib/runtime.ts'
 import { companyMachineOf } from '../deploy.ts'
 import { canonicalTimezone, parseRoutineTriggers, ROUTINE_MAX_TRIGGERS, type Account, type Db, type Routine, type RoutineModelRole, type RoutineRun } from '../db.ts'
@@ -85,9 +91,9 @@ async function suggestTz(db: Db, account: Account, browserTz: string): Promise<s
 }
 
 /** 自己那条。别人的、不存在的都是 404。 */
-async function ownRoutineOf(db: Db, account: Account, id: string): Promise<Routine> {
+async function ownRoutineOf(db: Db, account: Account, id: string, botId?: string): Promise<Routine> {
   const row = await db.routine((id || '').trim())
-  if (!row || row.accountId !== account.id) throw new HttpError(404, '没有这条日常任务')
+  if (!row || row.accountId !== account.id || (botId && row.botId !== botId)) throw new HttpError(404, '没有这条日常任务')
   return row
 }
 
@@ -128,8 +134,24 @@ function modelRoleOf(raw: unknown): RoutineModelRole | undefined {
 export function attachRoutines(router: Router, ctx: RouteCtx) {
   const { db, keys } = ctx
 
+  /**
+   * 人和 Bot 共用路由，但席位票必须把当前 botId 钉回来。
+   *
+   * 列表 / 新建的 botId 在路径上；按 routine id 操作时由工具放在 query 里。登录 JWT 不用
+   * 这一格——人可以在同一个页面切换自己名下的 Bot，而席位进程永远只代表部署时钉的那颗。
+   */
+  async function caller(req: Req, pathBotId?: string): Promise<{ account: Account; seatBotId?: string; by: 'user' | 'bot' }> {
+    const token = bearer(req)
+    const account = await requireSeatOrUser(req, db, keys)
+    if (!token?.startsWith('sat_')) return { account, by: 'user' }
+    const seatBotId = (pathBotId || req.query.get('botId') || '').trim()
+    if (!seatBotId) throw new HttpError(400, '席位操作日常任务时要带 botId')
+    await visibleBotOf(db, account, seatBotId)
+    return { account, seatBotId, by: 'bot' }
+  }
+
   router.get('/runtime/bots/:id/routines', async (req, res) => {
-    const account = await requireUser(req, db, keys)
+    const { account } = await caller(req, req.params.id)
     const bot = await visibleBotOf(db, account, req.params.id)
     const rows = await db.routinesOf(account.id, bot.id)
     const withRuns = await Promise.all(
@@ -139,7 +161,7 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
   })
 
   router.post('/runtime/bots/:id/routines', async (req, res) => {
-    const account = await requireUser(req, db, keys)
+    const { account, by } = await caller(req, req.params.id)
     const bot = await visibleBotOf(db, account, req.params.id)
     const body = bodyOf(req)
     const tz = await suggestTz(db, account, strField(body, 'tz', false))
@@ -158,14 +180,14 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
       companyId: account.companyId!,
       accountId: account.id,
       action: 'routine.create',
-      detail: { id: routine.id, botId: bot.id, name: routine.name },
+      detail: { id: routine.id, botId: bot.id, name: routine.name, by },
     })
     json(res, 201, { routine: publicRoutine(routine) })
   })
 
   router.get('/runtime/routines/:rid', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    const routine = await ownRoutineOf(db, account, req.params.rid)
+    const { account, seatBotId } = await caller(req)
+    const routine = await ownRoutineOf(db, account, req.params.rid, seatBotId)
     const runs = await db.routineRuns(routine.id, RUNS_SHOWN)
     json(res, 200, { routine: publicRoutine(routine, runs[0]), runs: runs.map(publicRun) })
   })
@@ -178,8 +200,8 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
    * 今晚仍然会在九点跑，而界面上写着七点。
    */
   router.patch('/runtime/routines/:rid', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    const routine = await ownRoutineOf(db, account, req.params.rid)
+    const { account, seatBotId, by } = await caller(req)
+    const routine = await ownRoutineOf(db, account, req.params.rid, seatBotId)
     const body = bodyOf(req)
     const tz = await suggestTz(db, account, strField(body, 'tz', false))
     const patch: Parameters<Db['updateRoutine']>[1] = {}
@@ -234,7 +256,7 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
         companyId: account.companyId!,
         accountId: account.id,
         action: 'routine.active',
-        detail: { id: routine.id, name: next.name, active: next.active },
+        detail: { id: routine.id, name: next.name, active: next.active, by },
       })
     }
     if (patch.instruction !== undefined && patch.instruction !== routine.instruction) {
@@ -242,7 +264,7 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
         companyId: account.companyId!,
         accountId: account.id,
         action: 'routine.update',
-        detail: { id: routine.id, name: next.name, instruction: next.instruction.slice(0, AUDIT_INSTRUCTION) },
+        detail: { id: routine.id, name: next.name, instruction: next.instruction.slice(0, AUDIT_INSTRUCTION), by },
       })
     }
     json(res, 200, { routine: publicRoutine(next) })
@@ -256,7 +278,7 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
       companyId: account.companyId!,
       accountId: account.id,
       action: 'routine.delete',
-      detail: { id: routine.id, botId: routine.botId, name: routine.name },
+      detail: { id: routine.id, botId: routine.botId, name: routine.name, by: 'user' },
     })
     json(res, 200, { deleted: true, id: routine.id })
   })
@@ -268,8 +290,8 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
    * 停用的也能试跑：那正是人调这段指令时的状态。
    */
   router.post('/runtime/routines/:rid/run', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    const routine = await ownRoutineOf(db, account, req.params.rid)
+    const { account, seatBotId } = await caller(req)
+    const routine = await ownRoutineOf(db, account, req.params.rid, seatBotId)
     if (!routine.instruction.trim()) throw new HttpError(400, '先写清楚它每次要做什么')
     if (await db.routineRunning(routine.id)) throw new HttpError(409, '上一次还在跑')
     const run = await runRoutine(db, routine, 'manual')
