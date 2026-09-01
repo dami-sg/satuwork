@@ -23,6 +23,7 @@ import { SQL as m0022 } from './0022-kanban-files.ts'
 import { SQL as m0023 } from './0023-card-pending.ts'
 import { SQL as m0024 } from './0024-tasks.ts'
 import { SQL as m0025 } from './0025-drop-kanban.ts'
+import { SQL as m0026 } from './0026-task-extract-logs.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -92,6 +93,7 @@ export const MIGRATIONS: Migration[] = [
   { id: '0024-tasks', name: '任务看板：从对话里总结出来的任务（tasks / task_events）', sql: m0024 },
   // 建新的和删旧的**分两条**：中间那一版两套并存，回滚只回滚这一条。见 0025 的头注。
   { id: '0025-drop-kanban', name: '删掉旧看板：板、成员、卡、依赖、时间线、附件、执行流水', sql: m0025 },
+  { id: '0026-task-extract-logs', name: '任务抽取判定日志：创建、未创建与失败原因', sql: m0026 },
 ]
 
 /**

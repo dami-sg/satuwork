@@ -293,7 +293,13 @@ function refreshSum(row) {
 /**
  * 往桶里追一条事件，**已经有的就不追**。返回它是不是新的。
  *
- * 桶按 seq 有序（seq 是会话日志的行号，天然单调），所以判据就是「比尾巴还大」。
+ * 桶按 seq 有序；但**到达顺序不保证有序**。席位给事件拿号之后才异步落盘、落完才广播，
+ * 两次并发 append 完全可能让 seq=42 先于 seq=41 到浏览器。尤其 `todo/list` 正好夹在
+ * 工具调用的流式事件之间：把「不比尾巴大」当成「重复」会在新建清单时偶发地把它丢掉，
+ * 输入框上面的任务 dock 就一直不出现。
+ *
+ * 所以这里按 seq **插入并去重**，不是只和尾巴比。桶不大（冷桶另有上限），一次从后往前
+ * 找位置的成本远小于让所有 fold 都各自防乱序。
  *
  * 这道闸是给两条路准备的：历史走 HTTP、实时走 SSE，而流上还垫了一轮
  * （STREAM_TAIL_TURNS）用来给名单和第一帧兜底。那一轮和 hydrateChat 拉回来的最后
@@ -306,12 +312,19 @@ function pushBotEvent(botId, ev) {
   const list = botStreamOf(botId).events
   const seq = Number(ev && ev.seq)
   if (Number.isFinite(seq)) {
+    let at = list.length
     for (let i = list.length - 1; i >= 0; i--) {
-      const last = Number(list[i] && list[i].seq)
-      if (!Number.isFinite(last)) continue
-      if (seq <= last) return false
-      break
+      const seen = Number(list[i] && list[i].seq)
+      if (!Number.isFinite(seen)) continue
+      if (seq === seen) return false
+      if (seq > seen) {
+        at = i + 1
+        break
+      }
+      at = i
     }
+    list.splice(at, 0, ev)
+    return true
   }
   list.push(ev)
   return true
@@ -2985,6 +2998,38 @@ function approvalTouched(a) {
   return fields.some((f) => f.editable && approvalValue(a, f) !== (f.value || ''))
 }
 
+/**
+ * 这封信的正文是不是 HTML。
+ *
+ * 席位为了让老版本也能把没认出的参数露出来，会把 `is_html` 当成一格只读字段一起
+ * 送来；所以不能只看布尔值（到这里通常已经是字符串了）。`html_body` 则是另一批
+ * 邮件工具的命名，本身就说明这一格该按 HTML 预览。
+ */
+function approvalEmailIsHtml(a, fields) {
+  const flag = fields.find((f) => {
+    const key = String(f.key || '').split('.').pop().toLowerCase()
+    return key === 'is_html'
+  })
+  if (flag) return /^(true|1|yes)$/i.test(String(approvalValue(a, flag)).trim())
+  return fields.some((f) => String(f.key || '').split('.').pop().toLowerCase() === 'html_body')
+}
+
+/**
+ * HTML 邮件只在 sandbox iframe 里预览，不能直接塞进批准页的 DOM。
+ *
+ * sandbox 禁掉脚本和顶层跳转；CSP 再挡住远程图片、字体和表单提交。尤其是邮件里的
+ * 跟踪像素，光用 sandbox 并不会阻止它发请求，所以这里默认只放行内嵌 data/cid 资源。
+ */
+function emailPreviewDoc(html) {
+  return (
+    '<!doctype html><html><head><meta charset="utf-8">' +
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: cid:; font-src data:; media-src data:; style-src \'unsafe-inline\'; form-action \'none\'; base-uri \'none\'">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<style>html{color-scheme:light}body{box-sizing:border-box;margin:0;padding:14px;background:#fff;color:#171717;font:14px/1.55 -apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;overflow-wrap:anywhere}img{max-width:100%;height:auto}table{max-width:100%}</style>' +
+    '</head><body>' + String(html || '') + '</body></html>'
+  )
+}
+
 /** 卡片底下那排按钮。发信那张的第一个按钮说「批准并发送」——它就是要干这件事。 */
 function approvalActs(a, okLabel) {
   const touched = approvalTouched(a)
@@ -3036,6 +3081,7 @@ function approvalActs(a, okLabel) {
  */
 function approvalEmailHtml(a) {
   const fields = (a.form && a.form.fields) || []
+  const isHtml = approvalEmailIsHtml(a, fields)
   const rows = fields
     .map((f) => {
       const value = approvalValue(a, f)
@@ -3047,6 +3093,18 @@ function approvalEmailHtml(a) {
           : ''
       }
       const attrs = `data-edit="${esc(f.key)}" data-call="${esc(a.callId)}"`
+      const htmlBody = f.multiline && (isHtml || String(f.key || '').split('.').pop().toLowerCase() === 'html_body')
+      if (htmlBody) {
+        return (
+          `<div class="sw-mail-body sw-mail-html"><span class="sw-mail-k">${esc(f.label)}</span>` +
+          `<iframe class="sw-mail-preview" sandbox="" referrerpolicy="no-referrer" loading="lazy"` +
+          ` title="${esc(t('HTML 邮件正文预览', 'HTML email body preview'))}" data-mail-preview` +
+          ` data-call="${esc(a.callId)}" data-preview-for="${esc(f.key)}" srcdoc="${esc(emailPreviewDoc(value))}"></iframe>` +
+          `<details class="sw-mail-source"><summary>${esc(t('查看或编辑 HTML 源码', 'View or edit HTML source'))}</summary>` +
+          `<textarea class="input sw-mail-text" rows="8" aria-label="${esc(t('HTML 邮件源码', 'HTML email source'))}" ${attrs}>${esc(value)}</textarea>` +
+          `</details></div>`
+        )
+      }
       return f.multiline
         ? `<div class="sw-mail-body"><span class="sw-mail-k">${esc(f.label)}</span>` +
             `<textarea class="input sw-mail-text" rows="8" ${attrs}>${esc(value)}</textarea></div>`
@@ -3057,7 +3115,9 @@ function approvalEmailHtml(a) {
   return (
     `<div class="sw-approval sw-approval-mail" data-state="pending" data-call="${esc(a.callId)}">` +
     `<div class="sw-approval-head">${ICON_MAIL}<span>${esc(t('这封邮件要发出去了', 'This email is about to be sent'))}</span></div>` +
-    `<div class="sw-approval-why">${esc(t('可以直接改主题和正文，改完发出去的就是你现在看到的这一份。', 'Edit the subject or body if you like — what you see is what gets sent.'))}</div>` +
+    `<div class="sw-approval-why">${esc(isHtml
+      ? t('下面按邮件效果预览正文；需要修改时可以展开 HTML 源码，预览会同步更新。', 'The body is previewed as an email. Expand the HTML source to edit it; the preview updates as you type.')
+      : t('可以直接改主题和正文，改完发出去的就是你现在看到的这一份。', 'Edit the subject or body if you like — what you see is what gets sent.'))}</div>` +
     `<div class="sw-mail">${rows}</div>` +
     `<div class="sw-approval-tool"><code>${esc((a.form && a.form.tool) || a.name)}</code></div>` +
     approvalActs(a, t('批准并发送', 'Approve and send')) +
@@ -7820,6 +7880,13 @@ document.addEventListener('input', (e) => {
   if (!key) return
   const callId = el.getAttribute('data-call') || ''
   approvalDrafts.set(draftKey(callId, key), el.value)
+  // HTML 源码藏在折叠区里；一旦展开修改，预览必须马上跟上，否则人批准的是源码 A，
+  // 眼睛最后检查的却还是旧预览 B。按 callId + 字段 key 精确找到这一格，避免同页几封
+  // 待批邮件互相串内容。
+  const card = el.closest('.sw-approval')
+  const preview = card && [...card.querySelectorAll('[data-mail-preview]')].find((frame) =>
+    frame.getAttribute('data-call') === callId && frame.getAttribute('data-preview-for') === key)
+  if (preview) preview.setAttribute('srcdoc', emailPreviewDoc(el.value))
   /**
    * 改过之后「这次对话都批准」就不能点了。**当场变灰**，不等下一次重画——重画是别的
    * 事件驱动的，可能一直不来；而这颗按钮亮着，人点下去就是「把之后所有没人看过的信
@@ -7832,7 +7899,6 @@ document.addEventListener('input', (e) => {
   // waiting 的 callId 列表，改一个字段它不变，卡片不会重画。两道都空着的话，人改完
   // 内容还能点「这一轮都批准」，而席位那边会把改过的这次强制成 once——按钮承诺的事
   // 没发生，下一次同样的工具还会再问。
-  const card = el.closest('.sw-approval')
   const wide = card && card.querySelector('[data-act="chat-approve"][data-scope="turn"]')
   if (wide) {
     wide.disabled = true

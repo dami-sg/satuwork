@@ -80,8 +80,8 @@ function catalogStamp(
 }
 
 /** 两个模型角色压成一小段，进指纹用。 */
-function modelStamp(s: { daily: { provider: string; model: string }; utility: { provider: string; model: string } }): string {
-  return `${s.daily.provider}/${s.daily.model}|${s.utility.provider}/${s.utility.model}`
+function modelStamp(s: { daily: { provider: string; model: string; reasoningEffort?: string }; utility: { provider: string; model: string; reasoningEffort?: string } }): string {
+  return `${s.daily.provider}/${s.daily.model}:${s.daily.reasoningEffort || 'off'}|${s.utility.provider}/${s.utility.model}:${s.utility.reasoningEffort || 'off'}`
 }
 
 /** 这个账号的连接器状态指纹：安装和连接一起算，删一条也要能看出来。 */

@@ -67,6 +67,22 @@ const B64 = PNG.toString('base64')
   out.anthropicPlain = { 还是字符串: typeof body.messages[0].content === 'string' }
 }
 
+// 同一层还负责把 Agent 的通用推理档位翻成两种上游协议。
+{
+  const ctx = { messages: [{ role: 'user', content: '想一想' }] }
+  const openai = toOpenAI(ctx, { provider: 'p', id: 'm' }, { reasoning: 'high' })
+  const openaiOff = toOpenAI(ctx, { provider: 'p', id: 'm' }, { reasoning: 'off' })
+  const anthropic = toAnthropic(ctx, { id: 'm', maxTokens: 10000 }, { reasoning: 'medium' })
+  const anthropicOff = toAnthropic(ctx, { id: 'm', maxTokens: 10000 }, { reasoning: 'off' })
+  out.reasoningTransport = {
+    openai档位: openai.reasoning_effort === 'high',
+    openai关闭时不发送: !('reasoning_effort' in openaiOff),
+    anthropic档位: anthropic.thinking?.type === 'enabled' && anthropic.thinking?.budget_tokens === 8192,
+    anthropic给正文留空间: anthropic.max_tokens === 10000 && anthropic.thinking.budget_tokens < anthropic.max_tokens,
+    anthropic关闭时不发送: !('thinking' in anthropicOff),
+  }
+}
+
 // ── 3. Gateway 的 /v1：最容易漏的那一层 ───────────────────────────────
 {
   const parts = gatewayUserContent([

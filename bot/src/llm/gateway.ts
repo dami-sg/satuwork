@@ -17,6 +17,14 @@ function apiFor(provider: string) {
   return '/v1/chat/completions'
 }
 
+type ReasoningLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+type GatewayStreamOptions = { signal?: AbortSignal; reasoning?: ReasoningLevel }
+
+function reasoningLevel(options?: GatewayStreamOptions): Exclude<ReasoningLevel, 'off'> | undefined {
+  const level = options?.reasoning
+  return level && level !== 'off' ? level : undefined
+}
+
 function contentText(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
@@ -44,7 +52,7 @@ function userContent(content: unknown, image: (c: any) => any): any {
     .filter((c: any) => c.type !== 'text' || c.text)
 }
 
-export function toOpenAI(context: any, model: { provider: string; id: string }) {
+export function toOpenAI(context: any, model: { provider: string; id: string }, options?: GatewayStreamOptions) {
   const messages: any[] = []
   if (context.systemPrompt) messages.push({ role: 'system', content: context.systemPrompt })
   for (const m of context.messages ?? []) {
@@ -90,10 +98,11 @@ export function toOpenAI(context: any, model: { provider: string; id: string }) 
     messages,
     ...(tools.length ? { tools } : {}),
     stream: true,
+    ...(reasoningLevel(options) ? { reasoning_effort: reasoningLevel(options) } : {}),
   }
 }
 
-export function toAnthropic(context: any, model: { id: string }) {
+export function toAnthropic(context: any, model: { id: string; maxTokens?: number }, options?: GatewayStreamOptions) {
   const messages: any[] = []
   for (const m of context.messages ?? []) {
     if (m.role === 'user') {
@@ -132,13 +141,19 @@ export function toAnthropic(context: any, model: { id: string }) {
     description: t.description ?? '',
     input_schema: t.parameters ?? { type: 'object', properties: {} },
   }))
+  const level = reasoningLevel(options)
+  const ceiling = Math.max(1, Number(model.maxTokens) || 8192)
+  const wanted = level === 'minimal' ? 1024 : level === 'low' ? 2048 : level === 'medium' ? 8192 : level ? 16384 : 0
+  // Anthropic 的 max_tokens 同时包住思考和正文；至少给正文留 1024 token。
+  const budget = level ? Math.min(wanted, Math.max(0, ceiling - 1024)) : 0
   return {
     model: model.id,
     system: context.systemPrompt || undefined,
     messages,
-    max_tokens: 8192,
+    max_tokens: ceiling,
     stream: true,
     ...(tools.length ? { tools } : {}),
+    ...(budget ? { thinking: { type: 'enabled', budget_tokens: budget } } : {}),
   }
 }
 
@@ -444,7 +459,7 @@ async function consumeAnthropic(
  */
 const LLM_IDLE_MS = Math.max(1_000, Number(process.env.SATUWORK_LLM_IDLE_MS) || 120_000)
 
-export async function streamViaGateway(model: any, context: any, options?: { signal?: AbortSignal }) {
+export async function streamViaGateway(model: any, context: any, options?: GatewayStreamOptions) {
   const stream = new AssistantMessageEventStream()
   // 计时从**建连之前**就开始：连不上、或者连上了迟迟不给响应头，一样得有人叫停。
   const idle = new AbortController()
@@ -507,7 +522,7 @@ export async function streamViaGateway(model: any, context: any, options?: { sig
     }
     const provider = model.provider || 'deepseek'
     const path = apiFor(provider)
-    const body = path === '/v1/messages' ? toAnthropic(context, model) : toOpenAI(context, model)
+    const body = path === '/v1/messages' ? toAnthropic(context, model, options) : toOpenAI(context, model, options)
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       authorization: `Bearer ${apiKey}`,

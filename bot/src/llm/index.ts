@@ -23,6 +23,7 @@ export interface CatalogProvider {
     name: string
     api?: string
     reasoning?: boolean
+    reasoningLevels?: string[]
     contextWindow?: number
     maxTokens?: number
     cost?: unknown
@@ -53,7 +54,17 @@ export class LlmService extends Service {
   }
 
   modelOf(provider: string, id: string) {
-    return stubModel(provider, id)
+    const base = stubModel(provider, id)
+    const found = this.cached.find((p) => p.provider === provider)?.models.find((m) => m.id === id)
+    return found
+      ? {
+          ...base,
+          api: found.api ?? base.api,
+          reasoning: !!found.reasoning,
+          contextWindow: found.contextWindow ?? base.contextWindow,
+          maxTokens: found.maxTokens ?? base.maxTokens,
+        }
+      : base
   }
 
   async configured(): Promise<string[]> {
@@ -99,6 +110,7 @@ export class LlmService extends Service {
           name: m.name ?? id,
           api: m.api,
           reasoning: !!m.reasoning,
+          reasoningLevels: Array.isArray(m.reasoning_levels) ? m.reasoning_levels.map(String) : undefined,
           contextWindow: m.context_window,
           maxTokens: m.max_tokens,
           cost: m.cost,

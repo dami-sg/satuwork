@@ -14,7 +14,7 @@ export async function runVision({ root, test, assert, log }) {
   let r
   await test('探针跑得完', async () => {
     r = await runProbe(root)
-    assert(r && r.openai && r.anthropic && r.gatewayV1, `结果不完整：${JSON.stringify(r)}`)
+    assert(r && r.openai && r.anthropic && r.reasoningTransport && r.gatewayV1, `结果不完整：${JSON.stringify(r)}`)
   })
 
   await test('Bot → OpenAI：图片进 image_url 的 data URI', () => {
@@ -31,6 +31,12 @@ export async function runVision({ root, test, assert, log }) {
     assert(r.anthropic.用source, '没有用 source 对象')
     assert(r.anthropic.媒体类型对 && r.anthropic.带上了字节, 'source 里的类型或字节不对')
     assert(r.anthropic.正文还在, '带图之后正文丢了')
+  })
+
+  await test('推理强度翻成 OpenAI 与 Anthropic 各自的请求参数', () => {
+    const x = r.reasoningTransport
+    assert(x.openai档位 && x.openai关闭时不发送, `OpenAI 推理参数不对：${JSON.stringify(x)}`)
+    assert(x.anthropic档位 && x.anthropic给正文留空间 && x.anthropic关闭时不发送, `Anthropic thinking 参数不对：${JSON.stringify(x)}`)
   })
 
   await test('Gateway 的 /v1 不再把图拍平', () => {

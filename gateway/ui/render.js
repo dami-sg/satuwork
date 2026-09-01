@@ -434,8 +434,8 @@ async function onLogin(e) {
 
 async function saveSettings(patch) {
   const next = {
-    daily: { ...(state.settings.daily || { provider: '', model: '' }) },
-    utility: { ...(state.settings.utility || { provider: '', model: '' }) },
+    daily: { ...(state.settings.daily || { provider: '', model: '', reasoningEffort: 'off' }) },
+    utility: { ...(state.settings.utility || { provider: '', model: '', reasoningEffort: 'off' }) },
     enabledModels: Array.isArray(state.settings.enabledModels) ? state.settings.enabledModels : [],
     priceMultiplier: priceMultiplier(),
     ...patch,

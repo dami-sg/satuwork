@@ -1803,8 +1803,8 @@ async function runGateway() {
     const put = await req(base, 'PUT', '/platform/settings', {
       token: ownerTok,
       body: {
-        daily: { provider: 'deepseek', model: 'deepseek-chat' },
-        utility: { provider: 'deepseek', model: 'deepseek-v4-flash' },
+        daily: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' },
+        utility: { provider: 'deepseek', model: 'deepseek-v4-flash', reasoningEffort: 'low' },
       },
     })
     assert(put.status === 200, `owner put ${put.status} ${put.text}`)
@@ -1812,7 +1812,15 @@ async function runGateway() {
     assert(me.status === 200, `admin me ${me.status}`)
     assert(me.json.settings.daily.provider === 'deepseek', 'daily provider')
     assert(me.json.settings.daily.model === 'deepseek-chat', 'daily model')
+    assert(me.json.settings.daily.reasoningEffort === 'high', 'daily reasoning effort')
     assert(me.json.settings.utility.model === 'deepseek-v4-flash', 'utility model')
+    assert(me.json.settings.utility.reasoningEffort === 'low', 'utility reasoning effort')
+
+    const bad = await req(base, 'PUT', '/platform/settings', {
+      token: ownerTok,
+      body: { utility: { provider: 'deepseek', model: 'deepseek-v4-flash', reasoningEffort: 'turbo' } },
+    })
+    assert(bad.status === 400, `非法推理强度没有被拦：${bad.status} ${bad.text}`)
   })
 
   let inviteOrg

@@ -509,6 +509,23 @@ document.getElementById('app').addEventListener('click', async (e) => {
       })
     return
   }
+  if (act === 'task-logs') {
+    state.taskLogsOpen = true
+    state.taskLogsLoading = true
+    render()
+    void loadTaskLogs()
+      .catch((e) => flash('err', e.message))
+      .finally(() => {
+        state.taskLogsLoading = false
+        render()
+      })
+    return
+  }
+  if (act === 'task-log-close') {
+    state.taskLogsOpen = false
+    render()
+    return
+  }
   if (act === 'task-open') {
     const id = btn.getAttribute('data-id') || ''
     void loadTask(id).then(render).catch((e) => flash('err', e.message))
@@ -1474,7 +1491,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
     const role = btn.getAttribute('data-role')
     const provider = btn.getAttribute('data-provider')
     const model = btn.getAttribute('data-model')
-    await saveSettings({ [role]: { provider, model } })
+    await saveSettings({ [role]: { provider, model, reasoningEffort: 'off' } })
     return
   }
   if (act === 'save-cred') {
@@ -2425,7 +2442,7 @@ document.getElementById('app').addEventListener('change', async (e) => {
     const p = state.catalog.find((x) => x.provider === provider)
     const model = p?.models[0]?.id || ''
     state.selectedProvider = provider
-    await saveSettings({ [role]: { provider, model } })
+    await saveSettings({ [role]: { provider, model, reasoningEffort: 'off' } })
     // saveSettings 里那次 render 在前面，改完 selectedProvider 得自己再画一次，
     // 否则下面那张表还停在上一个供应商。
     render()
@@ -2434,7 +2451,13 @@ document.getElementById('app').addEventListener('change', async (e) => {
   if (act === 'role-model') {
     const role = el.getAttribute('data-role')
     const cur = state.settings[role] || {}
-    await saveSettings({ [role]: { provider: cur.provider, model: el.value } })
+    await saveSettings({ [role]: { provider: cur.provider, model: el.value, reasoningEffort: 'off' } })
+    return
+  }
+  if (act === 'role-reasoning') {
+    const role = el.getAttribute('data-role')
+    const cur = state.settings[role] || {}
+    await saveSettings({ [role]: { provider: cur.provider, model: cur.model, reasoningEffort: el.value } })
     return
   }
   if (act === 'bot-ttl') {

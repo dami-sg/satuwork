@@ -40,7 +40,10 @@ const work = mkdtempSync(join(tmpdir(), 'satu-rtmodel-work-'))
 class FakeCatalog extends Service {
   constructor(ctx) {
     super(ctx, 'catalog')
-    this.models = { daily: { provider: 'p-daily', model: 'm-daily' }, utility: { provider: 'p-util', model: 'm-util' } }
+    this.models = {
+      daily: { provider: 'p-daily', model: 'm-daily', reasoningEffort: 'low' },
+      utility: { provider: 'p-util', model: 'm-util', reasoningEffort: 'medium' },
+    }
   }
   async pull() {
     return true
@@ -83,8 +86,8 @@ ctx.llm.catalog = () => [
  * 「这一轮打了几次模型」正好是「有没有偷偷压过一次」的探子。
  */
 let calls = []
-ctx.llm.streamFn = (model) => {
-  calls.push({ provider: model.provider, model: model.id })
+ctx.llm.streamFn = (model, _context, options) => {
+  calls.push({ provider: model.provider, model: model.id, reasoning: options?.reasoning || 'off' })
   const stream = new AssistantMessageEventStream()
   queueMicrotask(() => {
     stream.push({ type: 'error', reason: 'error', error: emptyAssistant(model, '探针不跑模型') })
@@ -108,6 +111,7 @@ const util = await turnWith('utility')
 out.utility = {
   换成了平台那一对: util?.provider === 'p-util' && util?.model === 'm-util',
   用的不是Bot自己的: util?.model !== 'm-bot',
+  推理强度生效: util?.reasoning === 'medium',
 }
 
 const daily = await turnWith('daily')
@@ -119,11 +123,22 @@ out.notPinned = {
   daily不是平台日常: daily?.model !== 'm-daily',
 }
 
+// 普通聊天 / daily 不覆盖模型，但模型正是平台 daily 时，也要带上 daily 的推理档位。
+ctx.catalog.models.daily = { provider: 'p-bot', model: 'm-bot', reasoningEffort: 'high' }
+const dailyReasoning = await turnWith(undefined)
+out.reasoning = { daily生效: dailyReasoning?.reasoning === 'high' }
+
 // 平台没钉 utility：照旧按 Bot 自己的跑，不是不跑。
-ctx.catalog.models = { daily: { provider: '', model: '' }, utility: { provider: '', model: '' } }
+ctx.catalog.models = {
+  daily: { provider: '', model: '', reasoningEffort: 'off' },
+  utility: { provider: '', model: '', reasoningEffort: 'off' },
+}
 const empty = await turnWith('utility')
 out.noRole = { 照旧跑得起来: Boolean(empty), 用的是Bot自己的: empty?.provider === 'p-bot' && empty?.model === 'm-bot' }
-ctx.catalog.models = { daily: { provider: 'p-daily', model: 'm-daily' }, utility: { provider: 'p-util', model: 'm-util' } }
+ctx.catalog.models = {
+  daily: { provider: 'p-bot', model: 'm-bot', reasoningEffort: 'high' },
+  utility: { provider: 'p-util', model: 'm-util', reasoningEffort: 'medium' },
+}
 
 /**
  * 把会话撑到**比 utility 的窗口大、比 Bot 自己的窗口小**：4 万个 ASCII 字符 ≈ 1.1 万

@@ -57,6 +57,7 @@ const BROKEN_PDF = Buffer.from('%PDF-1.4\n坏掉的内容，没有 xref 也没�
 /** 摘要该成功还是该炸。用来验回退那条路。 */
 let summaryBroken = false
 let summaryCalls = 0
+let lastSummaryBody = null
 
 const readBody = (req) =>
   new Promise((resolve) => {
@@ -124,6 +125,7 @@ const server = createServer(async (req, res) => {
   }
   if (req.url === '/v1/chat/completions') {
     summaryCalls += 1
+    lastSummaryBody = body
     if (summaryBroken) return json(503, { error: '模型不可用' })
     return json(200, { choices: [{ message: { content: `摘要：${String(body.messages[1].content).length} 字符的原文` } }] })
   }
@@ -139,7 +141,10 @@ process.env.GATEWAY_API_KEY = 'sk_sw_e2e'
 class FakeCatalog extends Service {
   constructor(ctx) {
     super(ctx, 'catalog')
-    this.models = { daily: { provider: 'p', model: 'daily-m' }, utility: { provider: 'p', model: 'util-m' } }
+    this.models = {
+      daily: { provider: 'p', model: 'daily-m', reasoningEffort: 'low' },
+      utility: { provider: 'p', model: 'util-m', reasoningEffort: 'high' },
+    }
   }
 }
 
@@ -199,6 +204,7 @@ const call = (name, args) =>
 // ── 2. 短页面：原样返回，一次模型都不调 ──────────────────────────────
 {
   summaryCalls = 0
+  lastSummaryBody = null
   const r = await call('web_extract', { urls: ['https://a.test/short'] })
   out.short = {
     没调模型: summaryCalls === 0,
@@ -216,6 +222,7 @@ const call = (name, args) =>
   const r = await call('web_extract', { urls: ['https://a.test/long'], goal: '找版本号' })
   out.long = {
     调了一次模型: summaryCalls === 1,
+    带了utility推理强度: lastSummaryBody?.reasoning_effort === 'high',
     标了已摘要: r.text.includes('已摘要'),
     正文是摘要: r.text.includes('摘要：'),
     // 50k 原文不能整个进上下文。

@@ -557,7 +557,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
     for (const role of used) {
       await db.putPlatformSettings({
         ...(await db.platformSettings()),
-        [role === '日常' ? 'daily' : 'utility']: { provider: '', model: '' },
+        [role === '日常' ? 'daily' : 'utility']: { provider: '', model: '', reasoningEffort: 'off' },
       })
     }
     await db.audit({ companyId: 'platform', accountId: account.id, action: 'platform.provider.delete', detail: { provider, clearedRoles: used } })

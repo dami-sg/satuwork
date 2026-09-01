@@ -14,7 +14,7 @@ import type {
 export type { MessageSource }
 import type { ReassignedItem, WorkspaceFile } from '../tools/index.ts'
 import { browserOf, memoryOf, type BotRecord } from '../registry/index.ts'
-import { cachedMemories, cachedSkill, cachedSkills, type CachedMemory, type CachedSkill } from '../catalog/index.ts'
+import { cachedMemories, cachedSkill, cachedSkills, type CachedMemory, type CachedSkill, type ReasoningEffort } from '../catalog/index.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -615,6 +615,7 @@ export class AgentService extends Service {
     const provider = pinned?.provider ?? bot?.provider?.trim() ?? this.provider
     const modelId = pinned?.model ?? bot?.model?.trim() ?? this.model
     const model = llm.modelOf(provider, modelId)
+    const reasoningEffort = this.roleReasoningEffort(provider, modelId, spec.modelRole)
     const usedModel = {
       role: spec.modelRole,
       provider,
@@ -652,6 +653,7 @@ export class AgentService extends Service {
       initialState: {
         systemPrompt: system.text,
         model,
+        thinkingLevel: reasoningEffort,
         messages: [],
         tools: this.bridgeTools(child, toolSchemas),
       },
@@ -678,6 +680,7 @@ export class AgentService extends Service {
         system: system.text,
         tools: toolSchemas,
         contextWindow: this.windowOf(provider, modelId),
+        reasoningEffort,
         sections: {
           system: estTokens(system.base),
           skills: estTokens(system.skills),
@@ -1421,6 +1424,7 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
     }
 
     const turn = history.filter((e) => e.type === 'turn/start').length + 1
+    const reasoningEffort = this.roleReasoningEffort(provider, modelId, modelRole)
 
     await sessions.append(sessionId, 'user/message', {
       message: { id: randomUUID(), role: 'user', content: userBlocks(text, images, mentions) },
@@ -1462,6 +1466,7 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
       initialState: {
         systemPrompt: system.text,
         model,
+        thinkingLevel: reasoningEffort,
         messages,
         tools: this.bridgeTools(sessionId, toolSchemas),
       },
@@ -1490,6 +1495,7 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
         system: system.text,
         tools: toolSchemas,
         contextWindow: this.windowOf(provider, modelId),
+        reasoningEffort,
         sections: {
           system: estTokens(system.base),
           skills: estTokens(system.skills),
@@ -1769,7 +1775,7 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
         messages: [{ role: 'user', content: transcript, timestamp: Date.now() }],
         tools: [],
       },
-      {},
+      { reasoning: this.roleReasoningEffort(provider, modelId) },
     )
     for await (const event of stream as AsyncIterable<any>) {
       if (event.type !== 'done') continue
@@ -2018,6 +2024,23 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
     return null
   }
 
+  /**
+   * 当前实际使用的模型对应哪一份平台推理档位。
+   *
+   * utility 是一次显式覆盖，优先取 utility；如果因为窗口不够退回了 Bot 自己的模型，
+   * provider/model 对不上 utility，就自然落回 daily。普通聊天和 daily 日常任务同理。
+   */
+  private roleReasoningEffort(provider: string, model: string, role?: TurnModelRole): ReasoningEffort {
+    const roles = this.ctx.catalog?.models
+    const match = (pick: typeof roles.daily | undefined) =>
+      pick?.provider === provider && pick.model === model ? pick.reasoningEffort : undefined
+    if (role === 'utility') {
+      const effort = match(roles?.utility)
+      if (effort) return effort
+    }
+    return match(roles?.daily) ?? 'off'
+  }
+
   /** 模型的上下文窗口，来自 Gateway 目录。拉不到就没有——界面那条占比会自己让位。 */
   private windowOf(provider: string, model: string): number | undefined {
     const found = this.ctx.llm
@@ -2124,6 +2147,7 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
       system: string
       tools: { name: string; description: string }[]
       contextWindow?: number
+      reasoningEffort: ReasoningEffort
       sections?: { system: number; skills: number; builtinTools: number; mcpTools: number; memory?: number }
     },
   ) {
@@ -2147,6 +2171,7 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
             system: used.system,
             tools: used.tools.map((t) => ({ name: t.name, description: t.description })),
             contextWindow: used.contextWindow,
+            reasoningEffort: used.reasoningEffort,
             sections: used.sections,
           })
           break

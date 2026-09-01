@@ -4,8 +4,8 @@ import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
 import { type DiscoverySnapshot, emptySnapshot, parseDiscoverySnapshot } from './model-discovery.ts'
-import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Task, type TaskEvent, type TaskEventKind, type TaskField, type TaskState, TASK_PAGE_DEFAULT, TASK_PAGE_MAX, parseTaskState, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, taskOf, taskEventOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
+import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Task, type TaskEvent, type TaskEventKind, type TaskExtractLog, type TaskExtractOutcome, type TaskField, type TaskState, TASK_PAGE_DEFAULT, TASK_PAGE_MAX, parseTaskState, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, taskOf, taskEventOf, taskExtractLogOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -3033,16 +3033,16 @@ export class Db {
     if (!r) return emptySettings()
     const raw = (jsonOf(r.payload) ?? {}) as Partial<CompanySettings>
     return {
-      daily: { provider: String(raw.daily?.provider ?? ''), model: String(raw.daily?.model ?? '') },
-      utility: { provider: String(raw.utility?.provider ?? ''), model: String(raw.utility?.model ?? '') },
+      daily: { provider: String(raw.daily?.provider ?? ''), model: String(raw.daily?.model ?? ''), reasoningEffort: parseReasoningEffort(raw.daily?.reasoningEffort) },
+      utility: { provider: String(raw.utility?.provider ?? ''), model: String(raw.utility?.model ?? ''), reasoningEffort: parseReasoningEffort(raw.utility?.reasoningEffort) },
     }
   }
 
   async putSettings(companyId: string, next: CompanySettings): Promise<CompanySettings> {
     const now = Date.now()
     const payload = JSON.stringify({
-      daily: { provider: next.daily.provider, model: next.daily.model },
-      utility: { provider: next.utility.provider, model: next.utility.model },
+      daily: { provider: next.daily.provider, model: next.daily.model, reasoningEffort: parseReasoningEffort(next.daily.reasoningEffort) },
+      utility: { provider: next.utility.provider, model: next.utility.model, reasoningEffort: parseReasoningEffort(next.utility.reasoningEffort) },
     })
     await this.run(
       'insert into settings ("companyId", payload, "updatedAt") values (?,?,?) on conflict ("companyId") do update set payload=excluded.payload, "updatedAt"=excluded."updatedAt"',
@@ -3061,8 +3061,8 @@ export class Db {
     const now = Date.now()
     const enabled = Array.isArray(next.enabledModels) ? next.enabledModels.map((x) => String(x)).filter(Boolean) : []
     const payload = JSON.stringify({
-      daily: { provider: next.daily.provider, model: next.daily.model },
-      utility: { provider: next.utility.provider, model: next.utility.model },
+      daily: { provider: next.daily.provider, model: next.daily.model, reasoningEffort: parseReasoningEffort(next.daily.reasoningEffort) },
+      utility: { provider: next.utility.provider, model: next.utility.model, reasoningEffort: parseReasoningEffort(next.utility.reasoningEffort) },
       enabledModels: enabled,
       priceMultiplier: parsePriceMultiplier(next.priceMultiplier),
       connectorPricing: parseConnectorPricing(next.connectorPricing),
@@ -4022,6 +4022,58 @@ export class Db {
     await this.run(
       'insert into task_events (id, "taskId", kind, "fromState", "toState", note, "createdAt") values (?,?,?,?,?,?,?)',
       [row.id, row.taskId, row.kind, row.fromState, row.toState, row.note, row.createdAt],
+    )
+    return row
+  }
+
+  /** 最近的抽取判定。日志和任务一样按账号隔离。 */
+  async taskExtractLogs(accountId: string, botId?: string, limit = 100): Promise<TaskExtractLog[]> {
+    const cap = Math.min(Math.max(Math.trunc(limit), 1), 200)
+    const rows = await this.many(
+      `select * from task_extract_logs where "accountId" = ?${botId ? ' and "botId" = ?' : ''}
+       order by "createdAt" desc, id desc limit ?`,
+      botId ? [accountId, botId, cap] : [accountId, cap],
+    )
+    return rows.map(taskExtractLogOf)
+  }
+
+  async insertTaskExtractLog(input: {
+    accountId: string
+    companyId: string
+    botId: string
+    sessionId: string
+    outcome: TaskExtractOutcome
+    reason: string
+    detail?: string
+    createdCount?: number
+    updatedCount?: number
+    taskCount?: number
+    fromSeq?: number
+    toSeq?: number
+    model?: string
+    version?: number
+  }): Promise<TaskExtractLog> {
+    const row: TaskExtractLog = {
+      id: randomUUID(),
+      accountId: input.accountId,
+      companyId: input.companyId,
+      botId: input.botId,
+      sessionId: input.sessionId,
+      outcome: input.outcome,
+      reason: input.reason.slice(0, 80),
+      detail: (input.detail ?? '').slice(0, 300),
+      createdCount: Math.max(0, Math.trunc(input.createdCount ?? 0)),
+      updatedCount: Math.max(0, Math.trunc(input.updatedCount ?? 0)),
+      taskCount: Math.max(0, Math.trunc(input.taskCount ?? 0)),
+      fromSeq: Math.max(0, Math.trunc(input.fromSeq ?? 0)),
+      toSeq: Math.max(0, Math.trunc(input.toSeq ?? 0)),
+      model: (input.model ?? '').slice(0, 80),
+      version: Math.max(0, Math.trunc(input.version ?? 0)),
+      createdAt: Date.now(),
+    }
+    await this.run(
+      'insert into task_extract_logs (id, "accountId", "companyId", "botId", "sessionId", outcome, reason, detail, "createdCount", "updatedCount", "taskCount", "fromSeq", "toSeq", model, version, "createdAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [row.id, row.accountId, row.companyId, row.botId, row.sessionId, row.outcome, row.reason, row.detail, row.createdCount, row.updatedCount, row.taskCount, row.fromSeq, row.toSeq, row.model, row.version, row.createdAt],
     )
     return row
   }

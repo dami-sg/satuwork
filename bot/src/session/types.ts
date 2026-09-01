@@ -207,6 +207,8 @@ export interface SessionEventMap {
     tools: { name: string; description: string }[]
     /** 这个模型的上下文窗口。目录没拉到就没有这个字段。 */
     contextWindow?: number
+    /** 这一步实际使用的推理强度。老日志没有时按 off。 */
+    reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
     /**
      * 提示词各段占多少 token（估算）。
      *

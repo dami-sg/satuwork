@@ -26,10 +26,13 @@ package.json 里有一条别名把 cordis 指向同一个物理包，避免加�
 | GATEWAY_URL | Gateway 基址，例如 http://127.0.0.1:3080 |
 | GATEWAY_TOKEN | 席位 access token（sat_ 前缀）。Gateway 与 Bot 双向 |
 | GATEWAY_API_KEY | 席位 API Key（sk_sw_ 前缀）。打 /v1，用量记在该用户 |
-| GATEWAY_MACHINE_TOKEN | 机器凭证。internal 口（ready、索引、拉全文） |
 | SATUWORK_BOT_ID | 部署必填。目录只钉这一颗，不种本地 default |
 | SATUWORK_WORK_DIR | 文件与命令工具的工作区根目录。部署注入 /home/{linuxUser}/work；本地回落 $SATUWORK_HOME/work |
 | SATUWORK_UPLOAD_MAX | 单个附件上限（字节）。默认 100 MiB |
+
+Bot **不持有**机器票 `smt_`：那把票等同于整台机器的控制权，只留在机器管家的
+`/etc/satuwork/manager.json` 和 Gateway 的 `machines.token`。Bot 的 ready、会话索引、guard、
+handoff 以及 Gateway 拉全文都使用席位票 `sat_`；服务端据此把调用方限制到自己的账号。
 
 模型调用走 Gateway /v1（Chat Completions / Responses / Anthropic Messages）。pi-ai 和上游密钥都在 Gateway。每个 Bot 有自己的 provider + model。
 

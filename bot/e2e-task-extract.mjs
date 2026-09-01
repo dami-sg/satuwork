@@ -30,6 +30,7 @@ process.on('exit', () => {
 let modelCalls = 0
 let lastPrompt = ''
 let lastReport = null
+let lastDecision = null
 let modelReply = '{"tasks":[]}'
 /** 上报那一跳回什么。**4xx 和 5xx 要分开验**：一个再报没希望、一个值得再试。 */
 let reportStatus = 200
@@ -53,6 +54,12 @@ const server = createServer((req, res) => {
       }
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ tasks: [], open: [{ key: 'reply-mail', title: '回信', state: 'doing' }] }))
+      return
+    }
+    if (req.url === '/internal/tasks/extract-log') {
+      lastDecision = JSON.parse(body)
+      res.writeHead(201, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
       return
     }
     res.writeHead(404)
@@ -108,7 +115,14 @@ const out = {}
 /** 往会话里写一轮：用户说一句、调几把工具、助理答一句。 */
 async function turn(id, n, { user, calls = [], say = '' }) {
   await ctx.sessions.append(id, 'turn/start', { turn: n })
-  if (user) await ctx.sessions.append(id, 'user/message', { id: `u${n}`, role: 'user', content: [{ type: 'text', text: user }], source: { kind: 'user' } })
+  // 必须和生产日志同形：正文挂在 data.message.content。把 message 那层漏掉，会让探针
+  // 和抽取器一起读错同一个字段、测试全绿而线上永远判成「没人说话」。
+  if (user) {
+    await ctx.sessions.append(id, 'user/message', {
+      message: { id: `u${n}`, role: 'user', content: [{ type: 'text', text: user }] },
+      source: { kind: 'user' },
+    })
+  }
   for (const [i, c] of calls.entries()) {
     const callId = `c${n}-${i}`
     await ctx.sessions.append(id, 'tool/call', { turn: n, step: 0, callId, name: c.name, arguments: {} })
@@ -129,6 +143,7 @@ const readOnlyRun = await ctx.taskExtract.run(readOnly)
 out.预过滤 = {
   只读的一段不抽: readOnlyRun === 'skipped',
   一次模型都没调: modelCalls === 0,
+  留下了不创建原因: lastDecision?.sessionId === readOnly && lastDecision?.reason === 'read_only_short',
   // 只读但人交代了一长段：那多半是一件事的开头，得抽。
   说得多的照抽: worthExtracting([{ turn: 1, startSeq: 1, endSeq: 2, user: ['帮我把这周所有客户反馈整理成一份表，按严重程度排序，明天早上要用'], say: '', calls: [] }]),
   没有人说话的不抽: !worthExtracting([{ turn: 1, startSeq: 1, endSeq: 2, user: [], say: '好的', calls: [{ name: 'gmail_send', risk: ['external', 'write'], result: 'ok' }] }]),
@@ -188,6 +203,7 @@ modelReply = '我觉得这段对话里有一件事……'
 const brokenRun = await ctx.taskExtract.run(broken)
 // **在重试之前就把这个判断做掉**：重试会把 lastReport 换成新的那一份。
 const brokenSilent = lastReport?.sessionId !== broken
+const brokenLogged = lastDecision?.sessionId === broken && lastDecision?.outcome === 'failed'
 modelReply = JSON.stringify({ tasks: [{ key: 'send-to-finance', title: '把信转给财务', state: 'done', evidence: 'x', turns: [1] }] })
 /**
  * **水位没推**，所以下一次还抽得到同一段——这一条是「失败不吃掉一段对话」的全部依据。
@@ -198,6 +214,7 @@ const retry = await ctx.taskExtract.run(broken)
 out.抽崩了 = {
   没抽成: brokenRun === 'skipped',
   没往上报: brokenSilent,
+  留下了失败原因: brokenLogged,
   重试还抽得到同一段: retry === 'ok' && lastReport?.sessionId === broken,
 }
 
@@ -212,6 +229,7 @@ out.没钉档位 = {
   不抽: noUtilityRun === 'skipped',
   // 回落到 daily 的话，一个「省钱」的功能会变成漏钱的：没有任何人在等这个结果。
   没有拿贵模型顶上: modelCalls === before,
+  留下了配置原因: lastDecision?.sessionId === noUtility && lastDecision?.reason === 'utility_model_missing',
 }
 
 // ── 6.5 日常任务替人下的那条要求，照样算一件事 ─────────────────────────
@@ -221,9 +239,7 @@ out.没钉档位 = {
 const routine = await ctx.sessions.create({ botId: 'bot-1', kind: 'main' })
 await ctx.sessions.append(routine, 'turn/start', { turn: 1 })
 await ctx.sessions.append(routine, 'user/message', {
-  id: 'r1',
-  role: 'user',
-  content: [{ type: 'text', text: '把昨天的对账单发给财务' }],
+  message: { id: 'r1', role: 'user', content: [{ type: 'text', text: '把昨天的对账单发给财务' }] },
   source: { kind: 'plugin', plugin: 'routine', form: 'rt_1' },
 })
 await ctx.sessions.append(routine, 'tool/call', { turn: 1, step: 0, callId: 'rc1', name: 'gmail_send', arguments: {} })
@@ -299,7 +315,9 @@ out.旁支 = { 子会话不抽: (await ctx.taskExtract.run(side)) === 'skipped' 
 const sample = turnsOf(await ctx.sessions.events(live), (n) => (n === 'gmail_send' ? ['external', 'read', 'write'] : ['external', 'read']))
 out.算子 = {
   分得出两轮: sample.length === 2,
-  只留真人说的话: sample[0].user.length === 1,
+  只留真人说的话: sample[0].user.length === 1 && sample[0].user[0] === '帮我看看今天的邮件',
+  // 用户指令很短也没关系：同一轮 gmail_send 是 write，必须越过 20 字的兜底门槛。
+  写工具让短指令也值得抽: worthExtracting(sample),
   没动手的工具不摘返回: sample[0].calls.every((c) => !c.result),
   写工具摘了返回: sample[1].calls.some((c) => c.result.includes('sent')),
   水位丢了只回溯尾巴: tailFrom(await ctx.sessions.events(live), 1) > 0,

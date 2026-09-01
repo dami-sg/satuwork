@@ -20,12 +20,17 @@ export async function runRoutineModel({ root, test, assert, log }) {
   let r
   await test('探针跑得完', async () => {
     r = await runProbe(root)
-    assert(r && r.utility && r.notPinned && r.noRole && r.tooBig, `结果不完整：${JSON.stringify(r)}`)
+    assert(r && r.utility && r.notPinned && r.reasoning && r.noRole && r.tooBig, `结果不完整：${JSON.stringify(r)}`)
   })
 
   await test('选了 utility，那一轮真的按 utility 跑', () => {
     assert(r.utility.换成了平台那一对, '还是按 Bot 自己的模型跑——这个开关等于摆设，账单一分不省')
     assert(r.utility.用的不是Bot自己的, '没换掉')
+    assert(r.utility.推理强度生效, 'utility 模型换对了，但推理强度没有送进模型调用')
+  })
+
+  await test('日常模型的推理强度用于普通聊天与 daily 任务', () => {
+    assert(r.reasoning.daily生效, '日常模型的推理强度没有送进模型调用')
   })
 
   await test('daily 与不给这个值：都不覆盖 Bot 自己的模型', () => {

@@ -6,7 +6,7 @@
 import { EMAIL_RE, PHONE_RE, SLUG_RE, strField } from './validate.ts'
 import { losingAdmin, statusOf } from './guards.ts'
 import { HttpError } from '../http.ts'
-import { type Account, type AccountStatus, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRate, type ModelRole, type BillingSettings, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, type Plan, type PlatformSettings, type Role, type SessionIndex, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier } from '../db.ts'
+import { type Account, type AccountStatus, type CatalogItem, type Company, type CompanySettings, type CompanyStatus, type Db, type Group, type ModelRate, type ModelRole, type BillingSettings, PRICE_MULTIPLIER_MAX, PRICE_MULTIPLIER_MIN, REASONING_EFFORTS, type Plan, type PlatformSettings, type Role, type SessionIndex, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseReasoningEffort } from '../db.ts'
 import { WEB_BACKENDS, WEB_DOCUMENT } from '../db/types.ts'
 import { VENDORS } from '../connectors/index.ts'
 
@@ -76,19 +76,22 @@ export function roleOf(v: unknown, fallback: Role = 'member'): Role {
 }
 
 export function modelRoleOf(v: unknown, label: string): ModelRole {
-  if (v == null) return { provider: '', model: '' }
+  if (v == null) return { provider: '', model: '', reasoningEffort: 'off' }
   if (typeof v !== 'object' || Array.isArray(v)) throw new HttpError(400, `${label} 必须是对象`)
   const o = v as Record<string, unknown>
   const provider = o.provider == null || o.provider === '' ? '' : strField(o, 'provider')
   const model = o.model == null || o.model === '' ? '' : strField(o, 'model')
   if (Boolean(provider) !== Boolean(model)) throw new HttpError(400, `${label} 需要同时有 provider 和 model`)
-  return { provider, model }
+  if (o.reasoningEffort != null && !(REASONING_EFFORTS as readonly unknown[]).includes(o.reasoningEffort)) {
+    throw new HttpError(400, `${label}.reasoningEffort 不合法`)
+  }
+  return { provider, model, reasoningEffort: parseReasoningEffort(o.reasoningEffort) }
 }
 
 export function publicSettings(s: CompanySettings | PlatformSettings): PlatformSettings {
   return {
-    daily: { provider: s.daily.provider, model: s.daily.model },
-    utility: { provider: s.utility.provider, model: s.utility.model },
+    daily: { provider: s.daily.provider, model: s.daily.model, reasoningEffort: parseReasoningEffort(s.daily.reasoningEffort) },
+    utility: { provider: s.utility.provider, model: s.utility.model, reasoningEffort: parseReasoningEffort(s.utility.reasoningEffort) },
     enabledModels: Array.isArray((s as PlatformSettings).enabledModels) ? (s as PlatformSettings).enabledModels : [],
     priceMultiplier: parsePriceMultiplier((s as PlatformSettings).priceMultiplier),
     connectorPricing: parseConnectorPricing((s as PlatformSettings).connectorPricing),

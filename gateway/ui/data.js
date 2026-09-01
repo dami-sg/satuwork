@@ -77,6 +77,7 @@ function groupCatalog(rows) {
       id: m.model || (typeof m.id === 'string' && m.id.includes('/') ? m.id.slice(m.id.indexOf('/') + 1) : m.id),
       name: m.name || m.model || m.id,
       reasoning: !!m.reasoning,
+      reasoningLevels: Array.isArray(m.reasoning_levels) ? m.reasoning_levels : (m.reasoning ? ['off', 'minimal', 'low', 'medium', 'high'] : ['off']),
       input: Array.isArray(m.input) ? m.input : ['text'],
       contextWindow: m.context_window,
       maxTokens: m.max_tokens,
@@ -821,6 +822,7 @@ async function loadPage() {
      */
     if (state.path === '/tasks') {
       state.taskOpen = null
+      state.taskLogsOpen = false
       state.taskCursor = ''
       await loadTasks().catch(() => {})
       tasksPoll()

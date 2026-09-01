@@ -1,4 +1,4 @@
-import type { Provider } from '@earendil-works/pi-ai'
+import { getSupportedThinkingLevels, type Provider } from '@earendil-works/pi-ai'
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Db } from './db.ts'
 import { overlayProvider, resolveOverlay, type DiscoverySnapshot } from './model-discovery.ts'
@@ -12,6 +12,7 @@ export interface CatalogModel {
   contextWindow?: number
   maxTokens?: number
   reasoning?: boolean
+  reasoningLevels?: string[]
   input?: ('text' | 'image')[]
   cost?: unknown
   source: 'builtin' | 'company' | 'custom' | 'discovered'
@@ -199,6 +200,7 @@ export class Llm {
           contextWindow: (m as { contextWindow?: number }).contextWindow,
           maxTokens: (m as { maxTokens?: number }).maxTokens,
           reasoning: !!(m as { reasoning?: boolean }).reasoning,
+          reasoningLevels: getSupportedThinkingLevels(m),
           input: Array.isArray((m as { input?: unknown }).input)
             ? ((m as { input: ('text' | 'image')[] }).input.filter((x) => x === 'text' || x === 'image'))
             : ['text'],

@@ -154,8 +154,31 @@ function pricePanel() {
     </div>`
 }
 
+const REASONING_LABELS = {
+  off: ['关闭', 'Off'],
+  minimal: ['极低', 'Minimal'],
+  low: ['低', 'Low'],
+  medium: ['中', 'Medium'],
+  high: ['高', 'High'],
+  xhigh: ['极高', 'Extra high'],
+  max: ['最高', 'Max'],
+}
+
 function rolePanel(role, title, hint) {
-  const cur = state.settings?.[role] || { provider: '', model: '' }
+  const cur = state.settings?.[role] || { provider: '', model: '', reasoningEffort: 'off' }
+  const picked = state.catalog
+    .find((p) => p.provider === cur.provider)
+    ?.models.find((m) => m.id === cur.model)
+  const levels = picked?.reasoning
+    ? (Array.isArray(picked.reasoningLevels) ? picked.reasoningLevels : ['off', 'minimal', 'low', 'medium', 'high'])
+    : ['off']
+  const effort = levels.includes(cur.reasoningEffort) ? cur.reasoningEffort : 'off'
+  const effortOptions = levels
+    .map((level) => {
+      const label = REASONING_LABELS[level] || [level, level]
+      return `<option value="${esc(level)}" ${effort === level ? 'selected' : ''}>${esc(t(label[0], label[1]))}</option>`
+    })
+    .join('')
   return `
     <div class="satu-panel">
       <span class="satu-panel-title">${esc(title)}</span>
@@ -172,6 +195,15 @@ function rolePanel(role, title, hint) {
         <select class="input" style="width: 250px; flex: none;" data-act="role-model" data-role="${esc(role)}">
           <option value="">${t('选择模型')}</option>
           ${modelOptions(cur.provider, cur.model)}
+        </select>
+      </div>
+      <div class="satu-toggleRow">
+        <div style="min-width: 0;">
+          <div style="font-size: 13.5px; font-weight: 600;">${t('推理强度', 'Reasoning effort')}</div>
+          <div style="font-size: 12px; color: var(--muted-foreground);">${picked?.reasoning ? t('控制推理模型在每次任务中投入的思考量。', 'Controls how much reasoning the model uses for each task.') : t('当前模型不支持推理。', 'The selected model does not support reasoning.')}</div>
+        </div>
+        <select class="input" style="width: 250px; flex: none;" data-act="role-reasoning" data-role="${esc(role)}" ${picked?.reasoning ? '' : 'disabled'}>
+          ${effortOptions}
         </select>
       </div>
       <div class="satu-toggleRow">

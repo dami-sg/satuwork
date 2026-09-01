@@ -54,6 +54,18 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
   }
 
   try {
+    await test('页面路径和 API 同名时，刷新拿 HTML、api() 仍拿 JSON', async () => {
+      // `/tasks` 同时是 SPA 地址和任务 API。浏览器刷新会带 text/html，必须先交回
+      // index.html；站内 api() 明确带 application/json，仍然走鉴权后的 JSON 路由。
+      const page = await req(gwBase, 'GET', '/tasks', { headers: { accept: 'text/html' } })
+      assert(page.status === 200, `刷新 /tasks → ${page.status} ${page.text}`)
+      assert((page.headers.get('content-type') || '').includes('text/html'), `刷新 /tasks 没拿到 HTML：${page.headers.get('content-type')}`)
+      assert(page.text.includes('data-app-part'), '刷新 /tasks 拿到的不是管理页 index.html')
+
+      const api = await req(gwBase, 'GET', '/tasks', { headers: { accept: 'application/json' } })
+      assert(api.status === 401 && api.json?.error === '需要登录', `JSON /tasks 没走原来的鉴权 API：${api.status} ${api.text}`)
+    })
+
     await test('index.html 列出的每个前端分片都真的取得到', async () => {
       // 前端拆成了一串普通脚本，多一个分片就要在 http.ts 的 ROOT_FILES 里也加一行。
       // 漏了的表现很坏：本地开 index.html 一切正常，线上那一个 404，整个界面白屏。
@@ -528,6 +540,26 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       const pop = ui.toolPopBody(ui.approvalPop({ callId: 'call_mail', name: 'x', args: '{}', state: 'approved', form, edited: ['正文'] }))
       assert(pop.includes('批准时改过') && pop.includes('正文'), '悬浮窗没说这次改过哪几格')
       assert(pop.includes('你好，附件是报表。'), '悬浮窗里看不到最终发出去的内容')
+
+      // HTML 邮件默认看渲染后的效果，不把一屏标签原样糊到批准人脸上；源码仍能展开改。
+      const htmlForm = {
+        ...form,
+        fields: form.fields.map((field) => field.key === 'args.body'
+          ? { ...field, value: '<p>你好，<b>账单见下表</b></p><script>parent.postMessage("x", "*")</script>' }
+          : field.key === 'args.is_html' ? { ...field, value: 'true' } : field),
+      }
+      const htmlCard = ui.approvalHtml({
+        callId: 'call_html_mail', name: 'mcp_gmail_default_sw_run', args: '{}', reason: 'send', state: 'pending', form: htmlForm,
+      })
+      assert(htmlCard.includes('class="sw-mail-preview"'), 'HTML 正文没有显示预览')
+      assert(htmlCard.includes('sandbox=""') && htmlCard.includes('referrerpolicy="no-referrer"'), 'HTML 预览没有隔离')
+      assert(htmlCard.includes('Content-Security-Policy') && htmlCard.includes('default-src'), 'HTML 预览没有阻断远程资源')
+      assert(htmlCard.includes('<details class="sw-mail-source">'), 'HTML 源码没有保留可编辑入口')
+      assert(htmlCard.includes('data-edit="args.body"'), 'HTML 源码编辑框没有沿用批准参数')
+      assert(!htmlCard.includes('<script>parent.postMessage'), '邮件 HTML 被直接注入了批准页')
+      assert(htmlCard.includes('&lt;script&gt;parent.postMessage'), '邮件源码转义后丢了')
+      // is_html=false 的普通邮件仍是直接编辑正文，不能也被误画成 iframe。
+      assert(!card.includes('sw-mail-preview'), '纯文本邮件被误判成 HTML')
     })
 
     await test('消息里的 @ 点名要留在气泡上，别发完就没', async () => {
@@ -993,6 +1025,30 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       await ui.fire('change', el('select', { 'data-act': 'role-provider', 'data-role': 'daily' }, 'bb'))
       assert(ui.state.selectedProvider === 'bb', `selectedProvider 还是 ${ui.state.selectedProvider}`)
       assert(ui.html().includes('BB One'), '表还停在上一个供应商')
+    })
+
+    await test('日常与 Utility 模型都能设置推理强度', async () => {
+      const ui = await boot(ownerToken)
+      ui.state.path = '/models'
+      ui.state.catalog = [{
+        provider: 'e2e-fake',
+        name: 'E2E',
+        models: [{ id: 'reasoner', name: 'Reasoner', reasoning: true, reasoningLevels: ['off', 'low', 'medium', 'high'] }],
+      }]
+      await ui.saveSettings({
+        daily: { provider: 'e2e-fake', model: 'reasoner', reasoningEffort: 'low' },
+        utility: { provider: 'e2e-fake', model: 'reasoner', reasoningEffort: 'medium' },
+      })
+      ui.render()
+      const html = ui.html()
+      assert((html.match(/data-act="role-reasoning"/g) || []).length === 2, '两个角色没有各自的推理强度下拉')
+      assert(html.includes('推理强度'), '没有推理强度标签')
+
+      await ui.fire('change', el('select', { 'data-act': 'role-reasoning', 'data-role': 'daily' }, 'high'))
+      assert(ui.state.settings.daily.reasoningEffort === 'high', `日常档位没存下：${JSON.stringify(ui.state.settings.daily)}`)
+      assert(ui.state.settings.utility.reasoningEffort === 'medium', '改日常时误改了 Utility')
+      const back = await ui.api('GET', '/platform/settings')
+      assert(back.daily.reasoningEffort === 'high' && back.utility.reasoningEffort === 'medium', `库里档位不对：${JSON.stringify(back)}`)
     })
 
     await test('倍率越界：不落库，输入退回上一个有效值', async () => {

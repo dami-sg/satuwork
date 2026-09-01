@@ -124,6 +124,22 @@ function serveUi(pathname: string, res: ServerResponse): boolean {
 }
 
 /**
+ * 这次 GET 是在拿一张网页，还是在调 JSON API。
+ *
+ * `/tasks`、`/handoffs` 这类地址两边都要用：浏览器刷新要 index.html，前端的 api()
+ * 则要同名 JSON。浏览器顶层导航会明确带 `text/html`，api() 也明确带
+ * `application/json`，用这句话分流就不需要给其中一边改一套公开 URL。
+ *
+ * 不把通配 Accept 当 HTML：脚本、curl 和旧客户端不表态时继续按 API 处理，避免一次前端
+ * 路由新增就静默改变已有接口的返回类型。
+ */
+function acceptsHtml(req: IncomingMessage): boolean {
+  const raw = req.headers.accept
+  if (typeof raw !== 'string') return false
+  return raw.split(',').some((part) => part.split(';', 1)[0].trim().toLowerCase() === 'text/html')
+}
+
+/**
  * 很小的路由器。路径按段精确匹配，`:id` 是参数。先注册的先中——所以更具体的
  * 路径要写在带参数的前面（`/orgs/:id/sessions/:sessionId` 和 `/orgs/:id/sessions`
  * 段数不同，互不抢）。未命中时 GET / 与 GET /ui/* 走静态管理页。
@@ -173,6 +189,14 @@ export class Router {
       for (const fn of this.intercepts) {
         if (await fn(raw, res, url)) return
       }
+      /**
+       * 页面导航要在同名 API 之前认领。
+       *
+       * 原来静态页只在所有 API 都没命中之后才试；`GET /tasks` 已经被任务 API 命中，
+       * 所以站内点过去正常（没有整页请求），一刷新却直接拿到 `{"error":"需要登录"}`。
+       * 只提前处理明确要 HTML 的请求，JSON API 的鉴权和行为都保持原样。
+       */
+      if ((method === 'GET' || method === 'HEAD') && acceptsHtml(raw) && serveUi(url.pathname, res)) return
       for (const route of this.routes) {
         if (route.method !== method) continue
         const params = match(route.parts, url.pathname)

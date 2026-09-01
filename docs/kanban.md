@@ -1075,7 +1075,7 @@ POST   /runtime/kanban/cards?botId=              `kanban_create`。**body 带 bo
 POST   /runtime/kanban/cards/:id/links?botId=    `kanban_link`
 POST   /runtime/kanban/cards/:id/comments?botId= `kanban_comment`
 
-# 席位运行面报的（不是模型调的）：机器票 / 席位票，同 requireInternalCaller 口径
+# 席位运行面报的（不是模型调的）：Bot 通常用席位票；requireInternalCaller 也兼容管家机器票
 POST   /internal/kanban/cards/:id/result      收口 { status, summary, metadata, steps, toolCalls, error }
 POST   /internal/kanban/cards/:id/heartbeat   还活着（席位每 60 秒一次，模型不管）
 ```
@@ -1103,7 +1103,7 @@ POST   /internal/kanban/cards/:id/heartbeat   还活着（席位每 60 秒一次
 | | 谁在说话 | 走哪 | 认什么 |
 |---|---|---|---|
 | `kanban_list` / `show` / `create` / `link` / `comment` | **模型**（一次工具调用） | `/runtime/kanban/*` | 席位那把 runtime 票（和 `/runtime/catalog` 同一把）+ `?botId=` |
-| `/result` / `/heartbeat` | **席位的运行面** | `/internal/kanban/*` | `requireInternalCaller`（同会话索引、guard-events、ready、用量） |
+| `/result` / `/heartbeat` | **席位的运行面** | `/internal/kanban/*` | `requireInternalCaller`（同会话索引、guard-events、ready；Bot 通常用 `sat_`） |
 
 **`botId` 从 query 取，而且服务端要验它真是这个账号的**（`seatBotOf`，
 [gateway/src/routes/runtime.ts:333](../gateway/src/routes/runtime.ts:333)）。理由和
@@ -1111,8 +1111,8 @@ POST   /internal/kanban/cards/:id/heartbeat   还活着（席位每 60 秒一次
 botId 就能拿别人的 Bot 身份往板上建卡。同理 `board`：验它属于 `seatBotOf` 认出来的那个账号，
 并且这颗 Bot 在它的成员名单里。**判据一律服务端现算，不收 body**（同会话索引那条）。
 
-那为什么 `/result` / `/heartbeat` 不也走 `/runtime`：它们不是模型说的话，是**这台机器在
-汇报**——和「这条会话结束了」「这次用了多少 token」同一类。混进 `/runtime` 的话，模型有一天
+那为什么 `/result` / `/heartbeat` 不也走 `/runtime`：它们不是模型说的话，是**席位运行面在
+汇报**——和会话索引、guard 结果同一类。混进 `/runtime` 的话，模型有一天
 就能自己报一句「这张卡跑完了」。
 
 ### 15.3 席位接口

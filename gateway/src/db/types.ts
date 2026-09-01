@@ -704,6 +704,17 @@ export interface CompanyModelUsage {
 export interface ModelRole {
   provider: string
   model: string
+  /** pi-ai 的通用推理档位；off 保持旧配置「不启用推理」的行为。 */
+  reasoningEffort: ReasoningEffort
+}
+
+export const REASONING_EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+export type ReasoningEffort = typeof REASONING_EFFORTS[number]
+
+export function parseReasoningEffort(v: unknown): ReasoningEffort {
+  return typeof v === 'string' && (REASONING_EFFORTS as readonly string[]).includes(v)
+    ? v as ReasoningEffort
+    : 'off'
 }
 
 export interface CompanySettings {
@@ -934,13 +945,16 @@ export function parsePriceMultiplier(v: unknown, fallback = 1): number {
 }
 
 export function emptySettings(): CompanySettings {
-  return { daily: { provider: '', model: '' }, utility: { provider: '', model: '' } }
+  return {
+    daily: { provider: '', model: '', reasoningEffort: 'off' },
+    utility: { provider: '', model: '', reasoningEffort: 'off' },
+  }
 }
 
 export function emptyPlatformSettings(): PlatformSettings {
   return {
-    daily: { provider: '', model: '' },
-    utility: { provider: '', model: '' },
+    daily: { provider: '', model: '', reasoningEffort: 'off' },
+    utility: { provider: '', model: '', reasoningEffort: 'off' },
     enabledModels: [],
     priceMultiplier: 1,
     connectorPricing: emptyConnectorPricing(),
@@ -1410,5 +1424,35 @@ export interface TaskEvent {
   fromState: TaskState | null
   toState: TaskState | null
   note: string
+  createdAt: number
+}
+
+/** 一次任务抽取判定。没有创建任务的那一次，天然没有 taskId 可挂。 */
+export type TaskExtractOutcome = 'created' | 'updated' | 'unchanged' | 'no_task' | 'skipped' | 'failed'
+
+export function parseTaskExtractOutcome(v: unknown): TaskExtractOutcome {
+  const s = String(v ?? '')
+  if (s === 'created' || s === 'updated' || s === 'unchanged' || s === 'no_task' || s === 'failed') return s
+  return 'skipped'
+}
+
+export interface TaskExtractLog {
+  id: string
+  accountId: string
+  companyId: string
+  botId: string
+  sessionId: string
+  outcome: TaskExtractOutcome
+  /** 稳定原因码，界面据此给出本地化说明。 */
+  reason: string
+  /** 安全诊断信息；不允许放对话正文。 */
+  detail: string
+  createdCount: number
+  updatedCount: number
+  taskCount: number
+  fromSeq: number
+  toSeq: number
+  model: string
+  version: number
   createdAt: number
 }

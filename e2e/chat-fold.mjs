@@ -201,6 +201,19 @@ export async function runChatFold({ root, test, assert, log }) {
   const listEv = (seq, statuses) =>
     ev(seq, 'todo/list', { callId: 'c1', items: statuses.map((st, i) => ({ id: String(i + 1), task: '事' + (i + 1), status: st })) })
 
+  await test('实时事件乱序：新建任务不会被后到的小 seq 丢掉', async () => {
+    const c = dockOf()
+    const row = c.botStreamOf('b')
+    c.state.chatEvents = row.events
+    // 并发落盘时，后拿号的流式事件可能先广播；todo/list 随后才到。
+    assert(c.pushBotEvent('b', ev(12, 'assistant/chunk', { turn: 1, step: 1, chunk: '继续' })), '首条事件没进桶')
+    assert(c.pushBotEvent('b', listEv(11, ['in_progress', 'pending'])), '后到的 todo/list 被当成重复丢了')
+    assert(row.events.map((x) => x.seq).join(',') === '11,12', `事件桶没按 seq 归位：${row.events.map((x) => x.seq)}`)
+    c.paintChatTodos(c.fold(row.events))
+    assert(!c.todock.hidden && c.todock.innerHTML.includes('事2'), '新建的任务清单没有显示在聊天中')
+    assert(!c.pushBotEvent('b', listEv(11, ['pending'])), '同 seq 重放没有去重')
+  })
+
   await test('重新加载：全部收口的清单不再占输入框上面那行', async () => {
     const c = dockOf()
     c.paintChatTodos(c.fold([listEv(4, ['completed', 'completed'])]))

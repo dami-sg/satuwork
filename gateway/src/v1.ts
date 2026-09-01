@@ -196,6 +196,7 @@ async function publicModels(llm: Llm, companyId: string | null) {
     context_window: m.contextWindow,
     max_tokens: m.maxTokens,
     reasoning: m.reasoning,
+    reasoning_levels: m.reasoningLevels ?? (m.reasoning ? ['off', 'minimal', 'low', 'medium', 'high'] : ['off']),
     input: m.input && m.input.length ? m.input : ['text'],
     cost: m.cost,
     // 'discovered' = 内置快照里没有、运行时从 models.dev 补进来的。页面据此打标：
@@ -359,6 +360,14 @@ export function toPiContext(body: Record<string, unknown>, provider: string, mod
       })
     : undefined
   return { systemPrompt, messages, tools }
+}
+
+/** OpenAI 兼容入参里的推理档位，转成 pi-ai 的通用档位。off 等同于不传。 */
+function reasoningOf(body: Record<string, unknown>): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined {
+  const raw = body.reasoning_effort
+  return raw === 'minimal' || raw === 'low' || raw === 'medium' || raw === 'high' || raw === 'xhigh' || raw === 'max'
+    ? raw
+    : undefined
 }
 
 function chunk(id: string, model: string, delta: Record<string, unknown>, extra: Record<string, unknown> = {}) {
@@ -566,6 +575,7 @@ async function streamChatCompletions(
     apiKey: secret,
     temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
     maxTokens: typeof body.max_tokens === 'number' ? body.max_tokens : typeof body.max_completion_tokens === 'number' ? body.max_completion_tokens : undefined,
+    reasoning: reasoningOf(body),
   })
   let usage: TokenUsage | undefined
   // 客户端一走就得停下来。以前没有这一条：浏览器关了标签页，Gateway 还在把上游的
@@ -665,6 +675,7 @@ async function completeChatCompletions(
       apiKey: secret,
       temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
       maxTokens: typeof body.max_tokens === 'number' ? body.max_tokens : undefined,
+      reasoning: reasoningOf(body),
     })
   } catch (e) {
     throw new HttpError(503, redact((e as Error).message || 'upstream error', secret))

@@ -170,14 +170,14 @@ export class WebSearchService extends Service {
   }
 
   /** 摘要用哪个模型：utility → daily → 本 Bot 当前在用的那个。 */
-  private summaryModel(): { provider: string; model: string } | null {
+  private summaryModel(): { provider: string; model: string; reasoningEffort: string } | null {
     const roles = this.ctx.catalog?.models
     for (const role of [roles?.utility, roles?.daily]) {
-      if (role?.provider && role.model) return { provider: role.provider, model: role.model }
+      if (role?.provider && role.model) return { provider: role.provider, model: role.model, reasoningEffort: role.reasoningEffort }
     }
     const pin = (process.env.SATUWORK_BOT_ID || '').trim()
     const bot = (pin ? this.ctx.roster?.get(pin) : null) ?? this.ctx.roster?.list()?.[0]
-    if (bot?.provider && bot.model) return { provider: bot.provider, model: bot.model }
+    if (bot?.provider && bot.model) return { provider: bot.provider, model: bot.model, reasoningEffort: 'off' }
     return null
   }
 
@@ -197,6 +197,7 @@ export class WebSearchService extends Service {
         model: `${picked.provider}/${picked.model}`,
         provider: picked.provider,
         stream: false,
+        ...(picked.reasoningEffort !== 'off' ? { reasoning_effort: picked.reasoningEffort } : {}),
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },

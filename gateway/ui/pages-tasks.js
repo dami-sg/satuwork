@@ -105,7 +105,8 @@ function tasksPage() {
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
-        <div>
+        <div class="satu-task-heading">
+          <div>
           <h1 style="font-size: 24px; margin: 0 0 4px;">${t('任务看板', 'Task board')}</h1>
           <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">
             ${t(
@@ -113,6 +114,8 @@ function tasksPage() {
               'Every item here is summarised from your conversations with your bots. Edit or delete freely — what you change stays changed.',
             )}
           </p>
+          </div>
+          <button type="button" class="btn btn-secondary" data-act="task-logs">${t('查看判定日志', 'View decision log')}</button>
         </div>
         ${flashes()}
         <div style="display: flex; flex-wrap: wrap; gap: var(--space-2);">${filters}</div>
@@ -140,7 +143,59 @@ function tasksPage() {
         }
       </div>
     </div>
-    ${taskModal()}`
+    ${taskModal()}${taskLogModal()}`
+}
+
+const TASK_LOG_LABELS = {
+  tasks_created: ['创建了任务', 'Tasks created'],
+  tasks_updated: ['更新了已有任务', 'Existing tasks updated'],
+  existing_unchanged: ['已有任务没有变化', 'Existing tasks unchanged'],
+  model_no_task: ['模型判断没有符合规则的任务', 'Model found no qualifying task'],
+  invalid_model_tasks: ['模型结果未通过字段校验', 'Model output failed validation'],
+  no_user_request: ['没有读到用户提出的要求', 'No user request was found'],
+  read_only_short: ['仅查询 / 读取，未达到建任务条件', 'Read-only query did not qualify'],
+  utility_model_missing: ['未配置任务抽取模型', 'Task extraction model is not configured'],
+  gateway_unavailable: ['任务服务暂时不可用', 'Task service was unavailable'],
+  gateway_rejected: ['任务服务拒绝了这次结果', 'Task service rejected the result'],
+  extract_failed: ['任务抽取失败', 'Task extraction failed'],
+}
+
+function taskLogText(x) {
+  const pair = TASK_LOG_LABELS[x.reason]
+  let label = pair ? t(pair[0], pair[1]) : (x.detail || x.reason)
+  if (x.reason === 'tasks_created' && x.createdCount) label += t(`（${x.createdCount} 条）`, ` (${x.createdCount})`)
+  if (x.reason === 'tasks_updated' && x.updatedCount) label += t(`（${x.updatedCount} 条）`, ` (${x.updatedCount})`)
+  return label
+}
+
+function taskLogModal() {
+  if (!state.taskLogsOpen) return ''
+  const bots = new Map((state.runtimeBots || []).map((b) => [b.id, b.name || b.id]))
+  const rows = (state.taskLogs || []).map((x) => {
+    const span = x.fromSeq || x.toSeq ? `seq ${x.fromSeq || '?'}–${x.toSeq || '?'}` : ''
+    return `<li class="satu-task-log" data-outcome="${esc(x.outcome)}">
+      <span class="satu-task-log-dot" aria-hidden="true"></span>
+      <div class="satu-task-log-body">
+        <div><b>${esc(taskLogText(x))}</b><time>${esc(fmtTime(x.createdAt))}</time></div>
+        ${x.detail && !['tasks_created', 'tasks_updated'].includes(x.reason) ? `<p>${esc(x.detail)}</p>` : ''}
+        <small>${esc(bots.get(x.botId) || x.botId)} · ${esc(span)}${x.model ? ` · ${esc(x.model)}` : ''}</small>
+      </div>
+    </li>`
+  }).join('')
+  return `<div class="gw-modal-backdrop" data-act="task-log-close">
+    <div class="gw-modal" style="max-width: 680px; max-height: 88vh; overflow-y: auto;" data-stop>
+      <div class="satu-task-log-head">
+        <div><h2>${t('任务判定日志', 'Task decision log')}</h2>
+        <p>${t('记录每次为什么创建、更新或不创建任务；不保存对话正文。', 'Shows why tasks were created, updated, or skipped. Conversation text is not stored.')}</p></div>
+        <button type="button" class="btn btn-ghost btn-icon" aria-label="${esc(t('关闭'))}" data-act="task-log-close">${svg(TASK_CLOSE_ICON, 16)}</button>
+      </div>
+      ${state.taskLogsLoading
+        ? `<p class="satu-task-empty">${t('加载中…', 'Loading…')}</p>`
+        : rows
+          ? `<ul class="satu-task-logs">${rows}</ul>`
+          : `<p class="satu-task-empty">${t('还没有判定日志。新对话结束后会在这里留下创建或不创建的原因。', 'No decision logs yet. New conversations will leave a create-or-skip reason here.')}</p>`}
+    </div>
+  </div>`
 }
 
 /**
@@ -226,6 +281,12 @@ async function loadTasks({ more } = {}) {
 async function loadTask(id) {
   const data = await api('GET', `/tasks/${encodeURIComponent(id)}`)
   state.taskOpen = data
+}
+
+async function loadTaskLogs() {
+  const q = state.taskBot ? `?bot=${encodeURIComponent(state.taskBot)}` : ''
+  const data = await api('GET', `/tasks/logs${q}`)
+  state.taskLogs = Array.isArray(data.logs) ? data.logs : []
 }
 
 /** 这一屏现在长什么样，压成一个字符串。变了才画（见 tasksPoll）。 */

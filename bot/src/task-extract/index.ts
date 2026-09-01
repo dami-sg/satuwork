@@ -325,6 +325,18 @@ export class TaskExtractService extends Service {
      * 办了事的轮次抽得成。
      */
     if (!worthExtracting(turns)) {
+      const hasRequest = turns.some((t) => t.user.some((u) => u.trim()))
+      await this.reportDecision(sessionId, {
+        botId: (root?.data as { botId?: string } | undefined)?.botId ?? '',
+        outcome: 'skipped',
+        reason: hasRequest ? 'read_only_short' : 'no_user_request',
+        detail: hasRequest
+          ? '这一段只有读取或查询，且用户要求少于 20 字；规则判定不创建任务'
+          : '会话事件里没有读到用户、日常任务或交接单提出的要求',
+        fromSeq: from,
+        toSeq: fitted.upto,
+        version: VERSION,
+      })
       if (fitted.truncated) {
         this.marks().put(sessionId, { ...mark, upto: fitted.upto })
         this.ctx.logger?.info?.(`task-extract: ${sessionId} 这一段不值得抽，但后面还排着，水位往前挪`)
@@ -338,6 +350,15 @@ export class TaskExtractService extends Service {
       // 平台没钉 utility：整件事静默关掉，但**留一行日志**——静静地不抽和真的抽不出东西，
       // 在外面长得一模一样。
       this.ctx.logger?.warn?.('task-extract: 平台还没钉 utility 模型，这次不抽')
+      await this.reportDecision(sessionId, {
+        botId: (root?.data as { botId?: string } | undefined)?.botId ?? '',
+        outcome: 'skipped',
+        reason: 'utility_model_missing',
+        detail: '平台没有配置 utility 模型，任务抽取未运行',
+        fromSeq: from,
+        toSeq: fitted.upto,
+        version: VERSION,
+      })
       return 'skipped'
     }
 
@@ -359,6 +380,7 @@ export class TaskExtractService extends Service {
       const open = await this.report(sessionId, {
         sessionId,
         botId: (root?.data as { botId?: string } | undefined)?.botId ?? '',
+        from,
         // **只推到真的喂进去的那一轮**，不是窗口末尾（见 fitWindow）。
         upto: fitted.upto,
         model: `${picked.provider}/${picked.model}`,
@@ -388,6 +410,16 @@ export class TaskExtractService extends Service {
       this.ctx.logger?.warn?.(
         `task-extract: ${sessionId} 第 ${fails} 次没抽成（${Math.round(wait / 60_000)} 分钟后再试）：${(e as Error).message}`,
       )
+      await this.reportDecision(sessionId, {
+        botId: (root?.data as { botId?: string } | undefined)?.botId ?? '',
+        outcome: 'failed',
+        reason: e instanceof ReportError ? (e.retryable ? 'gateway_unavailable' : 'gateway_rejected') : 'extract_failed',
+        detail: String((e as Error).message || '未知错误').replace(/\s+/g, ' ').slice(0, 300),
+        fromSeq: from,
+        toSeq: fitted.upto,
+        model: `${picked.provider}/${picked.model}`,
+        version: VERSION,
+      })
       return 'skipped'
     } finally {
       this.running.delete(sessionId)
@@ -395,9 +427,9 @@ export class TaskExtractService extends Service {
   }
 
   /** 抽取用哪个模型：**只用 utility**。 */
-  private model(): { provider: string; model: string } | null {
+  private model(): { provider: string; model: string; reasoningEffort: string } | null {
     const role = this.ctx.catalog?.models?.utility
-    if (role?.provider && role.model) return { provider: role.provider, model: role.model }
+    if (role?.provider && role.model) return { provider: role.provider, model: role.model, reasoningEffort: role.reasoningEffort }
     /**
      * **不回落到 daily，也不回落到 Bot 自己那个模型。**
      *
@@ -408,7 +440,7 @@ export class TaskExtractService extends Service {
   }
 
   /** 一次非流式补全。**不走 agent 那条流式路**：这不是这个 Bot 说的话，不该进会话事件。 */
-  private async complete(picked: { provider: string; model: string }, user: string): Promise<string> {
+  private async complete(picked: { provider: string; model: string; reasoningEffort: string }, user: string): Promise<string> {
     const base = gatewayUrl()
     const key = gatewayApiKey()
     if (!base || !key) throw new Error('没有配 Gateway')
@@ -420,6 +452,7 @@ export class TaskExtractService extends Service {
         provider: picked.provider,
         stream: false,
         temperature: 0,
+        ...(picked.reasoningEffort !== 'off' ? { reasoning_effort: picked.reasoningEffort } : {}),
         messages: [
           { role: 'system', content: SYSTEM },
           { role: 'user', content: user },
@@ -466,6 +499,41 @@ export class TaskExtractService extends Service {
       state: String(t.state ?? ''),
     }))
   }
+
+  /**
+   * 抽取在席位本地就结束时，给看板留一行「为什么没有创建」。
+   *
+   * 日志上报永远是旁路：它失败不能反过来让任务抽取失败或改变水位。body 只含原因码、
+   * 计数和 seq 范围，不含用户消息或工具返回。
+   */
+  private async reportDecision(
+    sessionId: string,
+    input: {
+      botId: string
+      outcome: 'skipped' | 'failed'
+      reason: string
+      detail: string
+      fromSeq: number
+      toSeq: number
+      model?: string
+      version: number
+    },
+  ): Promise<void> {
+    const base = gatewayUrl()
+    const token = gatewayToken()
+    if (!base || !token) return
+    try {
+      const r = await fetch(`${base}/internal/tasks/extract-log`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId, ...input }),
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (!r.ok) this.ctx.logger?.warn?.(`task-extract: ${sessionId} 判定日志上报 HTTP ${r.status}`)
+    } catch (e) {
+      this.ctx.logger?.warn?.(`task-extract: ${sessionId} 判定日志没报上去：${(e as Error).message}`)
+    }
+  }
 }
 
 /** 水位丢了时的起点：从后往前数 N 个 `turn/start`。 */
@@ -510,7 +578,13 @@ export function turnsOf(events: SessionEvent[], riskOf: (name: string) => string
       const by = !src?.kind || src.kind === 'user' ? 'user' : ASKED_BY[String(src.plugin ?? '')]
       if (by) {
         cur.by = by
-        cur.user.push(textOf((d as { content?: unknown }).content))
+        /**
+         * `user/message` 的正文在 `data.message.content`，不在 `data.content`（见
+         * session/types.ts）。原来读错了一层，结果每条真人消息都变成空串；下面
+         * worthExtracting 的第一道闸看见「没人说话」就直接跳过，连同一轮已经成功的
+         * gmail_send 也不会进入模型——所以整块任务看板永远是空的。
+         */
+        cur.user.push(textOf((d.message as { content?: unknown } | undefined)?.content))
       }
     } else if (e.type === 'assistant/message') {
       cur.say = textOf((d.message as { content?: unknown } | undefined)?.content)

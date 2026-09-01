@@ -141,6 +141,31 @@ export async function runTasks({ root, gwRoot, test, req, start, waitHttp, asser
       assert(r.json.open.length === 2, `open 该有两条：${JSON.stringify(r.json.open)}`)
     })
 
+    await test('创建和不创建都留判定日志，而且只能看自己的', async () => {
+      const skipped = await req(base, 'POST', '/internal/tasks/extract-log', {
+        token: seatTok,
+        body: {
+          sessionId: SESSION,
+          outcome: 'skipped',
+          reason: 'no_user_request',
+          detail: '会话事件里没有读到用户提出的要求',
+          fromSeq: 100,
+          toSeq: 120,
+          version: 1,
+        },
+      })
+      assert(skipped.status === 201, `log ${skipped.status} ${skipped.text}`)
+
+      const mine = await req(base, 'GET', '/tasks/logs', { token: meTok })
+      assert(mine.status === 200, `logs ${mine.status} ${mine.text}`)
+      assert(mine.json.logs.some((x) => x.reason === 'tasks_created' && x.createdCount === 2), '创建两条的判定没留档')
+      assert(mine.json.logs.some((x) => x.reason === 'no_user_request' && x.outcome === 'skipped'), '不创建的原因没留档')
+      assert(mine.json.logs.every((x) => !('detail' in x) || !String(x.detail).includes('邮件正文')), '日志不该带对话正文')
+
+      const others = await req(base, 'GET', '/tasks/logs', { token: otherTok })
+      assert(others.status === 200 && others.json.logs.length === 0, `别人不该看见我的日志：${others.text}`)
+    })
+
     await test('同一个 key 再报一次：并进去，不新开一条', async () => {
       await extract([{ key: 'reply-supplier-quote', title: '回复供应商的报价邮件', state: 'doing', summary: '改了措辞', evidence: 'x', firstSeq: 10, lastSeq: 40 }])
       const data = await list()
@@ -284,6 +309,7 @@ export async function runTasks({ root, gwRoot, test, req, start, waitHttp, asser
       ui.state.taskCounts = (await list()).counts
       ui.render()
       const html = ui.html()
+      assert(html.includes('data-act="task-logs"'), '看板没有「查看判定日志」入口')
       assert(['提案', '进行中', '完成'].every((x) => html.includes(x)), `三列该都在：${html.slice(html.indexOf('gw-body'), html.indexOf('gw-body') + 400)}`)
       assert(html.includes('draggable="true"'), '每一条都该拿得起来——这一版的状态是判断，人有权纠正')
       /**
@@ -315,6 +341,9 @@ export async function runTasks({ root, gwRoot, test, req, start, waitHttp, asser
       assert(html.includes(`>进行中<span>${shown}</span>`) || html.includes(`进行中<span>${shown}</span>`), `列头该只数画出来的 ${shown} 张`)
 
       const row = ui.state.tasks.find((x) => x.state !== 'dropped' && x.state !== 'done')
+      await ui.fire('click', el('button', { 'data-act': 'task-logs' }))
+      await settle('判定日志该打开', async () => ui.html().includes('任务判定日志') && ui.html().includes('没有读到用户提出的要求'))
+      await ui.fire('click', el('button', { 'data-act': 'task-log-close' }))
       await ui.fire('click', el('button', { 'data-act': 'task-open', 'data-id': row.id }))
       await settle('点一条该开详情', async () => ui.html().includes('gw-modal'))
       assert(ui.html().includes('打开这段对话'), '详情里该有回到原对话那条路——摘要错了只有原文能纠')

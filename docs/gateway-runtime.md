@@ -52,7 +52,7 @@
                                           └─ Linux 账号 B
                                               └─ 席位 (B, botX)
                                                 │
-                                                ├─ 拉目录 / ready / 报用量 / 报索引 ──► Gateway
+                                                ├─ 拉目录 / ready / 报索引 / guard / handoff ──► Gateway
                                                 └─ 模型 /v1/*（sk_sw_）──────────────► Gateway（pi-ai / 透传）
 ```
 
@@ -352,7 +352,7 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 - 平台密钥（模型 / 需鉴权的 MCP），由 `owner` 配置。**不**下发到浏览器，**也不下发到 Bot 磁盘/环境**。公司不再各自贴 key
 - 模型代理：`GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages`。鉴权是席位 API Key（`sk_sw_`）或登录 JWT；`sat_` 不行。上游 key 由 Gateway 按 provider 选取（平台密钥 > 环境变量）
 - 平台模型角色：`owner` 指定全站 **日常任务模型**（daily）和 **utility 模型**（轻量/快速），以及可用模型白名单。经平台 settings 读写，出现在 `GET /me` 里给 Bot 读。只存 provider + model，密钥仍按供应商留在 Gateway，不下发
-- 用量汇聚与额度扣减（实例上报）
+- 用量汇聚与额度扣减（Gateway 在 `/v1/*` 代理侧按上游原始 usage 结算；实例不重复上报）
 - 会话索引的写入与检索
 - 按索引向机器拉全文，给公司管理员看
 - 审计事件
@@ -366,9 +366,9 @@ Gateway 账号分两类，公司账号再分两种。JWT 带 `role`：`owner` | 
 - 一个进程恰好一个 Bot。`GET /api/bots` 返回钉住的那一颗（部署时由 `SATUWORK_BOT_ID` 钉目录项）
 - 本地 `$SATUWORK_HOME`：`satuwork.db` + `sessions/*.jsonl`
 - 启动时 `GET /runtime/catalog?botId=`，只钉这一颗；不种本地 `default`（`SATUWORK_BOT_ID` 已设）
-- 验 `GATEWAY_TOKEN`（`sat_`）与 `GATEWAY_MACHINE_TOKEN`；上报用量和会话索引
-- 提供「按 sessionId 出全文」的内网接口，只接受 Gateway 的服务凭证
-- 环境：`GATEWAY_URL`、`GATEWAY_TOKEN`（`sat_`）、`GATEWAY_API_KEY`（`sk_sw_`）、`GATEWAY_MACHINE_TOKEN`、`SATUWORK_BOT_ID`。没有 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`
+- 验 `GATEWAY_TOKEN`（`sat_`）；用它上报 ready、会话索引、guard、handoff，只能替自己的账号说话
+- 提供「按 sessionId 出全文」的内网接口；Gateway 仍带该账号的 `sat_`，管家那一跳另用 `smt_`
+- 环境：`GATEWAY_URL`、`GATEWAY_TOKEN`（`sat_`）、`GATEWAY_API_KEY`（`sk_sw_`）、`SATUWORK_BOT_ID`。没有 `GATEWAY_MACHINE_TOKEN`，也没有 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`
 
 开通 / 停用由 Gateway 下发给**机器管家**，机器上确实另跑着这个监督进程（这条取代了原来「不另跑监督进程」的结论）。换掉 SSH 的理由有三条：Gateway 不必再明文保存 root 级凭据；对外端口从「每席位两个」收成一个；管家能自己升级，否则删掉 SSH 之后每次更新都要有人跑到每台机器前面。
 
@@ -482,7 +482,7 @@ Skill / MCP：**定义**在 Gateway，**进程**跑在实例旁边。实例按�
      的那份（`status` / `phase` / `elapsedMs`）永远有；机器上那份细进度（第几
      步、这一步在干什么）由管家现问现答（`GET /seats/:id/progress`，协议 ≥ 3），问不到就
      只剩粗的那一档
-7. Gateway `PUT {machine.host}/seats/{seatId}` 给机器管家：由管家在本机建 `linuxUser`、写 `$SATUWORK_HOME`、起 `slim-desktop@` 与 `satuwork-bot@`，注入 `SATUWORK_BOT_ID` 与三把票（`sat_` / `sk_sw_` / machine token）
+7. Gateway `PUT {machine.host}/seats/{seatId}` 给机器管家：由管家在本机建 `linuxUser`、写 `$SATUWORK_HOME`、起 `slim-desktop@` 与 `satuwork-bot@`，注入 `SATUWORK_BOT_ID`、席位票 `sat_` 与 API Key `sk_sw_`。机器票 `smt_` 不进入席位环境
 8. 实例 `POST /internal/instances/:accountId/ready` `{ host, botId }`
 
 v1 约束：一家公司一台机器；机器先按 **pair 进程** 隔离，不上容器套容器。
@@ -530,18 +530,18 @@ HTTP/1.1 那 6 条只是紧一点——真正受限的是「切过几个 Bot 之
 
 ## 8. 认证
 
-三把票，用途不混：
+各类凭据用途不混：
 
 | 票 | 前缀 / 名 | 谁用 | 干什么 |
 |---|---|---|---|
 | 登录 JWT | Gateway 签发 | 浏览器 / 控制台 | dashboard 与 Gateway UI。带 `accountId` `role`（`owner` \| `admin` \| `member`）；公司账号再带 `companyId`。暴露 JWKS |
 | API Key | `sk_sw_…` | Bot 调 `/v1/*`；也可登录 JWT 调 `/v1` | 开 admin/member 时签发，用量记在这个用户上。owner 账号详情 `/users/:id`（`GET /platform/accounts/:id`）可见。列表 API 永不带出。`owner` 账号没有 |
 | Access token | `sat_…` | Gateway ↔ Bot 双向，该席位用户 | Bot 环境 `GATEWAY_TOKEN`。同一用户的多个 Bot 实例共用一把。不能调 `/v1` |
-| Machine token | `smt_…`（环境名仍是 `GATEWAY_MACHINE_TOKEN`） | 一台机器一把 | 心跳、会话索引、ready、用量。写在 `machines.token`，部署时注入该机器的 `bot.env`。**不是**集群共用票 |
-| Bootstrap machine token | 环境变量 `GATEWAY_MACHINE_TOKEN`（引导值） | 监督进程登记机器 | 只用于 `POST /internal/machines`。登记响应里带一次该机器的 `smt_`，之后心跳/ready/索引/用量都用那把 |
+| Machine token | `smt_…` | 一台机器一把；Gateway ↔ 机器管家 | 管家心跳、拉发布包、部署/删除/诊断/日志，以及 Gateway 经管家反代 Bot/桌面。写在 `machines.token` 与管家的 `manager.json`，**永不进入 `bot.env`** |
+| Bootstrap machine token | Gateway 环境变量 `GATEWAY_MACHINE_TOKEN`（引导值） | 无 UI 登记机器的兼容/测试路径 | 只用于 `POST /internal/machines`。正常装机使用一次性配对码；登记后换成该机器自己的 `smt_` |
 
 - 密码、注册、重置只在 Gateway
-- 实例不存密码。部署实例验 `sat_`（及 `/internal/sessions` 上的**该机器** `smt_`），不是「只验用户 JWT」
+- 实例不存密码，也不存 `smt_`。部署实例的 `/api/*` 与 `/internal/sessions/:id` 都验该账号的 `sat_`；管家在上一跳独立验证 `smt_`
 - 现有 `src/auth` 的本机 cookie 登录不是产品路径（实现阶段遗留）
 
 ---
@@ -638,7 +638,7 @@ messageCount?
    - `deepseek` 及其他 OpenAI Chat 兼容协议 → `/v1/chat/completions`
 8. Gateway 用 pi-ai（Chat Completions）或把 Responses / Anthropic Messages 透传到官方上游；密钥按 provider 从平台选取，永不回显
 9. 事件追加到本机 JSONL，经现有 SSE 推（Gateway 再转给浏览器）
-10. turn 结束：报索引（`updatedAt`、`messageCount`），报用量（token、费用、模型）
+10. turn 结束：Bot 报索引（`updatedAt`、`messageCount`）；用量已经由 Gateway 的 `/v1/*` 代理按这次调用结算，Bot 不再重复上报
 
 浏览器的聊天 SSE / 发消息打 Gateway，不直连实例。**模型调用**是 Bot 进程打 Gateway `/v1`。
 
@@ -875,7 +875,7 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/runtime/catalog/version?botId=&have=` | 「变了没有」的探针，只回 `templateVersion` + `stamp`。实例每分钟打一次，指纹没动就一个字节都不再取。`have` 是席位自报的当前模版版本，顺路记成同步状态（见上）。同样只认 `sat_` |
 | PUT | `/platform/bot-releases/:version` | **上传**发布包（body 就是 tgz）。CI 用 `GATEWAY_PLATFORM_TOKEN`，人用 `owner` 登录态 |
 | POST | `/platform/orgs/:id/runtime/update` | 公司批量把已部署 pair 更新到某版本 |
-| POST | `/platform/machines/:id/runtime/update` | `owner`：这台机器上的席位逐个重铺。带 `version`（或默认最新）= **升级**；带 `force` 不带 `version` = **照现状重铺**，每个席位仍用它自己那一版，只是重走一遍部署——为的是让部署时写死的配置（`bot.env` 里的 `GATEWAY_URL` 等）跟着重写。重铺不打断正在跑的那一轮，忙的席位回 `busy` |
+| POST | `/platform/machines/:id/runtime/update` | `owner`：这台机器上的席位逐个重铺。带 `version`（或默认最新）= **升级**；带 `force` 不带 `version` = **照现状重铺**，每个席位仍用它自己那一版，只是重走一遍部署——用于刷新整份部署期配置。`GATEWAY_URL` 平时会由入站请求自动纠正，不必只为换地址重铺。重铺不打断正在跑的那一轮，忙的席位回 `busy` |
 | POST | `/orgs/:id/accounts/:accountId/deploy` | admin/`owner`：给该账号部署 `{ botId }`。带 `force` = 照现状重铺**这一个**席位（机器详情页每行那颗「重新部署」走的就是它，会打断正在跑的那一轮） |
 
 ### Gateway（模型代理；API Key `sk_sw_` 或登录 JWT。`sat_` → 401。`x-api-key` 若出现也只当席位 API Key / JWT，不是上游密钥）
@@ -889,11 +889,14 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 
 选模型不在可见目录 → 404。该 provider 没有密钥 → 402（或上游不可达 503）。JSON 错误，无 stack。用量记在持有该 API Key / JWT 的用户上。
 
-Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`（`sat_`）+ `GATEWAY_API_KEY`（`sk_sw_`）+ `GATEWAY_MACHINE_TOKEN`（该机器的 `smt_`）+ `SATUWORK_BOT_ID`。进程里没有 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。
+Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`（`sat_`）+ `GATEWAY_API_KEY`（`sk_sw_`）+ `SATUWORK_BOT_ID`。进程里没有 `GATEWAY_MACHINE_TOKEN`，也没有 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`。
 
 ### Gateway（机器服务凭证）
 
-登记机器用环境变量引导票 `GATEWAY_MACHINE_TOKEN`。登记成功后每台机器有自己的 `smt_`（`machines.token`），之后心跳 / ready / 索引 / 用量都用那把。部署写入 `bot.env` 的名字仍是 `GATEWAY_MACHINE_TOKEN`，值是该机器的 `smt_`。
+正常装机用一次性配对码换取每台机器自己的 `smt_`（`machines.token`）；环境变量引导票
+`GATEWAY_MACHINE_TOKEN` 只保留给 `POST /internal/machines` 的无 UI 兼容/测试路径。`smt_`
+之后用于管家心跳、拉包和 Gateway → 管家的控制/反代调用，只留在管家的 `manager.json`；
+Bot 的 ready、索引等上报使用 `sat_`，部署绝不把 `smt_` 写入 `bot.env`。
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
@@ -907,10 +910,10 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 | GET | `/platform/desktop-ticket?seatId=` | owner 支持入口：替某个席位签一张桌面票。走审计 |
 | POST | `/internal/machines` | 引导票登记机器（无 UI 版，e2e/smoke 用）。响应带一次 `token`（`smt_`） |
 | POST | `/internal/machines/:id/heartbeat` | 该机器的 `smt_`；票必须对应 `:id`。**也是自升级、时区和日志上限的下发通道**：body 带 `managerVersion`/`protocol`/`arch`/`timezone`（实际时区）/`metrics`/`logs`/`seats`，响应带 `desiredManagerVersion`/`url`/`sha256`/`timezone`（期望时区）/`logCapMb`/`minNode`/`minProtocol` |
-| POST | `/internal/instances/:accountId/ready` | 该机器的 `smt_`。body `{ host, botId }`，`botId` 必填；pair 必须已部署；机器必须属于该账号的公司 |
-| POST | `/internal/sessions/index` | 该机器的 `smt_`。公司从机器派生，不能替别的公司报索引 |
+| POST | `/internal/instances/:accountId/ready` | Bot 通常带自己的 `sat_`，只能报该账号；兼容管家带 `smt_` 替本机席位上报。body `{ host, botId }`，`botId` 必填；pair 必须已部署 |
+| POST | `/internal/sessions/index` | Bot 通常带自己的 `sat_`，只能报该账号；兼容管家带 `smt_` 替本机席位上报。`machineId` 由服务端按席位实际所在机器计算，不采信 body |
 
-### 实例（`sat_` 或 machine token；Gateway 反代，浏览器不直连）
+### 实例（`sat_`；Gateway 经持有 `smt_` 的管家反代，浏览器不直连）
 
 现有 `/api/sessions*` 留下；产品名词是 Bot，主 API 是 `/api/bots*`：
 
@@ -925,11 +928,11 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
   `running`（排着的不算，理由同上）。只给计数，不给会话 id 和正文：这条路没有票，能
   少说一句是一句
 
-### 实例（Gateway 服务凭证，不暴露给浏览器）
+### 实例（Gateway 拉会话全文；两跳分别验证 `smt_` 与 `sat_`）
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| GET | `/internal/sessions/:sessionId` | 返回该 JSONL 的事件数组 |
+| GET | `/internal/sessions/:sessionId` | 管家先验 Gateway 的 `smt_` 并转发；Bot 再验目标账号的 `sat_`，返回该 JSONL 的事件数组 |
 
 没有服务凭证或 session 不属于本机：404，不泄露是否存在。
 
@@ -974,7 +977,7 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 **M3 — 开通 + pair 部署**
 - ~~买 3 席 → 派机器 → 起 3 个实例~~ **已取代**：买 3 席 → 派机器 → 按 (账号, botId) 部署；3 席 × N 个 Bot = 3N 个进程
 - ~~用户登录后跳到公司访问地址~~ **已取代**：登录后留在 Gateway 聊天 UI
-- 实例验 `sat_`（及 machine token），不是只验用户 JWT
+- 实例只验账号级 `sat_`；机器级 `smt_` 由管家独立验证，绝不进入席位
 
 **M4 — 目录下发与物化**
 - 实例拉全局 + 公司目录；部署时 `?botId=` 只钉一颗
@@ -982,7 +985,7 @@ Bot 配置：`GATEWAY_URL`（例如 `http://127.0.0.1:3080`）+ `GATEWAY_TOKEN`�
 - ~~公司密钥下发到实例~~ **否**：密钥留在 Gateway，实例只打 `/v1/*`
 
 **M5 — 索引、审计、按需全文**
-- 实例上报索引与用量
+- 实例上报索引；用量由 Gateway 的 `/v1/*` 代理直接结算，不做第二次上报
 - Gateway 检索索引
 - 点开向机器拉全文
 - 审计事件落地

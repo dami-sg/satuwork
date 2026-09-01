@@ -61,13 +61,21 @@ export interface BotMemory {
 export interface ModelRole {
   provider: string
   model: string
+  reasoningEffort: ReasoningEffort
 }
 
-const EMPTY_ROLE: ModelRole = { provider: '', model: '' }
+export type ReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+const REASONING_EFFORTS = new Set<ReasoningEffort>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+const EMPTY_ROLE: ModelRole = { provider: '', model: '', reasoningEffort: 'off' }
 
 /** 老 Gateway 不带 models 字段，回落成空——空就由调用方自己回退，不在这里瞎猜。 */
 function roleOf(raw: ModelRole | undefined): ModelRole {
-  return { provider: String(raw?.provider ?? ''), model: String(raw?.model ?? '') }
+  const effort = raw?.reasoningEffort
+  return {
+    provider: String(raw?.provider ?? ''),
+    model: String(raw?.model ?? ''),
+    reasoningEffort: effort && REASONING_EFFORTS.has(effort) ? effort : 'off',
+  }
 }
 
 interface RemoteSkill {

@@ -24,6 +24,8 @@ import {
   TASK_TITLE_MAX,
   type Task,
   type TaskEvent,
+  type TaskExtractLog,
+  type TaskExtractOutcome,
   type TaskField,
   type TaskState,
 } from '../db.ts'
@@ -53,6 +55,36 @@ function publicTask(t: Task) {
 
 function publicTaskEvent(e: TaskEvent) {
   return { id: e.id, kind: e.kind, fromState: e.fromState, toState: e.toState, note: e.note, createdAt: e.createdAt }
+}
+
+function publicTaskExtractLog(x: TaskExtractLog) {
+  return {
+    id: x.id,
+    botId: x.botId,
+    sessionId: x.sessionId,
+    outcome: x.outcome,
+    reason: x.reason,
+    detail: x.detail,
+    createdCount: x.createdCount,
+    updatedCount: x.updatedCount,
+    taskCount: x.taskCount,
+    fromSeq: x.fromSeq,
+    toSeq: x.toSeq,
+    model: x.model,
+    version: x.version,
+    createdAt: x.createdAt,
+  }
+}
+
+function extractOutcome(raw: unknown): TaskExtractOutcome {
+  const s = String(raw ?? '')
+  if (s === 'created' || s === 'updated' || s === 'unchanged' || s === 'no_task' || s === 'skipped' || s === 'failed') return s
+  throw new HttpError(400, 'outcome 不合法')
+}
+
+function nonNegative(raw: unknown): number {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0
 }
 
 /** 翻页游标：`stateAt:id`。第二把钥匙不能省——同一毫秒推两条状态是常态。 */
@@ -108,6 +140,17 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
       counts: await db.taskCounts(account.id, botId || undefined),
       cursor: rows.length > limit && last ? `${last.stateAt}:${last.id}` : null,
     })
+  })
+
+  /**
+   * 为什么建了 / 没建任务。必须放在 `/tasks/:id` 前面，否则 `logs` 会被当成任务 id。
+   */
+  router.get('/tasks/logs', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const botId = (req.query.get('bot') || '').trim()
+    const asked = Number(req.query.get('limit'))
+    const limit = Number.isFinite(asked) && asked > 0 ? Math.min(Math.trunc(asked), 200) : 100
+    json(res, 200, { logs: (await db.taskExtractLogs(account.id, botId || undefined, limit)).map(publicTaskExtractLog) })
   })
 
   router.get('/tasks/:id', async (req, res) => {
@@ -242,13 +285,19 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
     const byKey = new Map(known.map((t) => [t.key, t]))
     const out: Task[] = []
     let created = 0
+    let updated = 0
+    let unchanged = 0
+    let accepted = 0
 
     for (const item of raw.slice(0, TASK_EXTRACT_MAX)) {
       const next = cleanExtracted(item, fallback)
       if (!next) continue
+      accepted += 1
       const existing = byKey.get(next.key)
       if (existing) {
         const merged = await mergeExtracted(db, existing, next, { model, version })
+        if (merged.changed) updated += 1
+        else unchanged += 1
         out.push(merged.task)
         continue
       }
@@ -279,7 +328,10 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
         await db.insertTaskEvent({ taskId: row.id, kind: 'extract', toState: row.state, note: next.evidence })
         out.push(row)
       } else {
-        out.push((await mergeExtracted(db, settled, next, { model, version })).task)
+        const merged = await mergeExtracted(db, settled, next, { model, version })
+        if (merged.changed) updated += 1
+        else unchanged += 1
+        out.push(merged.task)
       }
     }
     /**
@@ -293,6 +345,32 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
      * 看到的就是人改过之后的样子。
      */
     const open = await db.tasksOfSession(sessionId)
+    const outcome: TaskExtractOutcome = created > 0 ? 'created' : updated > 0 ? 'updated' : accepted > 0 ? 'unchanged' : 'no_task'
+    const reason = created > 0
+      ? 'tasks_created'
+      : updated > 0
+        ? 'tasks_updated'
+        : accepted > 0
+          ? 'existing_unchanged'
+          : raw.length > 0
+            ? 'invalid_model_tasks'
+            : 'model_no_task'
+    await db.insertTaskExtractLog({
+      accountId: account.id,
+      companyId: account.companyId,
+      botId: bot.id,
+      sessionId,
+      outcome,
+      reason,
+      createdCount: created,
+      updatedCount: updated,
+      taskCount: accepted,
+      fromSeq: nonNegative(body.from),
+      toSeq: nonNegative(body.upto),
+      model,
+      version,
+      detail: unchanged ? `${unchanged} 条已有任务没有变化` : '',
+    })
     json(res, 200, {
       tasks: out.map(publicTask),
       // 按最近推进过的排在前面，截到 20 条：一份回喂给模型的清单，长了只会挤掉正文。
@@ -302,5 +380,41 @@ export function attachTasks(router: Router, ctx: RouteCtx) {
         .slice(0, OPEN_FED_BACK)
         .map((t) => ({ key: t.key, title: t.title, state: t.state })),
     })
+  })
+
+  /**
+   * 席位本地就结束的判定（预过滤、没配置模型、模型失败）不会走 extract，单独报一行。
+   * body 里没有对话正文；归属仍从席位票和 session_index 现算。
+   */
+  router.post('/internal/tasks/extract-log', async (req, res) => {
+    const caller = await requireInternalCaller(req, db)
+    const body = bodyOf(req)
+    const sessionId = strField(body, 'sessionId')
+    const index = await db.sessionIndex(sessionId)
+    if (!index || index.companyId !== caller.companyId) throw new HttpError(404, '没有这条会话')
+    if (caller.kind === 'seat' && index.accountId !== caller.account.id) throw new HttpError(404, '没有这条会话')
+    const account = caller.kind === 'seat' ? caller.account : await db.account(index.accountId)
+    if (!account?.companyId) throw new HttpError(404, '没有这条会话')
+    const wanted = index.botId || strField(body, 'botId', false)
+    const bot = wanted ? await visibleBotOf(db, account, wanted) : null
+    if (!bot) throw new HttpError(400, '这条会话还没认领到哪颗 Bot 上，记不了日志')
+
+    const log = await db.insertTaskExtractLog({
+      accountId: account.id,
+      companyId: account.companyId,
+      botId: bot.id,
+      sessionId,
+      outcome: extractOutcome(body.outcome),
+      reason: oneLine(body.reason, 80) || 'unknown',
+      detail: oneLine(body.detail, 300),
+      createdCount: nonNegative(body.createdCount),
+      updatedCount: nonNegative(body.updatedCount),
+      taskCount: nonNegative(body.taskCount),
+      fromSeq: nonNegative(body.fromSeq),
+      toSeq: nonNegative(body.toSeq),
+      model: oneLine(body.model, 80),
+      version: nonNegative(body.version),
+    })
+    json(res, 201, { log: publicTaskExtractLog(log) })
   })
 }

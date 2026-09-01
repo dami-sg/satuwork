@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseWebTools, Task, TaskEvent, parseTaskEventKind, parseTaskFields, parseTaskState } from './types.ts'
+import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, Task, TaskEvent, TaskExtractLog, parseTaskEventKind, parseTaskExtractOutcome, parseTaskFields, parseTaskState } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -102,7 +102,11 @@ export function nameFromEmail(email: string): string {
 }
 
 export function parseModelRole(raw: Partial<ModelRole> | undefined): ModelRole {
-  return { provider: String(raw?.provider ?? ''), model: String(raw?.model ?? '') }
+  return {
+    provider: String(raw?.provider ?? ''),
+    model: String(raw?.model ?? ''),
+    reasoningEffort: parseReasoningEffort(raw?.reasoningEffort),
+  }
 }
 
 export function parsePlatformPayload(raw: unknown): PlatformSettings {
@@ -617,6 +621,27 @@ export function taskEventOf(r: Row): TaskEvent {
     fromState: r.fromState == null ? null : parseTaskState(r.fromState),
     toState: r.toState == null ? null : parseTaskState(r.toState),
     note: str(r.note),
+    createdAt: num(r.createdAt),
+  }
+}
+
+export function taskExtractLogOf(r: Row): TaskExtractLog {
+  return {
+    id: str(r.id),
+    accountId: str(r.accountId),
+    companyId: str(r.companyId),
+    botId: str(r.botId),
+    sessionId: str(r.sessionId),
+    outcome: parseTaskExtractOutcome(r.outcome),
+    reason: str(r.reason),
+    detail: str(r.detail),
+    createdCount: num(r.createdCount),
+    updatedCount: num(r.updatedCount),
+    taskCount: num(r.taskCount),
+    fromSeq: num(r.fromSeq),
+    toSeq: num(r.toSeq),
+    model: str(r.model),
+    version: num(r.version),
     createdAt: num(r.createdAt),
   }
 }

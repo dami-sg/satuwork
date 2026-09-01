@@ -349,6 +349,12 @@ create index if not exists task_event_of on task_events ("taskId", "createdAt");
 
 > 这一条要用户拍板：如果线上已经有人在用看板派活，删表之前先确认。
 
+### 0026-task-extract-logs
+
+`task_events` 只能解释已经存在的任务如何变化，解释不了「为什么这一轮没有任务」。因此另建
+`task_extract_logs`，记录 outcome、稳定原因码、创建 / 更新计数、模型版本和 seq 范围。
+**不存用户消息、邮件正文或工具返回**，Gateway 不保存会话正文的不变量不变。
+
 ---
 
 ## 9. 接口
@@ -356,15 +362,17 @@ create index if not exists task_event_of on task_events ("taskId", "createdAt");
 ```
 # 用户 JWT
 GET    /tasks?bot=&state=&cursor=   我的任务。keyset 翻页，排序键 ("stateAt" desc, id desc)
+GET    /tasks/logs?bot=             最近的创建 / 不创建判定日志
 GET    /tasks/:id                   一条：全文 + 时间线 + 会话锚点
 PATCH  /tasks/:id                   改状态 / 改标题 / 改摘要
 DELETE /tasks/:id                   删掉（认错的那一条）
 
 # 席位运行面（requireInternalCaller，同 /internal/sessions/index 口径）
 POST   /internal/tasks/extract      一次抽取的结果
+POST   /internal/tasks/extract-log  席位本地结束的判定（预过滤、缺模型、失败）
 ```
 
-**就这五条。没有 `/run`、没有 `/assign`、没有 `/retry`。** 服务端根本不存在那个端点，是
+**没有 `/run`、没有 `/assign`、没有 `/retry`。** 服务端根本不存在那个端点，是
 §13.1 那条不变量的**实现**，不是它的注释。
 
 `/internal/tasks/extract` 的 body：
@@ -459,6 +467,10 @@ POST   /internal/tasks/extract      一次抽取的结果
 
 「停滞」那行灰字按 `stateAt` 算，只是**显示**（§5 规矩 3）。
 
+标题右侧的「查看判定日志」按当前 Bot 过滤打开一条时间线。每行明确显示创建、更新、无任务、
+规则跳过或失败，以及对应原因。这样板上没有卡片时，人能分清是仅查询不该建、模型判断无任务、
+平台没配置 utility，还是抽取真的失败了。
+
 ---
 
 ## 11. 钱和开关
@@ -516,6 +528,7 @@ Bot 被删、小模型永远回不出 JSON），归零的退避 + 只数成功�
 8. **`dropped` 只有人能推**；抽取器的 schema 里没有这个取值
 9. 平台没钉 utility 模型 → 功能整个静默关闭，其它一切照旧，日志留一行
 10. 抽取失败**永不阻塞对话**，也永不带走进程
+11. 每次真正结束的抽取判定都留一行日志；日志只含原因和元数据，**不含对话正文**
 
 ---
 

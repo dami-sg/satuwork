@@ -21,7 +21,10 @@ const state = {
   /** 模型自动发现的状态；null = 没拿到（非 owner，或接口挂了）。 */
   discovery: null,
   creds: [],
-  settings: { daily: { provider: '', model: '' }, utility: { provider: '', model: '' } },
+  settings: {
+    daily: { provider: '', model: '', reasoningEffort: 'off' },
+    utility: { provider: '', model: '', reasoningEffort: 'off' },
+  },
   selectedProvider: '',
   accounts: [],
   seats: { total: 0, used: 0 },
@@ -314,6 +317,10 @@ const state = {
   taskMore: false,
   /** 打开的那一条（含时间线）。null = 没开弹窗。 */
   taskOpen: null,
+  /** 抽取器每次「创建 / 不创建」的判定日志。按需拉，避免每次看板轮询都多打一趟。 */
+  taskLogs: [],
+  taskLogsOpen: false,
+  taskLogsLoading: false,
   handoffCount: 0,
   /** 近 30 天的概览（开了几张、还欠着几张、多久有人接）。空 = 还没拉到。 */
   handoffStats: null,

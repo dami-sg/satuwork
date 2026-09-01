@@ -645,6 +645,28 @@
   resize: vertical;
   line-height: 1.6;
 }
+/* HTML 正文默认给人看邮件效果，源码折进下面。预览固定白底，因为绝大多数邮件模板按
+   白色阅读面设计；外层即使是深色主题，也不反转邮件自身的颜色。iframe 不接收点击，
+   避免批准时误点模板里的链接；真正的隔离与断网约束仍由 sandbox + CSP 承担。 */
+.sw-mail-preview {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #fff;
+  pointer-events: none;
+}
+.sw-mail-source { margin-top: 2px; }
+.sw-mail-source > summary {
+  width: max-content;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.sw-mail-source[open] > summary { margin-bottom: 5px; }
 /* 悬浮窗里按表单摆的那几格。 */
 .sw-toolpop-field { margin-top: 4px; }
 .sw-toolpop-field > span { font-size: 11px; color: var(--muted-foreground); }
