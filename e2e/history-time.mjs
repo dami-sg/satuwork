@@ -46,4 +46,10 @@ export async function runHistoryTime({ root, test, assert, log }) {
     assert(yesterday.endsWith('昨天的问题'), `正文被改坏了：${JSON.stringify(yesterday)}`)
     assert(today.endsWith('今天的问题'), `正文被改坏了：${JSON.stringify(today)}`)
   })
+
+  await test('一次性待办不会被误写成长期记忆或定时执行', () => {
+    assert(r.taskBoardPrompt.deadlineIsNotTimer, '提示词没有区分截止时间与定时执行')
+    assert(r.taskBoardPrompt.noMemoryForTasks, '提示词没有禁止把任务写进长期记忆')
+    assert(r.taskBoardPrompt.automaticAfterTurn, '提示词没有说明任务看板在轮末自动整理')
+  })
 }
