@@ -13,6 +13,7 @@ import { METRIC_RETENTION_MS, MINUTE_MS, egressDelta, telemetryOf } from '../lib
 import { HANDOFF_STATES, type HandoffState, type Machine } from '../db.ts'
 import { resolveAssignee } from '../lib/handoff.ts'
 import { notify } from '../handoff-sweep.ts'
+import { createHash } from 'node:crypto'
 
 /**
  * 席位报上来的 guard / outcome 只认这两张表里的值。
@@ -376,6 +377,98 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
       updatedAt: intField(body, 'updatedAt'),
     })
     json(res, 200, { session })
+  })
+
+  /**
+   * 席位完成一个自动审计批次后，把有长度上限的结构化派生物报回来。
+   * 原始事件不进这个接口；批次归属、模型与窗口全部以 Gateway 预先创建的那行回答为准。
+   */
+  router.put('/internal/conversation-audits/:jobId/result', async (req, res) => {
+    const caller = await requireInternalCaller(req, db)
+    const batch = await db.conversationAuditBatch(req.params.jobId)
+    if (!batch) throw new HttpError(404, '审计批次不存在')
+    if (batch.status === 'dead') throw new HttpError(409, '这个定时批次已由删除终审接管')
+    if (caller.companyId !== batch.companyId) throw new HttpError(403, '批次不属于这家公司')
+    const body = bodyOf(req)
+    const accountId = callerAccountId(caller, () => strField(body, 'accountId'))
+    if (accountId !== batch.accountId) throw new HttpError(403, '席位票只能上报自己的审计')
+    if (strField(body, 'botId') !== batch.botId || strField(body, 'sessionId') !== batch.sessionId) {
+      throw new HttpError(403, '审计目标与批次不一致')
+    }
+    const fromSeq = intField(body, 'fromSeq') ?? 0
+    const toSeq = intField(body, 'toSeq') ?? 0
+    const eventCount = intField(body, 'eventCount') ?? 0
+    const turnCount = intField(body, 'turnCount') ?? 0
+    if (fromSeq !== batch.fromSeq || toSeq < fromSeq || eventCount < 0 || turnCount < 0) {
+      throw new HttpError(400, '审计覆盖范围不合法')
+    }
+    const sourceHash = strField(body, 'sourceHash', false)
+    if (!/^[a-f0-9]{64}$/.test(sourceHash)) throw new HttpError(400, 'sourceHash 不合法')
+    const rawItems = Array.isArray(body.items) ? body.items : []
+    if (rawItems.length > 100) throw new HttpError(413, '一个审计批次最多 100 条')
+    // 席位已经脱敏一次，但它是网络调用方，Gateway 落库前仍按字段值再做一道。
+    const text = (v: unknown, max: number) => String(v ?? '').trim()
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[邮箱已脱敏]')
+      .replace(/(?<!\d)(?:\+?\d[\s-]?){8,15}(?!\d)/g, '[号码已脱敏]')
+      .replace(/(?<!\d)\d{15,19}(?!\d)/g, '[长号码已脱敏]')
+      .replace(/\b(?:sk|sat|smt)_[A-Za-z0-9_-]{8,}\b/g, '[凭证已脱敏]')
+      .slice(0, max)
+    const finite = (v: unknown, fallback = 0) => {
+      const n = Number(v)
+      return Number.isFinite(n) ? n : fallback
+    }
+    const outcomes = new Set(['completed', 'partial', 'failed', 'blocked', 'answered', 'unknown'])
+    const items = rawItems.map((raw, index) => {
+      const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+      const firstSeq = Math.trunc(finite(o.firstSeq, fromSeq))
+      const lastSeq = Math.trunc(finite(o.lastSeq, toSeq))
+      if (firstSeq < fromSeq || lastSeq < firstSeq || lastSeq > toSeq) throw new HttpError(400, '审计条目的 seq 越界')
+      const timelineRaw = Array.isArray(o.timeline) ? o.timeline : []
+      const timeline = timelineRaw.slice(0, 20).map((x) => {
+        const row = x && typeof x === 'object' ? x as Record<string, unknown> : {}
+        return { at: Math.trunc(finite(row.at)), action: text(row.action, 200) }
+      })
+      const breakdownRaw = o.scoreBreakdown && typeof o.scoreBreakdown === 'object' && !Array.isArray(o.scoreBreakdown)
+        ? o.scoreBreakdown as Record<string, unknown> : {}
+      const scoreBreakdown = Object.fromEntries(
+        Object.entries(breakdownRaw).slice(0, 10).map(([k, v]) => [text(k, 40), Math.max(0, Math.min(100, finite(v)))]),
+      )
+      const rawScore = o.modelScore == null ? null : Math.trunc(finite(o.modelScore))
+      const rawConfidence = o.scoreConfidence == null ? null : finite(o.scoreConfidence)
+      return {
+        itemKey: text(o.itemKey, 100) || `item-${index + 1}`,
+        firstSeq, lastSeq,
+        startedAt: o.startedAt == null ? null : Math.trunc(finite(o.startedAt)),
+        endedAt: o.endedAt == null ? null : Math.trunc(finite(o.endedAt)),
+        taskSummary: text(o.taskSummary, 500), timeline,
+        userQuestion: text(o.userQuestion, 500), modelAnswer: text(o.modelAnswer, 1000),
+        finalResult: text(o.finalResult, 500),
+        outcome: outcomes.has(String(o.outcome)) ? String(o.outcome) as any : 'unknown' as const,
+        modelScore: rawScore == null ? null : Math.max(0, Math.min(100, rawScore)),
+        scoreBreakdown,
+        scoreConfidence: rawConfidence == null ? null : Math.max(0, Math.min(1, rawConfidence)),
+        evidence: (Array.isArray(o.evidence) ? o.evidence : []).slice(0, 10).map((x) => text(x, 200)),
+        riskFlags: (Array.isArray(o.riskFlags) ? o.riskFlags : []).slice(0, 10).map((x) => text(x, 80)),
+      }
+    })
+    const canonical = JSON.stringify({ fromSeq, toSeq, eventCount, turnCount, sourceHash, items })
+    const resultHash = createHash('sha256').update(canonical).digest('hex')
+    if ((batch.status === 'succeeded' || batch.status === 'empty') && batch.resultHash !== resultHash) {
+      throw new HttpError(409, '这个批次已经提交过不同的结果')
+    }
+    const account = await db.account(batch.accountId)
+    const bot = await db.catalog(batch.botId)
+    const settings = (await db.settings(batch.companyId)).conversationAudit
+    const saved = await db.completeConversationAuditBatch({
+      id: batch.id,
+      status: items.length ? 'succeeded' : 'empty',
+      fromSeq, toSeq, eventCount, turnCount, sourceHash, resultHash,
+      botName: bot?.name || batch.botId,
+      accountName: account?.name || account?.email || batch.accountId,
+      retentionDays: settings.retentionDays,
+      items,
+    })
+    json(res, 200, { batch: { id: saved.id, status: saved.status, resultHash: saved.resultHash } })
   })
 
   /**

@@ -68,6 +68,7 @@ import { runMemoryBot } from './memory-bot.mjs'
 import { runMemory } from './memory.mjs'
 import { runTasks } from './tasks.mjs'
 import { runTaskExtract } from './task-extract.mjs'
+import { runConversationAudit } from './conversation-audit.mjs'
 import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
@@ -3300,6 +3301,7 @@ async function main() {
     await suite('memory', () => runMemory({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('tasks', () => runTasks({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('task-extract', () => runTaskExtract({ root, test, assert, log }))
+    await suite('conversation-audit', () => runConversationAudit({ root, test, assert, log }))
     await suite('bot-template', () => runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager', () => runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager-confirm', () => runManagerConfirm({ root, test, assert, log }))

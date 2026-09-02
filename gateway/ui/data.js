@@ -47,15 +47,17 @@ function flash(kind, msg) {
   state.notice = kind === 'ok' ? text : ''
 }
 
-/**
- * 删完一颗 Bot 之后说什么。
- *
- * Bot 一定是删掉了（服务端不会因为拆不动席位就把删除否掉，见 deploy.ts 的
- * purgeBot），但机器上可能还留着几个没拆干净的席位。**那种情况要说出来**：那些
- * 席位还占着端口和槽位，得有人去机器详情页点「清理」——一句「已删除」会让这件事
- * 谁也不知道。
- */
+/** 删除先回 202 跑终审；兼容完成态回执仍展示拆席位留下的墓碑。 */
 function flashDeletedBot(data) {
+  if (data && data.deleting) {
+    return flash(
+      'ok',
+      t(
+        '已停止接收新任务，正在完成删除前终审；终审成功后会自动删除。',
+        'New work is stopped. The final audit is running and the bot will be deleted automatically when it succeeds.',
+      ),
+    )
+  }
   const orphans = (data && data.orphans) || []
   if (!orphans.length) return flash('ok', '已删除')
   flash(
@@ -650,6 +652,50 @@ async function loadAudit() {
   state.events = data.events || []
 }
 
+async function loadConversationAudits() {
+  const id = orgId()
+  if (!id) return
+  const q = new URLSearchParams()
+  if (state.auditAccountId) q.set('accountId', state.auditAccountId)
+  if (state.auditBotId) q.set('botId', state.auditBotId)
+  const from = dayStart(state.auditFrom)
+  const to = dayEnd(state.auditTo)
+  if (from !== '') q.set('from', String(from))
+  if (to !== '') q.set('to', String(to))
+  const qs = q.toString()
+  const data = await api('GET', `/orgs/${encodeURIComponent(id)}/conversation-audits${qs ? '?' + qs : ''}`)
+  state.auditItems = data.items || []
+  state.auditFilterOptions = data.filters || state.auditFilterOptions || { accounts: [], bots: [] }
+}
+
+async function loadConversationAuditCoverage() {
+  const id = orgId()
+  if (!id) return
+  const data = await api('GET', `/orgs/${encodeURIComponent(id)}/conversation-audit-coverage`)
+  state.auditCoverage = data.coverage || []
+}
+
+async function loadConversationAuditSettings() {
+  const id = orgId()
+  if (!id) return
+  state.auditSettings = await api('GET', `/orgs/${encodeURIComponent(id)}/conversation-audit-settings`)
+}
+
+async function saveConversationAuditRole(modelRole) {
+  const id = orgId()
+  if (!id) return
+  state.auditSettings = await api('PATCH', `/orgs/${encodeURIComponent(id)}/conversation-audit-settings`, { modelRole })
+}
+
+async function loadConversationAuditItem(itemId) {
+  const id = orgId()
+  if (!id || !itemId) return
+  state.auditItemDetail = await api(
+    'GET',
+    `/orgs/${encodeURIComponent(id)}/conversation-audits/${encodeURIComponent(itemId)}`,
+  )
+}
+
 async function loadSessions(append = false) {
   const id = orgId()
   if (!id) return
@@ -887,12 +933,12 @@ async function loadPage() {
       await loadAccounts()
     } else if (state.path === '/audit') {
       await Promise.all([
-        loadSessions(),
-        loadAccounts().catch(() => { state.accounts = state.accounts || [] }),
-        loadAudit().catch(() => { state.events = state.events || [] }),
+        loadConversationAudits().catch(() => { state.auditItems = state.auditItems || [] }),
+        loadConversationAuditCoverage().catch(() => { state.auditCoverage = state.auditCoverage || [] }),
+        loadConversationAuditSettings().catch(() => { state.auditSettings = null }),
       ])
-    } else if (state.path.startsWith('/audit/')) {
-      await loadSessionDetail(sessionIdOfPath(state.path))
+    } else if (state.path.startsWith('/audit/summary/')) {
+      await loadConversationAuditItem(auditItemIdOfPath(state.path))
     } else if (state.path === '/machines') {
       await loadAllMachines()
     } else if (state.path.startsWith('/machines/')) {

@@ -1,4 +1,4 @@
-/** 加入邀请页、审计（会话与事件），以及平台侧的公司、机器、发布包。 */
+/** 加入邀请页、审计总结，以及平台侧的公司、机器、发布包。 */
 function joinView() {
   const inv = state.joinInvite || { loading: true }
   const side = `
@@ -108,6 +108,7 @@ function auditTranscript(events) {
 
 function auditTabs(tab) {
   const items = [
+    { key: 'summaries', label: '审计总结' },
     { key: 'chats', label: '对话' },
     { key: 'events', label: '操作记录' },
   ]
@@ -117,6 +118,73 @@ function auditTabs(tab) {
         `<button type="button" class="satu-assignee" style="padding: 5px 14px;" aria-pressed="${String(tab === item.key)}" data-act="audit-tab" data-tab="${item.key}">${t(item.label)}</button>`,
     )
     .join('')
+}
+
+function auditOutcomeLabel(value) {
+  return ({ completed: '已完成', partial: '部分完成', failed: '失败', blocked: '受阻', answered: '已回答', unknown: '未知' })[value] || value || '—'
+}
+
+function conversationAuditTable() {
+  const settings = state.auditSettings?.settings
+  const model = state.auditSettings?.model
+  const role = settings?.modelRole === 'utility' ? 'utility' : 'daily'
+  const filterOptions = state.auditFilterOptions || { accounts: [], bots: [] }
+  const optionsOf = (rows, selected, allLabel) => {
+    const items = Array.isArray(rows) ? rows.slice() : []
+    if (selected && !items.some((row) => row.id === selected)) items.push({ id: selected, name: selected })
+    return [`<option value="">${t(allLabel)}</option>`]
+      .concat(items.map((row) => `<option value="${esc(row.id)}" ${selected === row.id ? 'selected' : ''}>${esc(row.name || row.id)}</option>`))
+      .join('')
+  }
+  const accountOptions = optionsOf(filterOptions.accounts, state.auditAccountId, '全部员工')
+  const botOptions = optionsOf(filterOptions.bots, state.auditBotId, '全部 Bot')
+  const coverage = state.auditCoverage || []
+  const pending = coverage.filter((x) => !['succeeded', 'empty'].includes(x.status))
+  const failed = pending.filter((x) => x.status === 'dead' || x.lastError)
+  const grid = 'grid-template-columns: minmax(180px, 2fr) minmax(105px, 1fr) minmax(90px, .8fr) minmax(130px, 1.1fr) 64px;'
+  const rows = (state.auditItems || []).map((row) => `<div class="satu-usagerow" style="${grid}">
+      <span style="font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;">${esc(row.taskSummary || t('未命名任务'))}</span>
+      <span style="font-size: 12px; color: var(--muted-foreground);">${esc(row.accountName || row.accountId || '—')} · ${esc(row.botName || row.botId || '—')}</span>
+      <span style="font-size: 12px; color: var(--muted-foreground);">${esc(auditOutcomeLabel(row.outcome))}${row.modelScore == null ? '' : ` · ${esc(String(row.modelScore))}`}</span>
+      <span style="font-size: 12px; color: var(--muted-foreground);">${esc(fmtTime(row.endedAt || row.startedAt))}</span>
+      <button type="button" class="satu-linkbtn" data-act="go" data-href="/audit/summary/${esc(row.id)}">${t('打开')}</button>
+    </div>`).join('')
+  return `
+    <div class="satu-panel" style="margin: 0;">
+      <span class="satu-panel-title">${t('自动审计设置')}</span>
+      <div class="satu-kv"><span>${t('审计时段')}</span><span>${t('每天连续 3 × 8 小时：09:00–17:00、17:00–01:00、01:00–09:00')} · ${esc(settings?.timezone || 'UTC')}</span></div>
+      <div class="satu-kv"><span>${t('审计模型')}</span><span style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
+        <button type="button" class="satu-assignee" aria-pressed="${String(role === 'daily')}" data-act="audit-model-role" data-role="daily">${t('任务模型（默认）')}</button>
+        <button type="button" class="satu-assignee" aria-pressed="${String(role === 'utility')}" data-act="audit-model-role" data-role="utility">UTILITY</button>
+        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(model?.provider && model?.model ? `${model.provider} / ${model.model}` : t('尚未配置'))}</span>
+      </span></div>
+      <div class="satu-kv"><span>${t('覆盖状态')}</span><span>${pending.length ? esc(t(`${pending.length} 个批次处理中`, `${pending.length} batch(es) in progress`)) : t('已覆盖到最新完成时段')}${failed.length ? ` · ${esc(t(`${failed.length} 个需要重试`, `${failed.length} need retry`))}` : ''}</span></div>
+    </div>
+    ${failed.length ? `<div class="gw-flash gw-flash-err">${esc(t('部分审计暂未完成；系统会自动重试，删除 Bot 时也会等待终审完成。'))}</div>` : ''}
+    <form id="audit-filter-form" style="display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: flex-end;">
+      <div class="field" style="margin: 0;">
+        <label for="audit-account">${t('员工')}</label>
+        <select class="input" id="audit-account" name="accountId" style="width: 190px;">${accountOptions}</select>
+      </div>
+      <div class="field" style="margin: 0;">
+        <label for="audit-bot">Bot</label>
+        <select class="input" id="audit-bot" name="botId" style="width: 190px;">${botOptions}</select>
+      </div>
+      <div class="field" style="margin: 0;">
+        <label for="audit-from">${t('开始日期')}</label>
+        <input class="input" id="audit-from" name="from" type="date" value="${esc(state.auditFrom || '')}">
+      </div>
+      <div class="field" style="margin: 0;">
+        <label for="audit-to">${t('结束日期')}</label>
+        <input class="input" id="audit-to" name="to" type="date" value="${esc(state.auditTo || '')}">
+      </div>
+      <button type="submit" class="btn btn-secondary" style="flex: none;">${t('筛选')}</button>
+      <button type="button" class="satu-linkbtn" data-act="audit-filter-clear">${t('清除')}</button>
+    </form>
+    <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+      <div class="satu-usagehead" style="${grid}"><span>${t('任务总结')}</span><span>${t('员工 / Bot')}</span><span>${t('结果 / 评分')}</span><span>${t('结束时间')}</span><span>${t('打开')}</span></div>
+      ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有审计总结。完成首个 8 小时时段后会自动生成。')}</div>`}
+    </div>`
 }
 
 function auditEventsTable() {
@@ -202,19 +270,37 @@ function auditChatsTable() {
 }
 
 function auditPage() {
-  const tab = state.auditTab === 'events' ? 'events' : 'chats'
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
         <div>
           <h1 style="font-size: 24px; margin: 0 0 4px;">${t('审计')}</h1>
-          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('查看公司成员的对话。全文在执行机器上，这里只存索引。')}</p>
+          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('查看自动生成的任务审计总结；可按日期、员工和 Bot 筛选。')}</p>
         </div>
-        <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">${auditTabs(tab)}</div>
         ${flashes()}
-        ${tab === 'events' ? auditEventsTable() : auditChatsTable()}
+        ${conversationAuditTable()}
       </div>
     </div>`
+}
+
+function conversationAuditDetailPage() {
+  const detail = state.auditItemDetail
+  const item = detail?.item
+  const batch = detail?.batch
+  if (!item) return `<div class="gw-page"><div class="gw-page-inner">${flashes()}<p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('找不到这条审计总结。')}</p></div></div>`
+  const timeline = (item.timeline || []).map((x) => `<div style="display: grid; grid-template-columns: 150px 1fr; gap: var(--space-3); font-size: 13px;"><span style="color: var(--muted-foreground);">${esc(fmtTime(x.at))}</span><span>${esc(x.action)}</span></div>`).join('')
+  const breakdown = Object.entries(item.scoreBreakdown || {}).map(([key, value]) => `${key}: ${value}`).join(' · ')
+  const textBlock = (title, value) => `<div class="satu-panel" style="margin: 0;"><span class="satu-panel-title">${t(title)}</span><div style="white-space: pre-wrap; font-size: 13px; line-height: 1.65;">${esc(value || '—')}</div></div>`
+  return `<div class="gw-page"><div class="gw-page-inner">
+    <div><h1 style="font-size: 24px; margin: 0 0 4px;">${esc(item.taskSummary || t('审计总结'))}</h1><p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(item.accountNameSnapshot || item.accountId)} · ${esc(item.botNameSnapshot || item.botId)} · ${esc(fmtTime(item.endedAt || item.startedAt))}</p></div>
+    ${flashes()}
+    <div class="satu-panel" style="margin: 0;"><span class="satu-panel-title">${t('结果与评分')}</span><div class="satu-kv"><span>${t('最终状态')}</span><span>${esc(auditOutcomeLabel(item.outcome))}</span></div><div class="satu-kv"><span>${t('评分')}</span><span>${item.modelScore == null ? '—' : esc(String(item.modelScore))}${item.scoreConfidence == null ? '' : ` · ${esc(t('置信度'))} ${esc(String(item.scoreConfidence))}`}</span></div>${breakdown ? `<div class="satu-kv"><span>${t('评分明细')}</span><span>${esc(breakdown)}</span></div>` : ''}<div class="satu-kv"><span>${t('审计模型')}</span><span>${esc(batch ? `${batch.modelRole} · ${batch.provider}/${batch.model}` : '—')}</span></div></div>
+    ${textBlock('用户问题', item.userQuestion)}
+    ${textBlock('模型回答', item.modelAnswer)}
+    ${textBlock('最终结果', item.finalResult)}
+    <div class="satu-panel" style="margin: 0;"><span class="satu-panel-title">${t('任务时间线')}</span><div style="display: flex; flex-direction: column; gap: var(--space-2);">${timeline || `<span style="font-size: 13px; color: var(--muted-foreground);">${t('没有时间线')}</span>`}</div></div>
+    ${(item.riskFlags || []).length ? `<div class="gw-flash gw-flash-err">${esc(t('风险标记'))}: ${esc(item.riskFlags.join('、'))}</div>` : ''}
+  </div></div>`
 }
 
 function auditDetailPage() {

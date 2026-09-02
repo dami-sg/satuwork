@@ -33,6 +33,7 @@ import { nextRunAtOf } from './lib/schedule.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
 import { sweepHandoffs } from './handoff-sweep.ts'
 import { refreshDiscovered } from './model-discovery.ts'
+import { tickBotDeletions, tickConversationAudits } from './conversation-audit.ts'
 
 /** 调度器多久看一眼。设成 0 就不起调度器（e2e 里有几条不需要它自己跑）。 */
 const TICK_MS = Math.max(0, Math.trunc(Number(process.env.GATEWAY_ROUTINE_TICK_MS ?? 30_000)))
@@ -564,6 +565,9 @@ export function startRoutineScheduler(db: Db): () => void {
        * 定时器就多一处要在关停时记得清的东西——忘了清的表现是进程不退出。
        */
       .then(() => sweepHandoffs(db))
+      // 自动对话审计与删除终审复用同一个粗节拍。批次和删除请求都在库里，tick 只负责推进。
+      .then(() => tickConversationAudits(db))
+      .then(() => tickBotDeletions(db))
       /**
        * 模型目录的自动发现（见 model-discovery.ts）。**同样不新起定时器**——理由和
        * 上面两处一样。它自己按 GATEWAY_MODEL_DISCOVERY_MS 节流（默认 6 小时），

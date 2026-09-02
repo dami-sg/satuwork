@@ -5,7 +5,7 @@ import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { PULL_ERROR, pullSessionEvents } from '../lib/machines.ts'
 import { companyMachineOf } from '../deploy.ts'
-import { intField } from '../lib/validate.ts'
+import { bodyOf, intField } from '../lib/validate.ts'
 import { modelProviderCreds, publicPlatformCred, publicSessionIndex, sessionCursorOf } from '../lib/org.ts'
 import { rangeQuery, requireOrg, requireUser } from '../lib/guards.ts'
 import { seatBearer } from '../lib/runtime.ts'
@@ -132,6 +132,115 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
         action: e.action,
         detail: e.detail,
         createdAt: e.createdAt,
+      })),
+    })
+  })
+
+  // ── 自动对话审计。结构化派生物在 Gateway，原始对话仍按上面的路径去席位拉。────
+
+  router.get('/orgs/:id/conversation-audit-settings', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOrg(account, req.params.id, true)
+    if (!await db.company(req.params.id)) throw new HttpError(404, '公司不存在')
+    const settings = (await db.settings(req.params.id)).conversationAudit
+    const platform = await db.platformSettings()
+    json(res, 200, { settings, model: platform[settings.modelRole] })
+  })
+
+  router.patch('/orgs/:id/conversation-audit-settings', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOrg(account, req.params.id, true)
+    if (!await db.company(req.params.id)) throw new HttpError(404, '公司不存在')
+    const body = bodyOf(req)
+    const role = String(body.modelRole ?? '')
+    if (role !== 'daily' && role !== 'utility') throw new HttpError(400, 'modelRole 只能是 daily 或 utility')
+    const platform = await db.platformSettings()
+    if (!platform[role].provider || !platform[role].model) {
+      throw new HttpError(400, `${role === 'daily' ? '任务' : 'Utility'} 模型还没配置`)
+    }
+    const cur = await db.settings(req.params.id)
+    const from = cur.conversationAudit.modelRole
+    cur.conversationAudit = { ...cur.conversationAudit, modelRole: role }
+    const saved = (await db.putSettings(req.params.id, cur)).conversationAudit
+    if (from !== role) {
+      await db.audit({
+        companyId: req.params.id,
+        accountId: account.id,
+        action: 'conversation_audit.model_role.update',
+        detail: { from, to: role },
+      })
+    }
+    json(res, 200, { settings: saved, model: platform[saved.modelRole] })
+  })
+
+  router.get('/orgs/:id/conversation-audits', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOrg(account, req.params.id, true)
+    const range = rangeQuery(req)
+    const rawOutcome = (req.query.get('outcome') || '').trim()
+    const outcomes = new Set(['completed', 'partial', 'failed', 'blocked', 'answered', 'unknown'])
+    if (rawOutcome && !outcomes.has(rawOutcome)) throw new HttpError(400, 'outcome 不合法')
+    const filter = {
+      accountId: (req.query.get('accountId') || '').trim() || undefined,
+      botId: (req.query.get('botId') || '').trim() || undefined,
+      from: range.from,
+      to: range.to,
+      outcome: rawOutcome ? rawOutcome as any : undefined,
+      scoreLte: intField({ scoreLte: req.query.get('scoreLte') ?? undefined }, 'scoreLte'),
+      limit: intField({ limit: req.query.get('limit') ?? undefined }, 'limit'),
+    }
+    const [items, filters] = await Promise.all([
+      db.conversationAuditItems(req.params.id, filter),
+      db.conversationAuditFilterOptions(req.params.id),
+    ])
+    await db.audit({
+      companyId: req.params.id,
+      accountId: account.id,
+      action: 'conversation_audit.list',
+      detail: { count: items.length },
+    })
+    json(res, 200, {
+      filters,
+      items: items.map((x) => ({
+        id: x.id, batchId: x.batchId, accountId: x.accountId, botId: x.botId,
+        accountName: x.accountNameSnapshot, botName: x.botNameSnapshot,
+        taskSummary: x.taskSummary, outcome: x.outcome, modelScore: x.modelScore,
+        scoreConfidence: x.scoreConfidence, startedAt: x.startedAt, endedAt: x.endedAt,
+      })),
+    })
+  })
+
+  router.get('/orgs/:id/conversation-audits/:itemId', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOrg(account, req.params.id, true)
+    const item = await db.conversationAuditItem(req.params.itemId)
+    if (!item || item.companyId !== req.params.id) throw new HttpError(404, '审计条目不存在')
+    const batch = await db.conversationAuditBatch(item.batchId)
+    await db.audit({
+      companyId: req.params.id,
+      accountId: account.id,
+      action: 'conversation_audit.read',
+      detail: { auditItemId: item.id },
+    })
+    json(res, 200, {
+      item,
+      batch: batch ? {
+        id: batch.id, kind: batch.kind, windowStart: batch.windowStart, windowEnd: batch.windowEnd,
+        modelRole: batch.modelRole, provider: batch.provider, model: batch.model,
+        reasoningEffort: batch.reasoningEffort, promptVersion: batch.promptVersion,
+      } : null,
+    })
+  })
+
+  router.get('/orgs/:id/conversation-audit-coverage', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireOrg(account, req.params.id, true)
+    const batches = await db.conversationAuditCoverageOfCompany(req.params.id)
+    json(res, 200, {
+      coverage: batches.map((b) => ({
+        accountId: b.accountId, botId: b.botId, sessionId: b.sessionId, status: b.status,
+        windowStart: b.windowStart, windowEnd: b.windowEnd, toSeq: b.toSeq,
+        completedAt: b.completedAt, lastError: b.lastError,
       })),
     })
   })

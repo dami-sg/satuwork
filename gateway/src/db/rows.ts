@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, Task, TaskEvent, TaskExtractLog, parseTaskEventKind, parseTaskExtractOutcome, parseTaskFields, parseTaskState } from './types.ts'
+import { Account, AuditEvent, BotDeletionRequest, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, ConversationAuditBatch, ConversationAuditItem, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseConversationAuditSettings, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, Task, TaskEvent, TaskExtractLog, parseTaskEventKind, parseTaskExtractOutcome, parseTaskFields, parseTaskState } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -439,8 +439,59 @@ export function catalogOf(r: Row): CatalogItem {
     botId: strOrNull(r.botId),
     name: str(r.name),
     definition: jsonOf(r.definition),
+    deletingAt: numOrNull(r.deletingAt),
     createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt),
+  }
+}
+
+export function conversationAuditBatchOf(r: Row): ConversationAuditBatch {
+  return {
+    id: str(r.id), companyId: str(r.companyId), accountId: str(r.accountId), botId: str(r.botId),
+    sessionId: str(r.sessionId), deletionRequestId: strOrNull(r.deletionRequestId),
+    kind: str(r.kind) === 'pre_delete' ? 'pre_delete' : 'scheduled',
+    windowStart: num(r.windowStart), windowEnd: num(r.windowEnd), timezone: str(r.timezone),
+    fromSeq: num(r.fromSeq), toSeq: num(r.toSeq), eventCount: num(r.eventCount), turnCount: num(r.turnCount),
+    status: str(r.status) as ConversationAuditBatch['status'], attempts: num(r.attempts),
+    leaseUntil: numOrNull(r.leaseUntil), nextTryAt: numOrNull(r.nextTryAt), lastError: strOrNull(r.lastError),
+    modelRole: str(r.modelRole) === 'utility' ? 'utility' : 'daily', provider: str(r.provider), model: str(r.model),
+    reasoningEffort: parseReasoningEffort(r.reasoningEffort), promptVersion: num(r.promptVersion),
+    redactionVersion: num(r.redactionVersion), sourceHash: str(r.sourceHash || ''), resultHash: str(r.resultHash || ''),
+    createdAt: num(r.createdAt), startedAt: numOrNull(r.startedAt), completedAt: numOrNull(r.completedAt),
+  }
+}
+
+export function conversationAuditItemOf(r: Row): ConversationAuditItem {
+  const timeline = jsonOf(r.timeline)
+  const breakdown = jsonOf(r.scoreBreakdown)
+  const evidence = jsonOf(r.evidence)
+  const risks = jsonOf(r.riskFlags)
+  return {
+    id: str(r.id), batchId: str(r.batchId), companyId: str(r.companyId), accountId: str(r.accountId),
+    botId: str(r.botId), sessionId: str(r.sessionId), botNameSnapshot: str(r.botNameSnapshot || ''),
+    accountNameSnapshot: str(r.accountNameSnapshot || ''), itemKey: str(r.itemKey),
+    firstSeq: num(r.firstSeq), lastSeq: num(r.lastSeq), startedAt: numOrNull(r.startedAt), endedAt: numOrNull(r.endedAt),
+    taskSummary: str(r.taskSummary || ''),
+    timeline: Array.isArray(timeline) ? timeline.map((x) => ({ at: num((x as any)?.at), action: str((x as any)?.action || '') })) : [],
+    userQuestion: str(r.userQuestion || ''), modelAnswer: str(r.modelAnswer || ''), finalResult: str(r.finalResult || ''),
+    outcome: str(r.outcome) as ConversationAuditItem['outcome'], modelScore: numOrNull(r.modelScore),
+    scoreBreakdown: breakdown && typeof breakdown === 'object' && !Array.isArray(breakdown) ? breakdown as Record<string, number> : {},
+    scoreConfidence: r.scoreConfidence == null ? null : Number(r.scoreConfidence),
+    evidence: Array.isArray(evidence) ? evidence.map(str) : [], riskFlags: Array.isArray(risks) ? risks.map(str) : [],
+    createdAt: num(r.createdAt), expiresAt: num(r.expiresAt),
+  }
+}
+
+export function botDeletionRequestOf(r: Row): BotDeletionRequest {
+  const orphans = jsonOf(r.orphans)
+  return {
+    id: str(r.id), companyId: str(r.companyId), accountId: strOrNull(r.accountId), botId: str(r.botId),
+    botNameSnapshot: str(r.botNameSnapshot || ''), requestedBy: str(r.requestedBy),
+    status: str(r.status) as BotDeletionRequest['status'], cutoffAt: num(r.cutoffAt), targetCount: num(r.targetCount),
+    auditedCount: num(r.auditedCount), attempts: num(r.attempts), nextTryAt: numOrNull(r.nextTryAt),
+    lastError: strOrNull(r.lastError),
+    orphans: Array.isArray(orphans) ? orphans.map((x) => ({ seatId: str((x as any)?.seatId || ''), error: str((x as any)?.error || '') })) : [],
+    requestedAt: num(r.requestedAt), auditCompletedAt: numOrNull(r.auditCompletedAt), deletedAt: numOrNull(r.deletedAt),
   }
 }
 export function credOf(r: Row): Credential {

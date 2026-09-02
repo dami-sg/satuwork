@@ -7,7 +7,7 @@ import { HttpError, bearer, json, type Req, type Router } from '../http.ts'
 import { INSTANCE_DOWN, desktopTicketFor } from '../lib/machines.ts'
 import { KIND, bodyOf, deployOptsOf, strField } from '../lib/validate.ts'
 import type { Account, CatalogItem, Memory, MemoryKind } from '../db.ts'
-import { deployInFlight, deploySeat, publicSeatRuntime, purgeBot, seatStepOf, startSeatDeploy } from '../deploy.ts'
+import { deployInFlight, deploySeat, publicSeatRuntime, seatStepOf, startSeatDeploy } from '../deploy.ts'
 import { blockMapOf, connectorDefOf, runtimeConnectorServer } from '../lib/connectors.ts'
 import { LEGACY_BOT_ICONS, type BotMemory, botContext, botIconOf, botNameOf, defaultBotModel, extraPromptOf, iconSetFor, publicBot, publicCatalog, publicSkill, runtimeServer, skillDisplayNames, skillFiles, tagsOf, trimStr } from '../lib/catalog.ts'
 import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } from '../lib/guards.ts'
@@ -16,6 +16,7 @@ import { WebToolError } from '../web-tools.ts'
 import { runExtract, runSearch } from '../web-service.ts'
 import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
 import { rosterStream } from '../lib/roster-stream.ts'
+import { requestBotDeletion } from '../conversation-audit.ts'
 
 /**
  * 一个人最多建几个 Bot。
@@ -93,11 +94,12 @@ async function connectorStampOf(db: RouteCtx['db'], accountId: string, companyId
 }
 
 /** 自己建的那一颗。别人的、公司的、全局的都不是——改和删都走它。 */
-async function ownBotOf(db: RouteCtx['db'], account: Account, id: string) {
+async function ownBotOf(db: RouteCtx['db'], account: Account, id: string, allowDeleting = false) {
   const item = await db.catalog((id || '').trim())
   if (!item || item.kind !== 'bot' || item.scope !== 'user' || item.accountId !== account.id) {
     throw new HttpError(404, '没有这个 Bot')
   }
+  if (item.deletingAt && !allowDeleting) throw new HttpError(409, '这个 Bot 正在完成删除前审计')
   return item
 }
 
@@ -1250,40 +1252,27 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     json(res, 200, { bot: { ...publicBot(next, pinned, tpl), runtime: await pairRuntime(db, account, next.id) } })
   })
 
-  /**
-   * 删自己那一个，**连席位一起拆**。
-   *
-   * 只删目录项的话，机器上那套 systemd 单元还在跑、还占着 slot 和端口，而库里已经没有
-   * 任何东西指向它了——下一个人的席位起不来，现场没有一条线索指回这次删除。
-   *
-   * **席位拆不掉也照删。** 以前是拆不掉就 502、什么都不删，而管家拆席位是「先停单元
-   * 再收拾目录」：中间任何一步出岔子，Bot 已经聊不了了，删除却每次都以同一个理由
-   * 失败——界面上于是永远挂着一颗既用不了也删不掉的 Bot。现在那行席位留成墓碑
-   * （slot 不会被下一个人分走），Bot 该删的全删，回执里说清还剩几个席位要清理。
-   */
+  /** 删自己那一个：先冻结、跑删除终审，再由后台状态机拆席位并物理删除。 */
   router.delete('/runtime/bots/:id', async (req, res) => {
     const account = await requireUser(req, db, keys)
-    const item = await ownBotOf(db, account, req.params.id)
-    const { released, failed } = await purgeBot(db, item.id)
-    await db.audit({
-      companyId: account.companyId!,
-      accountId: account.id,
-      action: 'bot.delete',
-      detail: {
-        id: item.id,
-        name: item.name,
-        seats: released.map((s) => s.seatId),
-        // 拆不掉的那些要留在审计里：机器详情页上那条「出错、没有 Bot 名」的席位
-        // 是从哪来的，只有这里答得上。
-        orphans: failed.map((f) => ({ seatId: f.seat.seatId, error: f.error })),
-      },
+    const item = await ownBotOf(db, account, req.params.id, true)
+    const deletion = await requestBotDeletion(db, {
+      companyId: account.companyId!, accountId: account.id, botId: item.id, botName: item.name, requestedBy: account.id,
     })
-    json(res, 200, {
-      deleted: true,
-      id: item.id,
-      seats: released.length,
-      orphans: failed.map((f) => ({ seatId: f.seat.seatId, error: f.error })),
-    })
+    const done = deletion.status === 'completed'
+    json(res, done ? 200 : 202, done
+      ? { deleted: true, id: item.id, seats: 'releasedSeats' in deletion ? deletion.releasedSeats : 0, orphans: deletion.orphans, deletion }
+      : { deleting: true, id: item.id, deletion })
+  })
+
+  router.get('/runtime/bot-deletions/:id', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    requireSeat(account)
+    const deletion = await db.botDeletion(req.params.id)
+    if (!deletion || deletion.companyId !== account.companyId || (deletion.accountId && deletion.accountId !== account.id)) {
+      throw new HttpError(404, '删除请求不存在')
+    }
+    json(res, 200, { deletion })
   })
 
   router.get('/runtime/bots/:id/session', async (req, res) => {

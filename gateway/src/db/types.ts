@@ -461,6 +461,8 @@ export interface CatalogItem {
   botId: string | null
   name: string
   definition: unknown
+  /** 删除前终审开始的时刻。非空时不再出现在可聊天名册里。 */
+  deletingAt: number | null
   createdAt: number
   updatedAt: number
 }
@@ -481,6 +483,134 @@ export interface AuditEvent {
   action: string
   detail: unknown
   createdAt: number
+}
+
+export type ConversationAuditModelRole = 'daily' | 'utility'
+export type ConversationAuditBatchKind = 'scheduled' | 'pre_delete'
+export type ConversationAuditBatchStatus = 'queued' | 'leased' | 'processing' | 'succeeded' | 'empty' | 'retry' | 'dead'
+export type ConversationAuditOutcome = 'completed' | 'partial' | 'failed' | 'blocked' | 'answered' | 'unknown'
+
+export interface ConversationAuditSettings {
+  enabled: boolean
+  timezone: string
+  /** 第一版固定 09:00。 */
+  anchor: '09:00'
+  /** 第一版固定 480，即每天三个不重叠窗口。 */
+  windowMinutes: 480
+  modelRole: ConversationAuditModelRole
+  retentionDays: number
+  promptVersion: number
+}
+
+export function emptyConversationAuditSettings(): ConversationAuditSettings {
+  return {
+    enabled: true,
+    timezone: 'UTC',
+    anchor: '09:00',
+    windowMinutes: 480,
+    modelRole: 'daily',
+    retentionDays: 180,
+    promptVersion: 1,
+  }
+}
+
+export function parseConversationAuditSettings(raw: unknown): ConversationAuditSettings {
+  const base = emptyConversationAuditSettings()
+  const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
+  const retention = Math.trunc(Number(o.retentionDays))
+  const version = Math.trunc(Number(o.promptVersion))
+  return {
+    enabled: o.enabled !== false,
+    timezone: typeof o.timezone === 'string' && o.timezone.trim() ? o.timezone.trim() : base.timezone,
+    anchor: '09:00',
+    windowMinutes: 480,
+    modelRole: o.modelRole === 'utility' ? 'utility' : 'daily',
+    retentionDays: Number.isFinite(retention) ? Math.min(3650, Math.max(30, retention)) : base.retentionDays,
+    promptVersion: Number.isFinite(version) && version > 0 ? version : base.promptVersion,
+  }
+}
+
+export interface ConversationAuditBatch {
+  id: string
+  companyId: string
+  accountId: string
+  botId: string
+  sessionId: string
+  deletionRequestId: string | null
+  kind: ConversationAuditBatchKind
+  windowStart: number
+  windowEnd: number
+  timezone: string
+  fromSeq: number
+  toSeq: number
+  eventCount: number
+  turnCount: number
+  status: ConversationAuditBatchStatus
+  attempts: number
+  leaseUntil: number | null
+  nextTryAt: number | null
+  lastError: string | null
+  modelRole: ConversationAuditModelRole
+  provider: string
+  model: string
+  reasoningEffort: ReasoningEffort
+  promptVersion: number
+  redactionVersion: number
+  sourceHash: string
+  resultHash: string
+  createdAt: number
+  startedAt: number | null
+  completedAt: number | null
+}
+
+export interface ConversationAuditItem {
+  id: string
+  batchId: string
+  companyId: string
+  accountId: string
+  botId: string
+  sessionId: string
+  botNameSnapshot: string
+  accountNameSnapshot: string
+  itemKey: string
+  firstSeq: number
+  lastSeq: number
+  startedAt: number | null
+  endedAt: number | null
+  taskSummary: string
+  timeline: { at: number; action: string }[]
+  userQuestion: string
+  modelAnswer: string
+  finalResult: string
+  outcome: ConversationAuditOutcome
+  modelScore: number | null
+  scoreBreakdown: Record<string, number>
+  scoreConfidence: number | null
+  evidence: string[]
+  riskFlags: string[]
+  createdAt: number
+  expiresAt: number
+}
+
+export type BotDeletionStatus = 'freezing' | 'auditing' | 'ready_to_purge' | 'purging' | 'completed' | 'failed'
+export interface BotDeletionRequest {
+  id: string
+  companyId: string
+  accountId: string | null
+  botId: string
+  botNameSnapshot: string
+  requestedBy: string
+  status: BotDeletionStatus
+  cutoffAt: number
+  targetCount: number
+  auditedCount: number
+  attempts: number
+  nextTryAt: number | null
+  lastError: string | null
+  orphans: { seatId: string; error: string }[]
+  requestedAt: number
+  auditCompletedAt: number | null
+  deletedAt: number | null
 }
 
 /** Gateway 只存指针。正文永远不该出现在这张表里。 */
@@ -720,6 +850,7 @@ export function parseReasoningEffort(v: unknown): ReasoningEffort {
 export interface CompanySettings {
   daily: ModelRole
   utility: ModelRole
+  conversationAudit: ConversationAuditSettings
 }
 
 export interface PlatformSettings {
@@ -948,6 +1079,7 @@ export function emptySettings(): CompanySettings {
   return {
     daily: { provider: '', model: '', reasoningEffort: 'off' },
     utility: { provider: '', model: '', reasoningEffort: 'off' },
+    conversationAudit: emptyConversationAuditSettings(),
   }
 }
 
