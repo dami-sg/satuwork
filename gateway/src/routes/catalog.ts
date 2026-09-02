@@ -7,7 +7,7 @@ import { HttpError, type Req, type Router, json } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { kindOf, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
 import { type Account, type CatalogItem, type CatalogKind } from '../db.ts'
-import { purgeBot } from '../deploy.ts'
+import { requestBotDeletion } from '../conversation-audit.ts'
 
 export function attachCatalog(router: Router, ctx: RouteCtx) {
   const { db, keys } = ctx
@@ -222,13 +222,14 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
   }
 
   /** 这一层**自己拥有**的那一条。全局层只认全局项，公司层只认本公司项——改和删都走它。 */
-  async function ownedItem(owner: CatalogOwner, id: string, kind: CatalogKind, missing: string): Promise<CatalogItem> {
+  async function ownedItem(owner: CatalogOwner, id: string, kind: CatalogKind, missing: string, allowDeleting = false): Promise<CatalogItem> {
     const item = await db.catalog(id)
     const mine =
       owner.scope === 'global'
         ? item?.scope === 'global'
         : item?.scope === 'company' && item.companyId === owner.companyId
     if (!item || item.kind !== kind || !mine) throw new HttpError(404, missing)
+    if (item.deletingAt && !allowDeleting) throw new HttpError(409, '这个 Bot 正在完成删除前审计')
     return item
   }
 
@@ -319,31 +320,21 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       })
     }
 
-    /**
-     * 删一颗 Bot，**连它名下的席位一起拆**。
-     *
-     * 只删目录项的话，机器上那套 systemd 单元还在跑、还占着 slot 和端口，而库里已经
-     * 没有任何东西指向它了——下一个人的席位于是起不来，现场没有一条线索指回这次删除
-     * （理由见 deploy.ts 的 releaseSeats）。删账号、删公司走的都是同一条规矩。
-     *
-     * 按 botId 查席位、不按公司：全局 Bot 可能被好几家公司各自部署过。
-     *
-     * **拆不掉的席位留成墓碑，Bot 照删**（见 deploy.ts 的 purgeBot）：那行还占着
-     * slot，谁也分不走它，而「删了」这件事不该被一台联系不上的机器无限期扣住——
-     * 员工那条删除路径上已经因此挂过一颗既聊不了也删不掉的 Bot。
-     */
+    /** 全局/公司 Bot 也先冻结并终审所有已部署 pair，成功后再由状态机拆席位。 */
     router.delete(`${s.base}/bots/:botId`, async (req, res) => {
       const { account, owner } = await s.write(req)
-      const item = await ownedItem(owner, req.params.botId, 'bot', '没有这个助理')
-      const { released, failed } = await purgeBot(db, item.id)
-      const orphans = failed.map((f) => ({ seatId: f.seat.seatId, error: f.error }))
-      await auditCatalog(owner, account.id, 'catalog.delete', {
-        kind: 'bot',
-        id: item.id,
-        seats: released.length,
-        orphans,
+      const item = await ownedItem(owner, req.params.botId, 'bot', '没有这个助理', true)
+      const deletion = await requestBotDeletion(db, {
+        companyId: owner.auditCompanyId,
+        accountId: item.accountId,
+        botId: item.id,
+        botName: item.name,
+        requestedBy: account.id,
       })
-      json(res, 200, { deleted: true, id: item.id, seats: released.length, orphans })
+      const done = deletion.status === 'completed'
+      json(res, done ? 200 : 202, done
+        ? { deleted: true, id: item.id, seats: 'releasedSeats' in deletion ? deletion.releasedSeats : 0, orphans: deletion.orphans, deletion }
+        : { deleting: true, id: item.id, deletion })
     })
 
     /**

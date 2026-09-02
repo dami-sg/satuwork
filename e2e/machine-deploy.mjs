@@ -1327,22 +1327,8 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         assert(deployed.status === 200, `部署 ${deployed.status} ${deployed.text}`)
         const seatId = deployed.json.seatId
 
-        // 会话索引：删 Bot 要连它一起清掉，否则管理员点进去的是一条永远打不开的会话。
-        const mach = await req(gwBase, 'GET', `/platform/orgs/${co.company.id}/machine`, { token: ownerTok })
-        assert(mach.status === 200, `机器 ${mach.status} ${mach.text}`)
-        const idx = await req(gwBase, 'POST', '/internal/sessions/index', {
-          token: mach.json.machine.token,
-          body: {
-            sessionId: 's-stuck',
-            companyId: co.company.id,
-            accountId: co.account.id,
-            botId,
-            messageCount: 1,
-            createdAt: 1_700_000_000_000,
-            updatedAt: 1_700_000_000_000,
-          },
-        })
-        assert(idx.status === 200, `会话索引 ${idx.status} ${idx.text}`)
+        // 这一条只测拆席位失败后的墓碑；不要造会话，否则新删除协议会先要求真实 Bot
+        // 完成终审，而这台假管家没有运行 Bot。无会话仍会先落一笔 empty 终审。
 
         // 分组里对它的引用也要跟着没：留着的话那一格指向一个不存在的 Bot，界面上
         // 是个空位，谁也说不清它原来是什么。
@@ -1358,13 +1344,6 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         assert((del.json.orphans || []).length === 1, `回执没说哪个席位没拆掉：${del.text}`)
         const gone = await req(gwBase, 'GET', `/runtime/bots/${botId}`, { token: co.token })
         assert(gone.status === 404, `Bot 应该删掉了，得到 ${gone.status} ${gone.text}`)
-        const sessions = await req(gwBase, 'GET', `/orgs/${co.company.id}/sessions`, { token: co.token })
-        assert(sessions.status === 200, `会话列表 ${sessions.status} ${sessions.text}`)
-        assert(
-          !(sessions.json.sessions || []).some((x) => x.sessionId === 's-stuck'),
-          `会话索引还在：${sessions.text}`,
-        )
-
         const roster = await req(gwBase, 'GET', `/orgs/${co.company.id}/accounts`, { token: co.token })
         assert(roster.status === 200, `名册 ${roster.status} ${roster.text}`)
         assert(

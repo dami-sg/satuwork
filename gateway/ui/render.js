@@ -9,7 +9,7 @@ function pageView() {
   if (state.path.startsWith('/companies/') && state.path !== '/companies') return companyDetailPage()
   if (state.path.startsWith('/users/') && state.path !== '/users') return userDetailPage()
   if (state.path.startsWith('/machines/') && state.path !== '/machines') return machineDetailPage()
-  if (state.path.startsWith('/audit/') && state.path !== '/audit') return auditDetailPage()
+  if (state.path.startsWith('/audit/summary/')) return conversationAuditDetailPage()
   if (isChatPath(state.path)) return chatPage()
   switch (state.path) {
     case '/bots':
@@ -809,11 +809,12 @@ async function saveCompany(e) {
 async function submitAuditFilter(e) {
   e.preventDefault()
   const fd = new FormData(e.target)
-  state.sessionAccountId = String(fd.get('accountId') || '').trim()
-  state.sessionFrom = String(fd.get('from') || '')
-  state.sessionTo = String(fd.get('to') || '')
+  state.auditAccountId = String(fd.get('accountId') || '').trim()
+  state.auditBotId = String(fd.get('botId') || '').trim()
+  state.auditFrom = String(fd.get('from') || '')
+  state.auditTo = String(fd.get('to') || '')
   try {
-    await loadSessions()
+    await loadConversationAudits()
   } catch (err) {
     flash('err', err.message)
   }

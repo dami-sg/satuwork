@@ -1327,7 +1327,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
        * 不该让数据助理忘了他姓什么（docs/memory.md §12 ④）。照原来那句话理解，人会以为
        * 删一颗 Bot 会把自己的称呼、习惯一起抹掉，于是不敢删。
        */
-      body: t(`「${(a && a.name) || bot.name}」的人设、能力配置、以及它自己记下的那些事会一并删除（跨所有 Bot 的那几条留着），正在用它的定时任务与渠道会失效。`, `The persona, capability config and the facts this bot recorded itself are deleted (anything shared across all your bots stays); scheduled tasks and channels using it stop working.`),
+      body: t(`「${(a && a.name) || bot.name}」会先停止接收新任务并完成删除前终审，随后删除人设、能力配置、以及它自己记下的那些事（跨所有 Bot 的那几条留着）；正在用它的定时任务与渠道会失效，审计总结会保留。`, `“${(a && a.name) || bot.name}” will stop taking new work and complete a final audit before its persona, capabilities, and bot-only memories are deleted. Shared memories stay; schedules and channels stop working, and audit summaries are retained.`),
       label: '删除',
       kind: isMyBot(bot) ? 'delete-my-bot' : 'delete-bot',
       id: bot.id,
@@ -1744,9 +1744,29 @@ document.getElementById('app').addEventListener('click', async (e) => {
     await testWebBackend(btn.getAttribute('data-kind') === 'extract' ? 'extract' : 'search')
     return
   }
-  if (act === 'audit-tab') {
-    state.auditTab = btn.getAttribute('data-tab') === 'events' ? 'events' : 'chats'
+  if (act === 'audit-filter-clear') {
+    state.auditAccountId = ''
+    state.auditBotId = ''
+    state.auditFrom = ''
+    state.auditTo = ''
+    loadConversationAudits()
+      .catch((err) => flash('err', err.message))
+      .finally(() => render())
+    return
+  }
+  if (act === 'audit-model-role') {
+    const role = btn.getAttribute('data-role') === 'utility' ? 'utility' : 'daily'
+    state.busy = true
     render()
+    try {
+      await saveConversationAuditRole(role)
+      flash('ok', role === 'utility' ? '后续审计将使用 UTILITY 模型' : '后续审计将使用任务模型')
+    } catch (err) {
+      flash('err', err.message)
+    } finally {
+      state.busy = false
+      render()
+    }
     return
   }
   if (act === 'billing-tab') {

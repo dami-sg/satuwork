@@ -2145,28 +2145,47 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(!admin.pathAllowed('/machines'), '公司管理员不该进得去机器管理')
     })
 
-    await test('会话列表截断时画出「加载更多」，没截断就不画', async () => {
-      // 这条防的是「接口分页了、界面没接上」：后端只回最近一页，界面照样画成一份
-      // 完整列表，管理员据此以为更早的会话不存在。按钮的 data-act 也要在，否则点了
-      // 没反应——和当初供应商页漏掉确认框是同一类错。
-      const ui = await boot(adminToken)
-      ui.state.path = '/audit'
-      ui.state.auditTab = 'chats'
-      ui.state.sessions = [
-        { sessionId: 's1', title: 'UI-SMOKE-会话一', accountName: '甲', botName: 'B', updatedAt: Date.now() },
-      ]
-      ui.state.sessionsHasMore = false
-      ui.state.sessionsCursor = ''
-      ui.render()
-      assert(ui.html().includes('UI-SMOKE-会话一'), '列表没画出来')
-      assert(!ui.html().includes('加载更多'), '没截断却画了「加载更多」')
+    await test('审计只留总结，并把日期、员工、Bot 筛选下推给接口', async () => {
+      const requested = []
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        fetchImpl: async (path, init) => {
+          requested.push(path)
+          return fetch(gwBase + path, init)
+        },
+      })
+      await ui.boot()
+      requested.length = 0
+      ui.state.auditAccountId = 'employee-1'
+      ui.state.auditBotId = 'bot-1'
+      ui.state.auditFrom = '2026-08-01'
+      ui.state.auditTo = '2026-08-31'
+      await ui.loadConversationAudits()
+      const path = requested.find((x) => x.includes('/conversation-audits?')) || ''
+      assert(path.includes('accountId=employee-1'), `员工没进查询：${path}`)
+      assert(path.includes('botId=bot-1'), `Bot 没进查询：${path}`)
+      assert(/[?&]from=\d+/.test(path) && /[?&]to=\d+/.test(path), `日期没进查询：${path}`)
 
-      ui.state.sessionsHasMore = true
-      ui.state.sessionsCursor = '123:s1'
+      ui.state.path = '/audit'
+      ui.state.auditFilterOptions = {
+        accounts: [{ id: 'employee-1', name: 'UI-SMOKE-甲' }],
+        bots: [{ id: 'bot-1', name: 'UI-SMOKE-Bot' }],
+      }
+      ui.state.auditItems = [{
+        id: 'summary-1', taskSummary: 'UI-SMOKE-审计总结', accountId: 'employee-1', accountName: 'UI-SMOKE-甲',
+        botId: 'bot-1', botName: 'UI-SMOKE-Bot', outcome: 'completed', modelScore: 91, endedAt: Date.now(),
+      }]
       ui.render()
       const html = ui.html()
-      assert(html.includes('加载更多'), '截断了却不说，用户会以为就这些')
-      assert(html.includes('data-act="sessions-more"'), '按钮没接 data-act，点了不会有任何反应')
+      assert(html.includes('UI-SMOKE-审计总结'), '总结没有画出来')
+      assert(html.includes('id="audit-filter-form"') && html.includes('name="botId"'), '筛选表单缺员工或 Bot')
+      assert(html.includes('type="date"') && html.includes('2026-08-01') && html.includes('2026-08-31'), '日期筛选没保留')
+      assert(!html.includes('data-tab="chats"') && !html.includes('data-tab="events"'), '对话或操作记录页签还在')
+      assert(!html.includes('对话索引') && !html.includes('管理员操作记录'), '审计页还在宣传已取消的内容')
+      assert(ui.pathAllowed('/audit/summary/summary-1'), '总结详情应该仍可打开')
+      assert(!ui.pathAllowed('/audit/session-1'), '旧的原始对话详情不该再能打开')
     })
 
     await test('建连失败（503）之后闩要放开，聊天还能重连', async () => {

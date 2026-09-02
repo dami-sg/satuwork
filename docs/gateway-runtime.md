@@ -75,7 +75,7 @@ Gateway **不跑** 一轮对话，不当聊天的工作副本。浏览器聊天�
 | Bot | 定义在 Gateway（全局 / 员工自建） | 侧栏里的一个人。有自己的长会话。自建的长在**公司 Bot 模版**上，只有本人看得见。部署实例只钉 `SATUWORK_BOT_ID` 那一颗 |
 | 会话 | 只在实例上 | JSONL。根事件带 `botId` |
 | 会话索引 | Gateway | 能找到会话的指针，没有正文 |
-| 审计事件 | Gateway | 谁在何时做了什么，不是聊天全文 |
+| 审计事件与对话审计派生物 | Gateway | 操作记录，以及 Bot 运行时脱敏后生成的任务总结、时间线、问答、结果和评分；不是聊天全文 |
 
 席位按**账号**计，不按 Bot 实例。`owner` 不占席位。用全局 Bot、或自己建几个 Bot 再各部署一个 pair，**都不多占席位**。3 席 × N 个 Bot = 最多 3N 个进程。
 
@@ -622,6 +622,13 @@ messageCount?
 
 审计事件**不是** `user/message` 原文。
 
+对话审计另走固定的三个连续 8 小时窗口（公司审计时区 09:00 起算）。Gateway 创建并租赁
+批次，Bot 运行时在本地读取 JSONL、脱敏，并用批次固化的模型生成任务总结、时间线、用户
+问题、模型回答、最终结果和评分，再把有长度上限的结构化派生物写回 Gateway。默认使用平台
+任务模型 `daily`，公司管理员可以改为 `utility`；模型选择只影响新批次。删除 Bot 时先冻结，
+完成一笔 `pre_delete` 终审（从未对话过则明确记为 `empty`）后才允许物理删除。完整设计见
+[`conversation-audit.md`](conversation-audit.md)。
+
 ---
 
 ## 12. 一轮对话（浏览器打 Gateway；Gateway 反代到该 pair；模型走 `/v1`）
@@ -759,7 +766,8 @@ $SATUWORK_GATEWAY_HOME/  # 默认 ~/.satuwork-gateway
   releases/bot-*.tgz     Bot 运行包
 ```
 
-聊天正文不进 Gateway，任何时候都只在实例的 JSONL 里；库里只有会话**指针**。
+聊天正文不进 Gateway，任何时候都只在实例的 JSONL 里；库里保存会话**指针**和经过脱敏、
+限长的结构化审计派生物，不能用它重建原始会话。
 
 部署：`docker compose up -d`（Gateway + PostgreSQL）。Bot 不在 compose 里，它按 pair
 宿主机 PG 端口用 5434。
@@ -859,11 +867,13 @@ GitHub Actions 的接线在 `.github/workflows/bot-release.yml`：推 `bot-v*` t
 | GET | `/orgs/:id/bots` | 该公司看得见的**全局** Bot，加上模版改版前留下、已停用的老公司 Bot（只读 / 可删）。员工自建的不在里面 |
 | GET/PUT | `/orgs/:id/bot-template` | 公司 Bot 模版。读：公司里所有人（员工建 Bot 那一屏要显示继承了什么）。写：公司 admin，每次保存 `version` 加一 |
 | POST | `/orgs/:id/bot-template/redeploy` | admin：把本公司已部署的席位挨个重铺一遍（会断对话）。平时不用——席位自己在盯版本号 |
-| CRUD | `/runtime/bots` `/runtime/bots/:id` | 员工自己的 Bot。POST/PATCH **只收身份字段**（名字、头像、简介、开场白、追加提示词），底座一概不收；**POST 建完顺手开装**（后台，回执里带 `deploy: { started }` 或装不成的理由，见第 6 节）；DELETE 连席位一起拆，会话索引、实例地址、分组里的引用一并清掉（账本和审计不动）。席位拆不掉时 Bot 照删，那行席位留成待清理并回在 `orphans` 里 |
+| CRUD | `/runtime/bots` `/runtime/bots/:id` | 员工自己的 Bot。POST/PATCH **只收身份字段**（名字、头像、简介、开场白、追加提示词），底座一概不收；**POST 建完顺手开装**（后台，回执里带 `deploy: { started }` 或装不成的理由，见第 6 节）；DELETE 通常返回 202，先冻结并完成删除终审，再连席位、会话索引、实例地址和分组引用一起清掉（账本与审计派生物不动）；从未有会话时可在同步写入 `empty` 终审后直接 200。拆不掉的席位留成待清理墓碑 |
 | DELETE | `/platform/machines/:id/seats/:seatId` | `owner`：清理一条**没有主人的席位**（Bot 已删、当时没拆掉）。Bot 还在的席位 409——那是「删 Bot」的事 |
 | GET | `/orgs/:id/sessions` | 会话索引检索，公司 admin |
 | GET | `/orgs/:id/sessions/:sessionId` | **现场**向机器拉全文，Gateway 不存，公司 admin |
 | GET | `/orgs/:id/audit` | 公司审计，公司 admin |
+| GET/PATCH | `/orgs/:id/conversation-audit-settings` | 对话审计设置；默认 `daily`，公司 admin 可切换 `utility` |
+| GET | `/orgs/:id/conversation-audits` `/orgs/:id/conversation-audits/:itemId` `/orgs/:id/conversation-audit-coverage` | 对话审计总结、详情与覆盖水位，公司 admin |
 | GET | `/me/stats` | 员工看自己的统计；admin / owner 看各自范围 |
 | GET | `/runtime/bots` | Gateway 目录名册，200 即使实例未上线；每条 `runtime` 或 null。`runtime` 里除了部署状态（`status`），还带**席位那台机器的通联状态** `machineLink`（`online` / `stale` / `offline` / `unpaired`，判据与平台机器页那盏灯同一份）与 `machineHeartbeatAge`：`status` 落库之后就不动了，答不了「那台机器现在还在不在」，而对话页抬头那盏灯问的正是后者。界面每 30 秒重拉一次这份名册 |
 | GET | `/runtime/bots/:id/session` 等 | 反代到**该 pair**；未部署 503 `实例还没上线` |
@@ -945,7 +955,7 @@ Bot 的 ready、索引等上报使用 `sat_`，部署绝不把 `smt_` 写入 `bo
 3. 一个 pair 的 `$SATUWORK_HOME` 不被另一个 pair 打开
 4. 聊天请求的 Host 是 Gateway，不是公司访问地址、也不是实例端口
 5. `/v1` 用 API Key 或登录 JWT 认人；`sat_` 不能调 `/v1`
-6. Gateway 磁盘上不出现会话事件正文（索引字段除外）
+6. Gateway 磁盘上不出现会话事件正文；只允许索引字段和脱敏、限长、不可还原全文的审计派生物
 7. 进入模型的内容必须能从**该实例**的 JSONL 重建（现有 session 规则）
 8. 全局 / 公司定义只读；改定义只发生在 Gateway，实例下次拉取生效
 9. 平台密钥不进浏览器、不进用户 JWT、不进 Bot 环境里的 provider key
@@ -955,6 +965,7 @@ Bot 的 ready、索引等上报使用 `sat_`，部署绝不把 `smt_` 写入 `bo
 13. 每个 Bot 有自己的 `provider` + `model`；发消息用这一对
 14. 席位按账号计；多部署几个 Bot 不多占席位
 15. `linuxUser` 只由 `accountId` 派生；席位靠 `seatId` 区分。同一员工的多个 bot 共用 uid 与 `~/work`，其余（`$SATUWORK_HOME`、Chrome profile、XDG 各目录、`XDG_RUNTIME_DIR`）一律按 `seatId` 隔离
+16. Bot 物理删除必须存在已完成的 `pre_delete` 批次；无会话也要有一笔 `empty` 终审
 
 ---
 

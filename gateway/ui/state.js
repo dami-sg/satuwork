@@ -33,7 +33,15 @@ const state = {
   sessionDetail: null,
   sessionEvents: null,
   sessionPullError: '',
-  auditTab: 'chats',
+  auditItems: [],
+  auditFilterOptions: { accounts: [], bots: [] },
+  auditAccountId: '',
+  auditBotId: '',
+  auditFrom: '',
+  auditTo: '',
+  auditItemDetail: null,
+  auditCoverage: [],
+  auditSettings: null,
   sessionAccountId: '',
   sessionFrom: '',
   sessionTo: '',
@@ -554,7 +562,7 @@ function pathAllowed(p) {
   if (p.startsWith('/companies/') && allowedHrefs().has('/companies')) return true
   if (p.startsWith('/users/') && allowedHrefs().has('/users')) return true
   if (p.startsWith('/machines/') && allowedHrefs().has('/machines')) return true
-  if (p.startsWith('/audit/') && allowedHrefs().has('/audit')) return true
+  if (p.startsWith('/audit/summary/') && allowedHrefs().has('/audit')) return true
   if (isChatPath(p)) return !isOwner()
   return false
 }
@@ -597,8 +605,13 @@ function userIdOfPath(p) {
 }
 
 function sessionIdOfPath(p) {
-  if (!p.startsWith('/audit/')) return ''
+  if (!p.startsWith('/audit/') || p.startsWith('/audit/summary/')) return ''
   return decodeURIComponent(p.slice('/audit/'.length).split('/')[0] || '')
+}
+
+function auditItemIdOfPath(p) {
+  if (!p.startsWith('/audit/summary/')) return ''
+  return decodeURIComponent(p.slice('/audit/summary/'.length).split('/')[0] || '')
 }
 
 /** 一级页面头上那个标题。二级页面走 crumbsOf()，不经过这里。 */
@@ -646,11 +659,11 @@ function crumbsOf(path) {
     const one = acc && acc.id === userIdOfPath(path) ? acc : null
     return { href: '/users', parent: t('用户'), current: one?.name || one?.email || t('账号详情') }
   }
-  if (path.startsWith('/audit/') && path !== '/audit') {
-    const row = state.sessionDetail
-    const id = sessionIdOfPath(path)
-    const one = row && (row.sessionId || row.id) === id ? row : null
-    return { href: '/audit', parent: t('审计'), current: one?.title || t('对话') }
+  if (path.startsWith('/audit/summary/')) {
+    const item = state.auditItemDetail?.item
+    const id = auditItemIdOfPath(path)
+    const one = item && item.id === id ? item : null
+    return { href: '/audit', parent: t('审计'), current: one?.taskSummary || t('审计总结') }
   }
   return null
 }
@@ -685,7 +698,7 @@ function pathOf() {
   if (p === '/bots' || p.startsWith('/bots/')) return p
   if (p === '/companies' || p.startsWith('/companies/')) return p
   if (p === '/users' || p.startsWith('/users/')) return p
-  if (p === '/audit' || p.startsWith('/audit/')) return p
+  if (p === '/audit' || p.startsWith('/audit/summary/')) return p
   if (p === '/chat' || p.startsWith('/a/')) return p
   if (p === '/costs') return '/billing'
   return PATHS[p] ? p : '/'

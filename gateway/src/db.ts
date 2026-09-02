@@ -4,8 +4,8 @@ import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
 import { type DiscoverySnapshot, emptySnapshot, parseDiscoverySnapshot } from './model-discovery.ts'
-import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Task, type TaskEvent, type TaskEventKind, type TaskExtractLog, type TaskExtractOutcome, type TaskField, type TaskState, TASK_PAGE_DEFAULT, TASK_PAGE_MAX, parseTaskState, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, taskOf, taskEventOf, taskExtractLogOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
+import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotDeletionRequest, type BotDeletionStatus, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type ConversationAuditBatch, type ConversationAuditBatchKind, type ConversationAuditItem, type ConversationAuditModelRole, type ConversationAuditOutcome, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Task, type TaskEvent, type TaskEventKind, type TaskExtractLog, type TaskExtractOutcome, type TaskField, type TaskState, TASK_PAGE_DEFAULT, TASK_PAGE_MAX, parseTaskState, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseConversationAuditSettings, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, releaseArch } from './db/types.ts'
+import { type Row, accountOf, auditOf, botDeletionRequestOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, conversationAuditBatchOf, conversationAuditItemOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, taskOf, taskEventOf, taskExtractLogOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -395,6 +395,9 @@ export class Db {
    */
   async deleteCompany(id: string): Promise<void> {
     await this.tx(async () => {
+    await this.run('delete from conversation_audit_items where "companyId" = ?', [id])
+    await this.run('delete from conversation_audit_batches where "companyId" = ?', [id])
+    await this.run('delete from bot_deletion_requests where "companyId" = ?', [id])
     await this.run('delete from groups where "companyId" = ?', [id])
     await this.run('delete from skill_tags where "companyId" = ?', [id])
     await this.run('delete from session_index where "companyId" = ?', [id])
@@ -2494,6 +2497,20 @@ export class Db {
    */
   async deleteBot(botId: string): Promise<void> {
     await this.tx(async () => {
+      // 物理删除只有删除状态机能走。这样未来新增调用点时，漏掉终审不是“靠 code review
+      // 发现”的约定，而是数据库入口当场拒绝的不变量。
+      const authorized = await this.one(
+        `select d.id from bot_deletion_requests d where d."botId"=? and d.status='purging'
+         and exists (
+           select 1 from conversation_audit_batches b where b."deletionRequestId"=d.id and b.kind='pre_delete'
+         )
+         and not exists (
+           select 1 from conversation_audit_batches b where b."deletionRequestId"=d.id
+           and b.status not in ('succeeded','empty')
+         ) order by d."requestedAt" desc limit 1`,
+        [botId],
+      )
+      if (!authorized) throw new Error('Bot 删除前审计尚未完成')
       await this.run('delete from session_index where "botId" = ?', [botId])
       await this.run('delete from instances where "botId" = ?', [botId])
       // 分组按 jsonb 反查，**不按公司**：全局 Bot 可能被好几家公司各自编进分组，
@@ -2592,6 +2609,7 @@ export class Db {
       botId: input.scope === 'user' ? (input.botId ?? null) : null,
       name: input.name,
       definition: input.definition ?? {},
+      deletingAt: null,
       createdAt: now,
       updatedAt: now,
     }
@@ -2609,11 +2627,11 @@ export class Db {
 
   async visibleCatalog(kind: CatalogKind, companyId: string | null): Promise<CatalogItem[]> {
     if (!companyId) {
-      const rows = await this.many("select * from catalog_items where kind = ? and scope = 'global' order by name", [kind])
+      const rows = await this.many("select * from catalog_items where kind = ? and scope = 'global' and \"deletingAt\" is null order by name", [kind])
       return rows.map(catalogOf)
     }
     const rows = await this.many(
-      "select * from catalog_items where kind = ? and (scope = 'global' or (scope = 'company' and \"companyId\" = ?)) order by scope, name",
+      "select * from catalog_items where kind = ? and \"deletingAt\" is null and (scope = 'global' or (scope = 'company' and \"companyId\" = ?)) order by scope, name",
       [kind, companyId],
     )
     return rows.map(catalogOf)
@@ -2732,11 +2750,11 @@ export class Db {
    */
   async botsFor(companyId: string | null, accountId: string): Promise<CatalogItem[]> {
     if (!companyId) {
-      const rows = await this.many("select * from catalog_items where kind = 'bot' and scope = 'global' order by name")
+      const rows = await this.many("select * from catalog_items where kind = 'bot' and scope = 'global' and \"deletingAt\" is null order by name")
       return rows.map(catalogOf)
     }
     const rows = await this.many(
-      `select * from catalog_items where kind = 'bot' and (
+      `select * from catalog_items where kind = 'bot' and "deletingAt" is null and (
          scope = 'global'
          or (scope = 'company' and "companyId" = ?)
          or (scope = 'user' and "accountId" = ?)
@@ -2754,7 +2772,7 @@ export class Db {
    */
   async companyBots(companyId: string): Promise<CatalogItem[]> {
     const rows = await this.many(
-      `select * from catalog_items where kind = 'bot' and (
+      `select * from catalog_items where kind = 'bot' and "deletingAt" is null and (
          scope = 'global' or "companyId" = ?
        ) order by scope, name`,
       [companyId],
@@ -2769,6 +2787,14 @@ export class Db {
       [accountId],
     )
     return Number((r as { n?: number } | undefined)?.n ?? 0)
+  }
+
+  async markBotDeleting(botId: string, deletingAt: number | null): Promise<CatalogItem | undefined> {
+    const r = await this.one(
+      'update catalog_items set "deletingAt" = ?, "updatedAt" = ? where id = ? and kind = \'bot\' returning *',
+      [deletingAt, Date.now(), botId],
+    )
+    return r ? catalogOf(r) : undefined
   }
 
   async deleteCatalog(id: string): Promise<void> {
@@ -3026,6 +3052,344 @@ export class Db {
     return rows.map(sessionIndexOf)
   }
 
+  // ── 自动对话审计 ────────────────────────────────────────────────────
+
+  /** 每个 (账号, Bot) 只取最近一条主会话索引。 */
+  async conversationAuditTargets(companyId?: string, botId?: string, includeDeleting = false): Promise<SessionIndex[]> {
+    const where = ['s."botId" is not null', 'c.kind = \'bot\'']
+    const args: unknown[] = []
+    if (companyId) { where.push('s."companyId" = ?'); args.push(companyId) }
+    if (botId) { where.push('s."botId" = ?'); args.push(botId) }
+    if (!includeDeleting) where.push('c."deletingAt" is null')
+    const rows = await this.many(
+      `select distinct on (s."accountId", s."botId") s.*
+       from session_index s join catalog_items c on c.id = s."botId"
+       where ${where.join(' and ')}
+       order by s."accountId", s."botId", s."updatedAt" desc, s."sessionId" desc`,
+      args,
+    )
+    return rows.map(sessionIndexOf)
+  }
+
+  async insertConversationAuditBatch(input: {
+    companyId: string
+    accountId: string
+    botId: string
+    sessionId: string
+    deletionRequestId?: string | null
+    kind: ConversationAuditBatchKind
+    windowStart: number
+    windowEnd: number
+    timezone: string
+    fromSeq?: number
+    modelRole: ConversationAuditModelRole
+    provider: string
+    model: string
+    reasoningEffort?: string
+    promptVersion?: number
+  }): Promise<ConversationAuditBatch> {
+    const now = Date.now()
+    const id = randomUUID()
+    const r = await this.one(
+      `insert into conversation_audit_batches
+       (id,"companyId","accountId","botId","sessionId","deletionRequestId",kind,"windowStart","windowEnd",timezone,
+        "fromSeq","toSeq",status,attempts,"nextTryAt","modelRole",provider,model,"reasoningEffort","promptVersion",
+        "redactionVersion","createdAt")
+       values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       on conflict ("accountId","botId",kind,"windowStart","windowEnd") do nothing returning *`,
+      [
+        id, input.companyId, input.accountId, input.botId, input.sessionId, input.deletionRequestId ?? null,
+        input.kind, input.windowStart, input.windowEnd, input.timezone, input.fromSeq ?? 0, 0, 'queued', 0, now,
+        input.modelRole, input.provider, input.model, parseReasoningEffort(input.reasoningEffort), input.promptVersion ?? 1, 1, now,
+      ],
+    )
+    if (r) return conversationAuditBatchOf(r)
+    const existing = await this.one(
+      `select * from conversation_audit_batches where "accountId"=? and "botId"=? and kind=?
+       and "windowStart"=? and "windowEnd"=?`,
+      [input.accountId, input.botId, input.kind, input.windowStart, input.windowEnd],
+    )
+    if (!existing) throw new Error('审计批次创建失败')
+    return conversationAuditBatchOf(existing)
+  }
+
+  async conversationAuditBatch(id: string): Promise<ConversationAuditBatch | undefined> {
+    const r = await this.one('select * from conversation_audit_batches where id = ?', [id])
+    return r ? conversationAuditBatchOf(r) : undefined
+  }
+
+  async claimConversationAuditBatch(now: number, leaseMs: number): Promise<ConversationAuditBatch | undefined> {
+    const r = await this.one(
+      `update conversation_audit_batches set status='leased', attempts=attempts+1,
+         "leaseUntil"=?, "startedAt"=coalesce("startedAt", ?), "lastError"=null
+       where id = (
+         select id from conversation_audit_batches
+         where ((status in ('queued','retry') and ("nextTryAt" is null or "nextTryAt" <= ?))
+            or (status in ('leased','processing') and "leaseUntil" < ?))
+         order by "createdAt" asc for update skip locked limit 1
+       ) returning *`,
+      [now + leaseMs, now, now, now],
+    )
+    return r ? conversationAuditBatchOf(r) : undefined
+  }
+
+  async markConversationAuditProcessing(id: string, leaseUntil: number): Promise<void> {
+    await this.run(
+      `update conversation_audit_batches set status='processing', "leaseUntil"=?
+       where id=? and status in ('leased','processing')`,
+      [leaseUntil, id],
+    )
+  }
+
+  async retryConversationAuditBatch(id: string, error: string, nextTryAt: number, dead = false): Promise<void> {
+    await this.run(
+      `update conversation_audit_batches set status=?, "lastError"=?, "nextTryAt"=?, "leaseUntil"=null
+       where id=? and status not in ('succeeded','empty')`,
+      [dead ? 'dead' : 'retry', error.slice(0, 500), dead ? null : nextTryAt, id],
+    )
+  }
+
+  async completeConversationAuditBatch(input: {
+    id: string
+    status: 'succeeded' | 'empty'
+    fromSeq: number
+    toSeq: number
+    eventCount: number
+    turnCount: number
+    sourceHash: string
+    resultHash: string
+    botName: string
+    accountName: string
+    retentionDays: number
+    items: Array<{
+      itemKey: string
+      firstSeq: number
+      lastSeq: number
+      startedAt: number | null
+      endedAt: number | null
+      taskSummary: string
+      timeline: { at: number; action: string }[]
+      userQuestion: string
+      modelAnswer: string
+      finalResult: string
+      outcome: ConversationAuditOutcome
+      modelScore: number | null
+      scoreBreakdown: Record<string, number>
+      scoreConfidence: number | null
+      evidence: string[]
+      riskFlags: string[]
+    }>
+  }): Promise<ConversationAuditBatch> {
+    return this.tx(async () => {
+      const cur = await this.conversationAuditBatch(input.id)
+      if (!cur) throw new Error('审计批次不存在')
+      if (cur.status === 'succeeded' || cur.status === 'empty') {
+        if (cur.resultHash !== input.resultHash || cur.sourceHash !== input.sourceHash) throw new Error('审计批次结果冲突')
+        return cur
+      }
+      const now = Date.now()
+      const expiresAt = now + Math.max(30, Math.min(3650, input.retentionDays)) * 86_400_000
+      for (const item of input.items) {
+        await this.run(
+          `insert into conversation_audit_items
+           (id,"batchId","companyId","accountId","botId","sessionId","botNameSnapshot","accountNameSnapshot",
+            "itemKey","firstSeq","lastSeq","startedAt","endedAt","taskSummary",timeline,"userQuestion","modelAnswer",
+            "finalResult",outcome,"modelScore","scoreBreakdown","scoreConfidence",evidence,"riskFlags","createdAt","expiresAt")
+           values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict do nothing`,
+          [
+            randomUUID(), cur.id, cur.companyId, cur.accountId, cur.botId, cur.sessionId, input.botName, input.accountName,
+            item.itemKey, item.firstSeq, item.lastSeq, item.startedAt, item.endedAt, item.taskSummary,
+            JSON.stringify(item.timeline), item.userQuestion, item.modelAnswer, item.finalResult, item.outcome,
+            item.modelScore, JSON.stringify(item.scoreBreakdown), item.scoreConfidence, JSON.stringify(item.evidence),
+            JSON.stringify(item.riskFlags), now, expiresAt,
+          ],
+        )
+      }
+      const r = await this.one(
+        `update conversation_audit_batches set status=?, "fromSeq"=?, "toSeq"=?, "eventCount"=?, "turnCount"=?,
+         "sourceHash"=?, "resultHash"=?, "leaseUntil"=null, "nextTryAt"=null, "lastError"=null, "completedAt"=?
+         where id=? returning *`,
+        [input.status, input.fromSeq, input.toSeq, input.eventCount, input.turnCount, input.sourceHash, input.resultHash, now, cur.id],
+      )
+      return conversationAuditBatchOf(r!)
+    })
+  }
+
+  async conversationAuditCoverage(accountId: string, botId: string): Promise<{ toSeq: number; windowEnd: number }> {
+    const r = await this.one(
+      `select coalesce(max("toSeq"),0) as "toSeq", coalesce(max("windowEnd"),0) as "windowEnd"
+       from conversation_audit_batches where "accountId"=? and "botId"=? and status in ('succeeded','empty')`,
+      [accountId, botId],
+    )
+    return { toSeq: num(r?.toSeq || 0), windowEnd: num(r?.windowEnd || 0) }
+  }
+
+  async conversationAuditBatchesOfDeletion(requestId: string): Promise<ConversationAuditBatch[]> {
+    const rows = await this.many(
+      'select * from conversation_audit_batches where "deletionRequestId"=? order by "accountId", "createdAt"',
+      [requestId],
+    )
+    return rows.map(conversationAuditBatchOf)
+  }
+
+  async conversationAuditItems(companyId: string, filter: {
+    accountId?: string
+    botId?: string
+    from?: number
+    to?: number
+    outcome?: ConversationAuditOutcome
+    scoreLte?: number
+    limit?: number
+  } = {}): Promise<ConversationAuditItem[]> {
+    const where = ['"companyId" = ?']
+    const args: unknown[] = [companyId]
+    if (filter.accountId) { where.push('"accountId" = ?'); args.push(filter.accountId) }
+    if (filter.botId) { where.push('"botId" = ?'); args.push(filter.botId) }
+    if (filter.from != null) { where.push('coalesce("endedAt","createdAt") >= ?'); args.push(filter.from) }
+    if (filter.to != null) { where.push('coalesce("endedAt","createdAt") <= ?'); args.push(filter.to) }
+    if (filter.outcome) { where.push('outcome = ?'); args.push(filter.outcome) }
+    if (filter.scoreLte != null) { where.push('"modelScore" <= ?'); args.push(filter.scoreLte) }
+    args.push(Math.min(200, Math.max(1, Math.trunc(filter.limit ?? 100))))
+    const rows = await this.many(
+      `select * from conversation_audit_items where ${where.join(' and ')}
+       order by coalesce("endedAt","createdAt") desc, id desc limit ?`,
+      args,
+    )
+    return rows.map(conversationAuditItemOf)
+  }
+
+  /**
+   * 审计总结的筛选项来自审计快照，不从当前账号 / Bot 名册现算。
+   *
+   * Bot 删除后审计仍然保留；如果下拉只读 catalog，那颗已删除 Bot 的历史总结就再也
+   * 筛不出来。员工离职同理。每个 id 取最近一条快照，既保留历史对象，也让改名后的
+   * 显示尽量接近最后一次审计时的名字。
+   */
+  async conversationAuditFilterOptions(companyId: string): Promise<{
+    accounts: { id: string; name: string }[]
+    bots: { id: string; name: string }[]
+  }> {
+    const [accounts, bots] = await Promise.all([
+      this.many(
+        `select distinct on ("accountId") "accountId", "accountNameSnapshot"
+         from conversation_audit_items where "companyId"=?
+         order by "accountId", "createdAt" desc, id desc`,
+        [companyId],
+      ),
+      this.many(
+        `select distinct on ("botId") "botId", "botNameSnapshot"
+         from conversation_audit_items where "companyId"=?
+         order by "botId", "createdAt" desc, id desc`,
+        [companyId],
+      ),
+    ])
+    return {
+      accounts: accounts
+        .map((row) => ({ id: str(row.accountId), name: str(row.accountNameSnapshot) }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      bots: bots
+        .map((row) => ({ id: str(row.botId), name: str(row.botNameSnapshot) }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    }
+  }
+
+  async conversationAuditItem(id: string): Promise<ConversationAuditItem | undefined> {
+    const r = await this.one('select * from conversation_audit_items where id = ?', [id])
+    return r ? conversationAuditItemOf(r) : undefined
+  }
+
+  async conversationAuditCoverageOfCompany(companyId: string): Promise<ConversationAuditBatch[]> {
+    const rows = await this.many(
+      `select distinct on ("accountId","botId") * from conversation_audit_batches
+       where "companyId"=? order by "accountId","botId","windowEnd" desc,"createdAt" desc`,
+      [companyId],
+    )
+    return rows.map(conversationAuditBatchOf)
+  }
+
+  async deleteExpiredConversationAudits(now = Date.now()): Promise<number> {
+    return await this.run('delete from conversation_audit_items where "expiresAt" < ?', [now])
+  }
+
+  // ── Bot 删除状态机 ──────────────────────────────────────────────────
+
+  async botDeletion(id: string): Promise<BotDeletionRequest | undefined> {
+    const r = await this.one('select * from bot_deletion_requests where id = ?', [id])
+    return r ? botDeletionRequestOf(r) : undefined
+  }
+
+  async liveBotDeletion(botId: string): Promise<BotDeletionRequest | undefined> {
+    const r = await this.one(
+      `select * from bot_deletion_requests where "botId"=?
+       and status in ('freezing','auditing','ready_to_purge','purging','failed') order by "requestedAt" desc limit 1`,
+      [botId],
+    )
+    return r ? botDeletionRequestOf(r) : undefined
+  }
+
+  async createBotDeletion(input: {
+    companyId: string
+    accountId?: string | null
+    botId: string
+    botName: string
+    requestedBy: string
+  }): Promise<BotDeletionRequest> {
+    return this.tx(async () => {
+      const existing = await this.liveBotDeletion(input.botId)
+      if (existing) return existing
+      const now = Date.now()
+      const id = randomUUID()
+      const r = await this.one(
+        `insert into bot_deletion_requests
+         (id,"companyId","accountId","botId","botNameSnapshot","requestedBy",status,"cutoffAt",
+          "targetCount","auditedCount",attempts,"nextTryAt",orphans,"requestedAt")
+         values (?,?,?,?,?,?,?,?,?,?,?,?,?,?) returning *`,
+        [id, input.companyId, input.accountId ?? null, input.botId, input.botName, input.requestedBy,
+          'freezing', now, 0, 0, 0, now, '[]', now],
+      )
+      await this.run('update catalog_items set "deletingAt"=?, "updatedAt"=? where id=? and kind=\'bot\'', [now, now, input.botId])
+      await this.run(
+        `update conversation_audit_batches set status='dead', "lastError"='已由删除终审批次接管',
+         "leaseUntil"=null, "nextTryAt"=null
+         where "botId"=? and kind='scheduled' and status not in ('succeeded','empty','dead')`,
+        [input.botId],
+      )
+      return botDeletionRequestOf(r!)
+    })
+  }
+
+  async updateBotDeletion(id: string, patch: {
+    status?: BotDeletionStatus
+    targetCount?: number
+    auditedCount?: number
+    attempts?: number
+    nextTryAt?: number | null
+    lastError?: string | null
+    orphans?: { seatId: string; error: string }[]
+    auditCompletedAt?: number | null
+    deletedAt?: number | null
+  }): Promise<BotDeletionRequest> {
+    const cur = await this.botDeletion(id)
+    if (!cur) throw new Error('删除请求不存在')
+    const next = { ...cur, ...patch }
+    const r = await this.one(
+      `update bot_deletion_requests set status=?, "targetCount"=?, "auditedCount"=?, attempts=?,
+       "nextTryAt"=?, "lastError"=?, orphans=?, "auditCompletedAt"=?, "deletedAt"=? where id=? returning *`,
+      [next.status, next.targetCount, next.auditedCount, next.attempts, next.nextTryAt, next.lastError,
+        JSON.stringify(next.orphans), next.auditCompletedAt, next.deletedAt, id],
+    )
+    return botDeletionRequestOf(r!)
+  }
+
+  async dueBotDeletions(now = Date.now(), limit = 20): Promise<BotDeletionRequest[]> {
+    const rows = await this.many(
+      `select * from bot_deletion_requests where status in ('freezing','auditing','ready_to_purge','purging','failed')
+       and ("nextTryAt" is null or "nextTryAt" <= ?) order by "requestedAt" asc limit ?`,
+      [now, limit],
+    )
+    return rows.map(botDeletionRequestOf)
+  }
+
   // ── 公司模型角色（日常 / utility）。不存密钥。────────────────────────
 
   async settings(companyId: string): Promise<CompanySettings> {
@@ -3035,6 +3399,7 @@ export class Db {
     return {
       daily: { provider: String(raw.daily?.provider ?? ''), model: String(raw.daily?.model ?? ''), reasoningEffort: parseReasoningEffort(raw.daily?.reasoningEffort) },
       utility: { provider: String(raw.utility?.provider ?? ''), model: String(raw.utility?.model ?? ''), reasoningEffort: parseReasoningEffort(raw.utility?.reasoningEffort) },
+      conversationAudit: parseConversationAuditSettings(raw.conversationAudit),
     }
   }
 
@@ -3043,6 +3408,7 @@ export class Db {
     const payload = JSON.stringify({
       daily: { provider: next.daily.provider, model: next.daily.model, reasoningEffort: parseReasoningEffort(next.daily.reasoningEffort) },
       utility: { provider: next.utility.provider, model: next.utility.model, reasoningEffort: parseReasoningEffort(next.utility.reasoningEffort) },
+      conversationAudit: parseConversationAuditSettings(next.conversationAudit),
     })
     await this.run(
       'insert into settings ("companyId", payload, "updatedAt") values (?,?,?) on conflict ("companyId") do update set payload=excluded.payload, "updatedAt"=excluded."updatedAt"',

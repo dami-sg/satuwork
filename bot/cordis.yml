@@ -121,5 +121,8 @@
 # 它不注册任何工具——模型碰不到这块板，板也驱动不了任何执行（不变量 1）。
 - name: './src/task-extract/index.ts'
 
+# 公司自动对话审计：Gateway 定窗口和模型，席位只读本地 JSONL、脱敏总结并可靠上报。
+- name: './src/conversation-audit/index.ts'
+
 # HTTP API（无 SPA）。对话 UI 在 Gateway。
 - name: './src/web/index.ts'
