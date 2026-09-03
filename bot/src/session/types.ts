@@ -12,6 +12,12 @@ export const SESSION_FORMAT_VERSION = 5
 /** 会话根上的 Bot 来源。M1 只有 local；company / global 是物化预留。 */
 export type SessionOrigin = 'local' | 'company' | 'global'
 
+export interface ChannelSessionMeta {
+  kind: 'telegram' | 'wechat_official' | 'wecom'
+  bindingId: string
+  conversationId: string
+}
+
 /** 每条事件共有的信封。 */
 export interface EventEnvelope<T extends keyof SessionEventMap = keyof SessionEventMap> {
   /** 会话内单调递增，从 1 开始。 */
@@ -100,6 +106,8 @@ export interface SessionEventMap {
     origin: SessionOrigin
     /** origin 不是 local 时，Gateway 上的定义 id。M1 用不到。 */
     remoteId?: string
+    /** 外部渠道会话。Bot 来源仍由 origin/remoteId 表示，这里不能复用那两个字段。 */
+    channel?: ChannelSessionMeta
     /**
      * `task` = 一次委派开出来的子会话（docs/delegation.md）。缺省按 `main` 读。
      *
@@ -496,6 +504,11 @@ export interface SessionEventMap {
     step: number
     callId: string
     text: string
+    /**
+     * 工具原文过大时，text 仍保存完整审计内容；模型回放只使用这份受控文本。
+     * 老日志没有该字段，回放层会即时套同一套预算。
+     */
+    modelText?: string
     /** 管道层失败（抛异常、超时、执行前被拒）。业务失败请写进 text。 */
     failed: boolean
     /**

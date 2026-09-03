@@ -142,6 +142,38 @@ export async function runChatFold({ root, test, assert, log }) {
     )
   })
 
+  await test('Web 和 Telegram 在同一会话中混合，问答都带本轮来源', async () => {
+    const events = [
+      ev(1, 'session', { version: 5, id: 's1', botId: 'telegram-bot', createdAt: T }),
+      ev(2, 'user/message', { message: um('Web 问题'), source: { kind: 'user' } }),
+      ev(3, 'turn/start', { turn: 1 }),
+      ev(4, 'assistant/message', { turn: 1, message: am('Web 回答'), usage }),
+      ev(5, 'turn/end', { turn: 1, reason: 'completed' }),
+      ev(6, 'user/message', {
+        message: um('Telegram 问题'),
+        source: { kind: 'plugin', plugin: 'channel', channel: 'telegram', form: 'update-1' },
+      }),
+      ev(7, 'turn/start', { turn: 2 }),
+      ev(8, 'assistant/message', { turn: 2, message: am('Telegram 回答'), usage }),
+      ev(9, 'turn/end', { turn: 2, reason: 'completed' }),
+    ]
+    const blocks = fold(events).blocks.filter((b) => b.kind === 'user' || b.kind === 'assistant')
+    assert(blocks.map((b) => b.text).join('|') === 'Web 问题|Web 回答|Telegram 问题|Telegram 回答', `混合顺序不对：${blocks.map((b) => b.text)}`)
+    assert(blocks.map((b) => b.via).join(',') === 'web,web,telegram,telegram', `来源继承不对：${blocks.map((b) => b.via)}`)
+  })
+
+  await test('普通 Bot 的 Web 对话不显示 channel 标签', async () => {
+    const events = [
+      ev(1, 'session', { version: 5, id: 's1', botId: 'ordinary-bot', createdAt: T }),
+      ev(2, 'user/message', { message: um('普通问题'), source: { kind: 'user' } }),
+      ev(3, 'turn/start', { turn: 1 }),
+      ev(4, 'assistant/message', { turn: 1, message: am('普通回答'), usage }),
+      ev(5, 'turn/end', { turn: 1, reason: 'completed' }),
+    ]
+    const blocks = fold(events).blocks.filter((b) => b.kind === 'user' || b.kind === 'assistant')
+    assert(blocks.every((b) => !b.via), `普通 Bot 不应有 channel 标签：${blocks.map((b) => b.via)}`)
+  })
+
   await test('分割线走 html 行，不套气泡的壳', async () => {
     const events = twoTurns().concat([ev(6, 'session/reset', { throughSeq: 5, from: T, to: T + 5000, droppedMessages: 2, by: 'user' })])
     state.chatEvents = events

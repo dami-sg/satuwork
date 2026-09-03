@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotDeletionRequest, BotRelease, CatalogItem, CatalogKind, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, ConversationAuditBatch, ConversationAuditItem, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseConversationAuditSettings, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, Task, TaskEvent, TaskExtractLog, parseTaskEventKind, parseTaskExtractOutcome, parseTaskFields, parseTaskState } from './types.ts'
+import { Account, AuditEvent, BotDeletionRequest, BotRelease, CatalogItem, CatalogKind, ChannelBinding, ChannelEvent, ChannelIdentity, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, ConversationAuditBatch, ConversationAuditItem, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseConversationAuditSettings, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, Task, TaskEvent, TaskExtractLog, parseTaskEventKind, parseTaskExtractOutcome, parseTaskFields, parseTaskState } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -82,6 +82,48 @@ export function accountOf(r: Row): Account {
     tokenRevokedAt: numOrNull(r.tokenRevokedAt),
     createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt),
+  }
+}
+
+export function channelBindingOf(r: Row): ChannelBinding {
+  const kind = str(r.kind)
+  const status = str(r.status)
+  return {
+    id: str(r.id), companyId: str(r.companyId), accountId: str(r.accountId), botId: str(r.botId),
+    kind: kind === 'wechat_official' || kind === 'wecom' ? kind : 'telegram',
+    status: status === 'binding' || status === 'paused' || status === 'error' ? status : 'active',
+    externalBotId: str(r.externalBotId), externalUsername: str(r.externalUsername || ''),
+    credentialCiphertext: str(r.credentialCiphertext), webhookSecretHash: str(r.webhookSecretHash),
+    publicId: str(r.publicId), pairingCodeHash: str(r.pairingCodeHash || ''),
+    pollOffset: num(r.pollOffset || 0), pollLeaseUntil: numOrNull(r.pollLeaseUntil),
+    lastPolledAt: numOrNull(r.lastPolledAt), pollLastError: strOrNull(r.pollLastError),
+    config: jsonOf(r.config) as ChannelBinding['config'],
+    lastReceivedAt: numOrNull(r.lastReceivedAt), lastError: strOrNull(r.lastError),
+    createdAt: num(r.createdAt), updatedAt: num(r.updatedAt),
+  }
+}
+
+export function channelIdentityOf(r: Row): ChannelIdentity {
+  return {
+    id: str(r.id), bindingId: str(r.bindingId), externalUserId: str(r.externalUserId),
+    externalUsername: str(r.externalUsername || ''), externalDisplayName: str(r.externalDisplayName || ''),
+    pairedEventId: str(r.pairedEventId), pairedAt: num(r.pairedAt), lastSeenAt: num(r.lastSeenAt),
+  }
+}
+
+export function channelEventOf(r: Row): ChannelEvent {
+  const statuses = new Set(['pending', 'processing', 'ready', 'retry', 'delivered', 'dead'])
+  const status = str(r.status)
+  return {
+    id: str(r.id), bindingId: str(r.bindingId), externalEventId: str(r.externalEventId),
+    externalConversationId: str(r.externalConversationId), remoteUserId: str(r.remoteUserId || ''),
+    remoteDisplayName: str(r.remoteDisplayName || ''), title: str(r.title || ''), text: str(r.text),
+    status: (statuses.has(status) ? status : 'pending') as ChannelEvent['status'], attempts: num(r.attempts),
+    nextTryAt: numOrNull(r.nextTryAt), leaseUntil: numOrNull(r.leaseUntil), leaseToken: str(r.leaseToken || ''),
+    approvalKey: str(r.approvalKey || ''), approvalMessageId: numOrNull(r.approvalMessageId),
+    sessionId: strOrNull(r.sessionId),
+    reply: str(r.reply || ''), lastError: strOrNull(r.lastError), createdAt: num(r.createdAt),
+    updatedAt: num(r.updatedAt), deliveredAt: numOrNull(r.deliveredAt),
   }
 }
 

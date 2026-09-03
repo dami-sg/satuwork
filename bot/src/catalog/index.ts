@@ -115,6 +115,8 @@ interface RemoteServer {
   timeoutMs?: number
   /** 「仅 @ 时可用」：连上、也注册工具，但不进默认工具表。 */
   mentionOnly?: boolean
+  /** 有值表示这是账号连接器合成的服务器；Web 的 @ 选单也只展示这一类。 */
+  connector?: string
 }
 
 export interface CachedSkill {
@@ -253,6 +255,7 @@ interface CachedServer {
   enabled: boolean
   timeoutMs?: number
   mentionOnly?: boolean
+  connector?: string
   createdAt: number
   updatedAt: number
 }
@@ -266,6 +269,8 @@ export interface ServerStatus {
   tools: string[]
   /** 「仅 @ 时可用」。连着，但不进默认工具表。 */
   mentionOnly?: boolean
+  /** 连接器 toolkit；普通公司 MCP 没有，不应进入用户的 @ 选单。 */
+  connector?: string
   error?: string
 }
 
@@ -382,6 +387,7 @@ export class CatalogService extends Service {
         enabled: s.enabled,
         connected: s.connected,
         tools: s.tools,
+        ...(s.connector ? { connector: s.connector } : {}),
         ...(s.error ? { error: s.error } : {}),
       })),
     }
@@ -737,6 +743,7 @@ export class CatalogService extends Service {
         enabled: s.enabled !== false,
         ...(Number.isFinite(Number(s.timeoutMs)) && Number(s.timeoutMs) > 0 ? { timeoutMs: Math.trunc(Number(s.timeoutMs)) } : {}),
         ...(s.mentionOnly === true ? { mentionOnly: true } : {}),
+        ...(typeof s.connector === 'string' && s.connector ? { connector: s.connector } : {}),
         createdAt: prev?.createdAt ?? now,
         updatedAt: now,
       })
@@ -838,7 +845,7 @@ export class CatalogService extends Service {
     for (const row of rows) {
       const s = row.value
       if (!s.enabled) {
-        statuses.push({ id: s.id, name: s.name, kind: s.kind, enabled: false, connected: false, tools: [] })
+        statuses.push({ id: s.id, name: s.name, kind: s.kind, enabled: false, connected: false, tools: [], ...(s.connector ? { connector: s.connector } : {}) })
         continue
       }
       if (s.kind === 'stdio') {
@@ -851,6 +858,7 @@ export class CatalogService extends Service {
           connected: false,
           tools: [],
           error: 'stdio 不支持',
+          ...(s.connector ? { connector: s.connector } : {}),
         })
         continue
       }
@@ -870,6 +878,7 @@ export class CatalogService extends Service {
           connected: false,
           tools: [],
           error: (e as Error).message,
+          ...(s.connector ? { connector: s.connector } : {}),
         })
       }
     }
@@ -890,7 +899,11 @@ export class CatalogService extends Service {
       }
       this.clients.set(s.id, client)
       if (s.mentionOnly) this.mentionOnly.add(s.id)
-      statuses.push({ id: s.id, name: s.name, kind: s.kind, enabled: true, connected: true, tools: names, ...(s.mentionOnly ? { mentionOnly: true } : {}) })
+      statuses.push({
+        id: s.id, name: s.name, kind: s.kind, enabled: true, connected: true, tools: names,
+        ...(s.mentionOnly ? { mentionOnly: true } : {}),
+        ...(s.connector ? { connector: s.connector } : {}),
+      })
     }
     this.servers = statuses
     this.mcpRetryAt = failed ? Date.now() + CatalogService.MCP_RETRY_MS : 0

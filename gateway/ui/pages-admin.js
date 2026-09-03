@@ -968,14 +968,17 @@ function providerModelsModal() {
   const d = state.modelDraft
   const rows = (p.models || [])
     .map(
-      (m) => `<div class="satu-provrow" style="grid-template-columns: 2fr 1fr 1fr 88px;">
+      (m) => `<div class="satu-provrow" style="grid-template-columns: 2fr 1fr 1fr 112px;">
         <div style="min-width: 0;">
           <div style="font-size: 13.5px; font-weight: 600;">${esc(m.name)}</div>
           <div style="font-size: 12px; color: var(--muted-foreground);">${esc(m.id)}</div>
         </div>
         <span style="font-size: 12px; color: var(--muted-foreground);">${esc(tokens(m.contextWindow))} / ${esc(tokens(m.maxTokens))}</span>
         <span style="font-size: 12px; color: var(--muted-foreground);">${esc(money(m.cost?.input))} / ${esc(money(m.cost?.output))}<br>${t('缓存', 'cache')} ${esc(money(m.cost?.cacheRead || m.cost?.input))} / ${esc(money(m.cost?.cacheWrite || m.cost?.input))}</span>
-        <button type="button" class="satu-linkbtn" data-act="prov-model-del" data-model="${esc(m.id)}">${t('删除')}</button>
+        <div style="display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2);">
+          <button type="button" class="satu-linkbtn" data-act="prov-model-edit" data-model="${esc(m.id)}">${t('编辑')}</button>
+          <button type="button" class="satu-linkbtn" data-act="prov-model-del" data-model="${esc(m.id)}">${t('删除')}</button>
+        </div>
       </div>`,
     )
     .join('')
@@ -993,8 +996,8 @@ function providerModelsModal() {
         ${
           d
             ? `<div class="satu-panel">
-          <span class="satu-panel-title">${t('新模型')}</span>
-          <div class="field"><label>${t('模型 id')}</label><input class="input" data-act="model-field" data-field="id" value="${esc(d.id)}" placeholder="my-model" autocomplete="off"></div>
+          <span class="satu-panel-title">${d.editing ? t('编辑模型', 'Edit model') : t('新模型')}</span>
+          <div class="field"><label>${t('模型 id')}</label><input class="input" data-act="model-field" data-field="id" value="${esc(d.id)}" placeholder="my-model" autocomplete="off" ${d.editing ? 'disabled' : ''}>${d.editing ? `<span style="font-size: 12px; color: var(--muted-foreground);">${t('模型 id 建好后不能改，避免已配置的模型角色和用量记录失去引用。', 'The model id is immutable so configured roles and usage records keep their reference.')}</span>` : ''}</div>
           <div class="field"><label>${t('名称')}</label><input class="input" data-act="model-field" data-field="name" value="${esc(d.name)}" placeholder="My Model" autocomplete="off"></div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3);">
             <div class="field"><label>${t('上下文窗口')}</label><input class="input" type="number" min="1" data-act="model-field" data-field="contextWindow" value="${esc(d.contextWindow)}"></div>
@@ -1015,7 +1018,7 @@ function providerModelsModal() {
           </div>
           <div style="display: flex; justify-content: flex-end; gap: var(--space-2);">
             <button type="button" class="btn btn-ghost" data-act="prov-model-cancel">${t('取消')}</button>
-            <button type="button" class="btn btn-primary" data-act="prov-model-save" ${state.busy ? 'disabled' : ''}>${t('添加')}</button>
+            <button type="button" class="btn btn-primary" data-act="prov-model-save" ${state.busy ? 'disabled' : ''}>${d.editing ? t('保存') : t('添加')}</button>
           </div>
         </div>`
             : `<button type="button" class="btn btn-secondary" data-act="prov-model-new">${t('添加模型')}</button>`

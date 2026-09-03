@@ -136,6 +136,7 @@ const PATHS = {
   '/chat': { title: '对话' },
   '/handoffs': { title: '转人工待办' },
   '/tasks': { title: '任务看板' },
+  '/channels': { title: '渠道' },
 }
 
 const ICONS = {

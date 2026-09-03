@@ -107,4 +107,13 @@ export async function runCompact({ root, test, assert, log }) {
     assert(r.rows.hasToolOutput, '工具结果没出现在历史里')
     assert(r.rows.ordered, '历史行不是按时间升序的')
   })
+
+  await test('超大 Gmail 结果保留审计原文，但模型与旧日志回放都受预算控制', () => {
+    assert(r.resultBudget.rawChars > 1_000_000, `用例没有造出足够大的结果：${r.resultBudget.rawChars}`)
+    assert(r.resultBudget.rawPreserved, '完整工具原文没有保留下来')
+    assert(r.resultBudget.payloadRemoved, '邮件列表仍把重复 payload 送进模型')
+    assert(r.resultBudget.underHardLimit, `模型工具结果仍超上限：${r.resultBudget.modelChars}`)
+    assert(r.resultBudget.oldLogSlimmed, '没有 modelText 的旧会话在回放时没有即时瘦身')
+    assert(r.resultBudget.promptHighWater === 665_223, `真实 prompt 高水位算成了 ${r.resultBudget.promptHighWater}`)
+  })
 }

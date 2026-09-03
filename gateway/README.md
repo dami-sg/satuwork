@@ -2,7 +2,7 @@
 
 Control plane and the only chat UI: companies, accounts, plans, seats, catalogs, JWT, chat proxy, `/v1`.
 Default listen port is 3080. Business data lives in **PostgreSQL**; the data dir
-(`SATUWORK_GATEWAY_HOME`, default `~/.satuwork-gateway`) only holds the JWT keypair and Bot release tarballs.
+(`SATUWORK_GATEWAY_HOME`, default `~/.satuwork-gateway`) only holds local wrapping keys and Bot release tarballs.
 
 控制面 + 聊天 UI：公司、账号、套餐、席位、目录、JWT、按 pair 部署、把 SSE/消息反代到该席位实例。
 
@@ -27,6 +27,17 @@ docker compose up -d
 `GATEWAY_DATABASE_URL` 必填（没有默认值，缺了会直接报错并给出示例）。其余见 `.env.example`：
 `GATEWAY_HOST`、`GATEWAY_PORT`、`GATEWAY_PG_SCHEMA`、`GATEWAY_ACCESS_HOST`、`GATEWAY_JWT_TTL_SECONDS`、
 `GATEWAY_ISS`、`GATEWAY_MACHINE_TOKEN`、`GATEWAY_PLATFORM_TOKEN`。
+
+Telegram 渠道使用 `getUpdates` 长轮询，不需要公网地址。用户在「任务看板」下方的「渠道」页
+粘贴 BotFather token 后，Gateway 会验证 token、关闭该 Bot 原有 Webhook、加密保存凭据，并
+自动创建一颗名为 `telegram bot` 的用户 Bot。页面同时生成一次性配对码：必须先在 Telegram
+私聊里发送该码，之后只有这个 Telegram 用户发出的私聊消息才会进入模型；被拉进群或频道时会自动退出。
+Telegram 和 Web 共用该 Bot 的同一条主会话，页面中的每轮问答分别带 `Telegram` 或 `Web` 来源标签。Bot 回复使用
+Telegram 原生 `sendRichMessage` 和 `rich_message.markdown`，标题、列表、表格、任务项、引用与代码块会由
+Telegram 客户端渲染；每轮回复附带最新任务清单，也可用 `/tasks` 查看。消息开头支持
+`@连接名`（`/mentions` 查看可用名称），`/new` 与 Web 一样在同一会话上重置上下文。
+旧版 Bot API 会自动降级为普通文本。微信目前只保留
+微信公众号/企业微信官方 API 的扩展位，不接个人微信模拟协议。
 
 进程**不读 `.env`**，要用得 `node --env-file=.env --import tsx src/index.ts`。
 

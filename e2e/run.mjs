@@ -72,6 +72,9 @@ import { runConversationAudit } from './conversation-audit.mjs'
 import { runBotTemplate } from './bot-template.mjs'
 import { runManager } from './manager.mjs'
 import { runManagerConfirm } from './manager-confirm.mjs'
+import { runChannels } from './channels.mjs'
+import { runTelegramRich } from './telegram-rich.mjs'
+import { runTelegramChannel } from './telegram-channel.mjs'
 import { PG_URL, requirePg } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePort } from './ports.mjs'
@@ -133,6 +136,7 @@ function assert(cond, msg) {
  */
 const TEST_TIMEOUT_MS = Number(process.env.E2E_TEST_TIMEOUT_MS) || 120_000
 const SUITE_TIMEOUT_MS = Number(process.env.E2E_SUITE_TIMEOUT_MS) || 420_000
+const ONLY_SUITES = new Set(String(process.env.E2E_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean))
 
 async function test(name, fn) {
   try {
@@ -153,6 +157,7 @@ async function test(name, fn) {
  * Gateway 会让后面每个套件各报一堆假失败，那种噪音比早点停下更糟。
  */
 async function suite(name, fn) {
+  if (ONLY_SUITES.size && !ONLY_SUITES.has(name)) return
   const t0 = Date.now()
   try {
     await withDeadline(Promise.resolve().then(fn), `套件 ${name}`, SUITE_TIMEOUT_MS)
@@ -3305,6 +3310,9 @@ async function main() {
     await suite('bot-template', () => runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager', () => runManager({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('manager-confirm', () => runManagerConfirm({ root, test, assert, log }))
+    await suite('channels', () => runChannels({ gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('telegram-rich', () => runTelegramRich({ root, test, assert, log }))
+    await suite('telegram-channel', () => runTelegramChannel({ root, test, assert, log }))
     await suite('ui-smoke', () => runUiSmoke({ root, gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('ui-files', () => runUiFiles({ root, test, assert, log }))
     await suite('markdown', () => runMarkdown({ root, test, assert, log }))

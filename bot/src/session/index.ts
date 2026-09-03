@@ -7,6 +7,7 @@ import { satuworkHome } from '../home.ts'
 import {
   SESSION_FORMAT_VERSION,
   type EventEnvelope,
+  type ChannelSessionMeta,
   type SessionEvent,
   type SessionEventMap,
   type SessionOrigin,
@@ -34,6 +35,7 @@ export interface CreateSession {
   origin?: SessionOrigin
   remoteId?: string
   title?: string
+  channel?: ChannelSessionMeta
   /**
    * `task` = 一次委派开出来的子会话（docs/delegation.md）。默认 `main`。
    *
@@ -109,6 +111,7 @@ export class SessionService extends Service {
       botId: opts.botId,
       origin: opts.origin ?? 'local',
       ...(opts.remoteId ? { remoteId: opts.remoteId } : {}),
+      ...(opts.channel ? { channel: opts.channel } : {}),
       ...(opts.kind && opts.kind !== 'main' ? { kind: opts.kind, parent: opts.parent } : {}),
     })
     return id
@@ -153,7 +156,7 @@ export class SessionService extends Service {
    * 要连它们一起看（调试、清理）传 `{ tasks: true }`。
    */
   async list(opts: { tasks?: boolean } = {}): Promise<
-    { id: string; title: string; createdAt: number; botId?: string; kind?: 'main' | 'task' | 'card' }[]
+    { id: string; title: string; createdAt: number; botId?: string; kind?: 'main' | 'task' | 'card'; channel?: ChannelSessionMeta }[]
   > {
     if (!existsSync(this.root)) return []
     const files = (await readdir(this.root)).filter((f) => f.endsWith('.jsonl'))
@@ -170,6 +173,7 @@ export class SessionService extends Service {
           botId?: string
           agentId?: string
           kind?: 'main' | 'task' | 'card'
+          channel?: ChannelSessionMeta
         }
         if (data.kind && data.kind !== 'main' && !opts.tasks) return null
         return {
@@ -181,6 +185,7 @@ export class SessionService extends Service {
           createdAt: data.createdAt,
           botId: data.botId ?? data.agentId,
           ...(data.kind ? { kind: data.kind } : {}),
+          ...(data.channel ? { channel: data.channel } : {}),
         }
       }),
     )

@@ -1105,6 +1105,42 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(ui.html().includes('模型 1'), '行上的模型计数没更新')
     })
 
+    await test('自定义模型能打开原值并编辑，不会追加出重复模型', async () => {
+      const ui = await boot(ownerToken)
+      ui.state.path = '/providers'
+      await ui.loadCustomProviders()
+      ui.state.modelsFor = 'my-llm'
+      await ui.fire('click', el('button', { 'data-act': 'prov-model-edit', 'data-model': 'm1' }))
+      const d = ui.state.modelDraft
+      assert(d?.editing && d.originalId === 'm1', `没进入编辑态：${JSON.stringify(d)}`)
+      assert(d.name === 'M One' && d.contextWindow === 65536 && d.costInput === 1.5, `原值没带进表单：${JSON.stringify(d)}`)
+      assert(d.reasoning === true && d.image === false, '模型能力没有还原到表单')
+      const editHtml = ui.html()
+      assert(editHtml.includes('编辑模型'), '编辑表单没有明确标题')
+      assert(/data-field="id"[^>]*disabled/.test(editHtml), '编辑时模型 id 仍然能改，会弄丢已有引用')
+
+      Object.assign(d, {
+        name: 'M One Updated',
+        contextWindow: 131072,
+        maxTokens: 8192,
+        costInput: 2,
+        costOutput: 4,
+        costCacheRead: 0.2,
+        costCacheWrite: 2.5,
+        reasoning: false,
+        image: true,
+      })
+      await ui.saveCustomModel()
+      assert(!ui.state.providerError, `编辑模型报错：${ui.state.providerError}`)
+      const p = (ui.state.customProviders || []).find((x) => x.id === 'my-llm')
+      assert(p?.models?.length === 1, `编辑变成了追加：${JSON.stringify(p?.models)}`)
+      const m = p.models[0]
+      assert(m.id === 'm1' && m.name === 'M One Updated', `模型身份或名称错了：${JSON.stringify(m)}`)
+      assert(m.contextWindow === 131072 && m.maxTokens === 8192, '窗口没有更新')
+      assert(m.cost.input === 2 && m.cost.output === 4 && m.cost.cacheRead === 0.2 && m.cost.cacheWrite === 2.5, '价格没有更新')
+      assert(m.reasoning === false && m.input.includes('image'), '模型能力没有更新')
+    })
+
     await test('删自定义供应商：确认框画得出来，确认后真的删掉', async () => {
       const ui = await boot(ownerToken)
       ui.state.path = '/providers'
@@ -1553,6 +1589,33 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         assert(html.includes('satu-botrow'), '名单取回来了却没画进侧栏')
         assert(html.includes('satu-botdot'), '状态点没画')
       }
+    })
+
+    await test('任务看板下面有渠道入口，渠道页提供 Telegram 绑定并标明微信扩展位', async () => {
+      const ui = await boot(adminToken)
+      let html = ui.html()
+      const tasksAt = html.indexOf('data-href="/tasks"')
+      const channelsAt = html.indexOf('data-href="/channels"')
+      assert(tasksAt >= 0, '侧栏没有任务看板')
+      assert(channelsAt > tasksAt, '渠道入口没有放在任务看板下面')
+
+      ui.state.path = '/channels'
+      ui.state.channels = []
+      ui.render()
+      html = ui.html()
+      assert(html.includes('绑定 Telegram'), '渠道页没有 Telegram 绑定入口')
+      assert(html.includes('微信公众号与企业微信官方接入'), '渠道页没有微信官方接入扩展说明')
+      assert(html.includes('暂未开放'), '微信扩展位没有明确标为未开放')
+
+      ui.state.channels = [{
+        id: 'tg-1', kind: 'telegram', status: 'active', botId: 'bot-tg', externalUsername: 'demo_bot',
+        allowGroups: false, paired: false, pairingCode: 'ABCD-2345', bot: { name: 'telegram bot' }, runtime: { status: 'ready' },
+      }]
+      ui.render()
+      html = ui.html()
+      assert(html.includes('等待配对'), '未配对渠道没有显示等待状态')
+      assert(html.includes('ABCD-2345'), '页面没有显示一次性配对码')
+      assert(html.includes('任何消息都不会进入 AI'), '没有说明配对前消息不会进入模型')
     })
 
     await test('平台菜单里没有「全局 Bot」，但那一页 owner 仍然进得去', async () => {

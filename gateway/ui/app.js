@@ -111,6 +111,18 @@ async function runConfirm() {
       flashDeletedBot(data)
       go('/')
       return
+    } else if (c.kind === 'channel-unbind') {
+      await api('DELETE', `/channels/${encodeURIComponent(c.id)}`)
+      await loadChannels().catch(() => {})
+      flash('ok', t('已解除 Telegram 绑定，Bot 与历史会话已保留', 'Telegram disconnected; the bot and history were kept'))
+      render()
+      return
+    } else if (c.kind === 'channel-pair-reset') {
+      await api('POST', `/channels/${encodeURIComponent(c.id)}/pairing-code`, {})
+      await loadChannels().catch(() => {})
+      flash('ok', t('已生成新配对码，旧 Telegram 身份已解除', 'New pairing code created; the old Telegram identity was revoked'))
+      render()
+      return
     } else if (c.kind === 'clean-seat') {
       await api('DELETE', `/platform/machines/${encodeURIComponent(c.machineId)}/seats/${encodeURIComponent(c.seatId)}`)
       await loadMachineDetail(c.machineId).catch(() => {})
@@ -207,6 +219,7 @@ document.getElementById('app').addEventListener('submit', (e) => {
   if (form.id === 'plan-sku-form') return savePlanSku(e)
   if (form.id === 'order-form') return saveOrder(e)
   if (form.id === 'audit-filter-form') return submitAuditFilter(e)
+  if (form.id === 'channel-bind-form') return submitChannelBinding(e)
   if (form.id === 'chat-form') {
     e.preventDefault()
     return sendChat()
@@ -267,6 +280,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
   if (!btn) return
   if (btn.classList.contains('gw-modal-backdrop') && e.target !== btn) return
   const act = btn.getAttribute('data-act')
+  if (await channelAct(act, btn)) return
   // 连接器那一屏的动作都在 pages-connectors.js 里。这条 if 链已经六百多行了，
   // 再往上堆只会让下一个人更难找。
   if (await connectorAct(act, btn)) return
@@ -1559,7 +1573,29 @@ document.getElementById('app').addEventListener('click', async (e) => {
   if (act === 'prov-model-new') {
     // 缓存那两项默认空：填 0 和「没填」在服务端是一个意思（回落到输入价），
     // 但摆一个 0 在输入框里会让人以为缓存不要钱。
-    state.modelDraft = { id: '', name: '', contextWindow: 128000, maxTokens: 8192, costInput: 0, costOutput: 0, costCacheRead: '', costCacheWrite: '', reasoning: false, image: false }
+    state.modelDraft = { editing: false, originalId: '', id: '', name: '', contextWindow: 128000, maxTokens: 8192, costInput: 0, costOutput: 0, costCacheRead: '', costCacheWrite: '', reasoning: false, image: false }
+    render()
+    return
+  }
+  if (act === 'prov-model-edit') {
+    const p = customProvider(state.modelsFor)
+    const model = p?.models?.find((m) => m.id === btn.getAttribute('data-model'))
+    if (!model) return
+    state.modelDraft = {
+      editing: true,
+      originalId: model.id,
+      id: model.id,
+      name: model.name || model.id,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      costInput: model.cost?.input ?? 0,
+      costOutput: model.cost?.output ?? 0,
+      // 服务端用 0 表示「没有单独配置」，表单里还原为空，和新增时的含义一致。
+      costCacheRead: model.cost?.cacheRead || '',
+      costCacheWrite: model.cost?.cacheWrite || '',
+      reasoning: !!model.reasoning,
+      image: Array.isArray(model.input) && model.input.includes('image'),
+    }
     render()
     return
   }

@@ -15,8 +15,10 @@ import {
   contextBoundary,
   clampTranscript,
   contentDigest,
+  observedPromptHighWater,
 } from './src/agent/index.ts'
 import { parseAt, rowsOf } from './src/tools/history.ts'
+import { budgetToolText, MODEL_TOOL_RESULT_MAX_CHARS } from './src/tools/result-budget.ts'
 
 let seq = 0
 const ev = (type, time, data) => ({ seq: ++seq, time, type, data })
@@ -287,10 +289,50 @@ const out = {}
 // 5. rowsOf 把事件铺成可读的行，工具结果也在里面
 {
   const rows = rowsOf(conversation(3))
-  out.rows = {
+out.rows = {
     roles: [...new Set(rows.map((r) => r.role))].sort(),
     hasToolOutput: rows.some((r) => r.text.includes('工具输出3')),
     ordered: rows.every((r, i) => i === 0 || rows[i - 1].time <= r.time),
+  }
+}
+
+// 6. 超大连接器结果：完整原文留档，模型只回放受控版本；老日志也即时生效。
+{
+  seq = 0
+  const body = '邮件正文。'.repeat(8_000)
+  const raw = JSON.stringify({
+    messages: Array.from({ length: 20 }, (_, i) => ({
+      messageId: `m-${i}`,
+      subject: `subject ${i}`,
+      messageText: body,
+      payload: { body: { data: 'QUJD'.repeat(5_000) } },
+    })),
+  })
+  const budgeted = budgetToolText('mcp_gmail_default_fetch_emails', raw)
+  const old = [
+    ev('assistant/message', T0, {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'a',
+        role: 'assistant',
+        content: [{ type: 'tool-call', callId: 'mail', name: 'mcp_gmail_default_fetch_emails', arguments: '{}' }],
+      },
+      usage: { inputTokens: 263, outputTokens: 1, cacheReadTokens: 664_960, reasoningTokens: 0 },
+    }),
+    ev('tool/result', T0 + 1, { turn: 1, step: 1, callId: 'mail', text: raw, failed: false }),
+  ]
+  const replay = await toAgentMessages(old)
+  const replayText = replay.find((m) => m.role === 'toolResult')?.content?.[0]?.text ?? ''
+  out.resultBudget = {
+    rawChars: raw.length,
+    modelChars: budgeted.text.length,
+    replayChars: replayText.length,
+    rawPreserved: budgeted.rawText === raw && old[1].data.text === raw,
+    payloadRemoved: !budgeted.text.includes('"payload":'),
+    underHardLimit: budgeted.text.length <= MODEL_TOOL_RESULT_MAX_CHARS,
+    oldLogSlimmed: replayText.length === budgeted.text.length,
+    promptHighWater: observedPromptHighWater(old),
   }
 }
 

@@ -22,6 +22,7 @@ import { attachBotTemplate } from './routes/bot-template.ts'
 import { attachSessions } from './routes/sessions.ts'
 import { attachCharges } from './routes/charges.ts'
 import { attachInternal } from './routes/internal.ts'
+import { attachChannels } from './routes/channels.ts'
 
 /**
  * 把控制面的路由挂上去。
@@ -37,13 +38,13 @@ import { attachInternal } from './routes/internal.ts'
  * 要排在带参数的前面（`/orgs/:id/bots/options` 必须在 `/orgs/:id/bots/:botId` 之前）。
  * 那类相邻关系都在各自的模块里，跨模块之间段数不同、互不相抢。
  */
-export function attach(router: Router, db: Db, keys: JwtKeys) {
+export function attach(router: Router, db: Db, keys: JwtKeys, channelKey: Buffer) {
   // 桌面反代。`/desktop/:seatId/*` → 管家的 noVNC。注册成拦截器而不是路由：它要拿
   // 原始 req 当流用，不能让路由器先把 body 读掉，路径也是通配的。
   router.intercept(desktopIntercept(db, keys))
 
   const llm = createLlm(db)
-  const ctx: RouteCtx = { db, keys, llm, meter: createMeter(db) }
+  const ctx: RouteCtx = { db, keys, channelKey, llm, meter: createMeter(db) }
   attachV1(router, db, keys, llm, ctx.meter)
 
   attachAuth(router, ctx)
@@ -55,6 +56,7 @@ export function attach(router: Router, db: Db, keys: JwtKeys) {
   attachHandoffs(router, ctx)
   attachRoutines(router, ctx)
   attachTasks(router, ctx)
+  attachChannels(router, ctx)
   attachCatalog(router, ctx)
   attachConnectors(router, ctx)
   attachConnectorMcp(router, ctx)

@@ -1,5 +1,6 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { ToolSchema } from '../llm/index.ts'
+import { budgetToolText } from './result-budget.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -44,6 +45,11 @@ export interface WorkspaceFile {
 export interface ToolResult {
   /** 给模型看的文本。业务失败也写在这里，用工具自己的语义表达。 */
   text: string
+  /**
+   * 结果超过上下文预算时的完整原文。只落会话日志、给人审计，绝不能送进模型。
+   * 没发生瘦身时不写，避免把正常结果复制一份。
+   */
+  rawText?: string
   /**
    * **管道层**失败：抛异常、超时、执行前被拒。
    * 命令退出码非零、查询没结果这类**业务失败**不置位——它们是正常返回。
@@ -341,10 +347,14 @@ export class ToolService extends Service {
     }
 
     try {
-      return await this.ctx.waterfall('tools/pre-execute', call, async () => {
+      const result = await this.ctx.waterfall('tools/pre-execute', call, async () => {
         const result = await this.ctx.waterfall('tools/execute', call, run)
         return await this.ctx.waterfall('tools/post-execute', call, result, async () => result)
       })
+      const budgeted = budgetToolText(call.name, result.text)
+      return budgeted.rawText
+        ? { ...result, text: budgeted.text, rawText: result.rawText ?? budgeted.rawText }
+        : result
     } catch (e) {
       return { text: `工具执行失败：${(e as Error).message}`, failed: true }
     }

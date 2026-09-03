@@ -628,6 +628,75 @@ export interface SessionIndex {
   updatedAt: number
 }
 
+export type ChannelKind = 'telegram' | 'wechat_official' | 'wecom'
+export type ChannelBindingStatus = 'binding' | 'active' | 'paused' | 'error'
+
+export interface ChannelBinding {
+  id: string
+  companyId: string
+  accountId: string
+  botId: string
+  kind: ChannelKind
+  status: ChannelBindingStatus
+  externalBotId: string
+  externalUsername: string
+  /** AES-GCM 密文；任何 public mapper 都不得带出去。 */
+  credentialCiphertext: string
+  webhookSecretHash: string
+  publicId: string
+  /** 一次性配对码只留摘要；明文和 token 一起放在 AES-GCM 密文里供本人页面读取。 */
+  pairingCodeHash: string
+  /** Telegram getUpdates 下一次要带的 offset，以及多 Gateway 之间的长轮询租约。 */
+  pollOffset: number
+  pollLeaseUntil: number | null
+  lastPolledAt: number | null
+  pollLastError: string | null
+  config: { allowGroups?: boolean }
+  lastReceivedAt: number | null
+  lastError: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ChannelIdentity {
+  id: string
+  bindingId: string
+  externalUserId: string
+  externalUsername: string
+  externalDisplayName: string
+  pairedEventId: string
+  pairedAt: number
+  lastSeenAt: number
+}
+
+export type ChannelEventStatus = 'pending' | 'processing' | 'ready' | 'retry' | 'delivered' | 'dead'
+
+export interface ChannelEvent {
+  id: string
+  bindingId: string
+  externalEventId: string
+  externalConversationId: string
+  remoteUserId: string
+  remoteDisplayName: string
+  title: string
+  text: string
+  status: ChannelEventStatus
+  attempts: number
+  nextTryAt: number | null
+  leaseUntil: number | null
+  /** 当前处理者的 fencing token；只有持有者可以续租和提交结果。 */
+  leaseToken: string
+  /** 最近一次发到 Telegram 的待审批短键与消息 id；用于重启接管时去重。 */
+  approvalKey: string
+  approvalMessageId: number | null
+  sessionId: string | null
+  reply: string
+  lastError: string | null
+  createdAt: number
+  updatedAt: number
+  deliveredAt: number | null
+}
+
 export interface Instance {
   accountId: string
   botId: string
