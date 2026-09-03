@@ -13,6 +13,7 @@ import type { Meter } from '../lib/meter.ts'
 export interface RouteCtx {
   db: Db
   keys: JwtKeys
+  channelKey: Buffer
   llm: Llm
   /**
    * 计费适配器。**整个进程一个**——它记着每家公司的余额，拆成多份就等于多份各算各的

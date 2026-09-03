@@ -1,17 +1,18 @@
 import { mkdirSync } from 'node:fs'
 import { Db, SchemaBusyError, databaseUrl } from './db.ts'
-import { hashPassword, loadKeys } from './crypto.ts'
+import { hashPassword, loadChannelKey, loadKeys } from './crypto.ts'
 import { Router, listen } from './http.ts'
 import { gatewayHome } from './home.ts'
 import { attach } from './routes.ts'
 import { attachDesktopUpgrade } from './desktop.ts'
 import { startRoutineScheduler } from './routines.ts'
+import { startChannelDispatcher } from './channels.ts'
 
 /**
  * Satuwork Gateway。控制面：公司、账号、套餐、席位、目录、JWT。
  *
- * 聊天不进这个进程。数据在 PostgreSQL；磁盘上只留 JWT 密钥对和 Bot 发布包——
- * 那两样重启不能变，也不适合塞进库里。
+ * 聊天不进这个进程。数据在 PostgreSQL；磁盘上只留 JWT/渠道包裹密钥和 Bot 发布包——
+ * 这些重启不能变，也不适合塞进库里。
  */
 const home = gatewayHome()
 mkdirSync(home, { recursive: true })
@@ -92,8 +93,9 @@ const resynced = await db.syncAllPlansFromOrders()
 if (resynced) console.log(`satuwork-gateway: 已按订单重算 ${resynced} 家公司的订阅`)
 
 const keys = loadKeys(home)
+const channelKey = loadChannelKey(home)
 const router = new Router()
-attach(router, db, keys)
+attach(router, db, keys, channelKey)
 const server = listen(router)
 // 桌面的画面走 WebSocket，而升级请求不进 Router——它是 server 上的一个事件。
 attachDesktopUpgrade(server, db, keys)
@@ -102,6 +104,7 @@ attachDesktopUpgrade(server, db, keys)
  * 不是藏在某组路由里：停机时要有人明确地把它和它等着的那几条流一起掐掉。
  */
 const stopRoutines = startRoutineScheduler(db)
+const stopChannels = startChannelDispatcher(db, channelKey)
 
 let closing = false
 /**
@@ -124,6 +127,7 @@ function shutdown() {
   }
   closing = true
   stopRoutines()
+  stopChannels()
   server.close(() => {
     void db.close()
   })

@@ -583,10 +583,17 @@ function splitUploads(text) {
   return { text: lines.slice(i).join('\n').trim(), files }
 }
 
-function fold(events, live) {
+function fold(events, live, channelBot = false) {
   const blocks = []
+  // 名册标记负责首条 Telegram 消息之前的 Web 轮次；历史里的渠道来源兼容旧响应。
+  const showChannelVia = channelBot || (events || []).some((ev) => {
+    const source = ev?.type === 'user/message' ? ev?.data?.source : null
+    return source?.kind === 'plugin' && source.plugin === 'channel' && source.channel === 'telegram'
+  })
   let assistant = null
   let tools = []
+  // 同一条主会话可以同时收 Web 和 Telegram；助手回复继承本轮用户消息的来源。
+  let turnVia = ''
   let status = ''
   /**
    * 正在跑的这一轮是**什么时候开始的**（turn/start 那条事件的时间）。
@@ -612,17 +619,21 @@ function fold(events, live) {
     const at = Number(ev.time) || 0
     if (type === 'user/message') {
       /**
-       * 不是人打进来的那些一律不画——除了**转人工的交还**。
+       * 不是人打进来的那些一律不画，但外部渠道和明确的代理入口要画。
        *
        * 那一条 `source` 是 `plugin: 'handoff'`（席位替接手的人发的，见 policy/handoff.ts），
        * 但它就是一个人做完事之后说的话，是这一轮的起因。滤掉的话，界面上会看到 Bot
        * 突然自己开口接着干活，而上一句是几小时前它说"等人接手"。
        */
       const src = data.source || {}
-      // **替人发话的两种也画**：看板卡和日常任务落进主会话的那条任务交底，带着
-      // `source.plugin` 身份——滤掉的话，人看到 Bot 突然开口干活，却找不到是因为什么。
-      const via = src.kind === 'plugin' && (src.plugin === 'kanban' || src.plugin === 'routine' || src.plugin === 'handoff') ? src.plugin : ''
+      // Telegram / Web 在同一主会话里按 via 分辨；看板、日常任务和交还继续用原来的代理标签。
+      const via = src.kind === 'plugin' && src.plugin === 'channel'
+        ? (src.channel === 'telegram' ? 'telegram' : String(src.channel || 'channel'))
+        : src.kind === 'plugin' && (src.plugin === 'kanban' || src.plugin === 'routine' || src.plugin === 'handoff')
+          ? src.plugin
+          : (!src.kind || src.kind === 'user') ? (showChannelVia ? 'web' : '') : ''
       if (src.kind && src.kind !== 'user' && !via) continue
+      turnVia = via
       assistant = null
       tools = []
       const raw = messageText(data.message) || data.text || ''
@@ -636,8 +647,7 @@ function fold(events, live) {
         // 不是输入框上一个发完就没的装饰。丢掉的话翻上去看昨天那条，「@ 了谁」就消失了，
         // 而那正是「它为什么去读了我的邮箱」的唯一答案。
         mentions: messageMentions(data.message),
-        // **这行话是谁让说的。** '看板任务' / '日常任务' 画在气泡上的角标（rowShell 的
-        // data-via），人一眼分得出派来的活和自己打的话。
+        // **这行话从哪来。** Web / Telegram / 代理任务都画在气泡上的角标。
         via,
         // **raw 不能省。** mergePending 靠「文字一模一样」认回执，而它手上那份是
         // 拼好的完整正文。只留拆过的 text，带附件的消息就永远认不回来——那条 pending
@@ -650,7 +660,7 @@ function fold(events, live) {
     } else if (type === 'assistant/message') {
       const text = messageText(data.message)
       if (!assistant) {
-        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        assistant = { kind: 'assistant', text: '', tools, via: turnVia, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
       if (text) assistant.text = text
@@ -659,7 +669,7 @@ function fold(events, live) {
       const chunk = data.chunk || {}
       if (chunk.type === 'text-delta' && chunk.text) {
         if (!assistant) {
-          assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+          assistant = { kind: 'assistant', text: '', tools, via: turnVia, time: at, seq: ev.seq }
           blocks.push(assistant)
         }
         assistant.text += chunk.text
@@ -671,7 +681,7 @@ function fold(events, live) {
       // 冒出来——正好是最想知道「它在干什么」的那几秒什么都看不到。这里补一条：工具
       // 一开跑就把助手块建出来，正文留空，界面上就是一个带工具痕迹的「正在想」气泡。
       if (!assistant) {
-        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        assistant = { kind: 'assistant', text: '', tools, via: turnVia, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
       // **没有名字的不画。** 那是 bot 那边一个已经修掉的下标错位留下的空壳（见
@@ -724,7 +734,7 @@ function fold(events, live) {
        * human/handoff 是同一套。
        */
       if (!assistant) {
-        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        assistant = { kind: 'assistant', text: '', tools, via: turnVia, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
       const list = assistant.tasks || (assistant.tasks = [])
@@ -742,7 +752,7 @@ function fold(events, live) {
        * 那一屏没人会没事去看。
        */
       if (!assistant) {
-        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        assistant = { kind: 'assistant', text: '', tools, via: turnVia, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
       const notes = assistant.skillNotes || (assistant.skillNotes = [])
@@ -759,7 +769,7 @@ function fold(events, live) {
        * 而事后去 Bot 设置里翻，那一屏没人会没事去看。
        */
       if (!assistant) {
-        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        assistant = { kind: 'assistant', text: '', tools, via: turnVia, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
       const mem = assistant.memNotes || (assistant.memNotes = [])
@@ -777,7 +787,7 @@ function fold(events, live) {
        * 也正是人要找它的地方。
        */
       if (!assistant) {
-        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        assistant = { kind: 'assistant', text: '', tools, via: turnVia, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
       const list = assistant.approvals || (assistant.approvals = [])
@@ -830,7 +840,7 @@ function fold(events, live) {
         continue
       }
       if (!assistant) {
-        assistant = { kind: 'assistant', text: '', tools, time: at, seq: ev.seq }
+        assistant = { kind: 'assistant', text: '', tools, via: turnVia, time: at, seq: ev.seq }
         blocks.push(assistant)
       }
       const hs = assistant.handoffs || (assistant.handoffs = [])
@@ -925,7 +935,13 @@ function fold(events, live) {
     const tail = blocks[blocks.length - 1]
     statusAt = (tail && (tail.endTime || tail.time)) || 0
   }
-  return { blocks, status, statusAt, todos }
+  return { blocks, status, statusAt, todos, channelVia: showChannelVia }
+}
+
+/** 只有绑定了 Telegram 渠道的 Bot 才显示 Web / Telegram 来源角标。 */
+function currentBotHasChannelLabels() {
+  const id = chatBotIdNow()
+  return Boolean(id && (state.runtimeBots || []).some((bot) => bot.id === id && bot.channel === 'telegram'))
 }
 
 /**
@@ -4016,7 +4032,7 @@ function threadRows(folded, sessionId) {
      * 的那段（想、调工具、日常任务里动辄十几秒）屏幕上一个秒表都没有，等第一个字落地
      * 才凭空冒出来一个「0s」。人看到的就是这一行忽有忽无、还从头数起。
      */
-    rows.push({ kind: 'msg', key: 'm-live', block: { kind: 'assistant', text: '', tools: [], time: folded.statusAt || 0 } })
+    rows.push({ kind: 'msg', key: 'm-live', block: { kind: 'assistant', text: '', tools: [], via: last?.via || '', time: folded.statusAt || 0 } })
   }
   return rows
 }
@@ -4060,6 +4076,7 @@ function mergePending(folded, sessionId) {
       raw: p.text,
       images: p.images || [],
       mentions: p.mentions || [],
+      via: folded.channelVia ? 'web' : '',
       time: p.at,
       pending: true,
     })
@@ -4155,7 +4172,7 @@ function paintChat() {
     : state.chatReplaying
       ? false
       : undefined
-  const folded = mergePending(fold(state.chatEvents, live), state.chatSessionId)
+  const folded = mergePending(fold(state.chatEvents, live, currentBotHasChannelLabels()), state.chatSessionId)
   state.chatStatus = folded.status
   if (!thread) return
   // 正文里的文件名要接回哪几个文件，整条会话算一次（见 chatFileCands）。
@@ -4584,7 +4601,7 @@ function paintChatCtx() {
 
 /** 导出成 Markdown。工具痕迹一起带上——只留回答的话，出问题时对不上做过什么。 */
 function chatExportText() {
-  const folded = fold(state.chatEvents)
+  const folded = fold(state.chatEvents, undefined, currentBotHasChannelLabels())
   const bot = chatBotOf()
   const account = (state.me && state.me.account) || {}
   const me = account.name || account.email || t('我')
@@ -6511,7 +6528,7 @@ function toggleChatTodos() {
 /** 关掉这一张。**只关这一张**：表一变它自己回来（见 chatTodoHidden）。 */
 function hideChatTodos() {
   const sid = state.chatSessionId
-  const folded = fold(state.chatEvents, chatLive.get(sid))
+  const folded = fold(state.chatEvents, chatLive.get(sid), currentBotHasChannelLabels())
   chatTodoHidden.set(sid, todoSign(chatTodoItems(folded)))
   paintChatTodos(folded)
 }

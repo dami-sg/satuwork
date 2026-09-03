@@ -349,7 +349,8 @@ export class AgentRegistry extends Service {
     }
     // 启动迁移可能刚把旧文件挂到这个 Bot，但还没来得及 bindSession。
     // list() 会走 load()，旧文件当场迁完，这里就能认领，不必另开一条。
-    const mine = (await this.ctx.sessions.list()).filter((s) => s.botId === agent.id)
+    // 渠道用户有自己的长会话，绝不能在席位重装后被认成 Bot 的网页主会话。
+    const mine = (await this.ctx.sessions.list()).filter((s) => s.botId === agent.id && !s.channel)
     if (mine[0]) {
       this.bindSession(agent.id, mine[0].id)
       return { sessionId: mine[0].id, created: false }
@@ -379,7 +380,7 @@ export function apply(ctx: Context) {
         // 旧会话挂到默认 Bot 之后，若它还没有长会话，把最近一条认领过来。
         const agent = roster.get(seeded.id)
         if (!agent || agent.sessionId) return
-        const mine = (await sessions.list()).filter((s) => s.botId === agent.id)
+        const mine = (await sessions.list()).filter((s) => s.botId === agent.id && !s.channel)
         if (mine[0]) roster.bindSession(agent.id, mine[0].id)
       })
     } else if (gatewayUrl() && !pinnedBotId()) {

@@ -328,6 +328,10 @@ const state = {
   /** 抽取器每次「创建 / 不创建」的判定日志。按需拉，避免每次看板轮询都多打一趟。 */
   taskLogs: [],
   taskLogsOpen: false,
+  /** 外部消息渠道。第一版一个账号至多一条 Telegram 绑定。 */
+  channels: [],
+  channelBindOpen: false,
+  channelBindError: '',
   taskLogsLoading: false,
   handoffCount: 0,
   /** 近 30 天的概览（开了几张、还欠着几张、多久有人接）。空 = 还没拉到。 */
@@ -523,6 +527,7 @@ function allowedHrefs() {
   // navForRole() 里——MEMBER_NAV 是空的，这条单独放行，否则点那颗按钮会被
   // pathAllowed 踢回首页。
   if (!isOwner()) set.add('/tasks')
+  if (!isOwner()) set.add('/channels')
   return set
 }
 

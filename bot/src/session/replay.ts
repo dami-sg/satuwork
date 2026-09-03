@@ -1,4 +1,5 @@
 import type { SessionEvent } from './types.ts'
+import { budgetToolText } from '../tools/result-budget.ts'
 
 /**
  * 历史重放要发的那一段。
@@ -30,6 +31,34 @@ export interface HistorySlice {
   firstSeq: number | null
   /** 前面还有没有。有就该给一个「加载更多」。 */
   hasMore: boolean
+}
+
+/**
+ * 会话日志的完整工具原文只属于服务端审计，不随聊天历史/SSE 发给浏览器。
+ *
+ * 老日志没有 modelText，按同一套预算即时生成；新日志直接用执行当时落下的 modelText。
+ * 这也避免打开一条看似只有几十句的会话时，暗中下载数 MB 邮件正文。
+ */
+export function publicSessionEvents(events: readonly SessionEvent[]): SessionEvent[] {
+  const names = new Map<string, string>()
+  for (const event of events) {
+    if (event.type === 'tool/call') names.set(event.data.callId, event.data.name)
+    if (event.type !== 'assistant/message') continue
+    for (const block of event.data.message.content) {
+      if (block.type === 'tool-call') names.set(block.callId, block.name)
+    }
+  }
+  return events.map((event) => {
+    if (event.type !== 'tool/result') return event
+    const { modelText, ...data } = event.data
+    return {
+      ...event,
+      data: {
+        ...data,
+        text: modelText ?? budgetToolText(names.get(event.data.callId) ?? '', event.data.text).text,
+      },
+    } as SessionEvent
+  })
 }
 
 function stepKey(ev: SessionEvent): string {
@@ -80,7 +109,9 @@ export function historySlice(
     if (ev.type === 'assistant/message' && hasText(ev)) settled.add(stepKey(ev))
   }
 
-  const out = slice.filter((ev) => !(ev.type === 'assistant/chunk' && settled.has(stepKey(ev))))
+  const out = publicSessionEvents(
+    slice.filter((ev) => !(ev.type === 'assistant/chunk' && settled.has(stepKey(ev)))),
+  )
   return {
     events: out,
     firstSeq: out.length ? out[0].seq : null,

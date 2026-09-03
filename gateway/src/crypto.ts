@@ -1,5 +1,7 @@
 import {
   createHash,
+  createCipheriv,
+  createDecipheriv,
   createPublicKey,
   generateKeyPairSync,
   randomBytes,
@@ -57,6 +59,38 @@ export interface JwtKeys {
   kid: string
   privatePem: string
   publicPem: string
+}
+
+/**
+ * 渠道 token 的包裹密钥。和 JWT 私钥一样第一次启动落盘、之后固定复用；0600 防止
+ * 同机的普通用户读走。数据库泄露时 Telegram token 仍然不是明文。
+ */
+export function loadChannelKey(home: string): Buffer {
+  const dir = join(home, 'keys')
+  const path = join(dir, 'channel-secret.key')
+  mkdirSync(dir, { recursive: true })
+  if (!existsSync(path)) writeFileSync(path, randomBytes(32), { mode: 0o600 })
+  const key = readFileSync(path)
+  if (key.length !== 32) throw new Error('渠道密钥长度不对，需要 32 字节')
+  return key
+}
+
+export function encryptChannelSecret(key: Buffer, value: unknown): string {
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', key, iv)
+  cipher.setAAD(Buffer.from('satuwork-channel-v1'))
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()])
+  return `v1.${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${encrypted.toString('base64url')}`
+}
+
+export function decryptChannelSecret<T>(key: Buffer, stored: string): T {
+  const [version, ivRaw, tagRaw, bodyRaw] = String(stored || '').split('.')
+  if (version !== 'v1' || !ivRaw || !tagRaw || !bodyRaw) throw new Error('渠道密文格式不对')
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivRaw, 'base64url'))
+  decipher.setAAD(Buffer.from('satuwork-channel-v1'))
+  decipher.setAuthTag(Buffer.from(tagRaw, 'base64url'))
+  const plain = Buffer.concat([decipher.update(Buffer.from(bodyRaw, 'base64url')), decipher.final()]).toString('utf8')
+  return JSON.parse(plain) as T
 }
 
 /**

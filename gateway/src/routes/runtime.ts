@@ -1120,9 +1120,13 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     requireSeat(account)
     // 平台指定的那一对和公司模版，整份名册共用一次——每行各读一遍没有意义。
     const { pinned, tpl } = await botContext(db, account.companyId)
+    // 渠道归属与 Bot 定义分表保存。给名册带稳定标记，前端才能只给渠道 Bot 画来源标签，
+    // 不能拿固定名称 `telegram bot` 猜：名称能改，也可能有普通 Bot 恰好同名。
+    const channelByBot = new Map((await db.channelBindings(account.id)).map((row) => [row.botId, row.kind]))
     const bots = await Promise.all(
       (await db.botsFor(account.companyId, account.id)).map(async (item) => ({
         ...publicBot(item, pinned, tpl),
+        channel: channelByBot.get(item.id) ?? null,
         runtime: await pairRuntime(db, account, item.id),
       })),
     )
@@ -1256,6 +1260,13 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   router.delete('/runtime/bots/:id', async (req, res) => {
     const account = await requireUser(req, db, keys)
     const item = await ownBotOf(db, account, req.params.id, true)
+    // 删除流程可能是异步的。先停渠道，避免新消息继续落到即将拆掉的席位。
+    const bindings = await db.channelBindings(account.id)
+    await Promise.all(bindings
+      .filter((binding) => binding.botId === item.id && binding.status !== 'paused')
+      .map((binding) => db.updateChannelBinding(binding.id, {
+        status: 'paused', lastError: '绑定的 Bot 正在删除',
+      })))
     const deletion = await requestBotDeletion(db, {
       companyId: account.companyId!, accountId: account.id, botId: item.id, botName: item.name, requestedBy: account.id,
     })

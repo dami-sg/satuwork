@@ -25,6 +25,12 @@ import { SQL as m0024 } from './0024-tasks.ts'
 import { SQL as m0025 } from './0025-drop-kanban.ts'
 import { SQL as m0026 } from './0026-task-extract-logs.ts'
 import { SQL as m0027 } from './0027-conversation-audits.ts'
+import { SQL as m0028 } from './0028-channels.ts'
+import { SQL as m0029 } from './0029-channel-polling-pairing.ts'
+import { SQL as m0030 } from './0030-channel-poll-error.ts'
+import { SQL as m0031 } from './0031-telegram-private-user.ts'
+import { SQL as m0032 } from './0032-channel-event-lease-token.ts'
+import { SQL as m0033 } from './0033-channel-approval-prompt.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -96,6 +102,12 @@ export const MIGRATIONS: Migration[] = [
   { id: '0025-drop-kanban', name: '删掉旧看板：板、成员、卡、依赖、时间线、附件、执行流水', sql: m0025 },
   { id: '0026-task-extract-logs', name: '任务抽取判定日志：创建、未创建与失败原因', sql: m0026 },
   { id: '0027-conversation-audits', name: '自动对话审计：批次、结构化条目与删除前终审', sql: m0027 },
+  { id: '0028-channels', name: '外部渠道：绑定、Webhook 去重与可靠投递', sql: m0028 },
+  { id: '0029-channel-polling-pairing', name: 'Telegram 长轮询游标、租约与用户身份配对', sql: m0029 },
+  { id: '0030-channel-poll-error', name: 'Telegram 长轮询错误与消息投递错误分开记录', sql: m0030 },
+  { id: '0031-telegram-private-user', name: 'Telegram 渠道限定单一私聊用户', sql: m0031 },
+  { id: '0032-channel-event-lease-token', name: '渠道消息短租约的续租与所有权隔离', sql: m0032 },
+  { id: '0033-channel-approval-prompt', name: '渠道审批提示去重与重启恢复', sql: m0033 },
 ]
 
 /**

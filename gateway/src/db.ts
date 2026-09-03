@@ -4,8 +4,9 @@ import pg from 'pg'
 import { randomAccessToken, randomApiKey, randomMachineToken } from './crypto.ts'
 import { migrate, migrationState, type MigrateResult } from './db/migrate.ts'
 import { type DiscoverySnapshot, emptySnapshot, parseDiscoverySnapshot } from './model-discovery.ts'
+import type { ChannelBinding, ChannelBindingStatus, ChannelEvent, ChannelEventStatus, ChannelIdentity, ChannelKind } from './db/types.ts'
 import { type Handoff, type HandoffState, HANDOFF_LIVE, type Account, type AccountSecrets, type AccountStatus, type AuditEvent, type BotDeletionRequest, type BotDeletionStatus, type BotRelease, type CatalogItem, type CatalogKind, type Company, type CompanyModelUsage, type ConnectionScope, type ConnectionStatus, type ConnectorCall, type ConnectorCallStatus, type ConnectorConnection, type ConnectorInstall, type ConversationAuditBatch, type ConversationAuditBatchKind, type ConversationAuditItem, type ConversationAuditModelRole, type ConversationAuditOutcome, type CompanySettings, type Credential, DEFAULT_MAX_ACCOUNTS, type Group, type Instance, type Invite, type Invoice, type LlmCall, type LlmUsage, type Machine, type MachineMetricMinute, type MachinePairing, type Memory, type MemoryKind, type MemoryLayer, type Task, type TaskEvent, type TaskEventKind, type TaskExtractLog, type TaskExtractOutcome, type TaskField, type TaskState, TASK_PAGE_DEFAULT, TASK_PAGE_MAX, parseTaskState, type Plan, type PlanOrder, type PlanPeriod, type PlanSku, type PlatformSettings, type ReleaseKind, type Role, type Routine, type RoutineRun, type RoutineRunTrigger, type RoutineRunStatus, ROUTINE_RUNS_KEEP, type RoutineModelRole, type RoutineTrigger, SESSION_PAGE_DEFAULT, SESSION_PAGE_MAX, type Scope, type SeatRuntime, type SessionIndex, type Topup, type UsageCharge, type ChargeKind, type ChargeStatus, CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type WebCall, type WebCallKind, emptyPlatformSettings, emptySettings, parseBilling, parseConnectorPricing, parseConversationAuditSettings, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, releaseArch } from './db/types.ts'
-import { type Row, accountOf, auditOf, botDeletionRequestOf, handoffOf, botReleaseOf, catalogOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, conversationAuditBatchOf, conversationAuditItemOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, taskOf, taskEventOf, taskExtractLogOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
+import { type Row, accountOf, auditOf, botDeletionRequestOf, handoffOf, botReleaseOf, catalogOf, channelBindingOf, channelEventOf, channelIdentityOf, companyOf, connectorCallOf, connectorConnectionOf, connectorInstallOf, conversationAuditBatchOf, conversationAuditItemOf, credOf, groupOf, instanceOf, inviteOf, invoiceOf, isUniqueViolation, jsonOf, machineMetricMinuteOf, machineOf, machinePairingOf, memoryOf, taskOf, taskEventOf, taskExtractLogOf, nameFromEmail, num, numOrNull, parsePlatformPayload, planOf, planOrderOf, planSkuOf, routineOf, routineRunOf, seatRuntimeOf, sessionIndexOf, str, strOrNull, toPg, topupOf, usageChargeOf } from './db/rows.ts'
 
 /**
  * 类型、常量和行解析都在 `db/` 底下；这里原样再导出，调用点仍然
@@ -398,6 +399,7 @@ export class Db {
     await this.run('delete from conversation_audit_items where "companyId" = ?', [id])
     await this.run('delete from conversation_audit_batches where "companyId" = ?', [id])
     await this.run('delete from bot_deletion_requests where "companyId" = ?', [id])
+    await this.run('delete from channel_bindings where "companyId" = ?', [id])
     await this.run('delete from groups where "companyId" = ?', [id])
     await this.run('delete from skill_tags where "companyId" = ?', [id])
     await this.run('delete from session_index where "companyId" = ?', [id])
@@ -638,6 +640,7 @@ export class Db {
       await this.run('delete from session_index where "accountId" = ?', [id])
       await this.run('delete from instances where "accountId" = ?', [id])
       await this.run('delete from seat_runtimes where "accountId" = ?', [id])
+      await this.run('delete from channel_bindings where "accountId" = ?', [id])
       // 同上：删员工也不销毁他的用量记录。少了它，公司的历史用量会凭空缺一块，而
       // 「谁烧了多少」正是要留档的东西。accountId 变成悬空引用，统计里按 id 显示。
       await this.run('delete from account_secrets where "accountId" = ?', [id])
@@ -2914,6 +2917,283 @@ export class Db {
       limit,
     ])
     return rows.map(auditOf)
+  }
+
+  // ── 外部渠道。凭据只存密文；Webhook 事件按远端 id 去重。──────────
+
+  async channelBindings(accountId: string): Promise<ChannelBinding[]> {
+    return (await this.many('select * from channel_bindings where "accountId" = ? order by "createdAt"', [accountId])).map(channelBindingOf)
+  }
+
+  async channelBinding(id: string): Promise<ChannelBinding | undefined> {
+    const r = await this.one('select * from channel_bindings where id = ?', [id])
+    return r ? channelBindingOf(r) : undefined
+  }
+
+  async channelBindingForAccount(accountId: string, kind: ChannelKind): Promise<ChannelBinding | undefined> {
+    const r = await this.one('select * from channel_bindings where "accountId" = ? and kind = ?', [accountId, kind])
+    return r ? channelBindingOf(r) : undefined
+  }
+
+  async channelBindingByExternal(kind: ChannelKind, externalBotId: string): Promise<ChannelBinding | undefined> {
+    const r = await this.one('select * from channel_bindings where kind = ? and "externalBotId" = ?', [kind, externalBotId])
+    return r ? channelBindingOf(r) : undefined
+  }
+
+  async channelBindingByPublicId(publicId: string): Promise<ChannelBinding | undefined> {
+    const r = await this.one('select * from channel_bindings where "publicId" = ?', [publicId])
+    return r ? channelBindingOf(r) : undefined
+  }
+
+  async insertChannelBinding(input: Omit<ChannelBinding, 'createdAt' | 'updatedAt' | 'lastReceivedAt' | 'lastError' | 'pollOffset' | 'pollLeaseUntil' | 'lastPolledAt' | 'pollLastError'>): Promise<ChannelBinding> {
+    const now = Date.now()
+    await this.run(
+      `insert into channel_bindings
+       (id,"companyId","accountId","botId",kind,status,"externalBotId","externalUsername","credentialCiphertext","webhookSecretHash","publicId","pairingCodeHash","pollOffset","pollLeaseUntil","lastPolledAt","pollLastError",config,"lastReceivedAt","lastError","createdAt","updatedAt")
+       values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [input.id, input.companyId, input.accountId, input.botId, input.kind, input.status, input.externalBotId,
+        input.externalUsername, input.credentialCiphertext, input.webhookSecretHash, input.publicId, input.pairingCodeHash,
+        0, null, null, null, JSON.stringify(input.config || {}), null, null, now, now],
+    )
+    return (await this.channelBinding(input.id))!
+  }
+
+  async updateChannelBinding(id: string, patch: {
+    status?: ChannelBindingStatus
+    credentialCiphertext?: string
+    webhookSecretHash?: string
+    externalBotId?: string
+    externalUsername?: string
+    lastReceivedAt?: number | null
+    lastError?: string | null
+    config?: ChannelBinding['config']
+    pairingCodeHash?: string
+    pollOffset?: number
+    pollLeaseUntil?: number | null
+    lastPolledAt?: number | null
+    pollLastError?: string | null
+  }): Promise<ChannelBinding> {
+    const cur = await this.channelBinding(id)
+    if (!cur) throw new Error('渠道不存在')
+    const next = { ...cur, ...patch, updatedAt: Date.now() }
+    await this.run(
+      `update channel_bindings set status=?, "credentialCiphertext"=?, "webhookSecretHash"=?, "externalBotId"=?,
+       "externalUsername"=?, "pairingCodeHash"=?, "pollOffset"=?, "pollLeaseUntil"=?, "lastPolledAt"=?, "pollLastError"=?,
+       "lastReceivedAt"=?, "lastError"=?, config=?, "updatedAt"=? where id=?`,
+      [next.status, next.credentialCiphertext, next.webhookSecretHash, next.externalBotId, next.externalUsername,
+        next.pairingCodeHash, next.pollOffset, next.pollLeaseUntil, next.lastPolledAt, next.pollLastError,
+        next.lastReceivedAt, next.lastError, JSON.stringify(next.config || {}), next.updatedAt, id],
+    )
+    return (await this.channelBinding(id))!
+  }
+
+  async deleteChannelBinding(id: string): Promise<void> {
+    await this.run('delete from channel_bindings where id = ?', [id])
+  }
+
+  async lockChannelBinding(id: string): Promise<void> {
+    if (!this.txClient.getStore()) throw new Error('lockChannelBinding 必须在事务里调用')
+    await this.one('select id from channel_bindings where id = ? for update', [id])
+  }
+
+  async dueChannelPolls(now: number, limit = 10): Promise<ChannelBinding[]> {
+    const rows = await this.many(
+      `select * from channel_bindings where kind='telegram' and status='active'
+       and coalesce("pollLeaseUntil",0) <= ? order by coalesce("lastPolledAt",0), "createdAt" limit ?`,
+      [now, Math.min(50, Math.max(1, limit))],
+    )
+    return rows.map(channelBindingOf)
+  }
+
+  async claimChannelPoll(id: string, now: number, leaseUntil: number): Promise<boolean> {
+    return (await this.run(
+      `update channel_bindings set "pollLeaseUntil"=?, "lastPolledAt"=?, "updatedAt"=?
+       where id=? and kind='telegram' and status='active' and coalesce("pollLeaseUntil",0) <= ?`,
+      [leaseUntil, now, now, id, now],
+    )) === 1
+  }
+
+  async finishChannelPoll(id: string, patch: { pollOffset?: number; pollLastError?: string | null; status?: ChannelBindingStatus; lastError?: string | null; nextPollAt?: number | null }): Promise<void> {
+    // pollLeaseUntil 在请求飞行时是租约，失败收口后是“最早再试时间”。dueChannelPolls 的
+    // 判据本来就是 <= now，因此无需再加一列，也不会出现两套时钟彼此打架。
+    const fields = ['"pollLeaseUntil"=?', '"lastPolledAt"=?', '"updatedAt"=?']
+    const now = Date.now()
+    const values: unknown[] = [patch.nextPollAt ?? null, now, now]
+    if (patch.pollOffset !== undefined) { fields.push('"pollOffset"=greatest("pollOffset",?)'); values.push(patch.pollOffset) }
+    if (patch.pollLastError !== undefined) { fields.push('"pollLastError"=?'); values.push(patch.pollLastError) }
+    if (patch.status !== undefined) { fields.push('status=?'); values.push(patch.status) }
+    if (patch.lastError !== undefined) { fields.push('"lastError"=?'); values.push(patch.lastError) }
+    values.push(id)
+    await this.run(`update channel_bindings set ${fields.join(',')} where id=?`, values)
+  }
+
+  async advanceChannelPollOffset(id: string, offset: number): Promise<void> {
+    await this.run(
+      'update channel_bindings set "pollOffset"=greatest("pollOffset",?), "updatedAt"=? where id=?',
+      [offset, Date.now(), id],
+    )
+  }
+
+  async channelIdentity(bindingId: string): Promise<ChannelIdentity | undefined> {
+    const row = await this.one('select * from channel_identities where "bindingId" = ? order by "pairedAt" limit 1', [bindingId])
+    return row ? channelIdentityOf(row) : undefined
+  }
+
+  async channelIdentityForUser(bindingId: string, externalUserId: string): Promise<ChannelIdentity | undefined> {
+    const row = await this.one('select * from channel_identities where "bindingId" = ? and "externalUserId" = ?', [bindingId, externalUserId])
+    return row ? channelIdentityOf(row) : undefined
+  }
+
+  async pairChannelIdentity(input: Omit<ChannelIdentity, 'id' | 'pairedAt' | 'lastSeenAt'>): Promise<ChannelIdentity> {
+    const now = Date.now()
+    await this.run('delete from channel_identities where "bindingId" = ?', [input.bindingId])
+    const id = randomUUID()
+    await this.run(
+      `insert into channel_identities
+       (id,"bindingId","externalUserId","externalUsername","externalDisplayName","pairedEventId","pairedAt","lastSeenAt")
+       values (?,?,?,?,?,?,?,?)`,
+      [id, input.bindingId, input.externalUserId, input.externalUsername, input.externalDisplayName, input.pairedEventId, now, now],
+    )
+    return (await this.channelIdentity(input.bindingId))!
+  }
+
+  async touchChannelIdentity(id: string): Promise<void> {
+    await this.run('update channel_identities set "lastSeenAt" = ? where id = ?', [Date.now(), id])
+  }
+
+  async deleteChannelIdentities(bindingId: string): Promise<void> {
+    await this.run('delete from channel_identities where "bindingId" = ?', [bindingId])
+  }
+
+  async insertChannelEvent(input: {
+    bindingId: string
+    externalEventId: string
+    externalConversationId: string
+    remoteUserId?: string
+    remoteDisplayName?: string
+    title?: string
+    text: string
+  }): Promise<{ event: ChannelEvent; created: boolean }> {
+    const now = Date.now()
+    const id = randomUUID()
+    try {
+      await this.run(
+        `insert into channel_events
+         (id,"bindingId","externalEventId","externalConversationId","remoteUserId","remoteDisplayName",title,text,status,attempts,"nextTryAt","leaseUntil","leaseToken","sessionId",reply,"lastError","createdAt","updatedAt","deliveredAt")
+         values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [id, input.bindingId, input.externalEventId, input.externalConversationId, input.remoteUserId || '',
+          input.remoteDisplayName || '', input.title || '', input.text, 'pending', 0, now, null, '', null, '', null, now, now, null],
+      )
+    } catch (e) {
+      if (!isUniqueViolation(e)) throw e
+      const old = await this.one('select * from channel_events where "bindingId" = ? and "externalEventId" = ?', [input.bindingId, input.externalEventId])
+      return { event: channelEventOf(old!), created: false }
+    }
+    return { event: (await this.channelEvent(id))!, created: true }
+  }
+
+  async channelEvent(id: string): Promise<ChannelEvent | undefined> {
+    const r = await this.one('select * from channel_events where id = ?', [id])
+    return r ? channelEventOf(r) : undefined
+  }
+
+  /**
+   * 每个远端会话一次只放一条。前一条还没送完时，后面的消息留在 pending，避免上下文
+   * 次序和 Telegram 里看到的次序分叉。
+   */
+  async dueChannelEvents(now: number, limit = 10): Promise<ChannelEvent[]> {
+    const rows = await this.many(
+      `select e.* from channel_events e join channel_bindings b on b.id=e."bindingId"
+       where b.status='active'
+         and ((e.status in ('pending','retry','ready') and coalesce(e."nextTryAt",0) <= ?)
+           or (e.status='processing' and coalesce(e."leaseUntil",0) <= ?))
+         and not exists (
+           select 1 from channel_events p
+            where p."bindingId"=e."bindingId" and p."externalConversationId"=e."externalConversationId"
+              and (p."createdAt" < e."createdAt" or (p."createdAt"=e."createdAt" and p.id < e.id))
+              and p.status not in ('delivered','dead')
+         )
+       order by e."createdAt", e.id limit ?`,
+      [now, now, Math.min(50, Math.max(1, limit))],
+    )
+    return rows.map(channelEventOf)
+  }
+
+  async claimChannelEvent(id: string, now: number, leaseUntil: number, leaseToken: string): Promise<boolean> {
+    return (await this.run(
+      `update channel_events set status='processing', "leaseUntil"=?, "leaseToken"=?, "updatedAt"=?
+       where id=? and ((status in ('pending','retry','ready') and coalesce("nextTryAt",0) <= ?)
+         or (status='processing' and coalesce("leaseUntil",0) <= ?))`,
+      [leaseUntil, leaseToken, now, id, now, now],
+    )) === 1
+  }
+
+  /** 短租约心跳。token 不一致说明另一进程已经接管，旧进程必须停止提交。 */
+  async renewChannelEventLease(id: string, leaseToken: string, leaseUntil: number): Promise<boolean> {
+    return (await this.run(
+      `update channel_events set "leaseUntil"=?, "updatedAt"=?
+       where id=? and status='processing' and "leaseToken"=?`,
+      [leaseUntil, Date.now(), id, leaseToken],
+    )) === 1
+  }
+
+  /** 只有当前事件租约持有者能登记审批提示，供重启后的接管者判断是否已经发过。 */
+  async recordChannelApprovalPrompt(id: string, leaseToken: string, approvalKey: string, messageId: number): Promise<boolean> {
+    return (await this.run(
+      `update channel_events set "approvalKey"=?, "approvalMessageId"=?, "updatedAt"=?
+       where id=? and status='processing' and "leaseToken"=?`,
+      [approvalKey, messageId, Date.now(), id, leaseToken],
+    )) === 1
+  }
+
+  /**
+   * 只让当前租约持有者提交结果。状态离开 processing 时同时清掉 token 和租约，避免
+   * 一个迟到的旧请求在接管者之后把 delivered/retry 覆盖回去。
+   */
+  async updateClaimedChannelEvent(id: string, leaseToken: string, patch: {
+    status: ChannelEventStatus
+    attempts?: number
+    nextTryAt?: number | null
+    leaseUntil?: number | null
+    sessionId?: string | null
+    reply?: string
+    lastError?: string | null
+    deliveredAt?: number | null
+  }): Promise<boolean> {
+    const cur = await this.channelEvent(id)
+    if (!cur || cur.leaseToken !== leaseToken || cur.status !== 'processing') return false
+    const next = { ...cur, ...patch, updatedAt: Date.now() }
+    const keepLease = next.status === 'processing'
+    return (await this.run(
+      `update channel_events set status=?, attempts=?, "nextTryAt"=?, "leaseUntil"=?, "leaseToken"=?,
+       "sessionId"=?, reply=?, "lastError"=?, "updatedAt"=?, "deliveredAt"=?
+       where id=? and status='processing' and "leaseToken"=?`,
+      [next.status, next.attempts, next.nextTryAt, keepLease ? next.leaseUntil : null,
+        keepLease ? leaseToken : '', next.sessionId, next.reply, next.lastError, next.updatedAt,
+        next.deliveredAt, id, leaseToken],
+    )) === 1
+  }
+
+  async updateChannelEvent(id: string, patch: {
+    status: ChannelEventStatus
+    attempts?: number
+    nextTryAt?: number | null
+    leaseUntil?: number | null
+    sessionId?: string | null
+    reply?: string
+    lastError?: string | null
+    deliveredAt?: number | null
+  }): Promise<void> {
+    const cur = await this.channelEvent(id)
+    if (!cur) return
+    const next = { ...cur, ...patch, updatedAt: Date.now() }
+    await this.run(
+      `update channel_events set status=?, attempts=?, "nextTryAt"=?, "leaseUntil"=?, "leaseToken"=?, "sessionId"=?, reply=?,
+       "lastError"=?, "updatedAt"=?, "deliveredAt"=? where id=?`,
+      [next.status, next.attempts, next.nextTryAt, next.status === 'processing' ? next.leaseUntil : null,
+        next.status === 'processing' ? next.leaseToken : '', next.sessionId, next.reply,
+        next.lastError, next.updatedAt, next.deliveredAt, id],
+    )
   }
 
   // ── 会话索引。只存指针，不存 user/message 或 assistant/message 正文。──

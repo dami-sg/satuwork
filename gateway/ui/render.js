@@ -32,6 +32,8 @@ function pageView() {
       return handoffsPage()
     case '/tasks':
       return tasksPage()
+    case '/channels':
+      return channelsPage()
     case '/audit':
       return auditPage()
     case '/machines':
@@ -218,6 +220,8 @@ function appView() {
               让顶栏多一颗没有名字的图标。跳页不弹窗——看板是一整屏，和插件弹窗不同。
               owner 没有席位，也就没有对话可总结。aria-current 让人知道自己站在这一页上。 */ ''}
         ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="go" data-href="/tasks" aria-current="${state.path === '/tasks'}">${svg(['M4 5h16v14H4z', 'M9 5v14', 'M15 5v14'], 15)} <span>${t('任务看板', 'Task board')}</span></button>`}
+        ${/* 渠道紧跟在任务看板下面，和用户给出的信息架构一致。 */ ''}
+        ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="go" data-href="/channels" aria-current="${state.path === '/channels'}">${svg(['M4 12a8 8 0 0 1 16 0', 'M12 4v4', 'M8 12h8', 'M6 18h12'], 15)} <span>${t('渠道', 'Channels')}</span></button>`}
         ${
           navHtml
             ? `<div class="satu-navfoot">
@@ -702,7 +706,7 @@ async function saveCustomModel() {
   state.providerError = ''
   render()
   try {
-    const next = [...(p.models || []), {
+    const model = {
       id: String(d.id).trim(),
       name: String(d.name).trim() || String(d.id).trim(),
       contextWindow: Number(d.contextWindow),
@@ -718,10 +722,13 @@ async function saveCustomModel() {
         cacheRead: Number(d.costCacheRead) || 0,
         cacheWrite: Number(d.costCacheWrite) || 0,
       },
-    }]
+    }
+    const next = d.editing
+      ? (p.models || []).map((m) => m.id === d.originalId ? model : m)
+      : [...(p.models || []), model]
     await putModels(state.modelsFor, next)
     state.modelDraft = null
-    flash('ok', '已添加模型')
+    flash('ok', d.editing ? '已保存模型' : '已添加模型')
   } catch (err) {
     state.providerError = err.message
   } finally {

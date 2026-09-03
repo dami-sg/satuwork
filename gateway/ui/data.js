@@ -874,6 +874,10 @@ async function loadPage() {
       tasksPoll()
       return
     }
+    if (state.path === '/channels') {
+      await loadChannels().catch(() => { state.channels = state.channels || [] })
+      return
+    }
     if (state.path === '/') {
       if (isOwner()) {
         await Promise.all([

@@ -1,0 +1,39 @@
+import { runProbe } from './probe.mjs'
+
+export async function runTelegramRich({ root, test, assert, log }) {
+  log('\n# telegram-rich')
+  const result = await runProbe(root, 'gateway/e2e-telegram-rich.mjs')
+
+  await test('Telegram 处理期间持续显示正在输入，结束后停止续发', async () => {
+    assert(result.typingCount >= 3, `正在输入状态只发送了 ${result.typingCount} 次`)
+    assert(result.typingValid, 'sendChatAction 没有使用目标私聊和 typing 动作')
+    assert(result.typingStopped, '处理结束后仍在续发正在输入状态')
+  })
+
+  await test('Telegram 回复原样传入 RichMessage Markdown', async () => {
+    assert(result.nativeMethod === 'sendRichMessage', `实际调用 ${result.nativeMethod}`)
+    assert(result.nativeMarkdown.includes('# 周报'), '标题 Markdown 丢失')
+    assert(result.nativeMarkdown.includes('| 指标 | 值 |'), '表格 Markdown 丢失')
+    assert(result.nativeMarkdown.includes('- [x] **已完成**'), '任务项 Markdown 丢失')
+    assert(result.nativeThread === '88', '话题 id 没有传给 RichMessage')
+  })
+
+  await test('旧 Bot API 不支持 RichMessage 时降级为普通文本', async () => {
+    assert(result.fallbackMethods.join(',') === 'sendRichMessage,sendMessage', `调用顺序 ${result.fallbackMethods}`)
+    assert(result.fallbackText === '**旧 API 降级**', '降级文本被改写')
+  })
+
+  await test('Telegram 审批卡可点击、回调有应答且完成后移除按钮', async () => {
+    assert(result.approvalMethod === 'sendRichMessage', `审批卡实际调用 ${result.approvalMethod}`)
+    assert(result.approvalButtons.length === 4, `审批按钮数量不对：${result.approvalButtons.length}`)
+    assert(result.approvalButtonsFit, '审批 callback_data 超过 Telegram 64 字节限制')
+    assert(result.callback?.queryId === 'query-1' && result.callback?.remoteUserId === '456', '审批回调没有正确归一化')
+    assert(result.answerMethod === 'answerCallbackQuery' && result.answerId === 'query-1', '点击审批后没有应答 callback query')
+    assert(result.clearMethod === 'editMessageReplyMarkup' && result.clearKeyboard.length === 0, '审批完成后没有移除旧按钮')
+  })
+
+  await test('超大代码块拆分后每段仍是完整 Markdown 控件', async () => {
+    assert(result.hugeParts > 1, '超限内容没有拆分')
+    assert(result.hugePartsValid, '拆分后 fence 不完整或仍超限')
+  })
+}

@@ -13,6 +13,7 @@ import type {
 // web/index.ts 那条 /messages 也要给来源打标，从这儿转一手，别让它反过来依赖 session/types。
 export type { MessageSource }
 import type { ReassignedItem, WorkspaceFile } from '../tools/index.ts'
+import { budgetToolText } from '../tools/result-budget.ts'
 import { browserOf, memoryOf, type BotRecord } from '../registry/index.ts'
 import { cachedMemories, cachedSkill, cachedSkills, type CachedMemory, type CachedSkill, type ReasoningEffort } from '../catalog/index.ts'
 
@@ -90,7 +91,8 @@ export interface Config {
   model?: string
   system?: string
   /**
-   * 估算的提示词占到上下文窗口这个比例时，轮次结束后压缩一次。
+   * 提示词占到上下文窗口这个比例时，轮次结束后压缩一次。优先采用 provider 回报的
+   * input + cache read 高水位；还没有 usage 时才完全依赖本地估算。
    *
    * 留 30% 给「这一轮之后还要长的东西」：工具结果、模型的输出、以及压缩本身
    * 落地之前的那一两轮。压得太早白花摘要的钱，压得太晚就直接撞墙了。
@@ -1675,10 +1677,16 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
     opts: { keepBudget?: number; by?: 'auto' | 'user'; atLeast?: number } = {},
   ): Promise<CompactOutcome> {
     const window = this.windowOf(provider, modelId) ?? this.config.contextWindowFallback ?? 128_000
-    const at = this.config.compactAt ?? 0.7
+    const at = this.config.compactAt ?? 0.6
     const keep = this.config.compactKeep ?? 0.3
     const events = await this.ctx.sessions.events(sessionId)
-    const before = estMessages(await toAgentMessages(events, undefined, this.ctx))
+    // 本地估算看不到 system prompt、工具 schema、provider 特殊 token，也很难准确估 CJK。
+    // provider 已经回报过的 prompt 用量才是真值：input + cache read 都是本次提示词的一部分。
+    // 取边界之后的高水位，避免压缩前的 usage 让新摘要反复触发压缩。
+    const before = Math.max(
+      estMessages(await toAgentMessages(events, undefined, this.ctx)),
+      observedPromptHighWater(events),
+    )
     if (!force && before < window * at) return { compacted: false, reason: 'below-threshold' }
     /**
      * `atLeast`：force 了，但**排在别人后面等完之后先看一眼还需不需要压**。
@@ -1825,16 +1833,18 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
           signal: this.live.get(sessionId)?.signal,
         })
         if (result.failed) throw new Error(result.text)
-        // files 走 details 而不是 content：content 是给模型的，它已经从 text 里知道
+        // files/rawText 走 details 而不是 content：content 是给模型的；details 是日志与
+        // 界面的旁路。rawText 尤其不能混进 content，否则预算形同虚设。
         // 自己写了什么；details 是 pi 留给「日志与界面渲染」的那一格，正好是这个用途。
         return {
           content: [{ type: 'text' as const, text: result.text }],
           details:
-            result.files?.length || result.refs?.length || result.shot
+            result.files?.length || result.refs?.length || result.shot || result.rawText
               ? {
                   ...(result.files?.length ? { files: result.files } : {}),
                   ...(result.refs?.length ? { refs: result.refs } : {}),
                   ...(result.shot ? { shot: result.shot } : {}),
+                  ...(result.rawText ? { rawText: result.rawText } : {}),
                 }
               : undefined,
         }
@@ -2225,11 +2235,14 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
           break
 
         case 'tool_execution_end':
+          const modelText = textOf(event.result)
+          const rawText = rawTextOf(event.result)
           await sessions.append(sessionId, 'tool/result', {
             turn,
             step,
             callId: event.toolCallId,
-            text: textOf(event.result),
+            text: rawText ?? modelText,
+            ...(rawText !== undefined ? { modelText } : {}),
             failed: Boolean(event.isError),
             files: filesOf(event.result),
             refs: refsOf(event.result),
@@ -2246,6 +2259,11 @@ function textOf(result: any): string {
   const content = result?.content
   if (Array.isArray(content)) return content.map((c: any) => c?.text ?? '').join('')
   return JSON.stringify(result ?? null)
+}
+
+/** details 里的审计原文。逐字段挑，绝不把整个 details 落盘。 */
+function rawTextOf(result: any): string | undefined {
+  return typeof result?.details?.rawText === 'string' ? result.details.rawText : undefined
 }
 
 /**
@@ -2377,11 +2395,14 @@ export async function toAgentMessages(
    * 必须成对丢：只丢调用会留下一条无主的 toolResult，Anthropic 那边同样是硬拒。
    */
   const nameless = new Set<string>()
+  const toolNames = new Map<string, string>()
   for (const e of events) {
     if (e.type === 'assistant/message') {
       assistantSeq.set(stepKey(e.data.turn, e.data.step), e.seq)
       for (const c of e.data.message.content) {
-        if (c.type === 'tool-call' && !String(c.name || '').trim()) nameless.add(c.callId)
+        if (c.type !== 'tool-call') continue
+        if (!String(c.name || '').trim()) nameless.add(c.callId)
+        else toolNames.set(c.callId, c.name)
       }
     }
   }
@@ -2454,7 +2475,14 @@ export async function toAgentMessages(
           role: 'toolResult',
           toolCallId: e.data.callId,
           toolName: '',
-          content: [{ type: 'text', text: e.data.text }],
+          // 新日志直接用 modelText；老日志在回放时即时套预算，所以升级后第一轮就生效，
+          // 不需要清空会话，也不需要重写历史 JSONL。
+          content: [
+            {
+              type: 'text',
+              text: e.data.modelText ?? budgetToolText(toolNames.get(e.data.callId) ?? '', e.data.text).text,
+            },
+          ],
           isError: e.data.failed,
           timestamp: e.time,
         } as any,
@@ -2623,6 +2651,27 @@ export function scopeAfterBoundary(
   return prior ? events.filter((e) => e.seq > prior.data.throughSeq) : events
 }
 
+/**
+ * 最后一条上下文边界真正落盘之后，provider 回报过的 prompt token 高水位。
+ *
+ * 用 boundary.seq，不用 throughSeq：compact 事件会保留几轮原文，而这些原文上的 usage
+ * 仍描述“压缩前的整份请求”。只有 compact/reset 事件之后新写的 assistant/message，
+ * 才代表当前上下文形状。
+ */
+export function observedPromptHighWater(
+  events: Awaited<ReturnType<Context['sessions']['events']>>,
+): number {
+  const boundary = contextBoundary(events)
+  let high = 0
+  for (const event of events) {
+    if (boundary && event.seq <= boundary.seq) continue
+    if (event.type !== 'assistant/message') continue
+    const usage = event.data.usage
+    high = Math.max(high, (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0))
+  }
+  return high
+}
+
 export function compactionPoint(
   events: Awaited<ReturnType<Context['sessions']['events']>>,
   keepBudget: number,
@@ -2668,7 +2717,7 @@ function estEvent(e: Awaited<ReturnType<Context['sessions']['events']>>[number])
     return estTokens(textFrom(e.data.message)) + 12 + images * EST_TOKENS_PER_IMAGE // 12 ≈ [时间] 前缀
   }
   if (e.type === 'assistant/message') return estTokens(contentDigest(e.data.message.content)) + 4
-  if (e.type === 'tool/result') return estTokens(e.data.text) + 4
+  if (e.type === 'tool/result') return estTokens(e.data.modelText ?? budgetToolText('', e.data.text).text) + 4
   return 0
 }
 
