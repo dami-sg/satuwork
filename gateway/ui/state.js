@@ -7,6 +7,8 @@ const state = {
   me: null,
   path: '/',
   rail: false,
+  /** 公司管理员侧栏各分类的展开状态；缺省视为展开，便于以后新增分类。 */
+  navGroupOpen: { company: true },
   busy: false,
   loginError: '',
   loginEmail: '',
@@ -258,6 +260,8 @@ const state = {
   chatEvents: [],
   chatDraft: '',
   chatStatus: '',
+  /** 对话里子代理任务详情的展开状态：taskId → true。 */
+  taskOpen: {},
   /**
    * 按下停止之后、这一轮真停下来之前的那一段。
    *
@@ -310,29 +314,10 @@ const state = {
    * 「要我处理、还没处理完」的。让界面自己去数的话，两处口径迟早会漂。
    */
   handoffs: [],
-  /**
-   * 任务看板（见 docs/task-board.md）。**一屏**：`tasks` 是当前过滤下的那一页，
-   * `taskCounts` 是四列的列头数（服务端算的——让界面自己数的话，翻页之后那几个数就
-   * 只反映当前这一页）。
-   */
-  tasks: [],
-  taskCounts: {},
-  /** 只看哪颗 Bot 的。空 = 全部。 */
-  taskBot: '',
-  /** 下一页的 keyset 游标。空 = 已经到底了（界面据此决定出不出「加载更多」）。 */
-  taskCursor: '',
-  /** 正在加载下一页。按钮据此置灰——连点三下就是三份重复追加。 */
-  taskMore: false,
-  /** 打开的那一条（含时间线）。null = 没开弹窗。 */
-  taskOpen: null,
-  /** 抽取器每次「创建 / 不创建」的判定日志。按需拉，避免每次看板轮询都多打一趟。 */
-  taskLogs: [],
-  taskLogsOpen: false,
   /** 外部消息渠道。第一版一个账号至多一条 Telegram 绑定。 */
   channels: [],
   channelBindOpen: false,
   channelBindError: '',
-  taskLogsLoading: false,
   handoffCount: 0,
   /** 近 30 天的概览（开了几张、还欠着几张、多久有人接）。空 = 还没拉到。 */
   handoffStats: null,
@@ -523,10 +508,6 @@ function allowedHrefs() {
   // 转人工待办的入口在**顶栏**那颗按钮上，不在侧栏菜单里（员工那份菜单是空的，
   // 见 MEMBER_NAV）。所以这里单独放行，否则点那颗按钮会被 pathAllowed 踢回首页。
   if (!isOwner()) set.add('/handoffs')
-  // 任务看板的入口在侧栏名单底下那颗「任务看板」（render.js，挨着「插件」），不在
-  // navForRole() 里——MEMBER_NAV 是空的，这条单独放行，否则点那颗按钮会被
-  // pathAllowed 踢回首页。
-  if (!isOwner()) set.add('/tasks')
   if (!isOwner()) set.add('/channels')
   return set
 }

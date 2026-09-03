@@ -30,8 +30,6 @@ function pageView() {
       return accountsPage()
     case '/handoffs':
       return handoffsPage()
-    case '/tasks':
-      return tasksPage()
     case '/channels':
       return channelsPage()
     case '/audit':
@@ -174,10 +172,21 @@ function appView() {
   // 说的是「这几条在管什么」，那才是站在菜单前要问的。
   const navHtml = navGroupsForRole()
     .map(
-      (group) =>
-        `<div class="satu-navgroup">${
-          group.label ? `<p class="satu-group">${esc(t(group.label))}</p>` : ''
-        }${group.items.map(navItem).join('')}</div>`,
+      (group) => {
+        const open = !group.collapsible || state.navGroupOpen[group.key] !== false
+        const title = !group.label
+          ? ''
+          : group.collapsible
+            ? `<button type="button" class="satu-group satu-group-toggle" data-act="nav-group-toggle"
+                data-group="${esc(group.key)}" aria-expanded="${String(open)}">
+                <span>${esc(t(group.label))}</span>
+                <span class="satu-groupchev" aria-hidden="true">${svg(CHEVRON_SMALL_DOWN, 12)}</span>
+              </button>`
+            : `<p class="satu-group">${esc(t(group.label))}</p>`
+        return `<div class="satu-navgroup"${group.collapsible ? ` data-collapsible="true" data-open="${String(open)}"` : ''}>${title}${
+          open ? group.items.map(navItem).join('') : ''
+        }</div>`
+      },
     )
     .join('')
   // 右栏和 header 同高：把 main 做成两行两列的 grid，侧栏跨两行占右列。做成 header
@@ -216,11 +225,7 @@ function appView() {
               才做的，属于名单，不属于设置页。点开是弹窗（pluginsModal），不跳页——跳走
               一整页，回来时草稿和滚动位置都没了。owner 没有席位，装了也没人用。 */ ''}
         ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="plugins-open">${svg(ICONS.plugins, 15)} <span>${t('插件', 'Plugins')}</span></button>`}
-        ${/* 「任务看板」紧跟在「插件」下面：入口该在侧栏里和其他页面入口站一排，而不是
-              让顶栏多一颗没有名字的图标。跳页不弹窗——看板是一整屏，和插件弹窗不同。
-              owner 没有席位，也就没有对话可总结。aria-current 让人知道自己站在这一页上。 */ ''}
-        ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="go" data-href="/tasks" aria-current="${state.path === '/tasks'}">${svg(['M4 5h16v14H4z', 'M9 5v14', 'M15 5v14'], 15)} <span>${t('任务看板', 'Task board')}</span></button>`}
-        ${/* 渠道紧跟在任务看板下面，和用户给出的信息架构一致。 */ ''}
+        ${/* 渠道是对话的外部入口，和插件一样紧跟在 Bot 名单下面。 */ ''}
         ${isOwner() ? '' : `<button type="button" class="satu-newbot" data-act="go" data-href="/channels" aria-current="${state.path === '/channels'}">${svg(['M4 12a8 8 0 0 1 16 0', 'M12 4v4', 'M8 12h8', 'M6 18h12'], 15)} <span>${t('渠道', 'Channels')}</span></button>`}
         ${
           navHtml

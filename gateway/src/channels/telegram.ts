@@ -155,21 +155,38 @@ function approvalKeyboard(approvalKey: string) {
   }
 }
 
-/** 发一张带内联按钮的 RichMessage 审批卡；旧 Bot API 降级为普通文本加同一组按钮。 */
+/**
+ * 发带内联按钮的 RichMessage 审批内容。长正文会完整拆成多条，按钮只挂在最后一条；
+ * 这样回调保存的 message id 始终指向真正带按钮的那条。旧 Bot API 逐段降级为普通文本。
+ */
 export async function telegramSendApproval(token: string, chatId: string, markdown: string, approvalKey: string): Promise<number> {
   const reply_markup = approvalKeyboard(approvalKey)
-  let sent: { message_id?: unknown }
-  try {
-    sent = await call(token, 'sendRichMessage', {
-      chat_id: chatId, rich_message: { markdown }, reply_markup,
-    })
-  } catch (error) {
-    if (!canFallBackToPlain(error)) throw error
-    sent = await call(token, 'sendMessage', {
-      chat_id: chatId, text: telegramTextParts(markdown, 4000)[0], reply_markup,
-    })
+  const richParts = telegramRichTextParts(markdown)
+  let messageId = NaN
+  for (let i = 0; i < richParts.length; i += 1) {
+    const part = richParts[i]
+    const lastRichPart = i === richParts.length - 1
+    let sent: { message_id?: unknown } | undefined
+    try {
+      sent = await call(token, 'sendRichMessage', {
+        chat_id: chatId,
+        rich_message: { markdown: part },
+        ...(lastRichPart ? { reply_markup } : {}),
+      })
+    } catch (error) {
+      if (!canFallBackToPlain(error)) throw error
+      const plainParts = telegramTextParts(part, 4000)
+      for (let j = 0; j < plainParts.length; j += 1) {
+        const lastPlainPart = j === plainParts.length - 1
+        sent = await call(token, 'sendMessage', {
+          chat_id: chatId,
+          text: plainParts[j],
+          ...(lastRichPart && lastPlainPart ? { reply_markup } : {}),
+        })
+      }
+    }
+    if (lastRichPart) messageId = Number(sent?.message_id)
   }
-  const messageId = Number(sent?.message_id)
   if (!Number.isSafeInteger(messageId)) throw new TelegramError('Telegram 没有返回审批消息 id')
   return messageId
 }
@@ -305,6 +322,11 @@ function markdownBlocks(markdown: string): string[] {
 
 function splitOversizedMarkdownBlock(block: string, max: number): string[] {
   const lines = block.split('\n')
+  if (lines.every((line) => /^\s*>/.test(line))) {
+    const plain = lines.map((line) => line.replace(/^\s*> ?/, '')).join('\n')
+    return telegramTextParts(plain, Math.max(1, max - 2)).map((part) =>
+      part.split('\n').map((line) => line ? `> ${line}` : '>').join('\n'))
+  }
   const opening = /^\s*(`{3,}|~{3,})[^\n]*$/.exec(lines[0] || '')
   const marker = opening?.[1] || ''
   const closed = marker && new RegExp(`^\\s*${marker[0]}{${marker.length},}\\s*$`).test(lines.at(-1) || '')

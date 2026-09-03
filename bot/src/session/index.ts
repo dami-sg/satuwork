@@ -41,7 +41,7 @@ export interface CreateSession {
    *
    * **除了 `main` 之外的都不是「这个人的对话」**：不进 list()、不上报会话索引、
    * 不会被 ensureSession 认领成长会话。判据一律写成「是不是 main」，不是「是不是
-   * task」——老日志里还有 `card` 那一档（看板的卡片会话，见 docs/task-board.md §14），
+   * task」——老日志里还有已经下线的 `card` 卡片会话，
    * 照后者写的每一处都会静默地把它当成主会话。
    */
   kind?: 'main' | 'task'

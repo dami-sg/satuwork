@@ -8,7 +8,7 @@
  *
  * 纯函数，不起服务——探针要 tsx 才 import 得了 .ts。
  */
-import { taskBoardBlock, toAgentMessages } from './src/agent/index.ts'
+import { schedulingBlock, toAgentMessages } from './src/agent/index.ts'
 
 const DAY1 = Date.parse('2026-08-18T14:10:00Z') // 昨天
 const DAY2 = Date.parse('2026-08-19T03:20:00Z') // 今天
@@ -74,10 +74,10 @@ console.log(
       // 时间要能进**正文**——pi 的 timestamp 字段停在 pi 那一层，
       // llm/gateway.ts 往请求体里只放 role 和 content。
       userContents: users.map((m) => m.content),
-      taskBoardPrompt: {
-        deadlineIsNotTimer: taskBoardBlock().includes('截止时间不等于要求你在那个时刻自动唤醒'),
-        noMemoryForTasks: taskBoardBlock().includes('绝不能用 `memory_write` 保存'),
-        automaticAfterTurn: taskBoardBlock().includes('一轮对话正常结束后'),
+      schedulingPrompt: {
+        deadlineIsNotTimer: schedulingBlock().includes('截止时间不等于要求你在那个时刻自动唤醒'),
+        noMemoryForTasks: schedulingBlock().includes('绝不能用 `memory_write` 保存'),
+        noSilentQueue: schedulingBlock().includes('不要声称系统会在后台记录、排队或稍后自动完成'),
       },
     }),
 )

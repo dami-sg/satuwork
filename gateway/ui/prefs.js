@@ -135,7 +135,6 @@ const PATHS = {
   '/skills': { title: 'Skill 与 MCP', ownerTitle: '全局 Skill 与 MCP' },
   '/chat': { title: '对话' },
   '/handoffs': { title: '转人工待办' },
-  '/tasks': { title: '任务看板' },
   '/channels': { title: '渠道' },
 }
 
@@ -388,14 +387,14 @@ const ADMIN_NAV = [
 const MEMBER_NAV = []
 
 /**
- * 公司侧还是一整组。
+ * 公司侧还是一整组，但这组可以整段折叠。
  *
  * 公司管理员那八条本来就同属一件事（「我这家公司」），再切一刀只会切出「两条一组」
- * 这种没有信息量的堆。分组是给平台那一侧的长名单用的，短名单不需要。侧栏只认这一种
- * 形状，所以这里把它包成一组，渲染那边不必再分角色判一次。
+ * 这种没有信息量的堆。侧栏只认这一种形状，所以这里把它包成一组；`key` 是折叠状态的
+ * 稳定标识，不能拿会随语言变化的 label 代替。
  *
  * 员工那一份是**空数组，不是一个空组**：包一层的话侧栏会照画那条分隔线和一个空 div，
  * 名单底下凭空多出一道横线。
  */
-const ADMIN_NAV_GROUPS = [{ label: '公司', items: ADMIN_NAV }]
+const ADMIN_NAV_GROUPS = [{ key: 'company', label: '公司', collapsible: true, items: ADMIN_NAV }]
 const MEMBER_NAV_GROUPS = []

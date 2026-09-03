@@ -803,8 +803,8 @@ window.SATU_I18N = {
     'The catalog comes from pi-ai; keys are configured on the Providers page. Keys stay on the Gateway and never touch local disk or environment.',
   '日常任务模型和 utility 模型由系统管理员配置。供应商密钥保存后不会回显，也不会下发到 Bot。':
     'The daily and utility models are configured by the system owner. Provider keys are never echoed back and never pushed to bots.',
-  '用来把微信、Telegram 这类渠道里的对话绑到你的账号上。渠道本身还没接入，所以现在没有可配对的东西。':
-    'Used to bind conversations from channels like WeChat or Telegram to your account. No channel is connected yet, so there is nothing to pair.',
+  '用于将 Telegram 私聊绑定到你的账号。请先在「渠道」页面绑定 Bot，再使用页面生成的一次性配对码。':
+    'Connect a private Telegram chat to your account. Bind a bot on the Channels page, then use the one-time pairing code shown there.',
   '这几条最终落在工具执行前的拦截上（tools/pre-execute），不是提示词里的一句话——现在还没接。':
     'These ultimately hook into pre-execution interception (tools/pre-execute) rather than a line in the prompt — not wired up yet.',
   '费用还没有账单，显示 —。调用次数和 token 来自 Gateway 记下的 llm_calls，没有就 0。':
