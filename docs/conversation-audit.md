@@ -6,7 +6,6 @@
 相关现状：
 
 - 会话索引与按需拉全文：[gateway-runtime.md](./gateway-runtime.md) 第 10、11 节
-- 任务抽取先例：[task-board.md](./task-board.md) 第 3、4 节
 - Gateway 调度先例：[routines.md](./routines.md) 第 2、3 节
 - 当前 Bot 删除链路：`gateway/src/routes/runtime.ts`、`gateway/src/deploy.ts`、
   `gateway/src/db.ts#deleteBot`
@@ -45,7 +44,7 @@
 
 - 不把原始 JSONL 搬到 Gateway。
 - 不保存完整工具返回、邮件正文、网页正文、附件正文或模型 reasoning。
-- 不让审计摘要回流到 Bot 上下文、记忆、Skill 或任务看板。
+- 不让审计摘要回流到 Bot 上下文、记忆或 Skill。
 - 不用审计分数自动处罚员工、停用 Bot 或触发外部动作。
 - 不承诺模型评分等同于事实正确性或人工绩效评价。
 
@@ -463,9 +462,8 @@ Gateway 或 Bot 重启后都从持久化状态恢复：Gateway 扫未完成删�
 - `bot/src/web/index.ts`：审计任务与删除静默端点
 - `bot/cordis.yml`：在 session、catalog、llm 之后挂载审计插件
 
-不要直接复用 `task-extract` 的 `Mark`：任务抽取的水位是“是否已识别任务”，自动审计的水位是
-“是否已持久化覆盖”，失败语义和删除约束不同。可以复用它的 turn 切分、非流式模型调用、
-JSON 解析和 outbox 写法，但状态必须分开。
+自动审计的水位必须独立表示“是否已持久化覆盖”，并按自己的失败语义和删除约束推进。
+turn 切分、非流式模型调用、JSON 解析和 outbox 可以复用通用实现，但不能共用状态。
 
 ---
 

@@ -1953,7 +1953,7 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
      * 第一个 token 重算，而模型不带参数调一次 todo 就能读回来。
      */
     const todo = this.ctx.tools.has('todo') ? `\n\n${todoBlock()}` : ''
-    const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}\n\n${taskBoardBlock()}${web}${escalate}${cite}${outFiles}${todo}`
+    const base = `${bot?.prompt?.trim() || this.system}\n\n${runtimeBlock()}\n\n${schedulingBlock()}${web}${escalate}${cite}${outFiles}${todo}`
     const { resident, index } = this.skillsOf(bot)
     const parts = [
       ...resident.map((s) => `## Skill: ${s.displayName}\n${s.body}`),
@@ -2965,24 +2965,17 @@ function runtimeBlock(): string {
 }
 
 /**
- * 任务看板和日常任务不是一回事。
+ * 定时执行与普通截止时间的边界。
  *
- * 这段约定必须进主代理的系统提示词，不能只写在 task-extract 的抽取提示词里。后者要等
- * `turn/end` 才运行；如果主代理把「周四前完成」误读成「周四自动唤醒」，再拿
- * `memory_write` 去记一条待办，确认卡会把整轮挂住，抽取器连一次运行机会都拿不到。
- *
- * `memory_write` 的工具说明已经说了只记事实，但一次带日期的任务很像「跨对话信息」，模型
- * 仍会偶尔越界。这里从用户意图一侧把边界写死：截止时间 != 定时执行，任务 != 记忆。
+ * `memory_write` 的工具说明已经说了只记事实，但一次带日期的工作很像「跨对话信息」，模型
+ * 仍会偶尔越界。这里从用户意图一侧写死：截止时间 != 定时执行，任务 != 记忆。
  */
-export function taskBoardBlock(): string {
+export function schedulingBlock(): string {
   return [
-    '## 任务看板与定时执行',
-    '任务看板由系统在一轮对话正常结束后，从对话中自动整理；它只用来跟踪发生过、正在做或尚未完成的工作，不会从看板再次启动执行。',
-    '',
-    '用户直接交代一件尚未完成的工作时（包括“明天前”“周四 18:00 前”这类截止时间），这本身就是一次性待办。',
+    '## 定时执行与长期记忆',
     '**截止时间不等于要求你在那个时刻自动唤醒。** 除非用户明确说“到点自动执行”“定时运行”或“到时提醒”，不要主动解释定时器限制。',
-    '如果工作不是这一轮立刻执行，简洁确认事项和截止时间，并说明它会由系统整理进任务看板；不要调用任何工具来创建看板条目。',
-    '任务看板只是跟踪：如果用户确实要求无人值守地到点执行，用 `routine_list` 查看现有安排，用 `routine_manage` 新增、修改或立即触发日常任务。',
+    '如果用户确实要求无人值守地到点执行，用 `routine_list` 查看现有安排，用 `routine_manage` 新增、修改或立即触发日常任务。',
+    '如果工作不是这一轮立刻执行、用户也没有要求定时，不要声称系统会在后台记录、排队或稍后自动完成；必要时问清是现在执行还是安排定时。',
     '',
     '**一次性任务、截止时间、行动计划都不是长期事实，绝不能用 `memory_write` 保存。** `memory_write` 只记称呼、偏好、身份关系等跨对话仍成立的事实。',
   ].join('\n')

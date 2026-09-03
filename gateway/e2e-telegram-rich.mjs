@@ -79,6 +79,20 @@ try {
   const callbackData = approval?.body?.reply_markup?.inline_keyboard
     ?.flatMap((row) => row.map((button) => button.callback_data)) || []
 
+  seen.length = 0
+  const longApprovalTail = '——长邮件正文结尾——'
+  const longApproval = `## 需要批准\n\n### 正文\n\n> ${'完整正文 '.repeat(7_000)}\n>\n> ${longApprovalTail}\n\n请选择审批范围。`
+  const longApprovalMessageId = await telegramSendApproval(token, '456', longApproval, approvalKey)
+  const longApprovalMessages = [...seen]
+
+  rejectRich = true
+  seen.length = 0
+  const fallbackApprovalTail = '——旧接口完整正文结尾——'
+  const fallbackApproval = `## 需要批准\n\n### 正文\n\n${'旧接口正文 '.repeat(2_000)}\n\n${fallbackApprovalTail}`
+  const fallbackApprovalMessageId = await telegramSendApproval(token, '456', fallbackApproval, approvalKey)
+  const fallbackApprovalMessages = seen.filter((entry) => entry.method === 'sendMessage')
+  rejectRich = false
+
   const huge = `\`\`\`txt\n${'x'.repeat(31_000)}\n\`\`\``
   const parts = telegramRichTextParts(huge)
   console.log('__RESULT__' + JSON.stringify({
@@ -93,6 +107,18 @@ try {
     approvalMethod: approval?.method,
     approvalButtons: callbackData,
     approvalButtonsFit: callbackData.every((data) => Buffer.byteLength(data, 'utf8') <= 64),
+    longApprovalParts: longApprovalMessages.length,
+    longApprovalComplete: longApprovalMessages.some((entry) => entry.body?.rich_message?.markdown?.includes(longApprovalTail)),
+    longApprovalQuoted: longApprovalMessages.filter((entry) => entry.method === 'sendRichMessage')
+      .every((entry) => String(entry.body?.rich_message?.markdown || '').split('\n').filter((line) => line.includes('完整正文')).every((line) => line.startsWith('> '))),
+    longApprovalButtonsOnlyLast: longApprovalMessages.slice(0, -1).every((entry) => !entry.body?.reply_markup)
+      && Boolean(longApprovalMessages.at(-1)?.body?.reply_markup),
+    longApprovalMessageIdIsLast: longApprovalMessageId === longApprovalMessages.length,
+    fallbackApprovalParts: fallbackApprovalMessages.length,
+    fallbackApprovalComplete: fallbackApprovalMessages.some((entry) => entry.body?.text?.includes(fallbackApprovalTail)),
+    fallbackApprovalButtonsOnlyLast: fallbackApprovalMessages.slice(0, -1).every((entry) => !entry.body?.reply_markup)
+      && Boolean(fallbackApprovalMessages.at(-1)?.body?.reply_markup),
+    fallbackApprovalMessageIdIsLast: fallbackApprovalMessageId === seen.length,
     callback,
     answerMethod: answer?.method,
     answerId: answer?.body?.callback_query_id,

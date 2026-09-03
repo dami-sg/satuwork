@@ -13,6 +13,17 @@ import { runProbe } from './probe.mjs'
 
 const TOKEN = '123456789:telegram-e2e-token-never-store-plain'
 const APPROVAL_KEY = 'AbCdEfGhIjKlMnOpQrStUv'
+const APPROVAL_EMAIL_BODY = [
+  'Hi,',
+  '',
+  '这是一封需要完整展示的审批邮件。',
+  `详细内容：${'很长但不能省略。'.repeat(80)}`,
+  '',
+  '- 第一项',
+  '- 第二项',
+  '',
+  '——完整正文结尾——',
+].join('\n')
 
 async function mockSeat() {
   const seen = { messages: [], approvals: [], approved: false, successfulApprovals: 0 }
@@ -37,6 +48,7 @@ async function mockSeat() {
               form: { kind: 'email', tool: 'MAIL_SEND', fields: [
                 { key: 'to', label: '收件人', value: 'alice@example.test' },
                 { key: 'subject', label: '主题', value: '测试', editable: true },
+                { key: 'body', label: '正文', value: APPROVAL_EMAIL_BODY, editable: true, multiline: true },
               ] },
             },
           }))
@@ -305,6 +317,11 @@ export async function runChannels({ gwRoot, test, req, start, waitHttp, assert, 
         'Telegram 收到审批卡',
       )
       assert(prompt.method === 'sendRichMessage', '审批卡没有使用 RichMessage')
+      const promptMarkdown = String(prompt.rich_message?.markdown || '')
+      assert(promptMarkdown.includes('### 邮件内容') && promptMarkdown.includes('### 正文'), '邮件审批没有按邮件结构排版')
+      assert(promptMarkdown.includes('> Hi,') && promptMarkdown.includes('> - 第一项'), '邮件正文没有保留段落和列表格式')
+      assert(promptMarkdown.includes('——完整正文结尾——'), '邮件正文仍被截断')
+      assert(!promptMarkdown.includes("'''text"), '邮件正文的 Markdown 围栏仍被破坏')
       const buttons = prompt.reply_markup?.inline_keyboard?.flat() || []
       assert(buttons.length === 4, `审批按钮不是四个：${buttons.length}`)
       assert(buttons.every((b) => Buffer.byteLength(b.callback_data, 'utf8') <= 64), '审批按钮 callback_data 超过 64 字节')

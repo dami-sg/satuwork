@@ -1,4 +1,4 @@
-/** 外部消息渠道。第一版接 Telegram；微信只保留官方接入的扩展位。 */
+/** 外部消息渠道。目前接入 Telegram。 */
 
 async function loadChannels() {
   const data = await api('GET', '/channels')
@@ -88,18 +88,10 @@ function channelsPage() {
   return `<div class="gw-page">
     <div class="gw-page-inner" style="max-width: 920px;">
       <div><h1 style="font-size: 24px; margin: 0 0 4px;">${t('渠道', 'Channels')}</h1>
-      <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('让外部消息进入你的 Bot。渠道会话仍使用现有的审计、任务识别和用量规则。', 'Let external messages reach your bots. Channel conversations use the same audit, task extraction, and usage rules.')}</p></div>
+      <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('让外部消息进入你的 Bot。渠道会话仍使用现有的审计和用量规则。', 'Let external messages reach your bots. Channel conversations use the same audit and usage rules.')}</p></div>
       ${flashes()}
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--space-4);">
         ${telegramChannelCard(telegram)}
-        <div class="satu-panel" style="opacity: .72; gap: var(--space-4);">
-          <div style="display: flex; align-items: flex-start; gap: var(--space-3);">
-            <span style="width: 42px; height: 42px; flex: none; border-radius: 12px; display: grid; place-items: center; background: #07c160; color: white; font-weight: 700;">微信</span>
-            <div><div style="display: flex; gap: var(--space-2); align-items: center;"><b>${t('微信', 'WeChat')}</b><span class="tag tag-neutral">${t('可选扩展', 'Optional')}</span></div>
-            <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted-foreground);">${t('预留微信公众号与企业微信官方接入，不使用个人微信模拟协议。', 'Reserved for official WeChat Official Account and WeCom integrations; no personal-account emulation.')}</p></div>
-          </div>
-          <div style="display: flex; justify-content: flex-end;"><button type="button" class="btn btn-secondary" disabled>${t('暂未开放', 'Not available yet')}</button></div>
-        </div>
       </div>
     </div>
     ${channelBindModal()}

@@ -32,6 +32,21 @@ export async function runTelegramRich({ root, test, assert, log }) {
     assert(result.clearMethod === 'editMessageReplyMarkup' && result.clearKeyboard.length === 0, '审批完成后没有移除旧按钮')
   })
 
+  await test('Telegram 长审批正文完整分段，格式和按钮位置不丢', async () => {
+    assert(result.longApprovalParts > 1, '长审批正文没有分段')
+    assert(result.longApprovalComplete, '长审批正文结尾丢失')
+    assert(result.longApprovalQuoted, '长审批正文分段后丢失引用格式')
+    assert(result.longApprovalButtonsOnlyLast, '审批按钮没有只挂在最后一段')
+    assert(result.longApprovalMessageIdIsLast, '审批记录没有指向带按钮的最后一段')
+  })
+
+  await test('旧 Telegram Bot API 也会完整发送长审批正文', async () => {
+    assert(result.fallbackApprovalParts > 1, '旧接口没有拆分长审批正文')
+    assert(result.fallbackApprovalComplete, '旧接口降级后正文结尾丢失')
+    assert(result.fallbackApprovalButtonsOnlyLast, '旧接口降级后按钮没有只挂在最后一段')
+    assert(result.fallbackApprovalMessageIdIsLast, '旧接口降级后没有记录带按钮的最后一段')
+  })
+
   await test('超大代码块拆分后每段仍是完整 Markdown 控件', async () => {
     assert(result.hugeParts > 1, '超限内容没有拆分')
     assert(result.hugePartsValid, '拆分后 fence 不完整或仍超限')

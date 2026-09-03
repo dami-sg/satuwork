@@ -31,6 +31,7 @@ import { SQL as m0030 } from './0030-channel-poll-error.ts'
 import { SQL as m0031 } from './0031-telegram-private-user.ts'
 import { SQL as m0032 } from './0032-channel-event-lease-token.ts'
 import { SQL as m0033 } from './0033-channel-approval-prompt.ts'
+import { SQL as m0034 } from './0034-drop-task-board.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -108,6 +109,7 @@ export const MIGRATIONS: Migration[] = [
   { id: '0031-telegram-private-user', name: 'Telegram 渠道限定单一私聊用户', sql: m0031 },
   { id: '0032-channel-event-lease-token', name: '渠道消息短租约的续租与所有权隔离', sql: m0032 },
   { id: '0033-channel-approval-prompt', name: '渠道审批提示去重与重启恢复', sql: m0033 },
+  { id: '0034-drop-task-board', name: '移除任务看板、时间线与对话任务抽取日志', sql: m0034 },
 ]
 
 /**

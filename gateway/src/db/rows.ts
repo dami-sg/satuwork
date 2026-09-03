@@ -1,4 +1,4 @@
-import { Account, AuditEvent, BotDeletionRequest, BotRelease, CatalogItem, CatalogKind, ChannelBinding, ChannelEvent, ChannelIdentity, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, ConversationAuditBatch, ConversationAuditItem, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseConversationAuditSettings, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools, Task, TaskEvent, TaskExtractLog, parseTaskEventKind, parseTaskExtractOutcome, parseTaskFields, parseTaskState } from './types.ts'
+import { Account, AuditEvent, BotDeletionRequest, BotRelease, CatalogItem, CatalogKind, ChannelBinding, ChannelEvent, ChannelIdentity, Company, ConnectionScope, ConnectionStatus, ConnectorCall, ConnectorCallStatus, ConnectorConnection, ConnectorInstall, ConversationAuditBatch, ConversationAuditItem, Credential, DEFAULT_MAX_ACCOUNTS, Group, Instance, Invite, Invoice, Locale, Machine, MachineMetricMinute, MachinePairing, Memory, ModelRole, OrderKind, PLAN_PERIODS, PayStatus, Plan, PlanOrder, PlanPeriod, PlanSku, PlatformSettings, Role, Scope, SeatDeployPhase, SeatRuntime, SeatRuntimeStatus, Handoff, HandoffState, Routine, RoutineRun, RoutineRunStatus, RoutineRunTrigger, SessionIndex, Theme, Topup, ChargeKind, ChargeStatus, UsageCharge, emptyPlatformSettings, parseBilling, parseConversationAuditSettings, parseRoutineModelRole, parseRoutineTriggers, parseConnectorPricing, parseMemoryKind, parseMemoryLayer, parseMemoryPii, parseModelPricing, parsePriceMultiplier, parseReasoningEffort, parseWebTools } from './types.ts'
 
 /**
  * `select *` 回来的裸行 → 上面那些类型。
@@ -671,70 +671,4 @@ export function handoffOf(r: Row): Handoff {
 export function toPg(text: string): string {
   let i = 0
   return text.replace(/\?/g, () => `$${++i}`)
-}
-
-// ── 任务看板（见 docs/task-board.md）────────────────────────────────────────
-
-/**
- * 一条任务。
- *
- * `state` 走 `parseTaskState` 而不是 `as`：读库这一路没人接得住异常，一条脏数据不该让
- * 整块板打不开（同 routineOf 那条）。真正拦住写错值的地方在路由上——那里一律 400。
- */
-export function taskOf(r: Row): Task {
-  return {
-    id: str(r.id),
-    accountId: str(r.accountId),
-    companyId: str(r.companyId),
-    botId: str(r.botId),
-    sessionId: str(r.sessionId),
-    title: str(r.title),
-    summary: str(r.summary),
-    state: parseTaskState(r.state),
-    key: str(r.key),
-    firstSeq: num(r.firstSeq),
-    lastSeq: num(r.lastSeq),
-    evidence: str(r.evidence),
-    humanFields: parseTaskFields(jsonOf(r.humanFields)),
-    extractModel: str(r.extractModel),
-    extractVersion: num(r.extractVersion),
-    createdAt: num(r.createdAt),
-    updatedAt: num(r.updatedAt),
-    stateAt: num(r.stateAt),
-    doneAt: numOrNull(r.doneAt),
-  }
-}
-
-export function taskEventOf(r: Row): TaskEvent {
-  return {
-    id: str(r.id),
-    taskId: str(r.taskId),
-    kind: parseTaskEventKind(r.kind),
-    // 建这一行的时候可以只有一边（新认出来的一条没有 from）。
-    fromState: r.fromState == null ? null : parseTaskState(r.fromState),
-    toState: r.toState == null ? null : parseTaskState(r.toState),
-    note: str(r.note),
-    createdAt: num(r.createdAt),
-  }
-}
-
-export function taskExtractLogOf(r: Row): TaskExtractLog {
-  return {
-    id: str(r.id),
-    accountId: str(r.accountId),
-    companyId: str(r.companyId),
-    botId: str(r.botId),
-    sessionId: str(r.sessionId),
-    outcome: parseTaskExtractOutcome(r.outcome),
-    reason: str(r.reason),
-    detail: str(r.detail),
-    createdCount: num(r.createdCount),
-    updatedCount: num(r.updatedCount),
-    taskCount: num(r.taskCount),
-    fromSeq: num(r.fromSeq),
-    toSeq: num(r.toSeq),
-    model: str(r.model),
-    version: num(r.version),
-    createdAt: num(r.createdAt),
-  }
 }

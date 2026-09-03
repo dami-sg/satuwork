@@ -744,7 +744,7 @@ function profilePage() {
         <div class="satu-panel">
           <span class="satu-panel-title">${t('渠道配对码', 'Channel pairing code')}</span>
           <p style="margin: 0; font-size: 13px; color: var(--muted-foreground);">
-            ${t('用来把微信、Telegram 这类渠道里的对话绑到你的账号上。渠道本身还没接入，所以现在没有可配对的东西。', 'Binds conversations from channels like WeChat or Telegram to your account. No channel is wired up yet, so there is nothing to pair with.')}
+            ${t('用于将 Telegram 私聊绑定到你的账号。请先在「渠道」页面绑定 Bot，再使用页面生成的一次性配对码。', 'Connect a private Telegram chat to your account. Bind a bot on the Channels page, then use the one-time pairing code shown there.')}
           </p>
         </div>
 
@@ -813,4 +813,3 @@ function profilePage() {
     </div>
     ${passwordModal()}`
 }
-

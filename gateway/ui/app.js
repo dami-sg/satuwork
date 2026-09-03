@@ -503,88 +503,6 @@ document.getElementById('app').addEventListener('click', async (e) => {
     if (bot) go('/a/' + encodeURIComponent(bot))
     return
   }
-  if (act === 'task-bot') {
-    // 换一颗 Bot 过滤。整屏重拉——列头那几个数是服务端按同一个过滤算的。
-    // **游标跟着清**：留着上一份过滤的游标，翻下一页会翻出别人家的任务。
-    state.taskBot = btn.getAttribute('data-id') || ''
-    state.taskCursor = ''
-    void loadTasks().then(render).then(tasksPoll).catch((e) => flash('err', e.message))
-    return
-  }
-  if (act === 'task-more') {
-    if (state.taskMore) return
-    state.taskMore = true
-    render()
-    void loadTasks({ more: true })
-      .catch((e) => flash('err', e.message))
-      .finally(() => {
-        state.taskMore = false
-        render()
-      })
-    return
-  }
-  if (act === 'task-logs') {
-    state.taskLogsOpen = true
-    state.taskLogsLoading = true
-    render()
-    void loadTaskLogs()
-      .catch((e) => flash('err', e.message))
-      .finally(() => {
-        state.taskLogsLoading = false
-        render()
-      })
-    return
-  }
-  if (act === 'task-log-close') {
-    state.taskLogsOpen = false
-    render()
-    return
-  }
-  if (act === 'task-open') {
-    const id = btn.getAttribute('data-id') || ''
-    void loadTask(id).then(render).catch((e) => flash('err', e.message))
-    return
-  }
-  if (act === 'task-close') {
-    state.taskOpen = null
-    render()
-    return
-  }
-  if (act === 'task-state') {
-    const id = btn.getAttribute('data-id') || ''
-    void patchTask(id, { state: btn.getAttribute('data-state') || '' })
-    return
-  }
-  if (act === 'task-delete') {
-    const id = btn.getAttribute('data-id') || ''
-    // 删掉是不可逆的（这一条的时间线跟着走），而它就在弹窗里挨着几颗常按的按钮。
-    if (!window.confirm(t('删掉这条任务？它不会再自己回来。', 'Delete this task? It will not come back.'))) return
-    void api('DELETE', `/tasks/${encodeURIComponent(id)}`)
-      .then(() => {
-        state.taskOpen = null
-        return loadTasks()
-      })
-      .then(render)
-      .then(tasksPoll)
-      .catch((e) => flash('err', e.message))
-    return
-  }
-  if (act === 'task-session') {
-    /**
-     * 「打开这段对话」跳的是**这颗 Bot 的对话**（`/a/<botId>`）。
-     *
-     * 摘要是模型写的，摘要错了只有原文能纠——没有这条路，人手上就只剩模型的一面之词。
-     * 定位到那一段（`firstSeq`）还没做：chat 那侧现在只会从末尾往前翻，见
-     * docs/task-board.md §17。
-     */
-    const bot = btn.getAttribute('data-bot') || ''
-    if (!bot) {
-      flash('err', t('这条任务没记下是哪颗 Bot 办的', "This task didn't record which bot did it"))
-      return
-    }
-    go('/a/' + encodeURIComponent(bot))
-    return
-  }
   if (act === 'handoff-scope') {
     state.handoffScope = btn.getAttribute('data-scope') === 'mine' ? 'mine' : 'all'
     render()
@@ -1470,6 +1388,13 @@ document.getElementById('app').addEventListener('click', async (e) => {
   }
   if (act === 'rail') {
     state.rail = !state.rail
+    render()
+    return
+  }
+  if (act === 'nav-group-toggle') {
+    const key = btn.getAttribute('data-group')
+    if (!key) return
+    state.navGroupOpen = { ...state.navGroupOpen, [key]: state.navGroupOpen[key] === false }
     render()
     return
   }
@@ -2360,17 +2285,6 @@ document.getElementById('app').addEventListener('input', (e) => {
 
 document.getElementById('app').addEventListener('change', async (e) => {
   const el = e.target
-  /**
-   * 任务的标题。**收在 change 上，不是 input**：保存要 render（那一列、列头的数都跟着
-   * 变），而 render 会把输入框换掉——边打边存等于每敲一个字丢一次焦点。
-   */
-  if (el instanceof HTMLInputElement && el.getAttribute('data-act') === 'task-title') {
-    const id = el.getAttribute('data-id') || ''
-    const title = el.value.trim()
-    const now = state.taskOpen && state.taskOpen.task.id === id ? state.taskOpen.task : null
-    if (id && title && now && title !== now.title) await patchTask(id, { title })
-    return
-  }
   /**
    * 日常任务的名字、指令与用哪个模型。**收在 change 而不是 input 上**：保存都要 render()
    * （列表里那一行、下一次的时间都跟着变），而 render 会把输入框换掉——边打边存

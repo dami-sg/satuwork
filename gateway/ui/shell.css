@@ -11,6 +11,11 @@ a:hover { color: var(--color-accent-600); }
 .satu-nav[aria-current="true"]:hover { background: var(--color-accent-600); }
 .satu-nav:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .satu-group { font-size: 11.5px; letter-spacing: 0.04em; padding: 0 var(--space-3); margin: 0; color: color-mix(in srgb, var(--color-text) 45%, transparent); }
+.satu-group-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; box-sizing: border-box; border: 0; background: transparent; font-family: var(--font-body); text-align: left; cursor: pointer; }
+.satu-group-toggle:hover { color: var(--color-text); }
+.satu-group-toggle:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+.satu-groupchev { display: flex; transition: transform 140ms ease; }
+.satu-navgroup[data-open="false"] .satu-groupchev { transform: rotate(-90deg); }
 .satu-sep { height: 1px; background: var(--color-divider); margin: var(--space-3) var(--space-2); }
 /* 侧栏分组的外壳。设计稿里没有这一层——稿子上每一组都是写死的，自然不会空；
    代码里各组由插件贡献，Plugin 那组现在就一个人都没有，Admin 那组则整段只给管理员看。
@@ -18,7 +23,7 @@ a:hover { color: var(--color-accent-600); }
    只在「这一组里一个 .satu-nav 都没有」时把分隔线和标题一起收走。
    `:has()` 不支持的旧浏览器上退回今天的样子：空标题照旧显示，别的都不受影响。 */
 .satu-navgroup { display: contents; }
-.satu-navgroup:not(:has(.satu-nav)) { display: none; }
+.satu-navgroup:not([data-collapsible="true"]):not(:has(.satu-nav)) { display: none; }
 /* 组和组之间要留一口气，否则四个标题混在一列 2px 间距的按钮里，看着还是一根柱子。
    `display: contents` 的元素自己没有盒子，撑不了外边距——所以顶在它的第一个孩子上，
    不管那是标题还是（第一组那样没标题时的）头一条。 */

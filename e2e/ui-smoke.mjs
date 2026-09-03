@@ -55,15 +55,24 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
 
   try {
     await test('页面路径和 API 同名时，刷新拿 HTML、api() 仍拿 JSON', async () => {
-      // `/tasks` 同时是 SPA 地址和任务 API。浏览器刷新会带 text/html，必须先交回
+      // `/channels` 同时是 SPA 地址和渠道 API。浏览器刷新会带 text/html，必须先交回
       // index.html；站内 api() 明确带 application/json，仍然走鉴权后的 JSON 路由。
-      const page = await req(gwBase, 'GET', '/tasks', { headers: { accept: 'text/html' } })
-      assert(page.status === 200, `刷新 /tasks → ${page.status} ${page.text}`)
-      assert((page.headers.get('content-type') || '').includes('text/html'), `刷新 /tasks 没拿到 HTML：${page.headers.get('content-type')}`)
-      assert(page.text.includes('data-app-part'), '刷新 /tasks 拿到的不是管理页 index.html')
+      const page = await req(gwBase, 'GET', '/channels', { headers: { accept: 'text/html' } })
+      assert(page.status === 200, `刷新 /channels → ${page.status} ${page.text}`)
+      assert((page.headers.get('content-type') || '').includes('text/html'), `刷新 /channels 没拿到 HTML：${page.headers.get('content-type')}`)
+      assert(page.text.includes('data-app-part'), '刷新 /channels 拿到的不是管理页 index.html')
 
+      const api = await req(gwBase, 'GET', '/channels', { headers: { accept: 'application/json' } })
+      assert(api.status === 401 && api.json?.error === '需要登录', `JSON /channels 没走原来的鉴权 API：${api.status} ${api.text}`)
+    })
+
+    await test('任务看板及自动整理接口已经下线', async () => {
+      const page = await req(gwBase, 'GET', '/tasks', { headers: { accept: 'text/html' } })
+      assert(page.status === 404, `已删除的 /tasks 页面仍返回 ${page.status}`)
       const api = await req(gwBase, 'GET', '/tasks', { headers: { accept: 'application/json' } })
-      assert(api.status === 401 && api.json?.error === '需要登录', `JSON /tasks 没走原来的鉴权 API：${api.status} ${api.text}`)
+      assert(api.status === 404, `已删除的 /tasks API 仍返回 ${api.status}`)
+      const extract = await req(gwBase, 'POST', '/internal/tasks/extract', { body: { tasks: [] } })
+      assert(extract.status === 404, `已删除的任务整理接口仍返回 ${extract.status}`)
     })
 
     await test('index.html 列出的每个前端分片都真的取得到', async () => {
@@ -1591,21 +1600,37 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       }
     })
 
-    await test('任务看板下面有渠道入口，渠道页提供 Telegram 绑定并标明微信扩展位', async () => {
+    await test('公司管理员可以折叠并重新展开公司分类菜单', async () => {
       const ui = await boot(adminToken)
       let html = ui.html()
-      const tasksAt = html.indexOf('data-href="/tasks"')
+      assert(/data-act="nav-group-toggle"[^>]*aria-expanded="true"/.test(html), '公司分类没有展开态的折叠按钮')
+      assert(html.includes('data-href="/company"'), '展开时没有画公司菜单入口')
+
+      await ui.fire('click', el('button', { 'data-act': 'nav-group-toggle', 'data-group': 'company' }))
+      html = ui.html()
+      assert(/data-act="nav-group-toggle"[^>]*aria-expanded="false"/.test(html), '点击后没有进入折叠态')
+      assert(!html.includes('data-href="/company"'), '折叠后公司菜单入口仍然可见')
+
+      await ui.fire('click', el('button', { 'data-act': 'nav-group-toggle', 'data-group': 'company' }))
+      html = ui.html()
+      assert(/data-act="nav-group-toggle"[^>]*aria-expanded="true"/.test(html), '第二次点击没有重新展开')
+      assert(html.includes('data-href="/company"'), '重新展开后公司菜单入口没有恢复')
+    })
+
+    await test('侧栏已移除任务看板，渠道页只提供 Telegram 绑定', async () => {
+      const ui = await boot(adminToken)
+      let html = ui.html()
       const channelsAt = html.indexOf('data-href="/channels"')
-      assert(tasksAt >= 0, '侧栏没有任务看板')
-      assert(channelsAt > tasksAt, '渠道入口没有放在任务看板下面')
+      assert(!html.includes('data-href="/tasks"'), '侧栏仍然显示任务看板')
+      assert(channelsAt >= 0, '侧栏没有渠道入口')
+      assert(!ui.pathAllowed('/tasks'), '已删除的任务看板路径仍被放行')
 
       ui.state.path = '/channels'
       ui.state.channels = []
       ui.render()
       html = ui.html()
       assert(html.includes('绑定 Telegram'), '渠道页没有 Telegram 绑定入口')
-      assert(html.includes('微信公众号与企业微信官方接入'), '渠道页没有微信官方接入扩展说明')
-      assert(html.includes('暂未开放'), '微信扩展位没有明确标为未开放')
+      assert(!html.includes('微信') && !html.includes('WeChat'), '渠道页仍然显示微信扩展位')
 
       ui.state.channels = [{
         id: 'tg-1', kind: 'telegram', status: 'active', botId: 'bot-tg', externalUsername: 'demo_bot',

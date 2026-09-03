@@ -94,10 +94,10 @@ const MIME: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
 }
 
-const SPA_PATHS = new Set(['/', '/index.html', '/ui', '/ui/', '/models', '/providers', '/company', '/accounts', '/audit', '/companies', '/users', '/plans', '/orders', '/stats', '/tools', '/costs', '/billing', '/usage', '/catalog', '/profile', '/bots', '/skills', '/chat', '/releases', '/machines', '/connectors', '/handoffs', '/tasks', '/channels'])
+const SPA_PATHS = new Set(['/', '/index.html', '/ui', '/ui/', '/models', '/providers', '/company', '/accounts', '/audit', '/companies', '/users', '/plans', '/orders', '/stats', '/tools', '/costs', '/billing', '/usage', '/catalog', '/profile', '/bots', '/skills', '/chat', '/releases', '/machines', '/connectors', '/handoffs', '/channels'])
 // 前端脚本拆成了一串（见 gateway/ui/index.html 里那组 data-app-part），
 // 加一个新的分片就要在这里也加一行，否则线上直接 404，而本地跑 index.html 是好的。
-const UI_PARTS = ['prefs.js', 'state.js', 'data.js', 'shell.js', 'pages-admin.js', 'pages-audit.js', 'pages-machines.js', 'pages-account.js', 'pages-bots.js', 'pages-tools.js', 'pages-connectors.js', 'pages-routines.js', 'pages-handoffs.js', 'pages-tasks.js', 'pages-channels.js', 'chat.js', 'render.js', 'app.js']
+const UI_PARTS = ['prefs.js', 'state.js', 'data.js', 'shell.js', 'pages-admin.js', 'pages-audit.js', 'pages-machines.js', 'pages-account.js', 'pages-bots.js', 'pages-tools.js', 'pages-connectors.js', 'pages-routines.js', 'pages-handoffs.js', 'pages-channels.js', 'chat.js', 'render.js', 'app.js']
 const ROOT_FILES = new Set(['theme.css', 'shell.css', 'app.css', 'chat.css', ...UI_PARTS, 'i18n.js', 'markdown.js', 'index.html', 'unzip.js'])
 
 /** GET / 与各管理屏、GET /ui/*、/theme.css、/assets/* 从 gateway/ui 出。路径不得逃出该目录。 */
@@ -126,7 +126,7 @@ function serveUi(pathname: string, res: ServerResponse): boolean {
 /**
  * 这次 GET 是在拿一张网页，还是在调 JSON API。
  *
- * `/tasks`、`/handoffs` 这类地址两边都要用：浏览器刷新要 index.html，前端的 api()
+ * `/channels` 这类地址两边都要用：浏览器刷新要 index.html，前端的 api()
  * 则要同名 JSON。浏览器顶层导航会明确带 `text/html`，api() 也明确带
  * `application/json`，用这句话分流就不需要给其中一边改一套公开 URL。
  *
@@ -192,7 +192,7 @@ export class Router {
       /**
        * 页面导航要在同名 API 之前认领。
        *
-       * 原来静态页只在所有 API 都没命中之后才试；`GET /tasks` 已经被任务 API 命中，
+       * 原来静态页只在所有 API 都没命中之后才试；`GET /channels` 已经被渠道 API 命中，
        * 所以站内点过去正常（没有整页请求），一刷新却直接拿到 `{"error":"需要登录"}`。
        * 只提前处理明确要 HTML 的请求，JSON API 的鉴权和行为都保持原样。
        */

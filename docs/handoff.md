@@ -191,7 +191,7 @@ open ──claim──> claimed ──return──> returned ──(Bot 答完�
 - 侧栏名单上，那颗琥珀点旁边多一个**图标**：拍板是盾牌、接手是那只举起来的手
   （`shell.js` 的 `botNeedIcon`）。一颗 8px 的点说不出「你得去点一下」，而确认那一路
   是真的有一轮停在席位上等着
-- 顶栏那个数是**两样之和**：开着的单 + 等着拍板的确认（`needCount`）。任务看板上那些**不算**——那块板是面镜子，上面没有一条在等人做决定（见 [task-board.md](./task-board.md) §1）
+- 顶栏那个数是**两样之和**：开着的单 + 等着拍板的确认（`needCount`）。
 - 待办页最上面多一段「等你拍板」，标清楚它是当场的、会过期的，入口是回到那颗 Bot 的
   对话（`pages-handoffs.js` 的 `approvalWaitPanel`）
 

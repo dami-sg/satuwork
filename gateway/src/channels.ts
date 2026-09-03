@@ -11,6 +11,14 @@ import {
 
 interface StoredSecret { token: string; pairingCode: string }
 
+interface ChannelApprovalField {
+  key?: string
+  label?: string
+  value?: string
+  editable?: boolean
+  multiline?: boolean
+}
+
 const TICK_MS = Math.max(250, Math.trunc(Number(process.env.GATEWAY_CHANNEL_TICK_MS ?? 2000)))
 const TURN_TIMEOUT_MS = Math.max(60_000, Math.trunc(Number(process.env.GATEWAY_CHANNEL_TURN_TIMEOUT_MS ?? 20 * 60_000)))
 /**
@@ -47,7 +55,7 @@ interface ChannelApprovalSnapshot {
   form?: {
     kind?: string
     tool?: string
-    fields?: Array<{ key?: string; label?: string; value?: string; editable?: boolean; multiline?: boolean }>
+    fields?: ChannelApprovalField[]
   }
 }
 
@@ -137,10 +145,36 @@ function compactMarkdown(value: unknown, max: number): string {
   return chars.length <= max ? chars.join('') : `${chars.slice(0, Math.max(0, max - 1)).join('')}…`
 }
 
-function approvalMarkdown(approval: ChannelApprovalSnapshot): string {
+function quotedMarkdown(value: unknown): string {
+  const text = String(value ?? '').replace(/\r\n?/g, '\n')
+  if (!text) return '> （空）'
+  return text.split('\n').map((line) => line ? `> ${line}` : '>').join('\n')
+}
+
+function emailApprovalDetails(fields: ChannelApprovalField[]): string {
+  const body = fields.find((field) => field.multiline)
+  const metadata = fields.filter((field) => field !== body).map((field) => {
+    const label = compactMarkdown(field.label || field.key || '参数', 80).replace(/[*_`]/g, '')
+    const value = compactMarkdown(field.value, 600).replace(/\s+/g, ' ').replace(/`/g, "'") || '（空）'
+    return `- **${label}**：\`${value}\``
+  })
+  const sections = ['### 邮件内容']
+  if (metadata.length) sections.push(metadata.join('\n'))
+  sections.push(
+    '',
+    '### 正文',
+    // 正文不截断。引用块既保留原始段落和列表，也把正文与审批说明清楚地区分开。
+    quotedMarkdown(body?.value),
+  )
+  return sections.join('\n')
+}
+
+export function approvalMarkdown(approval: ChannelApprovalSnapshot): string {
   const tool = compactMarkdown(approval.form?.tool || approval.name || '未知操作', 160).replace(/`/g, "'")
   const fields = Array.isArray(approval.form?.fields) ? approval.form.fields : []
-  const details = fields.length
+  const details = approval.form?.kind === 'email' && fields.length
+    ? emailApprovalDetails(fields)
+    : fields.length
     ? [
       ...fields.slice(0, 4).map((field) => {
       const label = compactMarkdown(field.label || field.key || '参数', 80).replace(/[*_`]/g, '')
@@ -150,18 +184,20 @@ function approvalMarkdown(approval: ChannelApprovalSnapshot): string {
       ...(fields.length > 4 ? [`_还有 ${fields.length - 4} 项参数，请在 Web 中查看完整内容。_`] : []),
     ].join('\n\n')
     : `\`\`\`json\n${compactMarkdown(approval.arguments || '{}', 2200)}\n\`\`\``
-  return compactMarkdown([
+  const parameterSection = approval.form?.kind === 'email' && fields.length
+    ? details
+    : `**参数**\n${details}`
+  return [
     '## 需要你的批准',
     '',
     compactMarkdown(approval.reason || 'Bot 准备执行一个需要确认的操作。', 600),
     '',
     `**操作**：\`${tool}\``,
     '',
-    '**参数**',
-    details,
+    parameterSection,
     '',
     '请选择下面的批准范围。Telegram 暂不支持编辑参数；如需修改，请在 Web 中审批。',
-  ].join('\n'), 3800)
+  ].join('\n')
 }
 
 async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<void> {

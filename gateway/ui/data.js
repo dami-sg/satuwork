@@ -858,22 +858,6 @@ async function loadPage() {
     startSeatWatch()
   }
   try {
-    /**
-     * **走到 `/tasks` 就把弹窗收起来。**
-     *
-     * `go()` 不认识 `taskOpen`，而点开一条任务是不经过 `go()` 的（那个动作自己
-     * render）——不复位的话，人从别处回到这一页，撞见的是上次打开的那条任务浮在屏幕上。
-     *
-     * 顺手起轮询：落在这一屏时没有任何点击动作会去起它。
-     */
-    if (state.path === '/tasks') {
-      state.taskOpen = null
-      state.taskLogsOpen = false
-      state.taskCursor = ''
-      await loadTasks().catch(() => {})
-      tasksPoll()
-      return
-    }
     if (state.path === '/channels') {
       await loadChannels().catch(() => { state.channels = state.channels || [] })
       return

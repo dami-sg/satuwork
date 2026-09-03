@@ -122,6 +122,10 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
         `select count(*)::int as n from information_schema.tables where table_schema = '${SCHEMA}' and table_name = 'companies'`,
       )
       assert(t.rows[0].n === 1, 'companies 表没建出来')
+      const removed = await client.query(
+        `select table_name from information_schema.tables where table_schema = '${SCHEMA}' and table_name in ('tasks','task_events','task_extract_logs')`,
+      )
+      assert(removed.rows.length === 0, `任务看板的表仍然存在：${removed.rows.map((r) => r.table_name).join(',')}`)
       assert(gw._out.includes(`已应用 ${ALL.length} 条迁移`), `启动日志没说跑了哪几条：\n${gw._out.slice(-400)}`)
       await stop(gw)
     })
