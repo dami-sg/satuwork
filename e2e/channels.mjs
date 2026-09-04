@@ -33,11 +33,28 @@ async function mockSeat() {
     req.on('end', () => {
       let body = {}
       try { body = JSON.parse(raw || '{}') } catch {}
-      const path = new URL(req.url, 'http://seat.test').pathname
+      const requestUrl = new URL(req.url, 'http://seat.test')
+      const path = requestUrl.pathname
       res.setHeader('content-type', 'application/json')
       if (req.method === 'GET' && path === '/api/workspace/file') {
-        res.setHeader('content-type', 'application/octet-stream')
-        res.end('<!doctype html><html><body><h1>ETH report</h1><script>document.body.dataset.ready="1"</script></body></html>')
+        const artifactPath = requestUrl.searchParams.get('path') || ''
+        const artifacts = {
+          'reports/eth-report.html': {
+            type: 'application/octet-stream',
+            body: '<!doctype html><html><body><h1>ETH report</h1><script>document.body.dataset.ready="1"</script></body></html>',
+          },
+          'reports/eth-report.md': { type: 'text/markdown; charset=utf-8', body: '# ETH report\n\n**Markdown preview**' },
+          'reports/eth-report.pdf': { type: 'application/pdf', body: '%PDF-1.4\n% Telegram preview fixture\n%%EOF' },
+          'reports/eth-report.txt': { type: 'text/plain; charset=utf-8', body: 'plain text report' },
+        }
+        const artifact = artifacts[artifactPath]
+        if (!artifact) {
+          res.statusCode = 404
+          res.end(JSON.stringify({ error: `unknown artifact ${artifactPath}` }))
+          return
+        }
+        res.setHeader('content-type', artifact.type)
+        res.end(artifact.body)
         return
       }
       if (/\/api\/channels\/[^/]+\/messages$/.test(path)) {
@@ -61,7 +78,12 @@ async function mockSeat() {
         }
         res.end(JSON.stringify({
           sessionId: 'session-telegram', reply: '审批通过，操作已经完成。',
-          files: [{ path: 'reports/eth-report.html', name: 'eth-report.html' }],
+          files: [
+            { path: 'reports/eth-report.html', name: 'eth-report.html' },
+            { path: 'reports/eth-report.md', name: 'eth-report.md' },
+            { path: 'reports/eth-report.pdf', name: 'eth-report.pdf' },
+            { path: 'reports/eth-report.txt', name: 'eth-report.txt' },
+          ],
         }))
         return
       }
@@ -353,13 +375,18 @@ export async function runChannels({ gwRoot, test, req, start, waitHttp, assert, 
       })
       await waitFor(() => seat.seen.successfulApprovals === 1, '席位收到 Telegram 批准')
       await waitFor(() => telegram.seen.sent.some((m) => String(m.rich_message?.markdown || m.text).includes('审批通过，操作已经完成')), '审批后原轮次完成并回复')
-      const previewMessage = await waitFor(
-        () => telegram.seen.sent.find((m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === '打开预览'),
-        'Telegram 收到产出文件预览卡',
-      )
-      const previewUrl = previewMessage.reply_markup.inline_keyboard[0][0].url
-      assert(previewMessage.link_preview_options?.url === previewUrl, '链接预览与按钮不是同一个地址')
-      assert(String(previewMessage.text).includes('eth-report.html'), '预览卡没有文件名')
+      const previewMessages = await waitFor(() => {
+        const cards = telegram.seen.sent.filter((m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === '打开预览')
+        return cards.length >= 4 ? cards.slice(-4) : null
+      }, 'Telegram 收到四种产出文件预览卡')
+      for (const card of previewMessages) {
+        const url = card.reply_markup.inline_keyboard[0][0].url
+        assert(card.link_preview_options?.url === url, '链接预览与按钮不是同一个地址')
+      }
+      assert(previewMessages.some((m) => String(m.text).includes('eth-report.html')), 'HTML 预览卡没有文件名')
+      assert(previewMessages.some((m) => String(m.text).includes('eth-report.md')), 'Markdown 预览卡没有文件名')
+      assert(previewMessages.some((m) => String(m.text).includes('eth-report.pdf')), 'PDF 预览卡没有文件名')
+      assert(previewMessages.some((m) => String(m.text).includes('eth-report.txt')), 'TXT 预览卡没有文件名')
 
       // 模拟 Bot 正常上报的会话索引，使签名链接能沿会话归属找到同一席位。
       const require = createRequire(new URL('../gateway/package.json', import.meta.url))
@@ -381,13 +408,46 @@ export async function runChannels({ gwRoot, test, req, start, waitHttp, assert, 
         )
       } finally { await client.end() }
 
-      const preview = await fetch(previewUrl, { headers: { accept: 'text/html' } })
-      const previewHtml = await preview.text()
-      assert(preview.status === 200, `预览链接 ${preview.status} ${previewHtml}`)
-      assert(previewHtml.includes('sandbox="allow-scripts') && previewHtml.includes('ETH report'), 'HTML 没有进入可运行的隔离预览')
-      assert(preview.headers.get('referrer-policy') === 'no-referrer', '预览没有阻止签名票随 referrer 外泄')
+      const previews = new Map()
+      for (const message of previewMessages) {
+        const previewUrl = message.reply_markup.inline_keyboard[0][0].url
+        const filename = String(message.text).match(/eth-report\.(?:html|md|pdf|txt)/)?.[0]
+        assert(filename, `预览卡文件名无法识别：${message.text}`)
+        const preview = await fetch(previewUrl, { headers: { accept: 'text/html' } })
+        const previewHtml = await preview.text()
+        assert(preview.status === 200, `预览链接 ${preview.status} ${previewHtml}`)
+        assert(previewHtml.includes('class="gw-modal sw-preview sw-channel-preview"'), `${filename} 没有使用系统预览窗口`)
+        assert(previewHtml.includes('/channel-preview.js') && previewHtml.includes('/markdown.js'), `${filename} 没有加载预览运行时`)
+        assert(preview.headers.get('referrer-policy') === 'no-referrer', `${filename} 没有阻止签名票随 referrer 外泄`)
+        assert(String(preview.headers.get('content-security-policy')).includes("frame-src blob:"), `${filename} 没有限制预览 frame 来源`)
+        previews.set(filename, { url: previewUrl, html: previewHtml })
+      }
 
-      const parsedPreview = new URL(previewUrl)
+      assert(previews.get('eth-report.html')?.html.includes('data-kind="html"'), 'HTML 预览类型不对')
+      assert(previews.get('eth-report.md')?.html.includes('data-kind="markdown"'), 'Markdown 预览类型不对')
+      assert(previews.get('eth-report.pdf')?.html.includes('data-kind="pdf"'), 'PDF 预览类型不对')
+      assert(previews.get('eth-report.txt')?.html.includes('data-kind="text"'), 'TXT 预览类型不对')
+      assert((previews.get('eth-report.md')?.html.match(/data-mode=/g) || []).length === 2, 'Markdown 没有预览/原文双模式')
+
+      const expectedRaw = new Map([
+        ['eth-report.html', '<h1>ETH report</h1>'],
+        ['eth-report.md', '**Markdown preview**'],
+        ['eth-report.pdf', '%PDF-1.4'],
+        ['eth-report.txt', 'plain text report'],
+      ])
+      for (const [filename, expected] of expectedRaw) {
+        const raw = await fetch(`${previews.get(filename).url}?raw=1`)
+        const rawBody = await raw.text()
+        assert(raw.status === 200 && rawBody.includes(expected), `${filename} 原始文件读取失败：${raw.status} ${rawBody}`)
+        if (filename.endsWith('.pdf')) assert(raw.headers.get('content-type') === 'application/pdf', 'PDF 原始响应类型不对')
+      }
+
+      const previewRuntime = await fetch(`${base}/channel-preview.js`)
+      const previewRuntimeJs = await previewRuntime.text()
+      assert(previewRuntime.status === 200 && previewRuntimeJs.includes("kind === 'markdown'"), '独立预览运行时没有发布')
+      assert(previewRuntimeJs.includes("iframe.setAttribute('sandbox', '')"), 'HTML 预览没有放进无权限 sandbox')
+
+      const parsedPreview = new URL(previews.get('eth-report.html').url)
       const pieces = parsedPreview.pathname.split('/')
       const signatureAt = pieces[2].lastIndexOf('.') + 1
       const signatureHead = pieces[2][signatureAt]
