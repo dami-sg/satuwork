@@ -376,6 +376,45 @@ function canFallBackToPlain(error: unknown): boolean {
   return error instanceof TelegramError && (error.status === 400 || error.status === 404)
 }
 
+function draftTail(text: string, max: number): string {
+  const chars = Array.from(String(text || ''))
+  if (chars.length <= max) return chars.join('')
+  return `…\n${chars.slice(-(max - 2)).join('')}`
+}
+
+/**
+ * Telegram 的 AI 草稿是临时预览，最终仍由 telegramSendText 固化。
+ *
+ * 优先走 Bot API 10.1 的 RichMessage 草稿，和最终消息保持同一套 Markdown；自建或旧版
+ * Bot API 不认识它、或者半截 Markdown 暂时解析不了时，退回 9.x 的纯文本草稿。两种
+ * 草稿的长度上限不同，所以只在预览里保留最新的一截，最终消息仍会完整分段发送。
+ */
+export async function telegramSendDraft(
+  token: string,
+  chatId: string,
+  draftId: number,
+  markdown: string,
+  threadId = '',
+): Promise<void> {
+  const rich = draftTail(markdown, 30_000)
+  try {
+    await call(token, 'sendRichMessageDraft', {
+      chat_id: chatId,
+      draft_id: draftId,
+      rich_message: { markdown: rich },
+      ...(threadId ? { message_thread_id: threadId } : {}),
+    }, 8_000)
+  } catch (error) {
+    if (!canFallBackToPlain(error)) throw error
+    await call(token, 'sendMessageDraft', {
+      chat_id: chatId,
+      draft_id: draftId,
+      text: draftTail(markdown, 4000),
+      ...(threadId ? { message_thread_id: threadId } : {}),
+    }, 8_000)
+  }
+}
+
 async function telegramSendPlain(token: string, chatId: string, text: string, threadId: string): Promise<void> {
   for (const part of telegramTextParts(text)) await call(token, 'sendMessage', {
     chat_id: chatId,

@@ -23,6 +23,18 @@ export async function runTelegramRich({ root, test, assert, log }) {
     assert(result.fallbackText === '**旧 API 降级**', '降级文本被改写')
   })
 
+  await test('Telegram 用同一个 RichMessage draft id 流式展示半截 Markdown', async () => {
+    assert(result.nativeDraftMethod === 'sendRichMessageDraft', `实际调用 ${result.nativeDraftMethod}`)
+    assert(result.nativeDraftId === 31415, `draft id 变成了 ${result.nativeDraftId}`)
+    assert(result.nativeDraftMarkdown.includes('## 正在生成'), '草稿 Markdown 丢失')
+    assert(result.nativeDraftThread === '88', '草稿没有带话题 id')
+  })
+
+  await test('旧 Bot API 不支持 RichMessage 草稿时降级为纯文本草稿', async () => {
+    assert(result.fallbackDraftMethods.join(',') === 'sendRichMessageDraft,sendMessageDraft', `调用顺序 ${result.fallbackDraftMethods}`)
+    assert(result.fallbackDraftText === '**旧 API 草稿**', '草稿降级文本被改写')
+  })
+
   await test('Telegram 审批卡可点击、回调有应答且完成后移除按钮', async () => {
     assert(result.approvalMethod === 'sendRichMessage', `审批卡实际调用 ${result.approvalMethod}`)
     assert(result.approvalButtons.length === 4, `审批按钮数量不对：${result.approvalButtons.length}`)

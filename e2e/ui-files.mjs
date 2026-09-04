@@ -108,6 +108,50 @@ export async function runUiFiles({ root, test, assert, log }) {
     assert(html.includes('2.0 KB'), '没标大小')
   })
 
+  await test('新生成的 HTML 自动打开，后续 patch 自动刷新且保留预览模式', async () => {
+    const calls = []
+    let source = '<h1>第一版</h1>'
+    const preview = loadApp({
+      appPath: join(root, 'gateway/ui/app.js'),
+      base: 'http://127.0.0.1:1',
+      fetchImpl: async (path) => {
+        calls.push(path)
+        return new Response(source, {
+          status: 200,
+          headers: {
+            'content-type': 'application/octet-stream',
+            'content-length': String(Buffer.byteLength(source)),
+          },
+        })
+      },
+    })
+    preview.state.me = { account: { id: 'a1', role: 'member', email: 'a@b.c' } }
+    preview.state.path = '/chat'
+    preview.state.chatBotId = 'b1'
+    preview.state.chatSessionId = 's-preview'
+    preview.state.chatEvents = []
+    const event = (turn) => ({
+      type: 'tool/result',
+      data: { turn, files: [{ path: 'reports/eth.html', name: 'eth.html' }] },
+    })
+
+    assert(preview.maybeLivePreview(event(1)), '第一次 HTML 产出没有触发预览')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    assert(preview.state.preview?.text === '<h1>第一版</h1>', `预览内容不对：${preview.state.preview?.text}`)
+    preview.state.preview.mode = 'source'
+    source = '<h1>第二版</h1>'
+    assert(preview.maybeLivePreview(event(1)), '同一路径的 patch 没有触发刷新')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    assert(preview.state.preview?.text === '<h1>第二版</h1>', '刷新后仍是旧内容')
+    assert(preview.state.preview?.mode === 'source', '自动刷新把用户选的源码模式重置了')
+    assert(calls.length === 2, `实际拉取了 ${calls.length} 次`)
+
+    // 模拟人主动关掉：同一轮后续 patch 不应再抢着弹回来；下一轮重新生成则可以。
+    preview.state.preview = null
+    assert(!preview.maybeLivePreview(event(1)), '同一轮关闭后又自动弹回来了')
+    assert(preview.maybeLivePreview(event(2)), '下一轮重新生成同一路径没有再次打开')
+  })
+
   await test('列不出来时说出来，不画成一棵空树', async () => {
     ui.state.wsDirs = { '': { entries: null, error: '实例还没接上' } }
     ui.state.wsOpen = {}

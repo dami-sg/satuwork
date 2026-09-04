@@ -21,4 +21,9 @@ export async function runTelegramChannel({ root, test, assert, log }) {
     assert(result.todos.includes('- [ ] ▶ 建立 \\*\\*页面\\*\\*'), '进行中任务或 Markdown 转义不对')
     assert(result.todos.includes('- [ ] ✗ ~~旧步骤~~'), '取消任务没有显示取消状态')
   })
+
+  await test('Telegram 草稿按步骤合并完整消息与当前 text delta', async () => {
+    assert(result.draft === '我先查行情。\n\n正在生成报告', `草稿合并错误：${JSON.stringify(result.draft)}`)
+    assert(result.draft.match(/我先查行情/g)?.length === 1, '完整消息和流式分片重复了')
+  })
 }

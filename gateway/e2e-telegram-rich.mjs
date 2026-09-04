@@ -12,7 +12,7 @@ const server = createServer((req, res) => {
     const body = JSON.parse(raw || '{}')
     seen.push({ method, body })
     res.setHeader('content-type', 'application/json')
-    if (method === 'sendRichMessage' && rejectRich) {
+    if ((method === 'sendRichMessage' || method === 'sendRichMessageDraft') && rejectRich) {
       res.statusCode = 404
       res.end(JSON.stringify({ ok: false, error_code: 404, description: 'Method not found' }))
       return
@@ -28,7 +28,7 @@ process.env.TELEGRAM_API_BASE = `http://127.0.0.1:${address.port}`
 try {
   const {
     normalizeTelegramCallback, startTelegramTyping, telegramAnswerCallbackQuery,
-    telegramClearApprovalButtons, telegramRichTextParts, telegramSendApproval, telegramSendText,
+    telegramClearApprovalButtons, telegramRichTextParts, telegramSendApproval, telegramSendDraft, telegramSendText,
   } = await import('./src/channels/telegram.ts')
   const stopTyping = startTelegramTyping(token, '456', { intervalMs: 20 })
   await new Promise((resolve) => setTimeout(resolve, 75))
@@ -59,6 +59,15 @@ try {
   rejectRich = true
   await telegramSendText(token, '456', '**旧 API 降级**', '88')
   const fallback = seen.slice(1)
+
+  rejectRich = false
+  seen.length = 0
+  await telegramSendDraft(token, '456', 31415, '## 正在生成\n\n第一段', '88')
+  const nativeDraft = seen[0]
+
+  rejectRich = true
+  await telegramSendDraft(token, '456', 31415, '**旧 API 草稿**', '88')
+  const fallbackDraft = seen.slice(1)
 
   rejectRich = false
   seen.length = 0
@@ -101,6 +110,12 @@ try {
     nativeThread: native?.body?.message_thread_id,
     fallbackMethods: fallback.map((entry) => entry.method),
     fallbackText: fallback.at(-1)?.body?.text,
+    nativeDraftMethod: nativeDraft?.method,
+    nativeDraftId: nativeDraft?.body?.draft_id,
+    nativeDraftMarkdown: nativeDraft?.body?.rich_message?.markdown,
+    nativeDraftThread: nativeDraft?.body?.message_thread_id,
+    fallbackDraftMethods: fallbackDraft.map((entry) => entry.method),
+    fallbackDraftText: fallbackDraft.at(-1)?.body?.text,
     typingCount: typingAtStop.length,
     typingStopped: typingAfterStop.length === typingAtStop.length,
     typingValid: typingAtStop.every((entry) => entry.body?.chat_id === '456' && entry.body?.action === 'typing'),
