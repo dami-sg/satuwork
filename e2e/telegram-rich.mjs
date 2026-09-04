@@ -23,16 +23,23 @@ export async function runTelegramRich({ root, test, assert, log }) {
     assert(result.fallbackText === '**旧 API 降级**', '降级文本被改写')
   })
 
-  await test('Telegram 用同一个 RichMessage draft id 流式展示半截 Markdown', async () => {
-    assert(result.nativeDraftMethod === 'sendRichMessageDraft', `实际调用 ${result.nativeDraftMethod}`)
+  await test('Telegram 用同一个纯文本 draft id 流式展示，避免半截 Markdown 双重请求', async () => {
+    assert(result.nativeDraftMethod === 'sendMessageDraft', `实际调用 ${result.nativeDraftMethod}`)
     assert(result.nativeDraftId === 31415, `draft id 变成了 ${result.nativeDraftId}`)
-    assert(result.nativeDraftMarkdown.includes('## 正在生成'), '草稿 Markdown 丢失')
+    assert(result.nativeDraftText.includes('## 正在生成'), '草稿文本丢失')
     assert(result.nativeDraftThread === '88', '草稿没有带话题 id')
   })
 
-  await test('旧 Bot API 不支持 RichMessage 草稿时降级为纯文本草稿', async () => {
-    assert(result.fallbackDraftMethods.join(',') === 'sendRichMessageDraft,sendMessageDraft', `调用顺序 ${result.fallbackDraftMethods}`)
-    assert(result.fallbackDraftText === '**旧 API 草稿**', '草稿降级文本被改写')
+  await test('流式草稿每帧只调用一次 Telegram API', async () => {
+    assert(result.secondDraftMethods.join(',') === 'sendMessageDraft', `调用顺序 ${result.secondDraftMethods}`)
+    assert(result.secondDraftText === '**旧 API 草稿**', '草稿文本被改写')
+  })
+
+  await test('Telegram 慢请求不会阻塞模型快照，等待帧只保留最新内容', async () => {
+    assert(result.enqueueElapsedMs < 15, `入队竟然阻塞了 ${result.enqueueElapsedMs}ms`)
+    assert(result.maxActiveDraftSends === 1, `同时有 ${result.maxActiveDraftSends} 个草稿请求`)
+    assert(result.pumpedDrafts.length === 2, `没有合并中间帧：${JSON.stringify(result.pumpedDrafts)}`)
+    assert(result.pumpedDrafts.at(-1) === '一二三四五六七八九十', `最后快照丢失：${JSON.stringify(result.pumpedDrafts)}`)
   })
 
   await test('Telegram 审批卡可点击、回调有应答且完成后移除按钮', async () => {

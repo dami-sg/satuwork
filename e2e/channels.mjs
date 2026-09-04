@@ -389,7 +389,9 @@ export async function runChannels({ gwRoot, test, req, start, waitHttp, assert, 
 
       const parsedPreview = new URL(previewUrl)
       const pieces = parsedPreview.pathname.split('/')
-      pieces[2] = pieces[2].slice(0, -1) + (pieces[2].endsWith('a') ? 'b' : 'a')
+      const signatureAt = pieces[2].lastIndexOf('.') + 1
+      const signatureHead = pieces[2][signatureAt]
+      pieces[2] = `${pieces[2].slice(0, signatureAt)}${signatureHead === 'a' ? 'b' : 'a'}${pieces[2].slice(signatureAt + 1)}`
       parsedPreview.pathname = pieces.join('/')
       const tampered = await fetch(parsedPreview)
       assert(tampered.status === 404, `篡改后的预览票仍拿到 ${tampered.status}`)

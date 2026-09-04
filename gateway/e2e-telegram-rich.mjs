@@ -37,6 +37,7 @@ try {
     telegramClearApprovalButtons, telegramRichTextParts, telegramSendApproval, telegramSendArtifactPreviews,
     telegramSendDraft, telegramSendText,
   } = await import('./src/channels/telegram.ts')
+  const { createDraftPump } = await import('./src/channels/draft-pump.ts')
   const stopTyping = startTelegramTyping(token, '456', { intervalMs: 20 })
   await new Promise((resolve) => setTimeout(resolve, 75))
   stopTyping()
@@ -74,7 +75,36 @@ try {
 
   rejectRich = true
   await telegramSendDraft(token, '456', 31415, '**旧 API 草稿**', '88')
-  const fallbackDraft = seen.slice(1)
+  const secondDraft = seen.slice(1)
+
+  let activeDraftSends = 0
+  let maxActiveDraftSends = 0
+  const pumpedDrafts = []
+  const pump = createDraftPump(async (text) => {
+    activeDraftSends += 1
+    maxActiveDraftSends = Math.max(maxActiveDraftSends, activeDraftSends)
+    await new Promise((resolve) => setTimeout(resolve, 45))
+    pumpedDrafts.push(text)
+    activeDraftSends -= 1
+  }, {
+    minMs: 15,
+    batchChars: 4,
+    maxWaitMs: 35,
+    initialWaitMs: 20,
+    keepaliveMs: 1000,
+  })
+  const enqueueStarted = performance.now()
+  pump.enqueue('一')
+  pump.enqueue('一二三四')
+  const enqueueElapsedMs = performance.now() - enqueueStarted
+  await new Promise((resolve) => setTimeout(resolve, 8))
+  pump.enqueue('一二三四五')
+  pump.enqueue('一二三四五六七八')
+  pump.enqueue('一二三四五六七八九十')
+  await new Promise((resolve) => setTimeout(resolve, 140))
+  await pump.finish()
+  pump.enqueue('结束后不能再发')
+  await new Promise((resolve) => setTimeout(resolve, 30))
 
   rejectRich = false
   seen.length = 0
@@ -134,10 +164,13 @@ try {
     fallbackText: fallback.at(-1)?.body?.text,
     nativeDraftMethod: nativeDraft?.method,
     nativeDraftId: nativeDraft?.body?.draft_id,
-    nativeDraftMarkdown: nativeDraft?.body?.rich_message?.markdown,
+    nativeDraftText: nativeDraft?.body?.text,
     nativeDraftThread: nativeDraft?.body?.message_thread_id,
-    fallbackDraftMethods: fallbackDraft.map((entry) => entry.method),
-    fallbackDraftText: fallbackDraft.at(-1)?.body?.text,
+    secondDraftMethods: secondDraft.map((entry) => entry.method),
+    secondDraftText: secondDraft.at(-1)?.body?.text,
+    pumpedDrafts,
+    maxActiveDraftSends,
+    enqueueElapsedMs,
     typingCount: typingAtStop.length,
     typingStopped: typingAfterStop.length === typingAtStop.length,
     typingValid: typingAtStop.every((entry) => entry.body?.chat_id === '456' && entry.body?.action === 'typing'),
