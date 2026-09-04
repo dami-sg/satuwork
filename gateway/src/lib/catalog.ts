@@ -4,7 +4,7 @@
  * 从 routes.ts 拆出来的——那个文件曾经是 5700 行，前 1900 行全是这类帮手。
  */
 import { HttpError } from '../http.ts'
-import { type CatalogItem, type Credential, type Db, type Scope } from '../db.ts'
+import { type CatalogItem, type Db, type Scope } from '../db.ts'
 
 export function publicCatalog(item: { id: string; kind: string; scope: string; companyId: string | null; name: string; definition: unknown; createdAt: number; updatedAt: number }) {
   let definition = item.definition
@@ -858,10 +858,6 @@ export function runtimeServer(item: CatalogItem) {
   return { ...publicServer(item), token, env, hasEnv: Object.keys(env).length > 0 }
 }
 
-/** 密钥本身永远不出现在响应里，只说配好了。 */
-export function publicCred(c: Credential) {
-  return { id: c.id, companyId: c.companyId, provider: c.provider, configured: true as const, createdAt: c.createdAt, updatedAt: c.updatedAt }
-}
 
 export function accessUrlFor(slug: string): string {
   const base = process.env.GATEWAY_ACCESS_HOST ?? 'satuwork.com'

@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { TaskOutcome, TaskSpec, TurnModelRole } from '../agent/index.ts'
+import { blankOutcome, type TaskOutcome, type TaskSpec, type TurnModelRole } from '../agent/index.ts'
 import { fail, registerTool } from './common.ts'
 
 /**
@@ -89,21 +89,7 @@ function render(outcomes: TaskOutcome[]): string {
  * 都可能没建出来。原因原样交给模型——它下一步要决定是重派一次还是换个做法。
  */
 function crashed(spec: TaskSpec, reason: unknown): TaskOutcome {
-  return {
-    index: spec.index,
-    taskId: '',
-    child: '',
-    goal: spec.goal,
-    state: 'failed',
-    summary: `没跑起来：${(reason as Error)?.message ?? String(reason)}`,
-    files: [],
-    steps: 0,
-    toolCalls: 0,
-    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0 },
-    model: { role: spec.modelRole, provider: '', id: '' },
-    handedOver: [],
-    ms: 0,
-  }
+  return blankOutcome(spec, 'failed', `没跑起来：${(reason as Error)?.message ?? String(reason)}`)
 }
 
 export function apply(ctx: Context) {

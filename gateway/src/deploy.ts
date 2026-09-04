@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { canonicalTimezone, isUniqueViolation, releaseArch, type Account, type BotRelease, type Db, type Machine, type SeatRuntime } from './db.ts'
-import { signDesktopTicket, type JwtKeys } from './crypto.ts'
+import { type JwtKeys } from './crypto.ts'
 import { botReleaseFile } from './releases.ts'
 
 /** 管家握手协议。低于这个数的机器不给下发部署——字段对不上会失败得很难看。 */
@@ -360,12 +360,6 @@ export function listSeatRuntime(row: SeatRuntime, machine: Machine | null, now =
   }
 }
 
-/** 给某个席位现签一张桌面票，拼成能直接点开的地址。 */
-export function desktopUrlOf(keys: JwtKeys, machine: Machine | undefined, row: SeatRuntime): string {
-  if (!machinePaired(machine)) return ''
-  // 口令随票走，人点开就进桌面，不用再去右栏抄一遍。
-  return novncUrlOf(machine.host, row.seatId, signDesktopTicket(keys, row.seatId, row.vncPassword))
-}
 
 /**
  * **明确配置过的**对外地址。没配就是空串。

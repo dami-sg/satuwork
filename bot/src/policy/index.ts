@@ -734,23 +734,7 @@ export function apply(ctx: Context) {
             const why = op === 'add' ? '它要记下一条跨对话的事实' : '它要改掉一条已经记下的事实'
             ctx.policy.markAsked(call.callId)
             const why2 = provenance(ctx, call, why)
-            const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why2, formOf(call))
-            await ctx.policy.record({
-              sessionId: call.sessionId,
-              botId: bot?.id ?? '',
-              callId: call.callId,
-              tool: call.name,
-              guard: 'memory',
-              outcome: verdict === 'approved' ? 'approved' : verdict === 'timeout' ? 'timeout' : 'denied',
-              reason: viaGrant
-                ? `${why2}（这一轮此前已批准同一把工具）`
-                : viaBlock
-                  ? `${why2}（这一轮此前已拒绝同一把工具，没有再问）`
-                  : edited?.length
-                    ? `${why2}（批准时改过：${edited.join('、')}）`
-                    : why2,
-              at: Date.now(),
-            })
+            const { verdict, viaBlock } = await askAndRecord(ctx, call, bot, 'memory', why2)
             if (verdict !== 'approved') return blockedByUser(verdict, why, viaBlock)
           }
         }
@@ -767,29 +751,7 @@ export function apply(ctx: Context) {
              * 这周的活收个尾」，中间隔着一次他没看见的委派。
              */
             const why2 = provenance(ctx, call, why)
-            // 表单在**席位这边**算：剥元工具的壳、认字段、定哪几格能改，全在 forms.ts。
-            const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why2, formOf(call))
-            await ctx.policy.record({
-              sessionId: call.sessionId,
-              botId: bot?.id ?? '',
-              callId: call.callId,
-              tool: call.name,
-              guard: 'high-risk',
-              outcome: verdict === 'approved' ? 'approved' : verdict === 'timeout' ? 'timeout' : 'denied',
-              // **靠这句话才看得出这次为什么没弹卡片。** 「本会话都批准」之后的每一次
-              // 放行，日志上都只是一条 approved；不写清楚出处，事后翻记录的人会以为
-              // 有人一次次点过头。
-              // 出处（`来自子任务《…》`）跟着进审计。卡片上说了、留档里不说的话，事后
-              // 翻记录的人看到的是一次凭空出现的发信确认——而那正是最该问出处的一种。
-              reason: viaGrant
-                ? `${why2}（这一轮此前已批准同一把工具）`
-                : viaBlock
-                  ? `${why2}（这一轮此前已拒绝同一把工具，没有再问）`
-                  : edited?.length
-                    ? `${why2}（批准时改过：${edited.join('、')}）`
-                    : why2,
-              at: Date.now(),
-            })
+            const { verdict, viaBlock } = await askAndRecord(ctx, call, bot, 'high-risk', why2)
             if (verdict !== 'approved') return blockedByUser(verdict, why, viaBlock)
           }
         }
@@ -848,6 +810,39 @@ function urlArgOf(raw: string): string {
 function outboundOf(call: ToolCall, risk: readonly string[]): boolean {
   if (call.name === 'terminal') return Boolean(networkCommand(call.arguments))
   return risk.includes('external')
+}
+
+/**
+ * 弹一次审批卡，把结果原样记进审计。记忆确认和高风险确认走的是同一套。
+ *
+ * 合成一个函数，是因为**留档那句 `reason` 的口径必须两边一样**：审计页按 guard 分组，
+ * 一次因为记忆弹的确认和一次因为高风险弹的确认，事后要一样查得到、一样读得懂。
+ * 分开写的时候，「本会话都批准」之后的放行在其中一边只留下一条光秃秃的 approved，
+ * 事后翻记录的人会以为有人一次次点过头。
+ *
+ * 表单在**席位这边**算：剥元工具的壳、认字段、定哪几格能改，全在 forms.ts。
+ */
+async function askAndRecord(ctx: Context, call: ToolCall, bot: BotRecord | undefined, guard: GuardId, why: string) {
+  const { verdict, viaGrant, viaBlock, edited } = await ctx.policy.approvals.ask(call, why, formOf(call))
+  await ctx.policy.record({
+    sessionId: call.sessionId,
+    botId: bot?.id ?? '',
+    callId: call.callId,
+    tool: call.name,
+    guard,
+    outcome: verdict === 'approved' ? 'approved' : verdict === 'timeout' ? 'timeout' : 'denied',
+    // 出处（`来自子任务《…》`）跟着进审计。卡片上说了、留档里不说的话，事后翻记录的
+    // 人看到的是一次凭空出现的发信确认——而那正是最该问出处的一种。
+    reason: viaGrant
+      ? `${why}（这一轮此前已批准同一把工具）`
+      : viaBlock
+        ? `${why}（这一轮此前已拒绝同一把工具，没有再问）`
+        : edited?.length
+          ? `${why}（批准时改过：${edited.join('、')}）`
+          : why,
+    at: Date.now(),
+  })
+  return { verdict, viaBlock }
 }
 
 /**

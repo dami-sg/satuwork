@@ -1573,27 +1573,15 @@ async function startRosterStream(attempt = 0) {
    */
   const openedAt = Date.now()
   const nextAttempt = () => (Date.now() - openedAt >= CHAT_ALIVE_MS ? 0 : attempt + 1)
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
   try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
+    for await (const ev of sseEvents(res.body.getReader(), () => ac.signal.aborted || rosterAbort !== ac)) {
+      // 中止是在 read() 里等着的时候发生的：那一刻已经在路上的这一块数据照样会到，
+      // 而它属于一条作废的流。不在这儿再判一次，它就会写进一份不该再动的名单。
       if (ac.signal.aborted || rosterAbort !== ac) break
-      buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
-      let idx
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
-        const frame = buf.slice(0, idx)
-        buf = buf.slice(idx + 2)
-        for (const line of frame.split('\n')) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            noteRosterFrame(JSON.parse(line.slice(6)))
-          } catch {
-            /* 半截帧 / 不认识的形状：跳过，别把整条流带下去 */
-          }
-        }
+      try {
+        noteRosterFrame(ev)
+      } catch {
+        /* 不认识的形状：跳过，别把整条流带下去 */
       }
     }
   } catch {
@@ -5743,31 +5731,20 @@ async function startLogStream(url) {
     paintLogs()
     return
   }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
   try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
+    for await (const ev of sseEvents(res.body.getReader(), () => ac.signal.aborted)) {
+      // 同 startRosterStream：中止后仍在路上的那一块不该再画进面板。
       if (ac.signal.aborted) break
-      buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
-      let idx
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
-        const frame = buf.slice(0, idx)
-        buf = buf.slice(idx + 2)
-        for (const line of frame.split('\n')) {
-          if (!line.startsWith('data: ')) continue
-          try {
-            const ev = JSON.parse(line.slice(6))
-            if (ev.error) state.logError = String(ev.error)
-            else if (typeof ev.line === 'string') state.logLines.push(ev.line)
-          } catch {}
-        }
-        // 不封顶的话，一个话多的 bot 能把标签页吃垮。
-        if (state.logLines.length > LOG_MAX) state.logLines.splice(0, state.logLines.length - LOG_MAX)
-        scheduleLogPaint()
-      }
+      try {
+        if (ev.error) state.logError = String(ev.error)
+        else if (typeof ev.line === 'string') state.logLines.push(ev.line)
+      } catch {}
+      // 不封顶的话，一个话多的 bot 能把标签页吃垮。
+      //
+      // 封顶和重绘从「每帧一次」改成了「每条一次」：两件事都幂等，而重绘本来就靠
+      // scheduleLogPaint 合并到一个动画帧，多问几次不会多画一次。
+      if (state.logLines.length > LOG_MAX) state.logLines.splice(0, state.logLines.length - LOG_MAX)
+      scheduleLogPaint()
     }
   } catch {
     /* 关面板 / 断线 */

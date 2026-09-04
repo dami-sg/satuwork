@@ -10,7 +10,7 @@
  */
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Req, type Router } from '../http.ts'
-import { rangeQuery, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
+import { rangeQuery, requireOrgUser, requireOwnerUser, requireUser } from '../lib/guards.ts'
 import { chargeCursorOf } from '../lib/org.ts'
 import { CHARGE_PAGE_DEFAULT, CHARGE_PAGE_MAX, type Account, type ChargeKind, type ChargeStatus, type Company, type UsageCharge } from '../db.ts'
 
@@ -99,8 +99,7 @@ export function attachCharges(router: Router, ctx: RouteCtx) {
   }
 
   router.get('/platform/charges', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const companyId = (req.query.get('companyId') || '').trim()
     if (companyId && !(await db.company(companyId))) throw new HttpError(404, '公司不存在')
     const range = rangeQuery(req)
@@ -126,8 +125,7 @@ export function attachCharges(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/orgs/:id/charges', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    const account = await requireOrgUser(req, db, keys, req.params.id, true)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const range = rangeQuery(req)

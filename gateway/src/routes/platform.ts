@@ -8,7 +8,7 @@ import { bodyOf, strField } from '../lib/validate.ts'
 import { billingOf, enabledModelsOf, modelPricingOf, modelProviderCreds, modelRoleOf, priceMultiplierOf, publicPlatformCred, publicSettings } from '../lib/org.ts'
 import { refreshDiscovered, REFRESH_MS } from '../model-discovery.ts'
 import { isVendor } from '../connectors/index.ts'
-import { rangeQuery, requireOwner, requireUser } from '../lib/guards.ts'
+import { rangeQuery, requireOwnerUser } from '../lib/guards.ts'
 import { WEB_BACKENDS, WEB_DOCUMENT, type PlatformSettings, emptyWebTools, parseBilling, parseConnectorPricing, parseModelPricing, parsePriceMultiplier, parseWebTools } from '../db.ts'
 import { WebToolError, canExtract, canSearch, needsSecret } from '../web-tools.ts'
 import { testBackend } from '../web-service.ts'
@@ -19,14 +19,12 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   // ── 平台（owner）───────────────────────────────────────────────────
 
   router.get('/platform/settings', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     json(res, 200, publicSettings(await db.platformSettings()))
   })
 
   router.put('/platform/settings', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const body = bodyOf(req)
     const cur = await db.platformSettings()
     const next: PlatformSettings = {
@@ -72,14 +70,12 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   }
 
   router.get('/platform/credentials', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     json(res, 200, { credentials: modelProviderCreds(await db.platformCredentials()).map(publicPlatformCred) })
   })
 
   router.post('/platform/credentials', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const body = bodyOf(req)
     const provider = modelSecretOr400(strField(body, 'provider'))
     const secret = strField(body, 'secret')
@@ -95,8 +91,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   })
 
   router.put('/platform/credentials/:provider', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const provider = modelSecretOr400(req.params.provider)
     if (!await db.platformCredential(provider)) throw new HttpError(404, '密钥不存在')
     const secret = strField(bodyOf(req), 'secret')
@@ -106,8 +101,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   })
 
   router.delete('/platform/credentials/:provider', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const provider = modelSecretOr400(req.params.provider)
     if (!await db.platformCredential(provider)) throw new HttpError(404, '密钥不存在')
     await db.deletePlatformCredential(provider)
@@ -158,14 +152,12 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   }
 
   router.get('/platform/tools/web', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     json(res, 200, await webToolsView())
   })
 
   router.put('/platform/tools/web', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const body = bodyOf(req)
     const cur = await db.platformSettings()
     const web = parseWebTools({ ...(cur.webTools ?? emptyWebTools()), ...body })
@@ -199,8 +191,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
 
   /** 自检：拿固定查询词打一次选中的后端。不记 web_calls——这是验配置，不是用。 */
   router.post('/platform/tools/web/test', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const kind = strField(bodyOf(req), 'kind') === 'extract' ? 'extract' : 'search'
     try {
       const out = await testBackend(db, kind)
@@ -269,8 +260,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
    * 因为倍率只有一个数、而原价有四项。
    */
   router.get('/platform/stats', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const range = rangeQuery(req)
     const companyId = (req.query.get('companyId') || '').trim()
     if (companyId && !(await db.company(companyId))) throw new HttpError(404, '公司不存在')
@@ -503,8 +493,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   }
 
   router.get('/platform/providers', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const items = await db.visibleCatalog('provider', null)
     const out: Record<string, unknown>[] = []
     for (const item of items) {
@@ -519,8 +508,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   })
 
   router.post('/platform/providers', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const def = parseOr400(() => parseProviderDef(bodyOf(req)))
     if (llm.isBuiltinProvider(def.id)) throw new HttpError(409, `${def.id} 是内置供应商，换个 id`)
     if (await customProviderItem(def.id)) throw new HttpError(409, '这个供应商 id 已经有了')
@@ -530,8 +518,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   })
 
   router.put('/platform/providers/:provider', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const item = await customProviderItem(req.params.provider)
     if (!item) throw new HttpError(404, '自定义供应商不存在')
     // id 不给改：模型角色、密钥、用量记录都是按它存的，改了会成孤儿。
@@ -542,8 +529,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   })
 
   router.delete('/platform/providers/:provider', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const provider = req.params.provider
     const item = await customProviderItem(provider)
     if (!item) throw new HttpError(404, '自定义供应商不存在')
@@ -565,8 +551,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
   })
 
   router.post('/platform/llm/test', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const body = bodyOf(req)
     let provider = ''
     let model = ''
@@ -604,8 +589,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
    * 「新模型怎么还没出来」就只能靠翻网关日志回答。
    */
   router.get('/platform/models/discovery', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const snap = await db.discoveredModels()
     json(res, 200, {
       fetchedAt: snap.fetchedAt || null,
@@ -622,8 +606,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
 
   /** 立即刷新。等不到下一个 tick 的时候用（比如上游刚上了模型，现在就要）。 */
   router.post('/platform/models/discovery/refresh', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const result = await refreshDiscovered(db, { force: true })
     if (result.error) throw new HttpError(502, `models.dev 拉取失败：${result.error}`)
     const snap = await db.discoveredModels()
@@ -638,8 +621,7 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
    * models.dev 的元数据看不出这类问题，只能等它在探测里露馅，然后按下去。
    */
   router.post('/platform/models/discovery/deny', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const body = bodyOf(req)
     const provider = strField(body, 'provider')
     const model = strField(body, 'model')

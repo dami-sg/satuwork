@@ -139,6 +139,23 @@ function pathOf(prefix: string, key: string): string {
 }
 
 /**
+ * 认过的字段之外，剩下那些参数也摆出来、只是不给改。
+ *
+ * 邮件卡和记忆卡都要这一段，理由一样：藏起来的话，人以为自己看到了这次操作的全部，
+ * 而实际发出去的可能带着一个附件。
+ */
+function pushRest(fields: ApprovalField[], un: Unwrapped, used: Set<string>) {
+  for (const [key, value] of Object.entries(un.args)) {
+    if (used.has(key)) continue
+    fields.push({
+      key: pathOf(un.prefix, key),
+      label: key,
+      value: typeof value === 'string' ? value : JSON.stringify(value),
+    })
+  }
+}
+
+/**
  * 这次调用该用哪张确认卡。
  *
  * 认不出来就 `generic`——**不认识不是理由把参数藏起来**：通用卡把整份 JSON 摆出来，
@@ -174,14 +191,7 @@ export function formOf(call: { name: string; arguments: string }): ApprovalForm 
    * 剩下那些参数（`is_html`、`attachment`、线程 id…）**也要露出来，只是不给改**。
    * 藏起来的话，人以为自己看到了这封信的全部，而实际发出去的可能带着一个附件。
    */
-  for (const [key, value] of Object.entries(un.args)) {
-    if (used.has(key)) continue
-    fields.push({
-      key: pathOf(un.prefix, key),
-      label: key,
-      value: typeof value === 'string' ? value : JSON.stringify(value),
-    })
-  }
+  pushRest(fields, un, used)
   return { kind: 'email', tool: un.tool, fields }
 }
 
@@ -218,14 +228,7 @@ function memoryForm(un: Unwrapped): ApprovalForm {
   if (un.args.match !== undefined) put('match', '改/删哪一条', un.args.match)
   if (op !== 'remove') put('kind', '类别', un.args.kind ?? '事实', true)
   put('layer', '范围', un.args.layer === 'self' ? '这个人所有的 Bot' : '只有这颗 Bot')
-  for (const [key, value] of Object.entries(un.args)) {
-    if (used.has(key)) continue
-    fields.push({
-      key: pathOf(un.prefix, key),
-      label: key,
-      value: typeof value === 'string' ? value : JSON.stringify(value),
-    })
-  }
+  pushRest(fields, un, used)
   return { kind: 'memory', tool: un.tool, fields }
 }
 

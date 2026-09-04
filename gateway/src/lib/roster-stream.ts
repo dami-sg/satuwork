@@ -39,7 +39,7 @@
 import type { ServerResponse } from 'node:http'
 import type { Account, Db } from '../db.ts'
 import type { Req } from '../http.ts'
-import { machineHeader, seatBearer, seatTargetFor } from './runtime.ts'
+import { machineHeader, seatBearer, seatTargetFor, sseEvents } from './runtime.ts'
 import { type CatchUp, type Frame, type Upstream, catchUpFrames, newCatchUp, remember, rosterFrame } from './roster-filter.ts'
 
 /** 流上垫几轮历史。名单只要「最近说了什么」，一轮就够。 */
@@ -276,30 +276,14 @@ async function drain(
   write: (frame: Frame) => void,
   closed: () => boolean,
 ) {
-  const reader = body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
-  while (!closed()) {
-    const { done, value } = await reader.read()
-    if (done) return
-    buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
-    let idx: number
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const frame = buf.slice(0, idx)
-      buf = buf.slice(idx + 2)
-      for (const line of frame.split('\n')) {
-        if (!line.startsWith('data: ')) continue
-        let ev: { type?: string; seq?: number; time?: number; live?: unknown }
-        try {
-          ev = JSON.parse(line.slice(6))
-        } catch {
-          continue
-        }
-        if (!ev || typeof ev !== 'object') continue
-        const out = rosterFrame(ev, up)
-        if (out) write(out)
-      }
-    }
+  type RosterEvent = { type?: string; seq?: number; time?: number; live?: unknown }
+  for await (const ev of sseEvents<RosterEvent>(body.getReader(), closed)) {
+    // 连接是在 read() 等着的时候断的：那一刻已经在路上的这一块照样会到。不在这儿
+    // 再判一次，就会往一条已经收摊的响应上写。
+    if (closed()) return
+    if (!ev || typeof ev !== 'object') continue
+    const out = rosterFrame(ev, up)
+    if (out) write(out)
   }
 }
 

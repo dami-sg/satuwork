@@ -351,6 +351,11 @@ function clearToken() {
   sessionStorage.removeItem(TOKEN_KEY)
 }
 
+/** 列表画不出东西时那一格。三张账单表 + 用量表共用，别再各抄一份。 */
+function emptyBox(msg) {
+  return `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${esc(msg)}</div>`
+}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
@@ -721,6 +726,75 @@ function dayEnd(dateStr) {
 /** Bot 详情页的图标格里那份草稿还没落库，层级要从当前页面的角色推。 */
 function draftOrigin() {
   return state.bot?.origin || (isOwner() ? 'global' : 'company')
+}
+
+/**
+ * 账单/充值那几张表的外壳：标题、表头、行，没行时一句空态。
+ *
+ * 三处（公司账单的两个 tab、平台侧公司详情）本来各写一遍，表头的格数还必须和
+ * `.satu-billhead` 的 grid-template-columns 对上——抄一份就多一次对不上的机会。
+ */
+function billTable(title, heads, rows, emptyMsg) {
+  const cells = heads.map((h) => `<span>${esc(h)}</span>`).join('')
+  return `<div style="display: flex; flex-direction: column; gap: var(--space-3);">
+      <h2 style="font-size: 18px; margin: 0;">${esc(title)}</h2>
+      <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
+        <div class="satu-billhead">${cells}</div>
+        ${rows || emptyBox(emptyMsg)}
+      </div>
+    </div>`
+}
+
+/**
+ * 一期订阅账单那一行。最后一格由调用方给：公司那边摆「发票」按钮（还没做，禁着），
+ * 平台侧那张只读表留空。
+ */
+function invoiceRow(b, tail = '<span></span>') {
+  return `<div class="satu-billrow">
+      <span style="font-size: 13.5px;">${esc(b.period)}</span>
+      <span style="font-size: 13.5px;">${esc(b.amount)}</span>
+      <span class="tag tag-accent-2">${esc(b.status)}</span>
+      <span style="font-size: 13px; color: var(--muted-foreground);">${esc(b.paid)}</span>
+      ${tail}
+    </div>`
+}
+
+/**
+ * 一条 SSE 拆成一个个事件。名册流和日志流共用。
+ *
+ * 分帧规则收在这一处：CRLF 归一化、`\n\n` 分帧、一帧里可能有多行 `data:`、认不出
+ * JSON 的那一行跳过。这几条每一条都是「写错了不报错、只是偶尔悄悄丢一帧」的规则，
+ * 抄一份就多一个悄悄丢帧的地方。
+ *
+ * 和 gateway/src/lib/runtime.ts 里那个同名函数是同一套语义，但**不能共用**：那边是
+ * 服务端模块，这边是浏览器里的普通脚本。改分帧规则时两边一起改。
+ *
+ * `stop` 在每次 read 之前问一次。事件本身怎么处理、处理时抛了怎么办，由调用方管——
+ * 这里只负责把字节变成事件。
+ */
+async function* sseEvents(reader, stop = () => false) {
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (!stop()) {
+    const { done, value } = await reader.read()
+    if (done) return
+    buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+    let idx
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data: ')) continue
+        let ev
+        try {
+          ev = JSON.parse(line.slice(6))
+        } catch {
+          continue
+        }
+        yield ev
+      }
+    }
+  }
 }
 
 function svg(paths, size = 17) {

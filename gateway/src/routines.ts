@@ -30,7 +30,7 @@
  */
 import { RoutineBusyError, type Db, type Routine, type RoutineRun, type RoutineRunTrigger } from './db.ts'
 import { nextRunAtOf } from './lib/schedule.ts'
-import { machineTokenFor, seatBearer } from './lib/runtime.ts'
+import { machineTokenFor, seatBearer, sseEvents } from './lib/runtime.ts'
 import { sweepHandoffs } from './handoff-sweep.ts'
 import { refreshDiscovered } from './model-discovery.ts'
 import { tickBotDeletions, tickConversationAudits } from './conversation-audit.ts'
@@ -214,8 +214,6 @@ async function readTurnEnd(
   ownTurn: boolean,
   instruction: string,
 ): Promise<string> {
-  const decoder = new TextDecoder()
-  let buf = ''
   // 我们那一轮的轮号。null = 还没开始（`steered` 的时候当场就算「已经在跑了」）。
   let turn: number | null = ownTurn ? null : -1
   /**
@@ -233,52 +231,38 @@ async function readTurnEnd(
    */
   let mine = false
   let foreign = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) throw new Error('事件流断了')
-    buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
-    let idx: number
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const frame = buf.slice(0, idx)
-      buf = buf.slice(idx + 2)
-      for (const line of frame.split('\n')) {
-        if (!line.startsWith('data: ')) continue
-        let ev: { type?: string; data?: { turn?: number; reason?: string | { kind?: string } } }
-        try {
-          ev = JSON.parse(line.slice(6))
-        } catch {
-          continue
-        }
-        if (ev.type === 'user/message') {
-          if (!mine) {
-            if (textOfUserMessage(ev.data).trim() === instruction.trim()) mine = true
-            else foreign++
-          }
-          continue
-        }
-        if (ev.type === 'turn/start') {
-          // 席位一条会话同时只跑一轮，所以发完消息之后开的第一轮就是我们这一轮——
-          // 前提是中间没有别人插进来（foreign 记着有几个人排在我们前面）。
-          if (turn === null) {
-            if (foreign > 0) foreign--
-            else turn = Number(ev.data?.turn ?? -1)
-          }
-          continue
-        }
-        if (ev.type !== 'turn/end') continue
-        if (turn === null) continue
-        // steered 那一岔不比轮号，所以「别人的那一轮」也得在这儿让开。
-        if (turn === -1 && foreign > 0) {
-          foreign--
-          continue
-        }
-        // 轮号对不上就不是我们那一条（-1 = 插进别人正在跑的那一轮，不比轮号）。
-        if (turn !== -1 && Number(ev.data?.turn ?? -1) !== turn) continue
-        const reason = ev.data?.reason
-        return String((typeof reason === 'string' ? reason : reason?.kind) || 'completed')
+  type TurnEvent = { type?: string; data?: { turn?: number; reason?: string | { kind?: string } } }
+  for await (const ev of sseEvents<TurnEvent>(reader)) {
+    if (ev.type === 'user/message') {
+      if (!mine) {
+        if (textOfUserMessage(ev.data).trim() === instruction.trim()) mine = true
+        else foreign++
       }
+      continue
     }
+    if (ev.type === 'turn/start') {
+      // 席位一条会话同时只跑一轮，所以发完消息之后开的第一轮就是我们这一轮——
+      // 前提是中间没有别人插进来（foreign 记着有几个人排在我们前面）。
+      if (turn === null) {
+        if (foreign > 0) foreign--
+        else turn = Number(ev.data?.turn ?? -1)
+      }
+      continue
+    }
+    if (ev.type !== 'turn/end') continue
+    if (turn === null) continue
+    // steered 那一岔不比轮号，所以「别人的那一轮」也得在这儿让开。
+    if (turn === -1 && foreign > 0) {
+      foreign--
+      continue
+    }
+    // 轮号对不上就不是我们那一条（-1 = 插进别人正在跑的那一轮，不比轮号）。
+    if (turn !== -1 && Number(ev.data?.turn ?? -1) !== turn) continue
+    const reason = ev.data?.reason
+    return String((typeof reason === 'string' ? reason : reason?.kind) || 'completed')
   }
+  // 走到这儿 = 上游把流关了，而我们那一轮的收口一直没来。
+  throw new Error('事件流断了')
 }
 
 /** 一轮没跑成，那句给人看的话。正文在对话里，这里只说是哪一类。 */
