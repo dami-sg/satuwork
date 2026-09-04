@@ -24,6 +24,18 @@ const draft = channelDraft([
   { type: 'assistant/message', data: { turn: 7, step: 1, message: { content: [{ type: 'text', text: '我先查行情。' }] } } },
   { type: 'assistant/chunk', data: { turn: 7, step: 2, chunk: { type: 'text-delta', text: '正在生成报告' } } },
 ], 'update-7')
+const toolDraft = channelDraft([
+  { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'channel', form: 'update-tools' } } },
+  { type: 'turn/start', data: { turn: 8 } },
+  { type: 'assistant/message', data: { turn: 8, step: 1, message: { content: [{ type: 'text', text: '我先查一下。' }] } } },
+  { type: 'tool/call', data: { turn: 8, step: 1, callId: 'call-search', name: 'web_search', arguments: '{"q":"ETH"}' } },
+  { type: 'tool/result', data: { turn: 8, step: 1, callId: 'call-search', text: '找到了', failed: false } },
+  { type: 'tool/call', data: { turn: 8, step: 2, callId: 'call-extract', name: 'web_extract', arguments: '{"url":"https://example.test"}' } },
+  { type: 'tool/call', data: { turn: 8, step: 2, callId: 'call-failed', name: 'browser_navigate', arguments: '{}' } },
+  { type: 'tool/result', data: { turn: 8, step: 2, callId: 'call-failed', text: '超时', failed: true } },
+  // 参数和结果可能含敏感内容，只能展示名称和状态。
+  { type: 'tool/result', data: { turn: 8, step: 2, callId: 'orphan', text: '不能露出来的结果', failed: false } },
+], 'update-tools')
 const files = channelFiles([
   { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'channel', form: 'update-7' } } },
   { type: 'turn/start', data: { turn: 7 } },
@@ -43,5 +55,6 @@ console.log('__RESULT__' + JSON.stringify({
   help: channelMentionHelp(candidates),
   todos,
   draft,
+  toolDraft,
   files,
 }))

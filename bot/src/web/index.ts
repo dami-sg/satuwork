@@ -31,7 +31,8 @@ export interface Config {
  * 一步模型调用会先落若干 assistant/chunk，收口时再落一条完整的 assistant/message；
  * 两份是同一句话，不能直接全拼起来。这里按 step 归并：有完整消息就用完整消息，否则用
  * 尚未收口的 delta。这样 Telegram 草稿既能跟着当前 token 长，也不会在每一步结束时把
- * 同一句话重复一遍。
+ * 同一句话重复一遍。工具调用只把名称和状态放进临时草稿，不带参数/结果；正式回复发出
+ * 后 Telegram 会自动清掉草稿，因此工具过程不会永久留在聊天记录里。
  */
 export function channelDraft(events: SessionEvent[], eventId: string): string {
   const start = events.findIndex((event) => {
@@ -45,10 +46,14 @@ export function channelDraft(events: SessionEvent[], eventId: string): string {
   if (!Number.isFinite(turn)) return ''
 
   const steps = new Map<number, { chunks: string; settled?: string }>()
+  const tools = new Map<string, { name: string; status: 'running' | 'done' | 'failed' }>()
   for (const event of events.slice(start + 1)) {
     const data = event.data as {
       turn?: unknown
       step?: unknown
+      callId?: unknown
+      name?: unknown
+      failed?: unknown
       chunk?: { type?: string; text?: unknown }
       message?: { content?: unknown }
     }
@@ -67,15 +72,37 @@ export function channelDraft(events: SessionEvent[], eventId: string): string {
           .map((block) => block.text)
           .join('')
         : ''
+    } else if (event.type === 'tool/call') {
+      const callId = String(data.callId ?? '').trim()
+      const name = Array.from(String(data.name ?? '').replace(/\s+/g, ' ').trim()).slice(0, 80).join('')
+      if (callId && name) tools.set(callId, { name, status: 'running' })
+    } else if (event.type === 'tool/result') {
+      const callId = String(data.callId ?? '').trim()
+      const tool = tools.get(callId)
+      if (tool) tool.status = data.failed ? 'failed' : 'done'
     }
     steps.set(step, row)
   }
-  return [...steps.entries()]
+  const text = [...steps.entries()]
     .sort(([a], [b]) => a - b)
     .map(([, row]) => row.settled === undefined ? row.chunks : row.settled)
     .filter((text) => text.trim())
     .join('\n\n')
     .trim()
+  const allTools = [...tools.values()]
+  const shownTools = allTools.slice(-8)
+  const activity = shownTools.length
+    ? [
+      '🔧 工具调用',
+      ...(allTools.length > shownTools.length ? [`… 还有 ${allTools.length - shownTools.length} 项`] : []),
+      ...shownTools.map((tool) => {
+        const state = tool.status === 'running' ? '调用中' : tool.status === 'failed' ? '失败' : '完成'
+        const icon = tool.status === 'running' ? '⏳' : tool.status === 'failed' ? '✗' : '✓'
+        return `${icon} ${tool.name} · ${state}`
+      }),
+    ].join('\n')
+    : ''
+  return [text, activity].filter(Boolean).join('\n\n')
 }
 
 export interface ChannelFile {
