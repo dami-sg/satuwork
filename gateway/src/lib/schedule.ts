@@ -30,8 +30,16 @@ interface Parts {
 
 const WEEKDAYS: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
 
-/** 某个时刻在某个时区里是几点几分、星期几。 */
-export function partsIn(tz: string, ms: number): Parts {
+/**
+ * 按时区缓存 formatter。`new Intl.DateTimeFormat` 是这条路上最贵的一步（要加载时区
+ * 数据），而审计调度每个 tick 要对每家公司算上百个窗口边界，每个边界四次 partsIn——
+ * 原来每次都新建一个。时区字符串的取值是有限的，缓存不会涨。
+ */
+const formatters = new Map<string, Intl.DateTimeFormat>()
+
+function formatterOf(tz: string): Intl.DateTimeFormat {
+  const hit = formatters.get(tz)
+  if (hit) return hit
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
     // hourCycle 要写死：只给 hour12: false 的话，某些实现会把午夜给成「24 点」，
@@ -44,6 +52,13 @@ export function partsIn(tz: string, ms: number): Parts {
     minute: '2-digit',
     weekday: 'short',
   })
+  formatters.set(tz, fmt)
+  return fmt
+}
+
+/** 某个时刻在某个时区里是几点几分、星期几。 */
+export function partsIn(tz: string, ms: number): Parts {
+  const fmt = formatterOf(tz)
   const got: Record<string, string> = {}
   for (const p of fmt.formatToParts(new Date(ms))) got[p.type] = p.value
   return {

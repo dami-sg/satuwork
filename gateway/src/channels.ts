@@ -291,7 +291,9 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
     } catch (e) {
       const attempts = current.attempts + 1
       const tg = e instanceof TelegramError ? e : null
-      const dead = attempts >= MAX_ATTEMPTS || Boolean(tg?.permanent)
+      // sendMessage 上的 403 / 404 / 400（被拉黑、chat 没了、消息不合法）原样重发不会变好，
+      // 这条事件直接 dead；但那不是 token 失效，binding 不动（见 TelegramError.permanent）。
+      const dead = attempts >= MAX_ATTEMPTS || Boolean(tg && !tg.retryable)
       const message = (e as Error).message.slice(0, 300)
       const updated = await db.updateClaimedChannelEvent(current.id, leaseToken, {
         status: dead ? 'dead' : 'retry', attempts,

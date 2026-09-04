@@ -12,6 +12,7 @@
 import { rmSync } from 'node:fs'
 import { runProbe as sharedProbe } from './probe.mjs'
 import { tmpOf } from './isolate.mjs'
+import { freePort } from './ports.mjs'
 
 const HOME = tmpOf('satuwork-e2e-mounted')
 
@@ -21,9 +22,12 @@ const HOME = tmpOf('satuwork-e2e-mounted')
  * 一个专门回答「组合对不对」的套件，带着上一次跑剩的库和名册跑，本身就拆了自己的
  * 前提。ui-smoke 那边也是先删再起。
  */
-const runProbe = (root) => {
+const runProbe = async (root) => {
   rmSync(HOME, { recursive: true, force: true })
-  return sharedProbe(root, 'bot/e2e-mounted.mjs', { env: { SATUWORK_HOME: HOME, SATUWORK_PORT: '18124' }, timeout: 40_000 })
+  // 端口向内核要（见 ports.mjs）：写死的 18124 在两个 worktree 同时跑时必撞，撞上的
+  // 现象是探针连到别人的 bot 上、报一堆和组合无关的断言。
+  const port = await freePort()
+  return sharedProbe(root, 'bot/e2e-mounted.mjs', { env: { SATUWORK_HOME: HOME, SATUWORK_PORT: String(port) }, timeout: 40_000 })
 }
 
 export async function runMounted({ root, test, assert, log }) {

@@ -650,6 +650,13 @@ export function attachPlatform(router: Router, ctx: RouteCtx) {
     if (on) deny.add(key)
     else deny.delete(key)
     await db.putDiscoveredModels({ ...snap, deny: [...deny] })
+    // 按下去一个模型等于把它从所有公司的目录里拿掉，和改 enabledModels 一样要留痕。
+    await db.audit({
+      companyId: 'platform',
+      accountId: account.id,
+      action: 'platform.models.discovery.deny',
+      detail: { model: key, denied: on },
+    })
     json(res, 200, { model: key, denied: on, added: await llm.syncDiscovered() })
   })
 }

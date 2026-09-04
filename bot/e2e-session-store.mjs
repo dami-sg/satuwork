@@ -8,7 +8,7 @@
  * 放在 e2e/ 下解析不到 @deepseek-ai/cordis。
  */
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionService } from './src/session/index.ts'
@@ -44,9 +44,23 @@ async function appendMany(sessions, id) {
   return events.map((e) => e.seq)
 }
 
+/**
+ * 每个场景一个临时目录，跑完在 finally 里收掉——不收的话每跑一轮 /tmp 里多三份。
+ * 目录建在外面、场景本体只拿 root：这样场景里头随便怎么 return / 抛，都收得到。
+ */
+async function inTmp(prefix, fn) {
+  const root = mkdtempSync(join(tmpdir(), prefix))
+  try {
+    return await fn(root)
+  } finally {
+    try {
+      rmSync(root, { recursive: true, force: true })
+    } catch {}
+  }
+}
+
 /** 场景一：已经是当前格式，只测并发追加会不会各记各的 seq。 */
-async function concurrentAppend() {
-  const root = mkdtempSync(join(tmpdir(), 'satuwork-sess-a-'))
+const concurrentAppend = () => inTmp('satuwork-sess-a-', async (root) => {
   const first = await freshService(root)
   const id = await first.create({ botId: 'default', title: '并发' })
   const file = join(root, `${id}.jsonl`)
@@ -67,11 +81,10 @@ async function concurrentAppend() {
       events.filter((e) => e.type === 'user/message').map((e) => e.data.message.content[0].text),
     ).size,
   }
-}
+})
 
 /** 场景二：旧格式（v1，无 botId），迁移重写和并发追加撞在一起。 */
-async function migrateUnderLoad() {
-  const root = mkdtempSync(join(tmpdir(), 'satuwork-sess-b-'))
+const migrateUnderLoad = () => inTmp('satuwork-sess-b-', async (root) => {
   const id = 's-legacy-under-load'
   const file = join(root, `${id}.jsonl`)
   const legacy = [
@@ -105,7 +118,7 @@ async function migrateUnderLoad() {
     ),
     strays: readdirSync(root).filter((f) => !f.endsWith('.jsonl')),
   }
-}
+})
 
 /**
  * 场景三：上个进程死在一轮对话中间——日志末尾留着一条没有配对 turn/end 的 turn/start。
@@ -113,8 +126,7 @@ async function migrateUnderLoad() {
  * 崩溃、机器重启、以及每一次「重新部署」都会造出这个形状。不收口的话，界面按
  * 「最后一条 turn/start 之后有没有 turn/end」判断，会永远显示「正在处理」。
  */
-async function danglingTurn() {
-  const root = mkdtempSync(join(tmpdir(), 'satuwork-sess-c-'))
+const danglingTurn = () => inTmp('satuwork-sess-c-', async (root) => {
 
   // 3a. 悬着的一轮：写到 turn/start 和一条助手消息就断电
   const cut = 's-cut'
@@ -158,7 +170,7 @@ async function danglingTurn() {
     stableOnReload: cutAgain.filter((e) => e.type === 'turn/end').length,
     untouchedDone: doneEvents.length,
   }
-}
+})
 
 const result = {
   concurrentAppend: await concurrentAppend(),

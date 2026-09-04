@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { lookup } from 'node:dns/promises'
 import { existsSync } from 'node:fs'
 import { satuworkHome } from '../home.ts'
+import { childEnv } from '../workspace/index.ts'
 import { blockedHost, hostOf, privateAddress, siteAllowed, type ActionContext } from '../policy/browser.ts'
 import type { ToolCall, ToolResult, WorkspaceFile } from '../tools/index.ts'
 import { Cdp, CdpError } from './cdp.ts'
@@ -310,7 +311,9 @@ export class BrowserService extends Service {
         `这个席位上没有浏览器可用（找不到 ${wrapper}）。桌面那套没部署，或者机器上装不上 Chrome。`,
       )
     }
-    spawn(wrapper, ['--new-window', 'about:blank'], { detached: true, stdio: 'ignore' }).unref()
+    // env 用剔过凭据的副本（见 workspace 的 childEnv）：Chrome 及它拉起的一切都不该
+    // 看到 GATEWAY_TOKEN 这类东西。包装脚本自己不读 SATUWORK_*，DISPLAY / HOME 都还在。
+    spawn(wrapper, ['--new-window', 'about:blank'], { detached: true, stdio: 'ignore', env: childEnv() }).unref()
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 250))
       if (await this.listening()) return

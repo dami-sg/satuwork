@@ -12,7 +12,18 @@ export class TelegramError extends Error {
   ) {
     super(message)
   }
-  get permanent(): boolean { return this.status === 401 || this.status === 403 || this.status === 404 }
+  /**
+   * **token 本身坏了**，整个渠道要标红——只看 getUpdates / getMe 上的 401 / 403 / 404
+   * （404 是 Telegram 对格式不对的 token 的答法）。
+   *
+   * 以前不分方法：sendMessage 上的 403（用户把 Bot 拉黑了）、404（chat 不存在）也算
+   * 「永久」，一个用户点了 block，整个 binding 就永久 error、别的人也收不到回复。
+   * 那种 4xx 只说明**这一条**发不出去，由 `retryable` 决定这条事件的去留。
+   */
+  get permanent(): boolean {
+    if (this.method !== 'getUpdates' && this.method !== 'getMe') return false
+    return this.status === 401 || this.status === 403 || this.status === 404
+  }
   /** 同一请求原样再试有机会恢复；其余 4xx 是这条 update 自身的毒消息。 */
   get retryable(): boolean { return this.status === 429 || this.status >= 500 }
 }

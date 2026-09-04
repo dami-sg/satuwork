@@ -63,6 +63,12 @@ const INLINE_NETWORK = /\b(urlopen|urllib|requests\.(get|post|put|delete)|http\.
 const WRAPPERS = new Set(['sudo', 'env', 'nohup', 'time', 'timeout', 'xargs', 'command', 'exec', 'nice', 'stdbuf'])
 
 /**
+ * shell 关键字：它们站在一段的开头，可自己不是命令。`if curl x; then` 的头是 `curl`，
+ * `! curl x` 也是。不跳过的话，套一层 `if` 就绕过去了。
+ */
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', '!'])
+
+/**
  * 把命令原样交给另一个 shell 的那几种写法：`bash -c "…"`、`sh -c '…'`、`eval "…"`。
  *
  * **不展开它们，上面那一套等于不存在。** 只看每段的第一个词的话，
@@ -84,14 +90,37 @@ const NESTED_PAYLOAD = new RegExp(
 /** 嵌套展开的深度上限。三层足够覆盖真实写法，也挡住自引用的病态输入。 */
 const MAX_NESTING = 3
 
+/**
+ * 切段与找头的几个例子（e2e-guards.mjs 的 shell 表里也有）：
+ *
+ *   `ls && curl x`            → ls, curl
+ *   `sleep 1 & curl x`        → sleep, curl       单个 & 也是分隔
+ *   `(curl x)` / `{ curl x; }` → curl              子 shell / 命令组的括号不是词
+ *   `if curl x; then echo; fi` → curl, echo         关键字跳过
+ *   `! curl x`                → curl
+ *   `env -i curl x`           → curl              包装命令后面的标志跳过
+ *   `FOO=1 sudo curl x`       → curl
+ */
 export function commandWords(command: string, depth = 0): { head: string; args: string[] }[] {
-  const segments = command.split(/\||&&|\|\||;|\n|\$\(|`|<\(/)
+  // 单个 `&`（后台）、`(` `)` `{` `}`（子 shell、命令组）都要切：`sleep 1 & curl x`、
+  // `(curl x)`、`{ curl x; }` 原来只看得到第一个词。
+  const segments = command.split(/\|\||&&|\||&|;|\n|\$\(|`|<\(|[(){}]/)
   const out: { head: string; args: string[] }[] = []
   for (const seg of segments) {
     const words = seg.trim().split(/\s+/).filter(Boolean)
     let i = 0
-    // 环境变量赋值与包装命令都不是「这一段在干什么」，跳过去继续找真正的头。
-    while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]) || WRAPPERS.has(base(words[i])))) i++
+    // 环境变量赋值、包装命令、shell 关键字都不是「这一段在干什么」，跳过去继续找真正的头。
+    // 包装命令后面跟着的标志（`env -i`、`nohup -p`）也跳过——不然头就成了 `-i`。
+    let afterWrapper = false
+    while (i < words.length) {
+      const w = words[i]!
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || KEYWORDS.has(base(w))) i++
+      else if (WRAPPERS.has(base(w))) {
+        afterWrapper = true
+        i++
+      } else if (afterWrapper && w.startsWith('-')) i++
+      else break
+    }
     if (i >= words.length) continue
     out.push({ head: base(words[i]), args: words.slice(i + 1) })
   }
@@ -224,7 +253,9 @@ const DESTRUCTIVE_WITH_FLAGS: Record<string, RegExp> = {
   chmod: /(^|\s)-{1,2}[a-z]*R/,
   chown: /(^|\s)-{1,2}[a-z]*R/,
   dd: /of=/,
-  git: /^(reset\s+--hard|clean\s+-[a-z]*f|push\s+.*--force)/,
+  // push 的强制：`--force`、`--force-with-lease`、短写 `-f` / `-uf`。短写要卡在词边界上，
+  // 不然 `--follow-tags` 里那个 f 也会中。
+  git: /^(reset\s+--hard|clean\s+-[a-z]*f|push(\s+\S+)*\s+(--force(-with-lease)?(=\S*)?|-[a-z]*f[a-z]*)(\s|$))/,
   docker: /^(rm|rmi|prune|system\s+prune)/,
   systemctl: /^(stop|disable|mask)/,
   truncate: /-s\s*0/,

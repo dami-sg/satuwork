@@ -25,6 +25,12 @@ import { requestBotDeletion } from '../conversation-audit.ts'
  * 屏、一个端口），不是一行配置。默认 10 够一个人分工用，真不够就调环境变量，不必改码。
  */
 export const MAX_USER_BOTS = Math.max(1, Math.trunc(Number(process.env.GATEWAY_MAX_USER_BOTS) || 10))
+/**
+ * 「数这个人有几个 Bot、再插一个」那一段的 advisory lock 键。两条建 Bot 的路（这里的
+ * POST /runtime/bots 和 channels.ts 绑 Telegram 时顺手建的那颗）数的是同一个配额，
+ * 所以**必须是同一把锁**——各用各的号，两边就能同时读到「还差一个」一起挤进来。
+ */
+export const USER_BOT_QUOTA_LOCK = 0x43484e
 
 /**
  * 「这份目录变了没有」的指纹。
@@ -113,6 +119,11 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       const account = await requireUser(req, db, keys)
       json(res, 200, { items: (await db.visibleCatalog(kindOf(name), account.companyId)).map(publicCatalog) })
     })
+    /**
+     * 平台令牌写全局目录的三条路各记一条审计。令牌不对应任何账号，accountId 记空、
+     * companyId 记 'platform'（同 platform.tools.web.update 那条），detail 里标明
+     * `by: 'platform-token'`，翻审计的人才分得清是人在界面上改的还是 CI 推的。
+     */
     router.post(`/catalog/${name}`, async (req, res) => {
       requirePlatformToken(req)
       const body = bodyOf(req)
@@ -123,6 +134,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         name: strField(body, 'name'),
         definition: body.definition ?? {},
       })
+      await db.audit({ companyId: 'platform', accountId: null, action: 'catalog.create', detail: { kind: kindOf(name), id: item.id, by: 'platform-token' } })
       json(res, 201, { item: publicCatalog(item) })
     })
     router.patch(`/catalog/${name}/:itemId`, async (req, res) => {
@@ -134,6 +146,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
         name: body.name != null ? strField(body, 'name') : undefined,
         definition: body.definition,
       })
+      await db.audit({ companyId: 'platform', accountId: null, action: 'catalog.update', detail: { kind: kindOf(name), id: item.id, by: 'platform-token' } })
       json(res, 200, { item: publicCatalog(next) })
     })
     router.delete(`/catalog/${name}/:itemId`, async (req, res) => {
@@ -141,6 +154,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       const item = await db.catalog(req.params.itemId)
       if (!item || item.kind !== kindOf(name) || item.scope !== 'global') throw new HttpError(404, '目录项不存在')
       await db.deleteCatalog(item.id)
+      await db.audit({ companyId: 'platform', accountId: null, action: 'catalog.delete', detail: { kind: kindOf(name), id: item.id, by: 'platform-token' } })
       json(res, 200, { deleted: true, id: item.id })
     })
   }
@@ -1157,21 +1171,29 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     requireSeat(account)
     const body = bodyOf(req)
-    const used = await db.countUserBots(account.id)
-    if (used >= MAX_USER_BOTS) throw new HttpError(409, `最多建 ${MAX_USER_BOTS} 个 Bot`)
-    const item = await db.insertCatalog({
-      kind: 'bot',
-      scope: 'user',
-      companyId: account.companyId,
-      accountId: account.id,
-      name: botNameOf(body.name),
-      definition: {
-        description: strField(body, 'description', false),
-        greeting: strField(body, 'greeting', false),
-        extraPrompt: extraPromptOf(body.extraPrompt),
-        icon: botIconOf(body.icon, 'company'),
-        enabled: true,
-      },
+    // 先把 body 整理好再进事务：形状错的 400 不该占着锁。
+    const definition = {
+      description: strField(body, 'description', false),
+      greeting: strField(body, 'greeting', false),
+      extraPrompt: extraPromptOf(body.extraPrompt),
+      icon: botIconOf(body.icon, 'company'),
+      enabled: true,
+    }
+    const name = botNameOf(body.name)
+    // 数和插放同一个事务、先拿锁（照 channels.ts 绑 Telegram 那条的写法）：不锁的话两个
+    // 并发请求都读到「还差一个」，配额就多出一颗。
+    const item = await db.tx(async () => {
+      await db.lockExclusive(USER_BOT_QUOTA_LOCK)
+      const used = await db.countUserBots(account.id)
+      if (used >= MAX_USER_BOTS) throw new HttpError(409, `最多建 ${MAX_USER_BOTS} 个 Bot`)
+      return db.insertCatalog({
+        kind: 'bot',
+        scope: 'user',
+        companyId: account.companyId,
+        accountId: account.id,
+        name,
+        definition,
+      })
     })
     await db.audit({
       companyId: account.companyId!,

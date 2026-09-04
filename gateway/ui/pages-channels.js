@@ -55,7 +55,7 @@ function telegramChannelCard(c) {
           <b>Telegram</b><span class="tag ${cls}">${t(zh, en)}</span>
         </div>
         <p style="margin: 4px 0 0; font-size: 13px; color: var(--muted-foreground);">${c
-          ? t(`@${c.externalUsername || c.externalBotId} · 关联 ${c.bot?.name || 'telegram bot'}`, `@${c.externalUsername || c.externalBotId} · ${c.bot?.name || 'telegram bot'}`)
+          ? t(`@${esc(c.externalUsername || c.externalBotId)} · 关联 ${esc(c.bot?.name || 'telegram bot')}`, `@${esc(c.externalUsername || c.externalBotId)} · ${esc(c.bot?.name || 'telegram bot')}`)
           : t('把 Telegram 私聊接入 Satuwork。Web 和 Telegram 消息会混合在同一条 Bot 对话中，并显示来源标签。', 'Connect a private Telegram chat to Satuwork. Web and Telegram messages share one bot conversation and show their source labels.')}</p>
       </div>
     </div>

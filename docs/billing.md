@@ -479,6 +479,10 @@ requireUser → gate（402）→ recordLlmCall（拿 callId）→ 打上游
 进程被 `migrate.ts` 拦下来。老行里那个不精确的值转类型也补不回来（精度在写入时就没了），
 所以界面上仍然收一下小数位。
 
+**迁移没有 down 脚本。** 每条只有向前的 SQL，「撤销」是再写一条新的把它改回去
+（`gateway/README.md` 的规矩）；真要回到升级前的状态，靠的是升级前的库快照，
+不是反向迁移——所以上线顺序第一步之前先备份。
+
 **回填不进迁移。** 那是一次性数据订正（同一条规矩的下半句），走
 `gateway/scripts/backfill-charges.mjs`：把 `connector_calls` 和 `web_calls` 的历史
 翻成账本行（`web_calls.mils × 1000`），金额**原样搬**，不按今天的单价重算。

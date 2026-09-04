@@ -115,5 +115,9 @@ export async function runCompact({ root, test, assert, log }) {
     assert(r.resultBudget.underHardLimit, `模型工具结果仍超上限：${r.resultBudget.modelChars}`)
     assert(r.resultBudget.oldLogSlimmed, '没有 modelText 的旧会话在回放时没有即时瘦身')
     assert(r.resultBudget.promptHighWater === 665_223, `真实 prompt 高水位算成了 ${r.resultBudget.promptHighWater}`)
+    // 从 bot/e2e-result-budget.mjs 并过来的两条（那个探针没有套件引用，从来没跑过）。
+    assert(r.resultBudget.publicHistorySlimmed, `对外历史没瘦身或改写了服务端日志：${r.resultBudget.publicHistoryChars} 字符`)
+    assert(r.resultBudget.highWaterAfterCompact === 0, `压缩边界之前的高水位漏到了新上下文：${r.resultBudget.highWaterAfterCompact}`)
+    assert(r.resultBudget.highWaterNext === 2_100, `边界之后的新 usage 没算上：${r.resultBudget.highWaterNext}`)
   })
 }

@@ -376,7 +376,10 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
      * 流水记事实（耗时、是不是点名来的、哪一把连接），账本记钱，靠 `refId` 串起来。
      * `free` 是「这一次不收钱」：我们自己拒掉的、根本没跑成的，没有产生上游成本。
      */
+    /** record() 里最后成功插进流水的那条 id；落账在它之后失败时，日志里靠它对回去。 */
+    let recordedRefId: string | null = null
     const record = async (status: ConnectorCallStatus, free = false) => {
+      recordedRefId = null
       const call = await db.insertConnectorCall({
         companyId: g.account.companyId,
         accountId: g.account.id,
@@ -400,6 +403,22 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
         free,
         refId: call.id,
       })
+      recordedRefId = call.id
+    }
+    /**
+     * **上游已经跑过了**（execute 返回、或超时也算发出去了）之后再落账，落账失败不能
+     * 再变成 500：那样席位那边看到的是「工具调用失败」，模型多半会再试一次——上游就
+     * 被真的执行了两遍（邮件发两封）。这里只记一行 error（带 refId 好补账），把上游
+     * 的结果照常还给席位。没跑成那一支不走这里：那时候没有上游成本，500 也不会重放什么。
+     */
+    const recordAfterUpstream = async (status: ConnectorCallStatus, free = false) => {
+      try {
+        await record(status, free)
+      } catch (e) {
+        console.error(
+          `satuwork-gateway: 连接器调用已执行但落账失败（connection=${g.conn.id} tool=${slug} status=${status} refId=${recordedRefId ?? '无'}）：${(e as Error).message}`,
+        )
+      }
     }
 
     if (!slug) {
@@ -472,13 +491,13 @@ export function attachConnectorMcp(router: Router, ctx: RouteCtx) {
        * 失败（「邮箱不存在」是跑完才知道的，成本已经发生）。没跑成的一律走下面的
        * catch：provider 的契约是「抛出 = 没跑成」，不许把异常吞成一个返回值。
        */
-      await record(out.ok ? 'ok' : 'failed')
+      await recordAfterUpstream(out.ok ? 'ok' : 'failed')
       rpcOk(res, id, toolResult(out.text, !out.ok))
     } catch (e) {
       const timedOut = timer.aborted
       // 超时**照收钱**：发出去的邮件不会因为我们没等到响应就退回来。别的失败
       // （连不上、4xx、5xx）没产生上游成本，不收。
-      await record(timedOut ? 'timeout' : 'error', !timedOut)
+      await recordAfterUpstream(timedOut ? 'timeout' : 'error', !timedOut)
       const msg = e instanceof ProviderError ? e.message : (e as Error).message
       rpcOk(res, id, toolResult(timedOut ? `工具调用超时（${UPSTREAM_TIMEOUT_MS / 1000} 秒）` : `工具调用失败：${msg}`, true))
     }

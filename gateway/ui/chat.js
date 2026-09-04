@@ -980,6 +980,39 @@ function stopChatStream() {
   chatStreamId = ''
 }
 
+/**
+ * 一个 Bot 被删掉了：把对话页上属于它的东西全部拆掉。
+ *
+ * 「删除当前 Bot」原先只清了 state.bot 就 go('/')——chatBotId 还指着那个已经不存在的
+ * Bot，正文、会话 id、桌面运行时全留着，流和长跑还在照着一个已删的席位敲接口。
+ * 拆的东西照着退出登录那条路（app.js 的 logout）来，但**只拆这一个 Bot 的**：名单上
+ * 别的 Bot 的流和长跑不能跟着断。
+ */
+function forgetChatBot(botId) {
+  if (!botId) return
+  closeBotStream(botId)
+  botStreams.delete(botId)
+  cancelIdleRetry(botId)
+  cancelIdleRetry('session:' + botId)
+  if (heldSend && heldSend.botId === botId) clearHeldSend()
+  if (state.chatDrafts) delete state.chatDrafts[botId]
+  if (state.chatBotId !== botId) return
+  stopChatStream()
+  if (state.chatSessionId) chatLive.delete(state.chatSessionId)
+  state.chatBotId = ''
+  state.chatSessionId = ''
+  state.chatEvents = []
+  state.chatDraft = ''
+  state.chatPending = []
+  state.chatStatus = ''
+  state.wsDirs = {}
+  state.wsOpen = {}
+  state.wsSession = ''
+  state.desktopRuntime = null
+  state.desktopRuntimeAt = 0
+  unmountDesktop()
+}
+
 async function loadRuntimeBots() {
   state.runtimeError = ''
   try {
@@ -2434,18 +2467,17 @@ function schedulePaintChat() {
    分开之后稳定的部分节点身份不变，markdown.js 打在上面的 data-done 才作数。
    ══════════════════════════════════════════════════════════════════ */
 
-/* 时间戳统一按这个时区读。跟 fmtTime 保持一致——同一屏上两套时区最难查。 */
-const CHAT_TZ = 'Asia/Kuching'
-
+/* 时间戳统一按 SATU_TZ 读（定义在 state.js，全站只此一份）。跟 fmtTime 保持一致——
+   同一屏上两套时区最难查。 */
 function chatClock(ms) {
   if (!ms) return ''
-  return new Intl.DateTimeFormat('en-GB', { timeZone: CHAT_TZ, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(ms))
+  return new Intl.DateTimeFormat('en-GB', { timeZone: SATU_TZ, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(ms))
 }
 
 /** YYYY-MM-DD，只用来比「是不是同一天」。 */
 function chatDayKey(ms) {
   if (!ms) return ''
-  return new Intl.DateTimeFormat('en-CA', { timeZone: CHAT_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms))
+  return tzDayKey(ms)
 }
 
 function chatDayLabel(ms) {
@@ -5434,13 +5466,16 @@ function mountDesktop(url, seatId) {
    * 把整个 Gateway 界面换掉——原来那颗「打开桌面」是新标签页加 `rel=noopener`，没这
    * 条路；一内嵌就有了。
    *
-   * `allow-same-origin` 必须留着：路径限定的那张 cookie 靠它才发得出去，去掉就是
-   * 一页 401。它不会让沙箱失效——能自己摘掉沙箱的只有和父页同源的框，而这一个是
-   * 跨源的。`allow-forms` 是留给「票里没带口令」时那个登录框的。
+   * **没有 `allow-same-origin`，而且不能加回来。** 桌面从 Gateway 同域反代出来之后
+   * （`/desktop/:seatId/…`），这个框和父页是**同源**的——再给 allow-same-origin 就等于
+   * 没有沙箱：框里那页（席位自己供的 noVNC）能直接读父页的 sessionStorage，登录 JWT
+   * 就躺在里面。去掉之后框的源是 opaque，浏览器不给它发 cookie，所以桌面票改成放在
+   * 路径里（见 gateway/src/desktop.ts 文件头），静态资源和 WebSocket 按相对路径天然
+   * 带票。`allow-forms` 是留给「票里没带口令」时那个登录框的。
    */
   layer.innerHTML = `
     <iframe class="sw-deskl-frame" title="${esc(t('桌面'))}" tabindex="-1"
-      sandbox="allow-scripts allow-same-origin allow-forms" allow="clipboard-read; clipboard-write"></iframe>
+      sandbox="allow-scripts allow-forms" allow="clipboard-read; clipboard-write"></iframe>
     <button type="button" class="sw-deskl-shield" data-desk="open">
       <span class="sw-deskl-open">${svg(DESK_EXPAND, 15)}${esc(t('打开'))}</span>
     </button>
@@ -5518,11 +5553,11 @@ function syncDesktop() {
 /**
  * 票过期了就先换一张再挂。
  *
- * 五分钟的票换成的是 path 限定 cookie，连上之后 WebSocket 一直活着；但 iframe
- * **重新加载**的那一刻要拿票换 cookie，票馊了就是一页 401。
+ * 五分钟的票进了 iframe 的路径（不再是 cookie，见 gateway/src/desktop.ts），连上之后
+ * WebSocket 一直活着；但 iframe **重新加载**的那一刻要重新验票，票馊了就是一页 401。
  *
  * `force` 是「重连」那颗按钮走的路：不管票看着新不新都换一张。掉过一次线之后
- * noVNC 自己重连不回来——它手里那张 cookie 里的票早过期了，升级请求一律 401——
+ * noVNC 自己重连不回来——它路径里那张票早过期了，升级请求一律 401——
  * 所以人得有一个确定能把它救回来的动作。
  */
 async function remountDesktop(force = false) {

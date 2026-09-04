@@ -109,34 +109,47 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
   try {
     const ALL = migrationIds(gwRoot)
 
+    /**
+     * 每条用例的 boot / stop 都包在 try/finally 里。
+     *
+     * 这一套的进程全听同一个口：某条断言先炸、进程没停，下一条 boot 就绑不上端口，
+     * `waitHttp` 探到的是上一个残留进程——接着整套一起红，报的全是和迁移无关的东西。
+     * waitHttp 带上 child：起不来时有用的是它的输出。
+     */
     await test('空库：建全套并按顺序记上每一条', async () => {
       await fresh()
       gw = boot('migrate-fresh')
-      await waitHttp(`${base}/health`)
-      const rows = await ledger()
-      assert(rows.length === ALL.length, `应有 ${ALL.length} 条迁移，实际 ${rows.length}：${JSON.stringify(rows)}`)
-      assert(rows.map((r) => r.id).join(',') === ALL.join(','), `编号或顺序不对：${rows.map((r) => r.id)}`)
-      assert(rows[0].checksum && rows[0].checksum.length === 16, `校验和形状不对：${rows[0].checksum}`)
-      // 表真的建出来了，不是只记了一行账。
-      const t = await client.query(
-        `select count(*)::int as n from information_schema.tables where table_schema = '${SCHEMA}' and table_name = 'companies'`,
-      )
-      assert(t.rows[0].n === 1, 'companies 表没建出来')
-      const removed = await client.query(
-        `select table_name from information_schema.tables where table_schema = '${SCHEMA}' and table_name in ('tasks','task_events','task_extract_logs')`,
-      )
-      assert(removed.rows.length === 0, `任务看板的表仍然存在：${removed.rows.map((r) => r.table_name).join(',')}`)
-      assert(gw._out.includes(`已应用 ${ALL.length} 条迁移`), `启动日志没说跑了哪几条：\n${gw._out.slice(-400)}`)
-      await stop(gw)
+      try {
+        await waitHttp(`${base}/health`, { child: gw, what: 'migrate-fresh' })
+        const rows = await ledger()
+        assert(rows.length === ALL.length, `应有 ${ALL.length} 条迁移，实际 ${rows.length}：${JSON.stringify(rows)}`)
+        assert(rows.map((r) => r.id).join(',') === ALL.join(','), `编号或顺序不对：${rows.map((r) => r.id)}`)
+        assert(rows[0].checksum && rows[0].checksum.length === 16, `校验和形状不对：${rows[0].checksum}`)
+        // 表真的建出来了，不是只记了一行账。
+        const t = await client.query(
+          `select count(*)::int as n from information_schema.tables where table_schema = '${SCHEMA}' and table_name = 'companies'`,
+        )
+        assert(t.rows[0].n === 1, 'companies 表没建出来')
+        const removed = await client.query(
+          `select table_name from information_schema.tables where table_schema = '${SCHEMA}' and table_name in ('tasks','task_events','task_extract_logs')`,
+        )
+        assert(removed.rows.length === 0, `任务看板的表仍然存在：${removed.rows.map((r) => r.table_name).join(',')}`)
+        assert(gw._out.includes(`已应用 ${ALL.length} 条迁移`), `启动日志没说跑了哪几条：\n${gw._out.slice(-400)}`)
+      } finally {
+        await stop(gw)
+      }
     })
 
     await test('再起一次：不重复应用，日志说「已是最新」', async () => {
       gw = boot('migrate-again')
-      await waitHttp(`${base}/health`)
-      const rows = await ledger()
-      assert(rows.length === ALL.length, `迁移被重复应用了：${JSON.stringify(rows)}`)
-      assert(gw._out.includes('已是最新'), `没说「已是最新」：\n${gw._out.slice(-400)}`)
-      await stop(gw)
+      try {
+        await waitHttp(`${base}/health`, { child: gw, what: 'migrate-again' })
+        const rows = await ledger()
+        assert(rows.length === ALL.length, `迁移被重复应用了：${JSON.stringify(rows)}`)
+        assert(gw._out.includes('已是最新'), `没说「已是最新」：\n${gw._out.slice(-400)}`)
+      } finally {
+        await stop(gw)
+      }
     })
 
     /**
@@ -167,24 +180,27 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       )
 
       gw = boot('migrate-legacy')
-      await waitHttp(`${base}/health`)
-      const rows = await ledger()
-      // 0001 在存量库上是空转（它幂等），后面几条是真跑的——账本上一条都不能少。
-      assert(rows.map((r) => r.id).join(',') === ALL.join(','), `没接上基线：${JSON.stringify(rows)}`)
-      const kept = await client.query('select name from companies where id = $1', ['co-legacy'])
-      assert(kept.rows.length === 1 && kept.rows[0].name === '存量公司', '存量数据被弄丢了')
-      const after = await client.query('select table_name from information_schema.tables where table_schema = $1', [SCHEMA])
-      const names = new Set(after.rows.map((r) => r.table_name))
-      /**
-       * 存量库里已有的表**一张都不能少**，并且多出 schema_migrations。
-       *
-       * 这里原来断言的是「正好多一张」，但那把「后续迁移不许建新表」也一起钉死了——
-       * 0004 加了三张连接器的表，这条就红了，而它想守的其实是「0001 的表没被重建、
-       * 没被删」。所以改成集合包含：新增多少张不管，少一张就是错。
-       */
-      for (const row of before.rows) assert(names.has(row.table_name), `存量表不见了：${row.table_name}`)
-      assert(names.has('schema_migrations'), '没记账本')
-      await stop(gw)
+      try {
+        await waitHttp(`${base}/health`, { child: gw, what: 'migrate-legacy' })
+        const rows = await ledger()
+        // 0001 在存量库上是空转（它幂等），后面几条是真跑的——账本上一条都不能少。
+        assert(rows.map((r) => r.id).join(',') === ALL.join(','), `没接上基线：${JSON.stringify(rows)}`)
+        const kept = await client.query('select name from companies where id = $1', ['co-legacy'])
+        assert(kept.rows.length === 1 && kept.rows[0].name === '存量公司', '存量数据被弄丢了')
+        const after = await client.query('select table_name from information_schema.tables where table_schema = $1', [SCHEMA])
+        const names = new Set(after.rows.map((r) => r.table_name))
+        /**
+         * 存量库里已有的表**一张都不能少**，并且多出 schema_migrations。
+         *
+         * 这里原来断言的是「正好多一张」，但那把「后续迁移不许建新表」也一起钉死了——
+         * 0004 加了三张连接器的表，这条就红了，而它想守的其实是「0001 的表没被重建、
+         * 没被删」。所以改成集合包含：新增多少张不管，少一张就是错。
+         */
+        for (const row of before.rows) assert(names.has(row.table_name), `存量表不见了：${row.table_name}`)
+        assert(names.has('schema_migrations'), '没记账本')
+      } finally {
+        await stop(gw)
+      }
     })
 
     await test('已发布的迁移被改过：当场停机，不往下跑', async () => {
@@ -192,13 +208,18 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       // 继续跑只会在几百行之后报一个和真正原因毫无关系的错。
       await client.query(`update schema_migrations set checksum = 'deadbeefdeadbeef' where id = '0001-initial'`)
       const bad = boot('migrate-tampered')
-      const exit = await waitExit(bad)
-      assert(exit.code !== 0, `应该起不来，实际退出码 ${exit.code}`)
-      assert(bad._out.includes('在应用之后被改过'), `报错没说清楚原因：\n${bad._out.slice(-600)}`)
-      assert(bad._out.includes('0001-initial'), '报错没说是哪一条')
-      // 失败时还要说清楚库停在哪儿——那是运维当场最想知道的一件事：
-      // 升级挂了，库是升过的还是没升过的？回滚代码安不安全？
-      assert(bad._out.includes('库停在'), `没报出库当前停在哪一号：\n${bad._out.slice(-600)}`)
+      try {
+        const exit = await waitExit(bad)
+        assert(exit.code !== 0, `应该起不来，实际退出码 ${exit.code}`)
+        assert(bad._out.includes('在应用之后被改过'), `报错没说清楚原因：\n${bad._out.slice(-600)}`)
+        assert(bad._out.includes('0001-initial'), '报错没说是哪一条')
+        // 失败时还要说清楚库停在哪儿——那是运维当场最想知道的一件事：
+        // 升级挂了，库是升过的还是没升过的？回滚代码安不安全？
+        assert(bad._out.includes('库停在'), `没报出库当前停在哪一号：\n${bad._out.slice(-600)}`)
+      } finally {
+        // 「应该起不来」的那个要是居然起来了，也不能让它占着口。
+        await stop(bad)
+      }
     })
 
     await test('库比代码新：当场停机，别拿旧代码配新库', async () => {
@@ -206,18 +227,25 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
       // 这一条才是在测「库里有代码没有的编号」，而不是继续测上一条。
       await client.query(`delete from schema_migrations`)
       const ok = boot('migrate-restore')
-      await waitHttp(`${base}/health`)
-      await stop(ok)
+      try {
+        await waitHttp(`${base}/health`, { child: ok, what: 'migrate-restore' })
+      } finally {
+        await stop(ok)
+      }
 
       await client.query(
         'insert into schema_migrations (id, name, checksum, "appliedAt") values ($1,$2,$3,$4)',
         ['9999-from-the-future', '未来的迁移', '0'.repeat(16), Date.now()],
       )
       const bad = boot('migrate-rollback')
-      const exit = await waitExit(bad)
-      assert(exit.code !== 0, `应该起不来，实际退出码 ${exit.code}`)
-      assert(bad._out.includes('但这份代码里没有'), `报错没说清楚原因：\n${bad._out.slice(-600)}`)
-      assert(bad._out.includes('9999-from-the-future'), '报错没说是哪一条')
+      try {
+        const exit = await waitExit(bad)
+        assert(exit.code !== 0, `应该起不来，实际退出码 ${exit.code}`)
+        assert(bad._out.includes('但这份代码里没有'), `报错没说清楚原因：\n${bad._out.slice(-600)}`)
+        assert(bad._out.includes('9999-from-the-future'), '报错没说是哪一条')
+      } finally {
+        await stop(bad)
+      }
     })
 
     /**
@@ -246,9 +274,10 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
           },
         })
       let holder
+      let intruder
       try {
         holder = reset('claim-holder', holderPort)
-        await waitHttp(`http://127.0.0.1:${holderPort}/health`)
+        await waitHttp(`http://127.0.0.1:${holderPort}/health`, { child: holder, what: 'claim-holder' })
         // 占着的那位手上有一行真数据。撞车的老毛病正是把它连同整个 schema 一起抹掉。
         const now = Date.now()
         await client.query(`set search_path to ${SHARED}`)
@@ -257,7 +286,7 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
           ['co-claim', 'claim', '占着的公司', now, now],
         )
 
-        const intruder = reset('claim-intruder', intruderPort)
+        intruder = reset('claim-intruder', intruderPort)
         const exit = await waitExit(intruder)
         assert(exit.code !== 0, `第二个应该起不来，实际退出码 ${exit.code}`)
         assert(intruder._out.includes('拒绝 GATEWAY_PG_RESET 清库'), `报错没说是撞了车：\n${intruder._out.slice(-600)}`)
@@ -274,6 +303,8 @@ export async function runMigrate({ gwRoot, test, start, waitHttp, assert, log })
         assert(alive.ok, `占着的 Gateway 被带塌了：${alive.status}`)
       } finally {
         await stop(holder)
+        // 「应该起不来」的那个要是居然起来了，也不能让它留着。
+        await stop(intruder)
         await client.query(`drop schema if exists ${SHARED} cascade`).catch(() => {})
         await client.query(`set search_path to ${SCHEMA}`).catch(() => {})
         rmSync(`${GW_HOME}-claim-holder`, { recursive: true, force: true })

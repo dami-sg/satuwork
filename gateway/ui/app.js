@@ -108,6 +108,9 @@ async function runConfirm() {
       state.bot = null
       state.botDraft = null
       await loadRuntimeBots().catch(() => {})
+      // 删的正是当前对话的那个 Bot 时，正文、会话、桌面和它的流都得跟着走（见
+      // chat.js 的 forgetChatBot）。「终审中、稍后自动删」那种它还在名单上，先留着。
+      if (!(state.runtimeBots || []).some((b) => b.id === c.id)) forgetChatBot(c.id)
       flashDeletedBot(data)
       go('/')
       return
@@ -1575,6 +1578,9 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'charges-next') {
+    // 在途闸：上一页还没回来就又点一下，游标栈会被压两次，两份响应谁后到谁赢，
+    // 页码和内容对不上。按钮在请求中也禁用了（pages-admin.js），这里是第二道。
+    if (state.chargesLoading) return
     const cursor = state.charges?.nextCursor
     if (!cursor) return
     state.chargesCursors.push(cursor)
@@ -1582,6 +1588,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'charges-prev') {
+    if (state.chargesLoading) return
     if (state.chargesCursors.length <= 1) return
     state.chargesCursors.pop()
     await loadCharges(btn.getAttribute('data-scope'), btn.getAttribute('data-org') || '')

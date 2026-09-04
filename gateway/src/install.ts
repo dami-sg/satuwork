@@ -123,7 +123,10 @@ RestartSec=3
 # independent system units and must not die with the manager. Restarting the
 # manager leaves every seat running.
 KillMode=process
-TimeoutStopSec=15
+# 管家停机时会等在飞的席位部署脚本跑完再退（最长 20 分钟，见 manager/src/index.ts 的
+# shutdown），否则脚本跑完了 commit 却没人做，席位装好了名册里没有。不忙时它 3 秒就退，
+# 这个上限只在真有部署在跑时才用得到。
+TimeoutStopSec=1260
 
 [Install]
 WantedBy=multi-user.target

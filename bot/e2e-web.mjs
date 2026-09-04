@@ -7,7 +7,7 @@
  *
  * 假 Gateway 还兼作**计数器**：短页面到底有没有多花一次模型调用，只能这么数。
  */
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -162,6 +162,9 @@ class FakeRoster extends Service {
 }
 
 const root = mkdtempSync(join(tmpdir(), 'satu-web-'))
+// 退出时收掉临时目录（和 e2e-memory / e2e-skills 那几个探针同一个写法）：探针是顶层 await 的
+// 脚本，没有一个能包 finally 的函数体；exit 钩子在 process.exit、正常结束和未捕获异常三条路上都会跑。
+process.on('exit', () => { try { rmSync(root, { recursive: true, force: true }) } catch {} })
 const ctx = new Context()
 ctx.plugin(WorkspaceService, { root })
 ctx.plugin(ToolService)

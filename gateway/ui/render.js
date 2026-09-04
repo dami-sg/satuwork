@@ -132,8 +132,8 @@ function asideToggle() {
 /** 在不在对话页。顶栏换不换成会话身份行、右栏开不开，都看它，免得两处判断漂移。 */
 function onChatPage() {
   if (!state.me) return false
-  const onChat = state.path === '/chat' || state.path.startsWith('/a/') || (memberChatHome() && state.path === '/')
-  return onChat && Boolean(chatBotIdOf(state.path) || state.chatBotId)
+  // 判据收敛到 state.js 的 isChatPath（`/` 对公司侧的人也算），这里不再自己列一遍。
+  return isChatPath(state.path) && Boolean(chatBotIdOf(state.path) || state.chatBotId)
 }
 
 /** 这一页有没有右栏可开。 */

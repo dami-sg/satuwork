@@ -5,7 +5,7 @@
  * 哪些类型允许浏览器内联。这类错不会在日常使用里露面——它要等到有人专门去试才发作，
  * 所以只能靠断言守着。
  */
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,6 +16,9 @@ import * as fileTools from './src/tools/file.ts'
 import { walkFiles } from './src/tools/common.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'satu-ws-'))
+// 退出时收掉临时目录（和 e2e-memory / e2e-skills 那几个探针同一个写法）：探针是顶层 await 的
+// 脚本，没有一个能包 finally 的函数体；exit 钩子在 process.exit、正常结束和未捕获异常三条路上都会跑。
+process.on('exit', () => { try { rmSync(root, { recursive: true, force: true }) } catch {} })
 const ctx = new Context()
 ctx.plugin(WorkspaceService, { root, uploadMax: 1024 })
 // plugin() 是异步生效的，等一拍再用。

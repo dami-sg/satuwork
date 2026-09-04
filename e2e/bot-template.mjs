@@ -11,10 +11,12 @@
 import { rmSync } from 'node:fs'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
+import { freePort } from './ports.mjs'
 
 export async function runBotTemplate({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-tpl')
-  const GW_PORT = 18981
+  // 端口向内核要（见 ports.mjs）：写死的数迟早撞上别的套件或别的 worktree。
+  const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })
@@ -227,5 +229,7 @@ export async function runBotTemplate({ gwRoot, test, req, start, waitHttp, asser
     })
   } finally {
     gw.kill()
+    // 自己的数据目录自己收：留下的话 /tmp 里会越攒越多，下一轮还会带着旧状态起。
+    rmSync(GW_HOME, { recursive: true, force: true })
   }
 }

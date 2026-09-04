@@ -6,7 +6,7 @@
  * 一封已经发出去的邮件面前差得很远。
  */
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ToolService } from './src/tools/index.ts'
@@ -178,7 +178,11 @@ tool('browser_type', ['external', 'write'])
 tool('browser_press', ['external', 'write'])
 tool('browser_dialog', ['external', 'write'])
 
-ctx.plugin(StorageService, { path: join(mkdtempSync(join(tmpdir(), 'satuwork-guards-')), 'probe.db') })
+const storeDir = mkdtempSync(join(tmpdir(), 'satuwork-guards-'))
+// 退出时收掉临时目录（和 e2e-memory / e2e-skills 那几个探针同一个写法）：探针是顶层 await 的
+// 脚本，没有一个能包 finally 的函数体；exit 钩子在 process.exit、正常结束和未捕获异常三条路上都会跑。
+process.on('exit', () => { try { rmSync(storeDir, { recursive: true, force: true }) } catch {} })
+ctx.plugin(StorageService, { path: join(storeDir, 'probe.db') })
 await new Promise((r) => setTimeout(r, 50))
 ctx.plugin(handoff)
 ctx.plugin(policy)
@@ -248,11 +252,26 @@ const pendingOf = (sessionId) =>
 
 const settle = async (ms = 30) => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * 等到某条会话上**至少有 n 张**待批卡片，上限几秒。
+ *
+ * 以前一律 `settle(30)`：卡片是在 pre-execute 里异步发出来的，30ms 在慢机器上不够，
+ * 于是 `pendingOf(...)[k]` 读到 undefined，整段断言以「卡片没发」的样子红掉——而那
+ * 和策略对不对毫无关系。等条件而不是等时间；`until` 是那次调用本身，它先结束了
+ * （比如根本不该问）就不用再等满。
+ */
+const untilPending = async (sessionId, n, { ms = 3000, until } = {}) => {
+  let done = false
+  until?.then(() => (done = true), () => (done = true))
+  const t = Date.now()
+  while (pendingOf(sessionId).length < n && !done && Date.now() - t < ms) await settle(5)
+}
+
 const approvals = {}
 {
   const before = ran.mcp_b_send_mail
   const running = call('s6', 'mcp_b_send_mail', { to: 'a@b.c', body: '你好' })
-  await settle()
+  await untilPending('s6', 1, { until: running })
   const pending = pendingOf('s6')
   approvals.等的时候没跑 = ran.mcp_b_send_mail === before
   approvals.发了pending事件 = pending.length === 1
@@ -269,7 +288,7 @@ const approvals = {}
 {
   const before = ran.mcp_b_send_mail
   const running = call('s6', 'mcp_b_send_mail', { to: 'x@y.z' })
-  await settle()
+  await untilPending('s6', 2, { until: running })
   const callId = pendingOf('s6')[1].data.callId
   ctx.policy.approvals.decide('s6', callId, 'deny')
   const result = await running
@@ -281,7 +300,7 @@ const approvals = {}
 {
   // 「这一轮都批准」：这一轮里第二次同一把工具不该再问，**但下一轮要重新问**。
   const running = call('s6', 'mcp_b_send_mail', { to: '1@2.3' })
-  await settle()
+  await untilPending('s6', 3, { until: running })
   ctx.policy.approvals.decide('s6', pendingOf('s6')[2].data.callId, 'approve', 'turn')
   await running
   const before = pendingOf('s6').length
@@ -298,7 +317,7 @@ const approvals = {}
   await settle(10)
   approvals.轮末清掉了名单 = ctx.policy.approvals.grantedIn('s6').length === 0
   const afterTurn = call('s6', 'mcp_b_send_mail', { to: '7@8.9' })
-  await settle()
+  await untilPending('s6', before + 1, { until: afterTurn })
   approvals.下一轮重新问 = pendingOf('s6').length === before + 1
   ctx.policy.approvals.decide('s6', pendingOf('s6').at(-1).data.callId, 'deny')
   await afterTurn
@@ -342,8 +361,9 @@ const approvals = {}
   const before = ran.terminal
   const ok = await call('s6', 'terminal', { command: 'ls -la' })
   approvals.普通命令不问 = ran.terminal === before + 1 && ok.failed !== true
+  const cardsBefore = pendingOf('s6').length
   const running = call('s6', 'terminal', { command: 'rm -rf build' })
-  await settle()
+  await untilPending('s6', cardsBefore + 1, { until: running })
   const pending = pendingOf('s6')
   approvals.递归删要问 = pending[pending.length - 1].data.name === 'terminal'
   ctx.policy.approvals.decide('s6', pending[pending.length - 1].data.callId, 'deny')
@@ -353,8 +373,9 @@ const approvals = {}
 {
   // 「这一轮别再试了」：拒绝也能带范围，之后同一把工具**连卡片都不弹**，直接挡。
   const before = ran.mcp_b_send_mail
+  const cardsBefore = pendingOf('s6').length
   const running = call('s6', 'mcp_b_send_mail', { to: 'nope@x' })
-  await settle()
+  await untilPending('s6', cardsBefore + 1, { until: running })
   const cards = pendingOf('s6').length
   ctx.policy.approvals.decide('s6', pendingOf('s6').at(-1).data.callId, 'deny', 'turn')
   const first = await running
@@ -374,7 +395,7 @@ const approvals = {}
   await settle(10)
   approvals.轮末清掉了拦停名单 = ctx.policy.approvals.blockedIn('s6').length === 0
   const next = call('s6', 'mcp_b_send_mail', { to: 'again@x' })
-  await settle()
+  await untilPending('s6', cards + 1, { until: next })
   approvals.下一轮又会问 = pendingOf('s6').length === cards + 1
   ctx.policy.approvals.decide('s6', pendingOf('s6').at(-1).data.callId, 'deny')
   await next
@@ -481,8 +502,9 @@ out.record = {
   }
 
   // 真跑一遍：在卡片上把正文改掉，看工具收到的是哪一份。
+  const cardsBefore = pendingOf('s6').length
   const running = call('s6', 'mcp_a_sw_run', mail)
-  await settle()
+  await untilPending('s6', cardsBefore + 1, { until: running })
   const pending = pendingOf('s6').at(-1)
   const edits = {
     'args.body': '你好，报表在附件里，数字我核对过了。',
@@ -608,7 +630,8 @@ out.record = {
   const asked = async (name, args) => {
     const before = pendingOf('s11').length
     const running = call('s11', name, args)
-    await settle()
+    // 要问的会停在 pre-execute 里等卡片；不该问的那次自己就跑完了——两种都不用等满。
+    await untilPending('s11', before + 1, { until: running })
     const now = pendingOf('s11').length
     if (now > before) {
       ctx.policy.approvals.decide('s11', pendingOf('s11')[now - 1].data.callId, 'approve', 'once')
@@ -679,8 +702,9 @@ out.record = {
   const n2 = noted.length
   browserSvc.writes = [{ method: 'POST', url: 'https://example.com/pay' }]
   {
+    const cardsBefore = pendingOf('s11').length
     const running = call('s11', 'browser_click', { ref: '@e1', __label: '提交订单' })
-    await settle()
+    await untilPending('s11', cardsBefore + 1, { until: running })
     const pend = pendingOf('s11')
     ctx.policy.approvals.decide('s11', pend[pend.length - 1].data.callId, 'approve', 'once')
     await running
@@ -813,12 +837,22 @@ out.shell = {
   npm带prefix: net('npm --prefix ./app install left-pad'),
   // 查询里出现关键字不算：只认第一个真正的非标志词。
   git日志里搜push: net('git log --grep push -n 5'),
+  // 其它分隔与关键字：单个 &、括号、if/!、env -i，少切一种就多一条绕法。
+  单个与号: net('sleep 1 & curl https://x'),
+  子shell括号: net('(curl https://x)'),
+  命令组花括号: net('{ curl https://x; }'),
+  套在if里: net('if curl https://x; then echo ok; fi'),
+  取反: net('! curl https://x'),
+  env空环境: net('env -i curl https://x'),
 }
 const des = (command) => destructiveCommand(JSON.stringify({ command }))
 out.destructive = {
   递归删: des('rm -rf build'),
   嵌套的递归删: des('bash -c "rm -rf /"'),
   嵌套的强制推送: des(`sh -c 'git push --force origin main'`),
+  短写的强制推送: des('git push -f origin main'),
+  强制推送加lease: des('git push --force-with-lease origin main'),
+  followTags不算强制: des('git push --follow-tags origin main'),
   普通删不算: des('rm tmp.txt'),
   ls不算: des('ls -la'),
 }
@@ -835,7 +869,7 @@ const delegation = {}
   const pendingBefore = pendingOf('s6').length
   // 子会话上发起一次要确认的调用。**先不 await**：它此刻正停在 pre-execute 里等。
   const running = call('s6t', 'mcp_b_send_mail', { to: 'boss@corp.com', body: '对账单' })
-  await settle()
+  await untilPending('s6', pendingBefore + 1, { until: running })
   const onRoot = pendingOf('s6')
   delegation.卡片开在主会话上 = onRoot.length === pendingBefore + 1
   // 开在子会话上的卡片，人在界面上根本没有入口去点它。
@@ -854,8 +888,9 @@ const delegation = {}
    * 「这一轮都批准」跨主子。名单记在主会话上，而子代理整个活在主代理这一轮里——
    * 主代理批过的这一轮，子代理不该再问一遍。
    */
+  const cardsBefore = pendingOf('s6').length
   const running = call('s6', 'mcp_b_send_mail', { to: 'turn@corp.com' })
-  await settle()
+  await untilPending('s6', cardsBefore + 1, { until: running })
   ctx.policy.approvals.decide('s6', pendingOf('s6').at(-1).data.callId, 'approve', 'turn')
   await running
   const before = pendingOf('s6').length

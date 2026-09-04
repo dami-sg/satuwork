@@ -521,8 +521,8 @@ function chargeTable(scope, forOrg) {
         more || page > 1
           ? `<div style="display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2);">
               <span style="font-size: 12px; color: var(--muted-foreground);">${t(`第 ${page} 页`, `Page ${page}`)}</span>
-              <button type="button" class="btn btn-ghost" data-act="charges-prev" data-scope="${esc(scope)}" data-org="${esc(forOrg || '')}" ${page > 1 ? '' : 'disabled'}>${t('上一页')}</button>
-              <button type="button" class="btn btn-ghost" data-act="charges-next" data-scope="${esc(scope)}" data-org="${esc(forOrg || '')}" ${more ? '' : 'disabled'}>${t('下一页')}</button>
+              <button type="button" class="btn btn-ghost" data-act="charges-prev" data-scope="${esc(scope)}" data-org="${esc(forOrg || '')}" ${page > 1 && !state.chargesLoading ? '' : 'disabled'}>${t('上一页')}</button>
+              <button type="button" class="btn btn-ghost" data-act="charges-next" data-scope="${esc(scope)}" data-org="${esc(forOrg || '')}" ${more && !state.chargesLoading ? '' : 'disabled'}>${t('下一页')}</button>
             </div>`
           : ''
       }

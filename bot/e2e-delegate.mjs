@@ -22,7 +22,7 @@
  *
  * 探针要 tsx 才 import 得了 .ts，所以由 e2e/delegate.mjs 另起一个进程跑。
  */
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -37,6 +37,9 @@ import { AssistantMessageEventStream, emptyAssistant } from './src/llm/stream.ts
 
 const home = mkdtempSync(join(tmpdir(), 'satu-delegate-'))
 const work = mkdtempSync(join(tmpdir(), 'satu-delegate-work-'))
+// 退出时收掉临时目录（和 e2e-memory / e2e-skills 那几个探针同一个写法）：探针是顶层 await 的
+// 脚本，没有一个能包 finally 的函数体；exit 钩子在 process.exit、正常结束和未捕获异常三条路上都会跑。
+process.on('exit', () => { try { rmSync(home, { recursive: true, force: true }) } catch {} try { rmSync(work, { recursive: true, force: true }) } catch {} })
 
 /** 假目录：这一层用到的只有 `models`（agent 的 roleModel 取 utility 就看它）。 */
 class FakeCatalog extends Service {

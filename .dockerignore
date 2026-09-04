@@ -1,0 +1,33 @@
+# 镜像构建上下文是仓库根目录（compose 里 context: .），而 gateway/Dockerfile 真正 COPY 的
+# 只有：根目录三份清单、三个 package.json（gateway/bot/manager）和整个 gateway/。
+# 别的全挡掉：node_modules 几百兆一进上下文，每次 build 先传它几分钟；.env 里是平台
+# token 和数据库连接串，进了镜像层就等于发出去了。
+.git
+node_modules
+**/node_modules
+.env
+**/.env
+.env.bak-*
+**/.env.bak-*
+*.log
+.DS_Store
+
+# 运行时数据、密钥
+.satuwork
+.satuwork-gateway
+.data
+.claude
+
+# 发布包、桌面壳、e2e、文档：Dockerfile 一个字都不拷
+dist
+desktop
+e2e
+docs
+searxng
+.github
+
+# bot 和 manager 只要 package.json（让 pnpm workspace 和 lockfile 对得上）
+bot/*
+!bot/package.json
+manager/*
+!manager/package.json

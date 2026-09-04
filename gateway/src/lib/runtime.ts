@@ -9,20 +9,74 @@ import { INSTANCE_DOWN, machineBase } from './machines.ts'
 import { Readable } from 'node:stream'
 import { companyMachineOf, listSeatRuntime, managerHeaders } from '../deploy.ts'
 import { pipeline } from 'node:stream/promises'
-import { type Account, type Db } from '../db.ts'
+import { type Account, type Db, type Machine } from '../db.ts'
+import { BlockList, isIP } from 'node:net'
+
+/** Node 在双栈 socket 上给的是 ::ffff:1.2.3.4，统一去掉那层壳。 */
+function plainIp(raw: string): string {
+  const v4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(raw.trim())
+  return v4 ? v4[1] : raw.trim()
+}
+
+/**
+ * 可信反代名单：`GATEWAY_TRUSTED_PROXIES`，逗号分隔的 IP 或 CIDR。
+ *
+ * 只有从这些地址进来的连接，`x-forwarded-for` 才算数。不配就是空名单——行为和以前
+ * 一模一样，只看 socket。写错的条目直接丢掉并吼一声，不让一条错行把整份名单作废。
+ */
+const TRUSTED_PROXIES: BlockList | null = (() => {
+  const raw = (process.env.GATEWAY_TRUSTED_PROXIES || '').trim()
+  if (!raw) return null
+  const list = new BlockList()
+  for (const entry of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const [addr, prefix] = entry.split('/')
+    const ip = plainIp(addr)
+    const family = isIP(ip) === 4 ? 'ipv4' : isIP(ip) === 6 ? 'ipv6' : null
+    const bits = prefix === undefined ? null : Number(prefix)
+    if (!family || (bits !== null && !(Number.isInteger(bits) && bits >= 0 && bits <= (family === 'ipv4' ? 32 : 128)))) {
+      console.error(`satuwork-gateway: GATEWAY_TRUSTED_PROXIES 里这一条看不懂，跳过：${entry}`)
+      continue
+    }
+    if (bits === null) list.addAddress(ip, family)
+    else list.addSubnet(ip, bits, family)
+  }
+  return list
+})()
+
+function isTrustedProxy(ip: string): boolean {
+  if (!TRUSTED_PROXIES) return false
+  const fam = isIP(ip)
+  return fam === 4 ? TRUSTED_PROXIES.check(ip, 'ipv4') : fam === 6 ? TRUSTED_PROXIES.check(ip, 'ipv6') : false
+}
 
 /**
  * 取请求的来源 IP。
  *
- * 配对时用它决定「这台机器在哪儿」，所以**不信 `x-forwarded-for`**——那个头谁都能
- * 写，信了就等于让配对方自己指定 Gateway 以后往哪儿发部署。要支持反代场景的话得
- * 另外配可信代理名单，不是在这儿放一个口子。
+ * 配对时用它决定「这台机器在哪儿」，所以**默认不信 `x-forwarded-for`**——那个头谁都
+ * 能写，信了就等于让配对方自己指定 Gateway 以后往哪儿发部署。
+ *
+ * 但 §7.1 要求上线挂 TLS 反代，那时 socket 另一头永远是 127.0.0.1：每台机器配对都会
+ * 被记成「在 Gateway 自己这台上」，第一次部署才发现打不通。所以补了一份可信代理名单
+ * （`GATEWAY_TRUSTED_PROXIES`）：socket 源地址在名单里时，从 `x-forwarded-for` **右往左**
+ * 找第一个不在名单里的地址——右边那些是我们自己的反代一跳跳追加的，左边那些是客户端
+ * 自己能写的，只有名单外的第一跳是反代亲眼看见的真实来源。整条链都在名单里（反代和
+ * 管家同一台机）就取最左那个。头里有看不懂的东西就当没有这个头，退回 socket 地址。
  */
 export function sourceIpOf(req: Req): string {
-  const raw = req.socket.remoteAddress || ''
-  // Node 在双栈 socket 上给的是 ::ffff:1.2.3.4。
-  const v4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(raw)
-  return v4 ? v4[1] : raw
+  const socketIp = plainIp(req.socket.remoteAddress || '')
+  if (!socketIp || !isTrustedProxy(socketIp)) return socketIp
+  const header = req.headers['x-forwarded-for']
+  const chain = (Array.isArray(header) ? header.join(',') : header || '')
+    .split(',')
+    .map((s) => plainIp(s))
+    .filter(Boolean)
+  if (!chain.length) return socketIp
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const hop = chain[i]
+    if (!isIP(hop)) return socketIp
+    if (!isTrustedProxy(hop)) return hop
+  }
+  return chain[0]
 }
 
 export function instanceHostOf(raw: string): string {
@@ -82,6 +136,20 @@ export async function machineTokenFor(db: Db, account: Account, botId: string): 
   const seatMachine = rt?.machineId ? await db.machine(rt.machineId) : undefined
   const machine = seatMachine ?? (await companyMachineOf(db, account.companyId))
   return machine?.token || undefined
+}
+
+/**
+ * 某个席位**实际所在**的那台机器（按 seat_runtimes 查）。没有席位记录就是 undefined。
+ *
+ * 给「不是本人调用」的那些路用（管理员拉会话全文）：machineTokenFor 收的是调用方的
+ * Account，而那条路上的调用方是管理员，席位是别人的。host 和机器票都从这一台取，才不
+ * 会出现 host 是 M2、票是 M1 的错配。
+ */
+export async function seatMachineOf(db: Db, accountId: string, botId: string): Promise<Machine | undefined> {
+  const id = (botId || '').trim()
+  if (!id) return undefined
+  const rt = await db.seatRuntime(accountId, id)
+  return rt?.machineId ? await db.machine(rt.machineId) : undefined
 }
 
 /** 反代目标。地址和机器票**一次解析出来**，两边各查各的就没有漂移的余地了。 */

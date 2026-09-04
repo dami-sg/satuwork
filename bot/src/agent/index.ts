@@ -638,107 +638,125 @@ export class AgentService extends Service {
       at: startedAt,
     })
 
-    const system = this.taskSystem(bot, spec)
-    const toolSchemas = this.taskTools(bot, parentSessionId, spec)
-    const brief = taskBrief(spec)
-
-    await sessions.append(child, 'user/message', {
-      message: { id: randomUUID(), role: 'user', content: [{ type: 'text', text: brief }] },
-      source: { kind: 'plugin', plugin: 'delegate', taskId, parent: parentSessionId },
-    })
-    await sessions.append(child, 'turn/start', { turn: 1 })
-
     let steps = 0
     let toolCalls = 0
     let capped = false
-    const agent = new Agent({
-      initialState: {
-        systemPrompt: system.text,
-        model,
-        thinkingLevel: reasoningEffort,
-        messages: [],
-        tools: this.bridgeTools(child, toolSchemas),
-      },
-      streamFn: llm.streamFn,
-      steeringMode: 'one-at-a-time',
-      followUpMode: 'one-at-a-time',
-      sessionId: child,
-      shouldStopAfterTurn: ({ toolResults }: { toolResults: unknown[] }) => {
-        if (!toolResults.length) return false
-        steps += 1
-        toolCalls += toolResults.length
-        if (steps < spec.maxSteps) return false
-        capped = true
-        return true
-      },
-    } as any)
-
-    this.live.set(child, agent)
-    const isMcp = (t: { name: string }) => t.name.startsWith('mcp_')
-    const off = agent.subscribe(
-      this.projector(child, 1, {
-        provider,
-        model: modelId,
-        system: system.text,
-        tools: toolSchemas,
-        contextWindow: this.windowOf(provider, modelId),
-        reasoningEffort,
-        sections: {
-          system: estTokens(system.base),
-          skills: estTokens(system.skills),
-          // 记忆单独一格：它和 Skill 都在提示词末尾，混着报的话，界面上那颗 chip
-          // 说不清「今天忽然变大」是有人加了 Skill 还是 Bot 自己记了十条东西。
-          memory: estTokens(system.memory),
-          builtinTools: estTokens(toolsText(toolSchemas.filter((t) => !isMcp(t)))),
-          mcpTools: estTokens(toolsText(toolSchemas.filter(isMcp))),
-        },
-      }),
-    )
-
-    /**
-     * 墙钟。Hermes 那边明确不设，我们必须设——他们的委派在后台，我们的主轮真的
-     * `await` 在这次工具调用上（§9）。
-     */
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      this.ctx.logger?.warn?.(`agents: 子任务 ${taskId} 超过 ${Math.round(spec.timeoutMs / 1000)} 秒，收口`)
-      this.abort(child)
-    }, spec.timeoutMs)
-    /** 主轮被停 → 这一条也停。这条链子断在中间的表现就是「停止按钮点了没反应」。 */
-    const onAbort = () => this.abort(child)
-    signal?.addEventListener('abort', onAbort, { once: true })
-    /**
-     * 挂上之后**再看一次**。上面进门那一眼和这一行之间隔着读日志、建会话、写两条事件
-     * ——全是真的磁盘 I/O，人按停止完全可能正落在这几十毫秒里，而那时监听器还没挂上。
-     */
-    if (signal?.aborted) this.abort(child)
-
     let state: TaskOutcome['state'] = 'done'
     let failure = ''
-    this.ctx.logger?.info?.(`agents: 子任务 ${taskId} 开跑（${provider}/${modelId}，最多 ${spec.maxSteps} 步）`)
+    /**
+     * 从写下 running 到真正 `agent.prompt` 之间还有好几步会抛的：拼提示词、建工具表、
+     * 写两条事件、建 agent。它们抛了的话，running 已经落在主会话上，而终态永远不会写
+     * ——那张卡永远转圈，`delegate` 那边也拿不到 outcome。所以整段包进 try：抛在哪一步
+     * 都记成 failed，往下照常走移交和写终态。turnStarted 记 turn/start 写没写，
+     * 写了才补 turn/end。
+     */
+    let turnStarted = false
     try {
-      const now = Date.now()
-      await agent.prompt(stampUser(brief, now))
-      failure = this.aborting.has(child) ? '' : ((agent.state as any)?.errorMessage ?? '')
-      if (failure) state = 'failed'
-      else if (capped) state = 'capped'
-    } catch (e) {
-      if (this.aborting.has(child)) state = timedOut ? 'timeout' : 'aborted'
-      else {
-        state = 'failed'
-        failure = (e as Error).message
-      }
-    } finally {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-      off()
-      this.live.delete(child)
-      if (this.aborting.delete(child)) state = timedOut ? 'timeout' : state === 'done' ? 'aborted' : state
-      await sessions.append(child, 'turn/end', {
-        turn: 1,
-        reason: state === 'done' || state === 'capped' ? (capped ? 'capped' : 'completed') : state === 'failed' ? 'error' : 'aborted',
+      const system = this.taskSystem(bot, spec)
+      const toolSchemas = this.taskTools(bot, parentSessionId, spec)
+      const brief = taskBrief(spec)
+
+      await sessions.append(child, 'user/message', {
+        message: { id: randomUUID(), role: 'user', content: [{ type: 'text', text: brief }] },
+        source: { kind: 'plugin', plugin: 'delegate', taskId, parent: parentSessionId },
       })
+      await sessions.append(child, 'turn/start', { turn: 1 })
+      turnStarted = true
+
+      const agent = new Agent({
+        initialState: {
+          systemPrompt: system.text,
+          model,
+          thinkingLevel: reasoningEffort,
+          messages: [],
+          tools: this.bridgeTools(child, toolSchemas),
+        },
+        streamFn: llm.streamFn,
+        steeringMode: 'one-at-a-time',
+        followUpMode: 'one-at-a-time',
+        sessionId: child,
+        shouldStopAfterTurn: ({ toolResults }: { toolResults: unknown[] }) => {
+          if (!toolResults.length) return false
+          steps += 1
+          toolCalls += toolResults.length
+          if (steps < spec.maxSteps) return false
+          capped = true
+          return true
+        },
+      } as any)
+
+      this.live.set(child, agent)
+      const isMcp = (t: { name: string }) => t.name.startsWith('mcp_')
+      const off = agent.subscribe(
+        this.projector(child, 1, {
+          provider,
+          model: modelId,
+          system: system.text,
+          tools: toolSchemas,
+          contextWindow: this.windowOf(provider, modelId),
+          reasoningEffort,
+          sections: {
+            system: estTokens(system.base),
+            skills: estTokens(system.skills),
+            // 记忆单独一格：它和 Skill 都在提示词末尾，混着报的话，界面上那颗 chip
+            // 说不清「今天忽然变大」是有人加了 Skill 还是 Bot 自己记了十条东西。
+            memory: estTokens(system.memory),
+            builtinTools: estTokens(toolsText(toolSchemas.filter((t) => !isMcp(t)))),
+            mcpTools: estTokens(toolsText(toolSchemas.filter(isMcp))),
+          },
+        }),
+      )
+
+      /**
+       * 墙钟。Hermes 那边明确不设，我们必须设——他们的委派在后台，我们的主轮真的
+       * `await` 在这次工具调用上（§9）。
+       */
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        this.ctx.logger?.warn?.(`agents: 子任务 ${taskId} 超过 ${Math.round(spec.timeoutMs / 1000)} 秒，收口`)
+        this.abort(child)
+      }, spec.timeoutMs)
+      /** 主轮被停 → 这一条也停。这条链子断在中间的表现就是「停止按钮点了没反应」。 */
+      const onAbort = () => this.abort(child)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      /**
+       * 挂上之后**再看一次**。上面进门那一眼和这一行之间隔着读日志、建会话、写两条事件
+       * ——全是真的磁盘 I/O，人按停止完全可能正落在这几十毫秒里，而那时监听器还没挂上。
+       */
+      if (signal?.aborted) this.abort(child)
+
+      this.ctx.logger?.info?.(`agents: 子任务 ${taskId} 开跑（${provider}/${modelId}，最多 ${spec.maxSteps} 步）`)
+      try {
+        const now = Date.now()
+        await agent.prompt(stampUser(brief, now))
+        failure = this.aborting.has(child) ? '' : ((agent.state as any)?.errorMessage ?? '')
+        if (failure) state = 'failed'
+        else if (capped) state = 'capped'
+      } catch (e) {
+        if (this.aborting.has(child)) state = timedOut ? 'timeout' : 'aborted'
+        else {
+          state = 'failed'
+          failure = (e as Error).message
+        }
+      } finally {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        off()
+        this.live.delete(child)
+        if (this.aborting.delete(child)) state = timedOut ? 'timeout' : state === 'done' ? 'aborted' : state
+        await sessions.append(child, 'turn/end', {
+          turn: 1,
+          reason: state === 'done' || state === 'capped' ? (capped ? 'capped' : 'completed') : state === 'failed' ? 'error' : 'aborted',
+        })
+      }
+    } catch (e) {
+      // 只有内层 try 之前那几步会走到这儿：内层自己收口了，不会再往外抛。
+      state = 'failed'
+      failure = (e as Error).message
+      this.ctx.logger?.warn?.(`agents: 子任务 ${taskId} 没能开跑：${failure}`)
+      this.live.delete(child)
+      if (turnStarted) await sessions.append(child, 'turn/end', { turn: 1, reason: 'error' })
     }
 
     /**
@@ -2396,8 +2414,24 @@ export async function toAgentMessages(
    */
   const nameless = new Set<string>()
   const toolNames = new Map<string, string>()
+  /**
+   * 调用与结果要**成对**回传，缺哪一半都会被 provider 硬拒。
+   *
+   * `resultIds`：日志里有结果的那些调用。有 tool-call 没结果的（进程在工具跑到一半时
+   * 死了、或者这一步被掐了），回传时补一条 error 结果，说明「被中断，没有结果」；
+   * 有结果没 tool-call 的（助手消息没写下来、或者被上面 nameless 那道筛掉了），
+   * 连结果一起丢——它没有锚点，放哪儿都是无主的。
+   */
+  const resultIds = new Set<string>()
+  /** 每个 step 的下界（step/start，老日志没有它时用第一条 tool/call）：给插话挪位用，见下。 */
+  const stepFrom = new Map<string, number>()
   for (const e of events) {
-    if (e.type === 'assistant/message') {
+    if (e.type === 'step/start' || e.type === 'tool/call') {
+      const key = stepKey(e.data.turn, e.data.step)
+      if (!stepFrom.has(key)) stepFrom.set(key, e.seq)
+    } else if (e.type === 'tool/result') {
+      resultIds.add(e.data.callId)
+    } else if (e.type === 'assistant/message') {
       assistantSeq.set(stepKey(e.data.turn, e.data.step), e.seq)
       for (const c of e.data.message.content) {
         if (c.type !== 'tool-call') continue
@@ -2405,6 +2439,26 @@ export async function toAgentMessages(
         else toolNames.set(c.callId, c.name)
       }
     }
+  }
+  /**
+   * 插话（steer）的落位。
+   *
+   * `steer()` 是在这一步跑到一半时把 user/message 写下来的，seq 落在这一步的 step/start
+   * 和 assistant/message 之间；而 pi 实际是把它排在**这一步的助手消息和工具结果之后**才
+   * 送进模型的。按 seq 原样回放，重建出来的历史会把那句话放到它其实还没说的位置上，
+   * 和模型当时看到的顺序对不上。这里把落在窗口里的 user/message 排到该步助手消息及其
+   * 工具结果之后（结果用的偏移都远小于 0.5）。
+   */
+  const steerWindows = [...assistantSeq.entries()]
+    .map(([key, to]) => ({ from: stepFrom.get(key) ?? -1, to }))
+    .filter((w) => w.from >= 0)
+    .sort((x, y) => x.to - y.to)
+  let windowIndex = 0
+  let steerIndex = 0
+  const userOrder = (seq: number): number => {
+    while (windowIndex < steerWindows.length && steerWindows[windowIndex]!.to < seq) windowIndex++
+    const w = steerWindows[windowIndex]
+    return w && w.from < seq && seq < w.to ? w.to + 0.5 + 1e-6 * ++steerIndex : seq
   }
 
   /**
@@ -2430,7 +2484,7 @@ export async function toAgentMessages(
   for (const e of events) {
     if (e.type === 'user/message') {
       entries.push({
-        order: e.seq,
+        order: userOrder(e.seq),
         message: {
           role: 'user',
           content: stampContent(
@@ -2465,8 +2519,24 @@ export async function toAgentMessages(
           timestamp: e.time,
         } as any,
       })
+      // 有调用没结果的，补一条 error 结果挂在这条助手消息后面（理由见 resultIds）。
+      for (const c of e.data.message.content) {
+        if (c.type !== 'tool-call' || nameless.has(c.callId) || resultIds.has(c.callId)) continue
+        entries.push({
+          order: e.seq + 1e-6 * ++resultIndex,
+          message: {
+            role: 'toolResult',
+            toolCallId: c.callId,
+            toolName: '',
+            content: [{ type: 'text', text: '工具执行被中断，没有结果。' }],
+            isError: true,
+            timestamp: e.time,
+          } as any,
+        })
+      }
     } else if (e.type === 'tool/result') {
-      if (nameless.has(e.data.callId)) continue
+      // 没有对应 tool-call 的结果不回传：nameless 那批和助手消息缺失的都在这里一起筛掉。
+      if (!toolNames.has(e.data.callId)) continue
       const anchor = assistantSeq.get(stepKey(e.data.turn, e.data.step)) ?? e.seq
       entries.push({
         // 小数偏移把结果排到锚点之后、下一条整数 seq 之前，同时保持批内先后。

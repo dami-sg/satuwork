@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { installRoot, managerVersion, readState, seatAssets, writeState } from './config.ts'
+import { installRoot, managerVersion, patchState, readState, seatAssets } from './config.ts'
 import { run } from './run.ts'
 import { busy, busySeats } from './seats.ts'
 
@@ -28,6 +28,15 @@ export interface UpgradeOffer {
 
 let lastError = ''
 let upgrading = false
+
+/**
+ * 被回滚脚本搬回来之后最多再试几次。
+ *
+ * 只对「新版本起来了、宽限期内没连上 Gateway」这一种成因：那多半是网络在那几分钟里
+ * 抖了，再试一次很可能就过。VERSION 对不上是确定性的，一次都不重试。次数记在
+ * state.upgradeRetries 里，重启也丢不掉。
+ */
+const ROLLBACK_RETRY_MAX = 3
 
 export const upgradeError = () => lastError
 
@@ -167,13 +176,22 @@ export async function maybeUpgrade(offer: UpgradeOffer, token: string): Promise<
   // VERSION 写错了」，而更常见的其实是另一种：回滚脚本把 current 搬回去了。那时人
   // 会照着这句话去查打包链路，怎么查都是对的——真正该看的是那台机器连不连得上
   // Gateway。分不出来就不要猜：回滚脚本会留一个记号，认它。
+  //
+  // 回滚这一种再细分：心跳不通可能只是网络抖了几分钟，允许 ROLLBACK_RETRY_MAX 次重试
+  // （次数在 state 里，见 config.ts 的 upgradeRetries）；VERSION 对不上才是一次都不再试。
   const state = readState()
+  let retrying = false
   if (state?.lastUpgradeTo === want) {
-    lastError =
-      rolledBackFrom() === want
-        ? `升级到 ${want} 之后被回滚了：新版本起来了，但没能在宽限期内连上 Gateway。现在跑的是 ${managerVersion()}，不再自动重试——先查这台机器到 Gateway 的网络。`
-        : `已换到 ${want} 但进程自报 ${managerVersion()}：发布包里的 VERSION 和登记的版本号不一致，不再重试`
-    return
+    if (rolledBackFrom() !== want) {
+      lastError = `已换到 ${want} 但进程自报 ${managerVersion()}：发布包里的 VERSION 和登记的版本号不一致，不再重试`
+      return
+    }
+    if (state.upgradeRetries >= ROLLBACK_RETRY_MAX) {
+      lastError = `升级到 ${want} 之后被回滚了 ${state.upgradeRetries + 1} 次：新版本起来了，但没能在宽限期内连上 Gateway。现在跑的是 ${managerVersion()}，不再自动重试——先查这台机器到 Gateway 的网络。`
+      return
+    }
+    retrying = true
+    console.warn(`satuwork-manager: 升级到 ${want} 之后被回滚过（第 ${state.upgradeRetries + 1} 次），再试一次，最多 ${ROLLBACK_RETRY_MAX} 次`)
   }
 
   // Node 太老就**不升**。升到起不来比不升坏得多——没有 SSH 可以救。
@@ -196,8 +214,10 @@ export async function maybeUpgrade(offer: UpgradeOffer, token: string): Promise<
     const dir = join(root, 'releases', want)
     mkdirSync(join(root, 'releases'), { recursive: true })
 
+    // 机器票只交给 Gateway 自己：包地址是心跳回包里给的，origin 和配对的 gatewayUrl
+    // 对不上就裸拉——票是这台机器的身份，不能因为一行回包就寄到别处去。
     const res = await fetch(offer.url, {
-      headers: { authorization: 'Bearer ' + token },
+      headers: sameOrigin(offer.url, state?.gatewayUrl) ? { authorization: 'Bearer ' + token } : {},
       signal: AbortSignal.timeout(300_000),
     })
     if (!res.ok) throw new Error(`downloading the manager package failed: ${res.status}`)
@@ -237,6 +257,14 @@ export async function maybeUpgrade(offer: UpgradeOffer, token: string): Promise<
     })
     if (self.code !== 0) throw new Error(`selftest of the new build failed: ${(self.stderr || self.stdout).slice(-200)}`)
 
+    // 下载、解包、自检加起来能有几分钟，这期间完全可能来了一条部署。动 current 之前
+    // 再问一次：换了链接就要重启，把跑了一半的 deploy-seat.sh 打断。放弃这一轮，
+    // 下一轮心跳再来（包会重拉一次，比打断一次部署便宜得多）。不算错，不进 lastError。
+    if (busy()) {
+      console.log(`satuwork-manager: ${want} 已经自检通过，但此刻有席位在部署，这轮先不换`)
+      return
+    }
+
     const prev = currentTarget()
     if (prev) relink('previous', prev)
     /**
@@ -252,7 +280,14 @@ export async function maybeUpgrade(offer: UpgradeOffer, token: string): Promise<
      */
     relink('current', dir)
     // 时刻是给回滚脚本用的——它靠这个才分得出「连不上 Gateway」和「还没来得及起来」。
-    if (state) writeState({ ...state, lastUpgradeTo: want, lastUpgradeAt: Date.now() })
+    // patchState 现读现写：这里离函数开头那次 readState 已经隔了好几分钟，整份写回会把
+    // 期间落盘的别的字段（confirmedVersion、gatewayUrl）抹掉。重试计数只在「同一个版本
+    // 被回滚后再试」时加一，换了目标版本就归零。
+    patchState((s) => ({
+      lastUpgradeTo: want,
+      lastUpgradeAt: Date.now(),
+      upgradeRetries: retrying && s.lastUpgradeTo === want ? s.upgradeRetries + 1 : 0,
+    }))
     // 上一次回滚的记号跟这次无关了，清掉；留着会让下一次熔断报出错的原因。
     rmSync(rolledBackPath(), { force: true })
 
@@ -280,10 +315,33 @@ export async function maybeUpgrade(offer: UpgradeOffer, token: string): Promise<
  * 自检只能证明「能起来」，证明不了「能跟 Gateway 说上话」，而后者失败 = 机器失联。
  */
 export function confirmVersion(): void {
-  const state = readState()
-  if (!state) return
   const v = managerVersion()
-  if (state.confirmedVersion === v) return
-  // 版本对上了，熔断标记也就没用了，一并清掉。
-  writeState({ ...state, confirmedVersion: v, lastUpgradeTo: state.lastUpgradeTo === v ? '' : state.lastUpgradeTo })
+  let wrote = false
+  // 现读现写（见 patchState）：这个函数每轮心跳都跑，正是被别处整份覆盖时最容易受害的那个。
+  patchState((s) => {
+    if (s.confirmedVersion === v) return
+    wrote = true
+    // 版本对上了，熔断标记和重试计数也就没用了，一并清掉。
+    return { confirmedVersion: v, lastUpgradeTo: s.lastUpgradeTo === v ? '' : s.lastUpgradeTo, upgradeRetries: 0 }
+  })
+  if (!wrote) return
+  // previous 只在「确认之前」有用（回滚脚本靠它判断有没有一次待确认的换版，见
+  // manager-confirm.sh 开头那行 -L 判断），所以换版成功那一刻**不能**删；确认落盘之后
+  // 它就只剩一个会误导人的旧链接了，删掉。删不掉不要紧，脚本看到 confirmedVersion
+  // 对得上也会 keep。
+  try {
+    rmSync(join(installRoot(), 'previous'), { force: true })
+  } catch {
+    /* 只读根之类。留着无害，别让它把心跳那一轮的后半截（removed、时区、升级）吞掉。 */
+  }
+}
+
+/** 包地址和配对的 Gateway 是不是同一个 origin。任一边解析不了都算不是。 */
+function sameOrigin(url: string, gatewayUrl: string | undefined): boolean {
+  if (!gatewayUrl) return false
+  try {
+    return new URL(url).origin === new URL(gatewayUrl).origin
+  } catch {
+    return false
+  }
 }

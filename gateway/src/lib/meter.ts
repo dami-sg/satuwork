@@ -129,7 +129,7 @@ export class Meter {
    * 同一个「还有余额」，透支上限变成「1 秒内能烧多少」；扣减之后，记忆和库之间只差
    * 别的进程写的那部分。
    */
-  private budgets = new Map<string, { at: number; value: Budget }>()
+  private budgets = new Map<string, { at: number; value: Budget; grantMicros: number; bonusSince: number | null }>()
 
   constructor(private db: Db) {}
 
@@ -140,8 +140,13 @@ export class Meter {
   }
 
   async budget(companyId: string): Promise<Budget> {
+    return (await this.budgetEntry(companyId)).value
+  }
+
+  /** budget 连同它背后的赠送额度和账期起点——charge 落账时要把这两个数交给库去校验。 */
+  private async budgetEntry(companyId: string) {
     const hit = this.budgets.get(companyId)
-    if (hit && Date.now() - hit.at < BUDGET_TTL_MS) return hit.value
+    if (hit && Date.now() - hit.at < BUDGET_TTL_MS) return hit
     const bal = await balanceOf(this.db, companyId)
     const spent = await this.db.chargeSpend(companyId, bal.planBonusStartAt)
     const value: Budget = {
@@ -153,8 +158,9 @@ export class Meter {
       planBonusExpiresAt: bal.planBonusExpiresAt,
     }
     value.left = value.bonusLeft + value.topupLeft
-    this.budgets.set(companyId, { at: Date.now(), value })
-    return value
+    const entry = { at: Date.now(), value, grantMicros: bal.planBonusMils * 1000, bonusSince: bal.planBonusStartAt }
+    this.budgets.set(companyId, entry)
+    return entry
   }
 
   /**
@@ -224,19 +230,9 @@ export class Meter {
    */
   async charge(b: Billable, q?: Quote): Promise<UsageCharge> {
     const quote = q ?? (await this.quote(b))
-    let bonusMicros = 0
-    if (b.account.companyId && quote.amountMicros > 0) {
-      const budget = await this.budget(b.account.companyId)
-      bonusMicros = Math.min(quote.amountMicros, budget.bonusLeft)
-      // 就地扣减，别等 TTL 到。透支上限因此是「一轮真并发的量」，不是「1 秒内的量」。
-      budget.bonusLeft -= bonusMicros
-      budget.topupLeft = Math.max(0, budget.topupLeft - (quote.amountMicros - bonusMicros))
-      budget.bonusSpent += bonusMicros
-      budget.topupSpent += quote.amountMicros - bonusMicros
-      budget.left = budget.bonusLeft + budget.topupLeft
-    }
-    return this.db.insertUsageCharge({
-      companyId: b.account.companyId,
+    const companyId = b.account.companyId
+    const input = {
+      companyId,
       accountId: b.account.id,
       botId: b.botId ?? null,
       sessionId: b.sessionId ?? null,
@@ -247,10 +243,36 @@ export class Meter {
       unitPrice: quote.unitPrice,
       multiplier: quote.multiplier,
       amountMicros: quote.amountMicros,
-      bonusMicros,
       unpriced: quote.unpriced,
       refId: b.refId ?? null,
+    }
+    if (!companyId || quote.amountMicros <= 0) return this.db.insertUsageCharge(input)
+    /**
+     * 赠送桶那一份**由库来算，不由这里的记忆算**。记忆里的 bonusLeft 是 1 秒前读的
+     * 再就地扣减，同一进程内是准的；可两个进程、或者一轮里几十次并发在缓存过期前各
+     * 读到同一份「还剩 $0.30」，每一笔都按 $0.30 记 bonus，赠送桶就被扣穿，而超出的
+     * 那截本该落到充值桶——余额页会比实际多出那一截。insert 里带 `bonusCap`，同一条
+     * SQL 用 sum(bonusMicros) 校验；配一把按公司的事务锁，让落账排队（锁里只有这一条
+     * insert，等的是一次 insert 的工夫）。
+     */
+    const entry = await this.budgetEntry(companyId)
+    const row = await this.db.tx(async () => {
+      await this.db.lockCompanyLedger(companyId)
+      return this.db.insertUsageCharge({
+        ...input,
+        bonusCap: entry.bonusSince == null ? { grantMicros: 0, since: 0 } : { grantMicros: entry.grantMicros, since: entry.bonusSince },
+      })
     })
+    // 就地扣减，别等 TTL 到。透支上限因此是「一轮真并发的量」，不是「1 秒内的量」。
+    // 用的是库真扣掉的那份，不是这里预估的。
+    const budget = entry.value
+    const bonusMicros = row.bonusMicros
+    budget.bonusLeft = Math.max(0, budget.bonusLeft - bonusMicros)
+    budget.topupLeft = Math.max(0, budget.topupLeft - (quote.amountMicros - bonusMicros))
+    budget.bonusSpent += bonusMicros
+    budget.topupSpent += quote.amountMicros - bonusMicros
+    budget.left = budget.bonusLeft + budget.topupLeft
+    return row
   }
 }
 

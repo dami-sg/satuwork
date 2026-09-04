@@ -142,6 +142,9 @@ export class Cdp {
     return await new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
+        // 超时也要摘掉 abort 监听器：同一个 signal 会跟着一整次工具调用跑几十条命令，
+        // 不摘的话每条超时都在它身上留一个闭包，直到那一轮结束。
+        opts.signal?.removeEventListener('abort', onAbort)
         reject(new CdpError(`${method} 超时`))
       }, opts.timeout ?? DEFAULT_TIMEOUT)
       const onAbort = () => {

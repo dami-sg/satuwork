@@ -30,6 +30,9 @@ export interface CatalogProvider {
   }[]
 }
 
+/** 拉目录的超时。Gateway 就在本机或内网，10 秒还没回就是它出问题了。 */
+const REFRESH_TIMEOUT_MS = 10_000
+
 /**
  * 模型接缝：Gateway 的薄客户端。
  *
@@ -87,10 +90,20 @@ export class LlmService extends Service {
       this.cached = []
       return this.cached
     }
+    /**
+     * 带超时；失败**保留上一次的目录**。
+     *
+     * 没有超时的话 Gateway 卡住时这个 await 会一直挂着，`available()` 也跟着挂。
+     * 失败就清空更糟：一次网络抖动就让 modelOf 认不出任何模型、界面上模型列表变空，
+     * 而上一份目录明明还在手里。只有从未成功过时它才是空的。
+     */
     try {
-      const r = await fetch(base + '/v1/models', { headers: { authorization: `Bearer ${apiKey}` } })
+      const r = await fetch(base + '/v1/models', {
+        headers: { authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+      })
       if (!r.ok) {
-        this.cached = []
+        this.ctx.logger?.warn?.(`llm: 拉模型目录失败 HTTP ${r.status}，沿用上一份`)
         return this.cached
       }
       const body = (await r.json()) as { data?: any[] }
@@ -118,8 +131,8 @@ export class LlmService extends Service {
       }
       this.cached = [...by.values()]
       return this.cached
-    } catch {
-      this.cached = []
+    } catch (e) {
+      this.ctx.logger?.warn?.(`llm: 拉模型目录失败：${(e as Error).message}，沿用上一份`)
       return this.cached
     }
   }

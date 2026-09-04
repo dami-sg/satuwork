@@ -9,6 +9,7 @@
  *   node e2e/run.mjs
  */
 import { spawn } from 'node:child_process'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
@@ -77,7 +78,7 @@ import { PG_URL, requirePg } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePort } from './ports.mjs'
 import { createCompany } from './org.mjs'
-import { closeServer, withDeadline } from './probe.mjs'
+import { closeServer, killProbes, withDeadline } from './probe.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const gwRoot = join(root, 'gateway')
@@ -117,6 +118,15 @@ function log(line) {
   console.log(line)
 }
 
+/**
+ * 记一条「这台机器上跑不了」。**和 test() 是两回事**：跳过的不算 passed，最后的
+ * 清单里单列出来——一条静默 return 的用例看着是绿的，实际上什么都没验。
+ */
+function skip(reason) {
+  skips.push(reason)
+  log(`  # skip  ${reason}`)
+}
+
 function assert(cond, msg) {
   if (!cond) throw new Error(msg)
 }
@@ -136,15 +146,45 @@ const TEST_TIMEOUT_MS = Number(process.env.E2E_TEST_TIMEOUT_MS) || 120_000
 const SUITE_TIMEOUT_MS = Number(process.env.E2E_SUITE_TIMEOUT_MS) || 420_000
 const ONLY_SUITES = new Set(String(process.env.E2E_ONLY || '').split(',').map((s) => s.trim()).filter(Boolean))
 
+/**
+ * 「超时了，但函数体还在跑」这件事，闸本身管不了。
+ *
+ * `withDeadline` 只是不再等它：被丢下的那段 async 代码照样往下执行，还会接着调
+ * `test()`——套件被判「卡住」之后，它的用例仍然一条条计入总数，甚至和下一个套件的
+ * 用例混在同一段日志里。所以：
+ *
+ * - 每个套件、每条用例各有一个 AbortSignal（作为 fn 的第一个参数传进去），超时就
+ *   abort。愿意看它的（等条件的循环、fetch）能就此收手；不看的照旧跑完，但——
+ * - 套件用 AsyncLocalStorage 记着「我是谁」：超时之后它再调 `test()` 一律 no-op 并
+ *   warn，**不计 passed / failed**。async 上下文跟着 await 链走，所以哪怕下一个套件
+ *   已经开跑，僵尸套件的用例也认得出是它的，不会记到别人头上。
+ * - 僵尸套件起的子进程仍然进 `children`，最后由 killAll 兜底杀掉。
+ *
+ * 没做到的：真正打断函数体。那需要每一处 await 都看 signal，这一版只把 signal 递到
+ * 手上，逐处接线交给后面。
+ */
+const suiteScope = new AsyncLocalStorage()
+
 async function test(name, fn) {
+  const scope = suiteScope.getStore()
+  if (scope?.dead) {
+    log(`# warn  套件 ${scope.name} 已经超时，用例「${name}」不再计入`)
+    return
+  }
+  const ac = new AbortController()
+  const onSuiteAbort = () => ac.abort(scope.ac.signal.reason)
+  scope?.ac.signal.addEventListener('abort', onSuiteAbort, { once: true })
   try {
-    await withDeadline(Promise.resolve().then(fn), `用例「${name}」`, TEST_TIMEOUT_MS)
+    await withDeadline(Promise.resolve().then(() => fn({ signal: ac.signal })), `用例「${name}」`, TEST_TIMEOUT_MS)
     passed += 1
     log(`ok  ${name}`)
   } catch (e) {
+    if (e?.deadline) ac.abort(e)
     failed += 1
     log(`not ok  ${name}`)
     log(`  ${e.stack || e.message}`)
+  } finally {
+    scope?.ac.signal.removeEventListener('abort', onSuiteAbort)
   }
 }
 
@@ -157,10 +197,18 @@ async function test(name, fn) {
 async function suite(name, fn) {
   if (ONLY_SUITES.size && !ONLY_SUITES.has(name)) return
   const t0 = Date.now()
+  const scope = { name, dead: false, ac: new AbortController() }
   try {
-    await withDeadline(Promise.resolve().then(fn), `套件 ${name}`, SUITE_TIMEOUT_MS)
+    await withDeadline(
+      suiteScope.run(scope, () => Promise.resolve().then(() => fn({ signal: scope.ac.signal }))),
+      `套件 ${name}`,
+      SUITE_TIMEOUT_MS,
+    )
   } catch (e) {
     if (!e?.deadline) throw e
+    // 从这一刻起它的 test() 全部 no-op（见 suiteScope）；它的子进程留给 killAll。
+    scope.dead = true
+    scope.ac.abort(e)
     failed += 1
     log(`not ok  ${name}（整个套件卡住了）`)
     log(`  ${e.message}`)
@@ -201,6 +249,8 @@ function start(name, args, { cwd, env }) {
 }
 
 function killAll() {
+  // 探针是 detached 的（见 probe.mjs），终端的 Ctrl-C 到不了它们，这里一并收掉。
+  killProbes()
   for (const child of children) {
     if (child._exited) continue
     try {
@@ -345,7 +395,8 @@ async function runGateway() {
       GATEWAY_OWNER_PASSWORD: 'test-owner-3080',
     },
   })
-  await waitHttp(base + '/health')
+  // 带上 child：起不来时有用的是它的输出，不是三十秒后那句「等不到」。
+  await waitHttp(base + '/health', { child, what: 'gateway' })
 
   let token
   let orgId
@@ -2694,7 +2745,7 @@ async function runBot() {
       // 空 key 不删：套件不能因为没配模型就整组失败，但进程环境保持原样。
     },
   })
-  await waitHttp(base + '/api/health', { timeout: 45000 })
+  await waitHttp(base + '/api/health', { timeout: 45000, child, what: 'bot' })
   assert(!child._exited, 'bot 启动后就退出了')
 
   let botId
@@ -2968,11 +3019,11 @@ async function runBot() {
       token: SEAT_TOK,
       body: { text: 'ping' },
     })
-    assert(r.status >= 200 && r.status < 500, `message ${r.status} ${r.text}`)
-    assert(r.status === 200 || (r.status >= 400 && r.status < 500), `意外状态 ${r.status}`)
-    if (r.status === 200) {
-      assert(r.json.accepted === true || r.json.steered === true, '既没 accepted 也没 steered')
-    }
+    // 只认 200：这条路（bot/src/web/index.ts 的 /messages）收下就回 accepted / steered，
+    // 没配模型是那一轮之后的事，HTTP 这一跳不该因此变成 4xx。以前放到 4xx 的写法
+    // 等于「随便回什么都行」，验不出任何东西。
+    assert(r.status === 200, `message ${r.status} ${r.text}`)
+    assert(r.json.accepted === true || r.json.steered === true, '既没 accepted 也没 steered')
     await new Promise((x) => setTimeout(x, 800))
     assert(!child._exited, `发消息后进程退出 code=${child._exited?.code} sig=${child._exited?.sig}`)
     const health = await req(base, 'GET', '/api/health')
@@ -3335,7 +3386,7 @@ async function main() {
     await suite('delegate', () => runDelegate({ root, test, assert, log }))
     await suite('toolcalls', () => runToolCalls({ root, test, assert, log }))
     await suite('guards', () => runGuards({ root, test, assert, log }))
-    await suite('handoff', () => runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log }))
+    await suite('handoff', () => runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log, skip }))
     await suite('routine-retry', () => runRoutineRetry({ gwRoot, test, req, start, waitHttp, assert, log }))
     await suite('browser', () => runBrowser({ root, test, assert, log }))
     await suite('mounted', () => runMounted({ root, test, assert, log }))

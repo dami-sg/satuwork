@@ -114,11 +114,36 @@
     if (((lastLine.match(/`/g) || []).length) % 2 === 1) s += '`'
 
     // 5. 强调。长记号先补——`***` 拆成 `**` 再补 `*` 会错位。
+    //
+    // **数记号之前先把代码剔掉**：走到这一步围栏已经全部闭合（第 1 步开着就返回了）、
+    // 最后一行的反引号也已成对，可 `a * b` 这种代码里的星号照样会被数进去，于是补出
+    // 一个多余的 `*`，正文尾巴上就多一个星。围栏块整段去掉，行内代码按 \`…\` 去掉。
+    const plain = s
+      .split('\n')
+      .filter(
+        (() => {
+          let fence = ''
+          return (line) => {
+            const m = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line)
+            if (m && !fence) {
+              fence = m[1]
+              return false
+            }
+            if (m && fence && m[1][0] === fence[0] && m[1].length >= fence.length) {
+              fence = ''
+              return false
+            }
+            return !fence
+          }
+        })(),
+      )
+      .join('\n')
+      .replace(/`[^`\n]*`/g, '')
     for (const mk of ['***', '~~', '**', '__']) {
-      if ((s.split(mk).length - 1) % 2 === 1) s += mk
+      if ((plain.split(mk).length - 1) % 2 === 1) s += mk
     }
     // 单记号要先把成对的长记号剔掉再数，否则 `**粗**` 会被算成四个单星号。
-    const bare = s.replace(/\*\*\*|\*\*|__/g, '')
+    const bare = plain.replace(/\*\*\*|\*\*|__/g, '')
     if ((bare.split('*').length - 1) % 2 === 1) s += '*'
     return s
   }

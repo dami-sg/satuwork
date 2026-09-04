@@ -10,7 +10,26 @@ import { type Account, type CatalogItem, type CatalogKind } from '../db.ts'
 import { requestBotDeletion } from '../conversation-audit.ts'
 
 export function attachCatalog(router: Router, ctx: RouteCtx) {
-  const { db, keys } = ctx
+  const { db, keys, llm } = ctx
+
+  /**
+   * 公司模型条目的 definition **不能原样入库**。规矩在 Llm.companyModelAllowed 里
+   * （provider 得是平台配好的、模型得在白名单 / 平台目录里、不许自带 cost）；这里只做
+   * 形状整理和翻成 400。catalog() 合并时还会再按同一条规矩挡一层。
+   */
+  async function companyModelDefinition(raw: unknown, name: string): Promise<Record<string, unknown>> {
+    if (raw != null && (typeof raw !== 'object' || Array.isArray(raw))) throw new HttpError(400, 'definition 必须是对象')
+    const def = { ...((raw ?? {}) as Record<string, unknown>) }
+    if ('cost' in def) throw new HttpError(400, '公司模型条目不能自带 cost，单价由平台定')
+    const provider = String(def.provider ?? name ?? '').trim()
+    const id = String(def.id ?? def.model ?? name ?? '').trim()
+    if (!provider || !id) throw new HttpError(400, 'definition 要带 provider 和 id')
+    await llm.syncCustomProviders()
+    await llm.syncDiscovered()
+    const verdict = await llm.companyModelAllowed(provider, id)
+    if (!verdict.ok) throw new HttpError(400, verdict.reason)
+    return def
+  }
 
   // ── 目录项的建 / 改。平台侧和公司侧共用这几段，差别只在 owner。────────
 
@@ -553,12 +572,14 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       requireOrg(account, req.params.id, true)
       if (!await db.company(req.params.id)) throw new HttpError(404, '公司不存在')
       const body = bodyOf(req)
+      const name = strField(body, 'name')
       const item = await db.insertCatalog({
         kind,
         scope: 'company',
         companyId: req.params.id,
-        name: strField(body, 'name'),
-        definition: body.definition ?? {},
+        name,
+        // 现在这一组只有 models；再加一种要给它配自己的校验，别让新种类顺着这条路原样入库。
+        definition: kind === 'model' ? await companyModelDefinition(body.definition, name) : body.definition ?? {},
       })
       await db.audit({ companyId: req.params.id, accountId: account.id, action: 'catalog.create', detail: { kind, id: item.id } })
       json(res, 201, { item: publicCatalog(item) })
@@ -576,9 +597,13 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       const item = await db.catalog(req.params.itemId)
       if (!item || item.kind !== kind || item.companyId !== req.params.id) throw new HttpError(404, '目录项不存在')
       const body = bodyOf(req)
+      const name = body.name != null ? strField(body, 'name') : undefined
       const next = await db.updateCatalog(item.id, {
-        name: body.name != null ? strField(body, 'name') : undefined,
-        definition: body.definition,
+        name,
+        definition:
+          kind === 'model' && body.definition !== undefined
+            ? await companyModelDefinition(body.definition, name ?? item.name)
+            : body.definition,
       })
       await db.audit({ companyId: req.params.id, accountId: account.id, action: 'catalog.update', detail: { kind, id: item.id } })
       json(res, 200, { item: publicCatalog(next) })

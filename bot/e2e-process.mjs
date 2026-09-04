@@ -18,6 +18,9 @@ import * as terminalTools from './src/tools/terminal.ts'
 const home = mkdtempSync(join(tmpdir(), 'satu-proc-home-'))
 process.env.SATUWORK_HOME = home
 const root = mkdtempSync(join(tmpdir(), 'satu-proc-'))
+// 退出时收掉临时目录（和 e2e-memory / e2e-skills 那几个探针同一个写法）：探针是顶层 await 的
+// 脚本，没有一个能包 finally 的函数体；exit 钩子在 process.exit、正常结束和未捕获异常三条路上都会跑。
+process.on('exit', () => { try { rmSync(home, { recursive: true, force: true }) } catch {} try { rmSync(root, { recursive: true, force: true }) } catch {} })
 
 const ctx = new Context()
 ctx.provide('logger', { warn() {}, info() {}, error() {} })

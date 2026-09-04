@@ -10,6 +10,7 @@ import { rmSync } from 'node:fs'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
 import { freePorts } from './ports.mjs'
+import { closeServer } from './probe.mjs'
 
 export async function runCustomProvider({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-custom')
@@ -224,7 +225,8 @@ export async function runCustomProvider({ gwRoot, test, req, start, waitHttp, as
     })
   } finally {
     gw.kill()
-    upstream.close()
+    // closeServer 先掐 keep-alive 连接再关：裸 close() 会等 Gateway 那条连接自己断，那永远不来。
+    await closeServer(upstream, 'custom provider upstream')
     try {
       rmSync(GW_HOME, { recursive: true, force: true })
     } catch {}

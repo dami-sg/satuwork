@@ -7,7 +7,18 @@ import { HttpError, type Req } from '../http.ts'
 import { hashPassword } from '../crypto.ts'
 import { type CatalogKind, PLAN_PERIODS, type PayStatus, type PlanPeriod } from '../db.ts'
 
-export const JWT_TTL = Number(process.env.GATEWAY_JWT_TTL_SECONDS ?? 7 * 24 * 3600)
+/**
+ * 登录票活多久（秒）。**配错了当场停机**，而不是签出一张 exp 为 NaN 的票：
+ * `exp: NaN` 序列化成 null，verifyJwt 那头会当成「没有过期时间」，等于永不过期。
+ */
+export const JWT_TTL = jwtTtlOf(process.env.GATEWAY_JWT_TTL_SECONDS)
+
+function jwtTtlOf(raw: string | undefined): number {
+  if (raw == null || raw === '') return 7 * 24 * 3600
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`GATEWAY_JWT_TTL_SECONDS 必须是正数（秒），现在是 ${JSON.stringify(raw)}`)
+  return n
+}
 export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 export const SLUG_RE = /^[a-z][a-z0-9-]{0,61}[a-z0-9]$|^[a-z]$/
 export const PHONE_RE = /^\+\d{1,4}[\s-]?[\d\s()-]{4,24}$/

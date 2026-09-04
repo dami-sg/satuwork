@@ -200,6 +200,18 @@ export async function runRoutineRetry({ gwRoot, test, req, start, waitHttp, asse
         await sleep(100)
       }
       assert(runsOf(d, 'schedule').length === 1, `到点那一次没跑起来：${JSON.stringify(d && d.runs)}`)
+      /**
+       * 等的是**补跑排上了**（retryAt 有值），不是「没有在跑的」。
+       *
+       * 和下面那条一样的竞态：那一轮记成 error 和 `armRetry` 写回 retryAt 之间隔着一次
+       * db 往返，`settled` 正好落进那一两毫秒就会看到「跑完了、但还没排补跑」——下面
+       * 那句 retryAt 断言于是在实现完全正确的情况下报「补跑没排上」。
+       */
+      const armed = Date.now() + 15000
+      while (Date.now() < armed && !(d.routine && d.routine.retryAt)) {
+        await sleep(100)
+        d = await detail()
+      }
       d = await settled('到点那一次')
       assert(seat.hits.length > before, '压根没去敲席位')
       /**

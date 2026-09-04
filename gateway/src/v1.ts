@@ -1,6 +1,6 @@
 import type { ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import type { Account, Db } from './db.ts'
+import type { Account, ChargeStatus, Db } from './db.ts'
 import type { JwtKeys } from './crypto.ts'
 import { verifyJwt } from './crypto.ts'
 import { HttpError, bearer, json, type Req, type Router } from './http.ts'
@@ -111,7 +111,10 @@ async function gateOr402(meter: Meter, account: Account, found: CatalogModel): P
  * - **上游没报 usage 也要落账。** 静默不落的话，账本上查不到这次调用，而 `llm_calls`
  *   里躺着一行 token 全 0 的记录——对账时说不清它是没花钱还是没记上。这种行金额记 0
  *   且标 `unpriced`：那个 0 是「算不出来」，不是「免费」。
- * - **断流照落账。** `proxyUpstream` 已经保证中途断开时保留已累计的 usage。
+ * - **断流照落账。** `proxyUpstream` 已经保证中途断开时保留已累计的 usage；pi 那条流
+ *   （`streamChatCompletions`）从每一帧的 `partial.usage` 里累计，上游报错、客户端
+ *   中途走了都带着已知的输入 token 落账，状态记 `error` / `failed`。**真拿不到**
+ *   （第一帧都没到）时金额 0 且标 `unpriced`——那个 0 是「算不出来」，不是「免费」。
  * - **客户端提前走了也照落账。** 已经问上游要过的 token 是花掉了的，不记等于白送。
  */
 async function settle(
@@ -121,14 +124,16 @@ async function settle(
   found: CatalogModel,
   callId: string,
   usage: TokenUsage | undefined,
+  status?: ChargeStatus,
 ): Promise<void> {
   if (usage) await db.updateLlmCallTokens(callId, usage)
   const billable: Billable = {
     kind: 'llm',
     account,
     // 没拿到用量不等于调用没发生：上游回了，只是没报数。记成 failed 而不是 ok，
-    // 是为了让「这次到底花没花钱」在明细里一眼看得出来。
-    status: usage ? 'ok' : 'failed',
+    // 是为了让「这次到底花没花钱」在明细里一眼看得出来。断流 / 上游报错的那条路
+    // 会自己指定 status（见 streamChatCompletions）。
+    status: status ?? (usage ? 'ok' : 'failed'),
     provider: found.provider,
     model: found.id,
     tokens: {
@@ -161,17 +166,24 @@ async function withSettle(
   account: Account,
   found: CatalogModel,
   callId: string,
-  run: () => Promise<TokenUsage | undefined>,
+  run: () => Promise<RunOutcome>,
 ): Promise<void> {
   let usage: TokenUsage | undefined
+  let status: ChargeStatus | undefined
   let failed: unknown
   try {
-    usage = await run()
+    const out = await run()
+    if (out && 'status' in out) {
+      usage = out.usage
+      status = out.status
+    } else {
+      usage = out
+    }
   } catch (e) {
     failed = e
   }
   try {
-    await settle(db, meter, account, found, callId, usage)
+    await settle(db, meter, account, found, callId, usage, status)
   } catch (e) {
     if (!failed) throw e
   }
@@ -437,6 +449,12 @@ type TokenUsage = {
   cache_write_tokens: number
 }
 
+/**
+ * 一次上游调用收口时交给 settle 的东西。多数路只回 usage；流式那条在断流 / 报错时
+ * 还要说明「这次没正常收口」——账本的 status 由它定，usage 是到断开为止已知的那部分。
+ */
+type RunOutcome = TokenUsage | { usage: TokenUsage | undefined; status: ChargeStatus } | undefined
+
 /** 一帧只报了一半是常事，所以缺的字段是 undefined，不是 0——0 会把上一帧盖掉。 */
 type PartialUsage = {
   prompt_tokens?: number
@@ -506,9 +524,24 @@ function usageFromPayload(obj: unknown): PartialUsage | undefined {
     const prompt = openaiPrompt ?? anthropicPrompt
     const completion = raw.completion_tokens ?? raw.output_tokens ?? raw.output
     if (prompt == null && completion == null) continue
-    const details = raw.prompt_tokens_details as Record<string, unknown> | undefined
-    const readRaw = openaiPrompt != null ? details?.cached_tokens : raw.cache_read_input_tokens
-    const writeRaw = openaiPrompt != null ? undefined : raw.cache_creation_input_tokens
+    /**
+     * 三种形状，两套口径：
+     *
+     * - Chat Completions：`prompt_tokens` + `prompt_tokens_details.cached_tokens`；
+     * - Responses API：`input_tokens` + `input_tokens_details.cached_tokens`——字段名和
+     *   Anthropic 撞了，但口径跟 Chat 一样，`input_tokens` **已含**缓存命中；
+     * - Anthropic：`input_tokens` + `cache_read_input_tokens` / `cache_creation_input_tokens`，
+     *   `input_tokens` **不含**缓存，要加回去。
+     *
+     * 以前只按「有没有 prompt_tokens」二分，Responses 走进了 Anthropic 分支：读的是
+     * 不存在的 `cache_read_input_tokens`，命中缓存的那截就按全价记了。
+     * 判据是 `input_tokens_details` 这个对象在不在——Anthropic 的 usage 里没有它。
+     */
+    const chatDetails = objectAt(raw, 'prompt_tokens_details')
+    const responsesDetails = objectAt(raw, 'input_tokens_details')
+    const openaiShape = openaiPrompt != null || responsesDetails != null
+    const readRaw = openaiPrompt != null ? chatDetails?.cached_tokens : responsesDetails != null ? responsesDetails.cached_tokens : raw.cache_read_input_tokens
+    const writeRaw = openaiShape ? undefined : raw.cache_creation_input_tokens
     const cacheRead = nonNegInt(readRaw)
     // 写缓存的那部分也是这次真发出去的提示词，算进总量；但它不是「读到的缓存」，
     // 不进 cached_tokens——两者单价不同，而且缓存写**比普通输入还贵**。
@@ -517,7 +550,7 @@ function usageFromPayload(obj: unknown): PartialUsage | undefined {
     const pt = Number(prompt)
     const ct = Number(completion)
     if (prompt != null && Number.isFinite(pt)) {
-      out.prompt_tokens = openaiPrompt != null ? pt : pt + cacheRead + cacheWrite
+      out.prompt_tokens = openaiShape ? pt : pt + cacheRead + cacheWrite
       // **这一帧没带缓存字段就别写这个键。** 写成 0 的话，mergeUsage 取 next 优先，
       // 会把前面帧里记下的缓存 token 抹掉：Anthropic 的 message_start 报了
       // input 900 + cache_read 400，后面某个 message_delta 只回传累计 input_tokens
@@ -558,7 +591,7 @@ async function streamChatCompletions(
   found: { provider: string; id: string },
   secret: string,
   body: Record<string, unknown>,
-): Promise<TokenUsage | undefined> {
+): Promise<RunOutcome> {
   const modelId = openaiModelId(found)
   const id = `chatcmpl-${randomUUID()}`
   const piModel = llm.piModel(found.provider, found.id)
@@ -578,6 +611,17 @@ async function streamChatCompletions(
     reasoning: reasoningOf(body),
   })
   let usage: TokenUsage | undefined
+  /**
+   * 这次有没有正常收口。断流、上游报错时以前 usage 是 undefined，settle 记成一行
+   * 金额 0 的 failed——可上游在第一帧（Anthropic 的 message_start）就报了输入 token，
+   * 那些提示词是真发出去、真收了钱的。所以每一帧都从 `partial.usage` 里把已知的
+   * 用量累计下来（取大，同 mergeUsage），断了就按已知的那部分落账。
+   */
+  let outcome: ChargeStatus | undefined
+  const noteUsage = (raw: unknown) => {
+    const u = tokensOf(openaiUsage(raw), raw)
+    if (u && (u.prompt_tokens || u.completion_tokens)) usage = mergeUsage(usage, u)
+  }
   // 客户端一走就得停下来。以前没有这一条：浏览器关了标签页，Gateway 还在把上游的
   // token 一个个拉完——写进一个没人读的 socket，钱照付。break 会调 for-await 的
   // .return()，取消一路传到底层流。
@@ -589,6 +633,7 @@ async function streamChatCompletions(
   try {
     for await (const event of stream) {
       if (gone) break
+      if ('partial' in event) noteUsage(event.partial?.usage)
       switch (event.type) {
         case 'start':
           writeSse(res, chunk(id, modelId, { role: 'assistant' }))
@@ -632,6 +677,9 @@ async function streamChatCompletions(
           break
         }
         case 'error': {
+          // 报错那一帧带的是到此为止的 AssistantMessage，usage 里有已经算过的输入。
+          noteUsage(event.error?.usage)
+          outcome = 'error'
           const msg = redact(event.error?.errorMessage || 'model error', secret)
           // **错误帧在前，finish 块在后。** 反过来写的话，任何一个「读到 finish_reason
           // 就收工」的客户端（我们自己的 bot 就是）永远读不到错误那一帧，一次上游报错
@@ -644,6 +692,7 @@ async function streamChatCompletions(
       }
     }
   } catch (e) {
+    outcome = 'error'
     const msg = redact((e as Error).message || 'upstream error', secret)
     if (!gone) writeSse(res, { error: { message: msg, type: 'upstream_error' } })
   } finally {
@@ -655,7 +704,11 @@ async function streamChatCompletions(
     res.write('data: [DONE]\n\n')
     res.end()
   }
-  return usage
+  // 客户端中途走了记 failed，上游报错记 error。账本的 status 只有 ok / failed / timeout /
+  // denied / error（迁移 0007 的 check），没有 aborted——要加得开一条新迁移，这里先用
+  // 现有的两档；已知的 usage 照常计价，一点都没拿到时 settle 会标 unpriced。
+  if (gone && !outcome) outcome = 'failed'
+  return outcome ? { usage, status: outcome } : usage
 }
 
 async function completeChatCompletions(

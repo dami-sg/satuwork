@@ -1,5 +1,5 @@
 import { hostname } from 'node:os'
-import { bootConfig, managerVersion, PROTOCOL, readState, writeState, type ManagerState } from './config.ts'
+import { bootConfig, managerVersion, PROTOCOL, patchState, readState, watchState, type ManagerState } from './config.ts'
 import { HttpError, json, listen, Router, type Req } from './http.ts'
 import { attachUpgrade, proxyIntercept } from './proxy.ts'
 import { bootChallenge, pairIfNeeded } from './pair.ts'
@@ -7,7 +7,7 @@ import { diagnose } from './diag.ts'
 import { botUnit, clampLines, followLogs, MANAGER_UNIT, recentLogs } from './logs.ts'
 import { checkLogs, defaultKeepMb, logUsage, setDesiredCapMb, startLogWatch, vacuum } from './logdisk.ts'
 import { metrics, startMetrics } from './metrics.ts'
-import { SeatBusy, deploySeat, removeSeat, seat, seatProgress, seatsWithLiveness, type SeatSpec } from './seats.ts'
+import { SeatBusy, busy, deploySeat, removeSeat, seat, seatProgress, seatsWithLiveness, waitForDeploys, type SeatSpec } from './seats.ts'
 import { confirmVersion, maybeUpgrade, refreshConfirmScript, upgradeDeferred, upgradeError } from './upgrade.ts'
 import { currentTimezone, maybeSetTimezone, timezoneError } from './timezone.ts'
 import { standDown } from './standdown.ts'
@@ -101,9 +101,11 @@ function adoptGatewayUrl(req: Req): void {
    * 而且失败不该把调用方那次部署打成 500：那会让人去查一个根本不存在的部署故障。
    * 喊一句，然后当这次没听见——下一次调用还会再试。
    */
-  const moved = { ...state, gatewayUrl: next }
+  // 走 patchState 而不是拿内存里那份整份写回：这份 state 是启动时读的，隔着不知多少
+  // 轮心跳；整份写回会把 confirmVersion 刚落盘的 confirmedVersion 抹回旧值，回滚脚本
+  // 随即把一次好端端的升级搬回去。补丁只动 gatewayUrl，内存由 watchState 那条同步。
   try {
-    writeState(moved)
+    if (!patchState((s) => (s.gatewayUrl === next ? undefined : { gatewayUrl: next }))) return
   } catch (e) {
     console.error(
       `satuwork-manager: 收到新的 Gateway 地址 ${next}，但写不进 manager.json（${e instanceof Error ? e.message : String(e)}）。` +
@@ -111,7 +113,6 @@ function adoptGatewayUrl(req: Req): void {
     )
     return
   }
-  state = moved
   authFails = 0
   if (idled) {
     idled = false
@@ -380,6 +381,11 @@ const server = listen(router, boot.host, boot.port)
 attachUpgrade(server, { machineToken: token, gatewayUrl })
 
 state = readState()
+// 磁盘是唯一的真相：谁通过 patchState 改了 manager.json，内存这份就跟着换。少了这条，
+// 三处各自写盘的老毛病只是换了个地方——内存里的旧快照下一次照样覆盖回去。
+watchState((s) => {
+  state = s
+})
 if (!state) {
   try {
     const out = await pairIfNeeded(boot)
@@ -504,6 +510,15 @@ function onAuthFail(): void {
 }
 
 let closing = false
+/**
+ * 有部署在跑时最多等多久再退出。
+ *
+ * deploy-seat.sh 一跑十几分钟，进程半路退出会把建了一半的席位连同那条挂着的 PUT 一起
+ * 打断——而 KillMode=process 意味着脚本本身还会作为孤儿跑完，只是没人收结果、名册上
+ * 也不会落那一行。**注意 unit 里的 TimeoutStopSec 得跟着放大**（模板在
+ * gateway/src/install.ts，现在是 15 秒）：systemd 到点就 SIGKILL，这里等多久都没用。
+ */
+const SHUTDOWN_DEPLOY_WAIT_MS = 20 * 60_000
 function shutdown() {
   if (closing) return
   closing = true
@@ -511,7 +526,14 @@ function shutdown() {
   // 短暂 drain：停止接受新连接，给在途请求几秒。换版重启时聊天 SSE 会断，UI 侧靠
   // ?after=N 游标自己接回来。
   server.close()
-  setTimeout(() => process.exit(0), 3000).unref()
+  void (async () => {
+    // 没有部署在跑时行为和以前一模一样：3 秒后退出。
+    if (busy()) {
+      console.log(`satuwork-manager: 收到停止信号，但有席位部署还在跑，等它结束（最多 ${SHUTDOWN_DEPLOY_WAIT_MS / 60_000} 分钟）再退出`)
+      await waitForDeploys(SHUTDOWN_DEPLOY_WAIT_MS)
+    }
+    setTimeout(() => process.exit(0), 3000).unref()
+  })()
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)

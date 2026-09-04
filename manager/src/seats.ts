@@ -127,6 +127,22 @@ let inFlight = 0
 export const busy = () => inFlight > 0
 
 /**
+ * 等手上的部署都跑完，最多等 `maxMs`。给 shutdown 用：进程半路退出会把 deploy-seat.sh
+ * 建了一半的席位连同那条挂着的 PUT 一起打断。**定时器不 unref**——server 已经 close
+ * 了，要是这条也不占着事件循环，Node 可能在部署结束前就自己退出去。
+ */
+export function waitForDeploys(maxMs: number): Promise<void> {
+  const started = Date.now()
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (inFlight === 0 || Date.now() - started >= maxMs) resolve()
+      else setTimeout(tick, 1000)
+    }
+    tick()
+  })
+}
+
+/**
  * 席位正忙，这次没换版。
  *
  * **不是部署失败**，所以不写进名册、也不碰机器上的任何东西：席位还是原来那个版本，
@@ -446,8 +462,21 @@ async function doDeploy(spec: SeatSpec, token: string): Promise<SeatRecord> {
 
   if (bootConfig().dryRun) return commit(spec.seatId, base)
 
-  const fail = (message: string): SeatRecord =>
-    commit(spec.seatId, { ...base, status: 'error', lastError: message.slice(0, 500) })
+  /**
+   * 失败时端口**保留名册上原来那一对**，不写 spec 里的新端口。走到 fail 的时候机器上
+   * 还在服务的（如果有）是上一轮部署的那套进程，它们听的是旧端口；名册要是换成新端口，
+   * 反代和 busySeats 就会去敲一个没人听的口——席位明明还活着，界面上却成了「失联」。
+   * 现读：这一行之前隔着排空和拉包两段等待，开头那份 current 可能已经旧了。
+   */
+  const fail = (message: string): SeatRecord => {
+    const was = load()[spec.seatId]
+    return commit(spec.seatId, {
+      ...base,
+      ...(was ? { botPort: was.botPort, novncPort: was.novncPort } : {}),
+      status: 'error',
+      lastError: message.slice(0, 500),
+    })
+  }
 
   try {
     await ensureRelease(spec.botVersion, { gatewayUrl: spec.gatewayUrl, token })

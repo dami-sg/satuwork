@@ -65,6 +65,13 @@ function wsUpgrade(port, path, cookie) {
 export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-machine-gw')
   const GW_PORT = await freePort()
+  /**
+   * 假管家们听的口也向内核要。8443 / 8544-8546 这几个写死的数以前在两个 worktree
+   * 同时跑时必撞，而撞上的现象是「配对回拨到了别人的假管家」——断言报的东西和端口
+   * 毫无关系。MGR_PORT 是配对时记下的那台「主机器」，桌面反代那条用例要在它上面起
+   * 假管家；另外三条各自要一个，端口跟着传进 managerPort。
+   */
+  const MGR_PORT = await freePort()
   const MACHINE_TOK = 'e2e-machine-deploy'
   const PLATFORM_TOK = 'e2e-platform-deploy'
   const gwBase = `http://127.0.0.1:${GW_PORT}`
@@ -91,7 +98,8 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       SATUWORK_DEPLOY_STUB: '1',
     },
   })
-  await waitHttp(gwBase + '/health')
+  // 带上 child：起不来时有用的是它的输出，不是三十秒后那句「等不到」。
+  await waitHttp(gwBase + '/health', { child: gw, what: 'machine-deploy gateway' })
 
   try {
     const ownerLogin = await req(gwBase, 'POST', '/auth/login', {
@@ -186,7 +194,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(String(code.json.installCommand).includes(code.json.code), '安装命令要带码')
 
       const bad = await req(gwBase, 'POST', '/machines/pair', {
-        body: { code: 'SW-0000-0000', managerPort: 8443, protocol: 1 },
+        body: { code: 'SW-0000-0000', managerPort: MGR_PORT, protocol: 1 },
       })
       assert(bad.status === 401, `坏码 ${bad.status}`)
 
@@ -195,7 +203,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(!/[SZBOIL]/.test(code.json.code.slice(3)), `码里有易混字符 ${code.json.code}`)
       const typo = code.json.code.slice(3).replace(/5/g, 'S').replace(/2/g, 'Z').replace(/8/g, 'B')
       const fuzzy = await req(gwBase, 'POST', '/machines/pair', {
-        body: { code: 'sw-' + typo.toLowerCase(), managerPort: 8443, hostname: 'e2e', managerVersion: '9.9.9', protocol: 1 },
+        body: { code: 'sw-' + typo.toLowerCase(), managerPort: MGR_PORT, hostname: 'e2e', managerVersion: '9.9.9', protocol: 1 },
       })
       assert(fuzzy.status === 201, `抄错字符也该认出来：${fuzzy.status} ${fuzzy.text}`)
       machineTok = fuzzy.json.token
@@ -205,18 +213,18 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(code1b.status === 201, 'code1b')
 
       const paired = await req(gwBase, 'POST', '/machines/pair', {
-        body: { code: code1b.json.code, managerPort: 8443, hostname: 'e2e', managerVersion: '9.9.9', protocol: 1 },
+        body: { code: code1b.json.code, managerPort: MGR_PORT, hostname: 'e2e', managerVersion: '9.9.9', protocol: 1 },
       })
       assert(paired.status === 201, `pair ${paired.status} ${paired.text}`)
       assert(String(paired.json.token).startsWith('smt_'), 'smt_')
       // 地址取的是请求来源 IP，不是 body 里说的——body 说了不算。
-      assert(paired.json.host === 'http://127.0.0.1:8443', `host ${paired.json.host}`)
+      assert(paired.json.host === `http://127.0.0.1:${MGR_PORT}`, `host ${paired.json.host}`)
       // e2e 里没有管家在听，回拨必然失败；配对本身照样成立。
       assert(paired.json.reachable === false, 'reachable 应为 false')
       machineTok = paired.json.token
 
       const replay = await req(gwBase, 'POST', '/machines/pair', {
-        body: { code: code1b.json.code, managerPort: 8443, protocol: 1 },
+        body: { code: code1b.json.code, managerPort: MGR_PORT, protocol: 1 },
       })
       assert(replay.status === 401, `重放 ${replay.status}`)
 
@@ -274,7 +282,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         String(r.json.novncUrl).startsWith(`/desktop/${r.json.seatId}/?ticket=`),
         `novncUrl ${r.json.novncUrl}`,
       )
-      assert(!String(r.json.novncUrl).includes('8443'), `桌面地址不该指向管家：${r.json.novncUrl}`)
+      assert(!String(r.json.novncUrl).includes(`127.0.0.1:${MGR_PORT}`), `桌面地址不该指向管家：${r.json.novncUrl}`)
       assert(r.json.display === 10, `display ${r.json.display}`)
       assert(r.json.vncPort === 5910, `vncPort ${r.json.vncPort}`)
       assert(r.json.novncPort === 6081, `novncPort ${r.json.novncPort}`)
@@ -630,7 +638,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       // 改回去，后面的用例还要用。
       await req(gwBase, 'PUT', `/platform/orgs/${orgId}/machine`, {
         token: ownerTok,
-        body: { host: 'http://127.0.0.1:8443' },
+        body: { host: `http://127.0.0.1:${MGR_PORT}` },
       })
     })
 
@@ -881,7 +889,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
      * 一组用例钉它），但 iframe 里用不了：管家发的 cookie 是 SameSite=Lax，跨站的
      * iframe 里浏览器连存都不给存，画面永远出不来而且不报错。
      *
-     * 这里起一个假管家听在配对时记下的那个地址上（127.0.0.1:8443），然后整条走一遍：
+     * 这里起一个假管家听在配对时记下的那个地址上（127.0.0.1:MGR_PORT），然后整条走一遍：
      * 票换 cookie → 静态资源 → WebSocket 升级，以及三种不该放行的情况。
      */
     await test('桌面从 Gateway 同域反代出去：票换 cookie、资源与 WebSocket 都通', async () => {
@@ -909,9 +917,9 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       await withDeadline(
         new Promise((ok, bad) => {
           fake.once('error', bad)
-          fake.listen(8443, '127.0.0.1', ok)
+          fake.listen(MGR_PORT, '127.0.0.1', ok)
         }),
-        'fake listen 8443',
+        `fake listen ${MGR_PORT}`,
         15_000,
       )
       try {
@@ -921,22 +929,21 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         const entry = rt.json.novncUrl
         assert(entry.startsWith(`/desktop/${seatId}/?ticket=`), `entry ${entry}`)
 
+        const ticket = entry.split('ticket=')[1]
         const hop = await fetch(gwBase + entry, { redirect: 'manual' })
-        assert(hop.status === 302, `换 cookie ${hop.status}`)
-        const setCookie = String(hop.headers.get('set-cookie') || '')
-        assert(setCookie.startsWith(`satu_desk_${seatId}=`), `cookie 名 ${setCookie}`)
-        assert(setCookie.includes('HttpOnly'), 'cookie 要 HttpOnly')
-        assert(setCookie.includes(`Path=/desktop/${seatId}`), 'cookie 要限定到这块屏')
-        // http 部署不能加 Secure，否则浏览器直接把这张 cookie 丢掉。
-        assert(!setCookie.includes('Secure'), `http 这一跳不该加 Secure：${setCookie}`)
-        const cookie = setCookie.split(';')[0]
+        assert(hop.status === 302, `入口 ${hop.status}`)
+        // 票不再换 cookie，而是进路径段（`/desktop/:seatId/t/:ticket/*`）：iframe 去掉了
+        // allow-same-origin，框里的源是 opaque，cookie 根本带不上；路径里的票让 noVNC
+        // 自己发的静态资源和 WebSocket 升级按相对路径解析时天然都带着票。
+        assert(!hop.headers.get('set-cookie'), `不该再发 cookie：${hop.headers.get('set-cookie')}`)
+        const base = `/desktop/${seatId}/t/${encodeURIComponent(ticket)}`
 
         const loc = String(hop.headers.get('location'))
         const q = new URLSearchParams(loc.split('?')[1] || '')
-        assert(loc.startsWith(`/desktop/${seatId}/vnc.html`), `location ${loc}`)
+        assert(loc.startsWith(`${base}/vnc.html`), `location ${loc}`)
         // noVNC 拼 WebSocket 地址的写法是 `'/' + path`，从根开始。不告诉它就会去连
         // /websockify——那个路径不属于任何席位，反代认不出来。
-        assert(q.get('path') === `desktop/${seatId}/websockify`, `path ${q.get('path')}`)
+        assert(q.get('path') === `${base.slice(1)}/websockify`, `path ${q.get('path')}`)
         assert(q.get('autoconnect') === '1', `autoconnect ${loc}`)
         assert(q.get('password') === rt.json.vncPassword, '口令没随票转过去')
 
@@ -945,7 +952,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
          * 「桌面票无效或已过期」原样递出去——那句话和票真的过期一字不差，人会去反复
          * 重开桌面，而那永远不会好。上面的心跳把这台机器报成了 protocol 1。
          */
-        const old = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`, { headers: { cookie } })
+        const old = await fetch(`${gwBase}${base}/vnc.html`)
         assert(old.status === 409, `旧管家应 409：${old.status}`)
         assert(String((await old.json()).error).includes('升级管家'), '没说清楚要升级管家')
 
@@ -958,7 +965,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         })
         assert(hb2.status === 200, `heartbeat2 ${hb2.status} ${hb2.text}`)
 
-        const page = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`, { headers: { cookie } })
+        const page = await fetch(`${gwBase}${base}/vnc.html`)
         assert(page.status === 200, `静态 ${page.status}`)
         const body = await page.text()
         assert(body.includes('VNC-PAGE'), '字节没带回来')
@@ -972,35 +979,42 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         assert(body.includes('#noVNC_status.noVNC_status_normal'), '连接成功那条提示没关掉')
         assert(!body.includes('noVNC_status_error'), '不该把报错那一档也关掉')
         assert(body.indexOf('#noVNC_control_bar_anchor') < body.indexOf('</head>'), '样式要在 </head> 之前')
+        // opaque 源里碰 localStorage 会抛，noVNC 初始化第一步就读设置——垫片要在 module 之前。
+        assert(body.includes('localStorage'), '落地页没垫 localStorage 的替身')
         assert(page.headers.get('content-length') === String(new TextEncoder().encode(body).length), '改了内容没重算长度')
+        // 反代出来的每条响应都要钉上 frame-ancestors，并放开 CORS（opaque 源取 module 要它）。
+        assert(String(page.headers.get('content-security-policy')).includes("frame-ancestors 'self'"), 'CSP 没加')
+        assert(page.headers.get('access-control-allow-origin') === '*', 'opaque 源取 module 需要 CORS')
         assert(seen.paths.some((p) => p.startsWith(`/seats/${seatId}/vnc/vnc.html`)), `上游路径 ${seen.paths}`)
-        // 机器票只该活在 Gateway 与管家之间；Gateway 这一侧的 cookie 不该漏下去。
+        // 机器票只该活在 Gateway 与管家之间；浏览器那侧的 cookie 也不该漏下去。
         const last = seen.headers[seen.headers.length - 1]
         assert(last['x-satuwork-machine'] === machineTok, '没带机器票')
         assert(!last.cookie, `Gateway 的 cookie 漏给了管家：${last.cookie}`)
 
         // 别的资源不许被碰：只有落地页走改写那条路。
-        const asset = await fetch(`${gwBase}/desktop/${seatId}/app/ui.js`, { headers: { cookie } })
+        const asset = await fetch(`${gwBase}${base}/app/ui.js`)
         assert(!(await asset.text()).includes('noVNC_control_bar_anchor'), '普通资源不该被改写')
 
         const anon = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`)
-        assert(anon.status === 401, `无 cookie 应 401：${anon.status}`)
-        const stolen = await fetch(`${gwBase}/desktop/${seatId}/vnc.html`, {
-          headers: { cookie: `satu_desk_${seatId}=not-a-jwt` },
-        })
-        assert(stolen.status === 401, `伪造 cookie 应 401：${stolen.status}`)
-        // 别人那块屏的票，换不来这块屏的 cookie。
+        assert(anon.status === 401, `无票应 401：${anon.status}`)
+        const stolen = await fetch(`${gwBase}/desktop/${seatId}/t/not-a-jwt/vnc.html`)
+        assert(stolen.status === 401, `伪造票应 401：${stolen.status}`)
+        // 别人那块屏的票，进不了这块屏：入口和带票路径两条路都要挡。
         const other = seatIdOf(member2Id, botA)
-        const crossed = await fetch(`${gwBase}/desktop/${other}/?ticket=${encodeURIComponent(entry.split('ticket=')[1])}`, {
+        const crossed = await fetch(`${gwBase}/desktop/${other}/?ticket=${encodeURIComponent(ticket)}`, {
           redirect: 'manual',
         })
         assert(crossed.status === 401, `串屏应 401：${crossed.status}`)
+        const crossedPath = await fetch(`${gwBase}/desktop/${other}/t/${encodeURIComponent(ticket)}/vnc.html`)
+        assert(crossedPath.status === 401, `带票路径串屏应 401：${crossedPath.status}`)
 
-        const ws = await wsUpgrade(GW_PORT, `/desktop/${seatId}/websockify`, cookie)
+        const ws = await wsUpgrade(GW_PORT, `${base}/websockify`, '')
         assert(ws.includes('101'), `升级失败: ${ws.slice(0, 120)}`)
         assert(ws.includes('HELLO-WS'), '升级后字节没通')
         const wsAnon = await wsUpgrade(GW_PORT, `/desktop/${seatId}/websockify`, '')
-        assert(wsAnon.includes('401'), `无 cookie 的升级应 401: ${wsAnon.slice(0, 80)}`)
+        assert(wsAnon.includes('404') || wsAnon.includes('401'), `无票的升级应被拒: ${wsAnon.slice(0, 80)}`)
+        const wsStolen = await wsUpgrade(GW_PORT, `/desktop/${seatId}/t/not-a-jwt/websockify`, '')
+        assert(wsStolen.includes('401'), `伪造票的升级应 401: ${wsStolen.slice(0, 80)}`)
       } finally {
         // 走 closeServer：Gateway 那侧的反代是 keep-alive，光 close 会一直等着它自己
         // 断开——套件就停在这儿不动了。
@@ -1165,9 +1179,10 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         seen.push(`${r.method} ${r.url}`)
         res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
       })
+      const fakePort = await freePort()
       await new Promise((ok, bad) => {
         fake.once('error', bad)
-        fake.listen(8544, '127.0.0.1', ok)
+        fake.listen(fakePort, '127.0.0.1', ok)
       })
       try {
         const co = await createCompany(req, gwBase, {
@@ -1183,7 +1198,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         const code = await req(gwBase, 'POST', `/platform/orgs/${co.company.id}/pairing-code`, { token: ownerTok })
         assert(code.status === 201, `配对码 ${code.status} ${code.text}`)
         const paired = await req(gwBase, 'POST', '/machines/pair', {
-          body: { code: code.json.code, managerPort: 8544, managerVersion: '1.0.0', protocol: 1 },
+          body: { code: code.json.code, managerPort: fakePort, managerVersion: '1.0.0', protocol: 1 },
         })
         assert(paired.status === 201, `配对 ${paired.status} ${paired.text}`)
 
@@ -1228,9 +1243,10 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         seen.push(`${r.method} ${r.url}`)
         res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
       })
+      const fakePort = await freePort()
       await new Promise((ok, bad) => {
         fake.once('error', bad)
-        fake.listen(8545, '127.0.0.1', ok)
+        fake.listen(fakePort, '127.0.0.1', ok)
       })
       try {
         const co = await createCompany(req, gwBase, {
@@ -1243,7 +1259,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         const code = await req(gwBase, 'POST', `/platform/orgs/${co.company.id}/pairing-code`, { token: ownerTok })
         assert(code.status === 201, `配对码 ${code.status} ${code.text}`)
         const paired = await req(gwBase, 'POST', '/machines/pair', {
-          body: { code: code.json.code, managerPort: 8545, managerVersion: '1.0.0', protocol: 1 },
+          body: { code: code.json.code, managerPort: fakePort, managerVersion: '1.0.0', protocol: 1 },
         })
         assert(paired.status === 201, `配对 ${paired.status} ${paired.text}`)
 
@@ -1300,9 +1316,10 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         }
         res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
       })
+      const fakePort = await freePort()
       await new Promise((ok, bad) => {
         fake.once('error', bad)
-        fake.listen(8546, '127.0.0.1', ok)
+        fake.listen(fakePort, '127.0.0.1', ok)
       })
       try {
         const co = await createCompany(req, gwBase, {
@@ -1315,7 +1332,7 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
         const code = await req(gwBase, 'POST', `/platform/orgs/${co.company.id}/pairing-code`, { token: ownerTok })
         assert(code.status === 201, `配对码 ${code.status} ${code.text}`)
         const paired = await req(gwBase, 'POST', '/machines/pair', {
-          body: { code: code.json.code, managerPort: 8546, managerVersion: '1.0.0', protocol: 1 },
+          body: { code: code.json.code, managerPort: fakePort, managerVersion: '1.0.0', protocol: 1 },
         })
         assert(paired.status === 201, `配对 ${paired.status} ${paired.text}`)
         const machineId = paired.json.machineId

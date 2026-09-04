@@ -22,25 +22,48 @@ import { json } from './http.ts'
  *   - 机器票（`smt_`）不进浏览器。这一跳用它认到管家那侧，浏览器手里只有一张只对
  *     一块屏、五分钟有效的桌面票。
  *
+ * **后来又把 cookie 换成了路径里的票**（`/desktop/:seatId/t/:ticket/*`）。同域反代
+ * 之后那个 iframe 和父页同源，`sandbox="allow-scripts allow-same-origin"` 等于没有沙箱：
+ * 框里的页面能读父页的 sessionStorage，里面躺着登录 JWT。要去掉 `allow-same-origin`，
+ * 框的源就是 opaque——浏览器**不给它发 cookie**，而 noVNC 的静态资源和 WebSocket
+ * 都是相对路径拼出来的，没法一条条挂 `?ticket=`。票放进路径段之后，相对路径解析出来
+ * 的每一条请求天然都带着它，验票的地方和从前验 cookie 的地方一一对应。
+ * 代价：票（含 VNC 口令的 JWT）出现在每条请求的 URL 里；从前 `?password=` 就在落地页
+ * 的 URL 上，暴露面同一类，没有变大。见 ui/chat.js 的 mountDesktop。
+ *
  * **代价说清楚**：桌面的像素现在全部经过 Gateway。noVNC 只在画面变化时发字节，几个
  * 席位不成问题；真要成规模，这一跳得挪到边缘去。
  */
 
+/** 入口：`/desktop/:seatId/?ticket=…`，验票之后 302 到下面那种带票的路径。 */
 const DESKTOP_PREFIX = /^\/desktop\/([^/]+)(\/.*)?$/
+/** 落地页、静态资源、WebSocket 都走这条：`/desktop/:seatId/t/:ticket/*`。票是 JWT，字符集里没有 `/`。 */
+const TICKET_PREFIX = /^\/desktop\/([^/]+)\/t\/([^/]+)(\/.*)?$/
 
-/** 每块屏一张，path 限定。名字里带 seatId，多开几块屏互不覆盖。 */
-export const deskCookieName = (seatId: string) => `satu_desk_${seatId.replace(/[^A-Za-z0-9_-]/g, '')}`
+/**
+ * 反代响应上要改的头。
+ *
+ * - `content-security-policy: frame-ancestors 'self'`：这页只准嵌在 Gateway 自己的页面里
+ *   （对话页右栏那个 iframe），别的站不许把它框进去。上游要是带了自己的 CSP / XFO，
+ *   一律覆盖——那是给「整页就是一块屏」的直连用法写的，这一跳说了算。
+ * - `set-cookie` 不透传：管家那侧的 cookie 落到 Gateway 的域上没有任何意义，只是多一个面。
+ * - `access-control-allow-origin: *`：iframe 去掉 `allow-same-origin` 之后源是 opaque，
+ *   ES module（noVNC 的 app/ui.js 及其 import）和 locale JSON 都按 CORS 取，没这一行
+ *   浏览器直接拒载。放开无妨：这条路上没有 cookie，鉴权全在路径里的票。
+ */
+function guardHead(head: Record<string, string | string[]>): void {
+  delete head['set-cookie']
+  delete head['x-frame-options']
+  head['content-security-policy'] = "frame-ancestors 'self'"
+  head['access-control-allow-origin'] = '*'
+  head['cache-control'] = 'no-store'
+}
 
-function cookieOf(req: IncomingMessage, name: string): string {
-  const raw = req.headers.cookie
-  if (!raw) return ''
-  for (const part of raw.split(';')) {
-    const i = part.indexOf('=')
-    if (i < 0) continue
-    if (part.slice(0, i).trim() !== name) continue
-    return decodeURIComponent(part.slice(i + 1).trim())
-  }
-  return ''
+/** 认路径里那张票认不认。认不过的一律当没认，不区分原因。 */
+function seatOfTicketPath(keys: JwtKeys, seatId: string, ticket: string): boolean {
+  if (!ticket) return false
+  const ok = verifyDesktopTicket(keys, ticket)
+  return !!ok && ok.seatId === seatId
 }
 
 /**
@@ -87,14 +110,6 @@ async function upstreamOf(
  */
 const TOO_OLD = '这台机器的管家版本过旧，还不会从 Gateway 反代桌面。去「机器配置」里升级管家（升完不用重新部署 Bot）'
 
-/** 认这张 cookie 认不认。认不过的一律当没认，不区分原因。 */
-function seatOfCookie(req: IncomingMessage, keys: JwtKeys, seatId: string): boolean {
-  const token = cookieOf(req, deskCookieName(seatId))
-  if (!token) return false
-  const ok = verifyDesktopTicket(keys, token)
-  return !!ok && ok.seatId === seatId
-}
-
 function upstreamPath(seatId: string, rest: string, search: string): string {
   return `/seats/${encodeURIComponent(seatId)}/vnc${rest}${search}`
 }
@@ -126,6 +141,21 @@ const LANDING_CSS =
   '#noVNC_status.noVNC_status_normal{display:none!important}</style>'
 
 /**
+ * 落地页上再补一段脚本：**给沙箱里的 noVNC 一个假的 localStorage**。
+ *
+ * iframe 去掉 `allow-same-origin` 之后（见文件头），框内碰 `localStorage` 会直接抛
+ * SecurityError，而 noVNC 的 app/webutil.js 在 UI 初始化时就用它读设置——一抛整页白屏。
+ * 这里在 module 脚本跑之前把 window.localStorage 换成一份内存字典：设置不再跨会话
+ * 记住（本来也没人在这块预览里调设置），别的一切照旧。有真 localStorage 时什么也不做。
+ */
+const LANDING_SHIM =
+  '<script>(function(){try{localStorage.getItem("satu")}catch(e){var m={};' +
+  'var s={getItem:function(k){return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null},' +
+  'setItem:function(k,v){m[k]=String(v)},removeItem:function(k){delete m[k]},clear:function(){m={}},' +
+  'key:function(i){return Object.keys(m)[i]||null},get length(){return Object.keys(m).length}};' +
+  'try{Object.defineProperty(window,"localStorage",{value:s,configurable:true})}catch(_){}}})()</script>'
+
+/**
  * 落地页要改内容，所以不能像别的资源那样直接对接两个流：先收完，插一段样式，再按
  * 新长度发出去。它只有几十 KB，且一次会话只取一次。
  *
@@ -143,7 +173,7 @@ function pipeLanding(
     const html = body.toString('utf8')
     const at = html.lastIndexOf('</head>')
     if (at < 0) return body
-    return Buffer.from(html.slice(0, at) + LANDING_CSS + html.slice(at), 'utf8')
+    return Buffer.from(html.slice(0, at) + LANDING_SHIM + LANDING_CSS + html.slice(at), 'utf8')
   })
 }
 
@@ -192,6 +222,7 @@ function pipeUpstream(
         return
       }
       const head = { ...(up.headers as Record<string, string | string[]>) }
+      guardHead(head)
       if (!transform || up.statusCode !== 200) {
         res.writeHead(up.statusCode ?? 502, head)
         up.pipe(res)
@@ -231,73 +262,68 @@ function pipeUpstream(
 /** 注册到 Router.intercept。返回 true 表示这个请求已经被反代接管。 */
 export function desktopIntercept(db: Db, keys: JwtKeys) {
   return async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
+    const withTicket = TICKET_PREFIX.exec(url.pathname)
+    if (withTicket) {
+      // 带票的路径：落地页和 noVNC 自己发的静态资源都从这儿过，每一条都验票。
+      const seatId = decodeURIComponent(withTicket[1])
+      const rest = withTicket[3] || '/'
+      if (!seatOfTicketPath(keys, seatId, withTicket[2])) {
+        json(res, 401, { error: '这块屏的凭据过期了（Gateway 验的）。回对话页重新打开它' })
+        return true
+      }
+      const target = await upstreamOf(db, seatId)
+      if (!target) {
+        json(res, 404, { error: '没有这个席位' })
+        return true
+      }
+      if (target.protocol < MIN_DESKTOP_PROTOCOL) {
+        json(res, 409, { error: TOO_OLD })
+        return true
+      }
+      // 落地页要改（关掉 noVNC 自己的控制条），别的资源原样对接两个流。
+      const send = rest === '/vnc.html' || rest === '/vnc_lite.html' ? pipeLanding : pipeUpstream
+      send(req, res, target, upstreamPath(seatId, rest, url.search))
+      return true
+    }
     const hit = DESKTOP_PREFIX.exec(url.pathname)
     if (!hit) return false
     const seatId = decodeURIComponent(hit[1])
-    const rest = hit[2] || '/'
     const ticket = url.searchParams.get('ticket')
-    if (ticket) {
-      /**
-       * 入口。票换 cookie 再跳转，之后 noVNC 自己发的那些请求（静态资源、WebSocket
-       * 升级）就不用把票挂在 URL 上到处跑了。
-       *
-       * **必须把 path 告诉 noVNC。** 它拼 WebSocket 地址的写法是 `'/' + path`，从
-       * **根**开始，而 path 默认是 `websockify`——不传的话它会去连 ws://<gateway>/
-       * websockify，那个路径不属于任何席位，反代认不出来直接 404。页面本身照样打得
-       * 开（静态资源是相对路径），坏的只有这一条连接，而它是唯一真正要紧的那条。
-       */
-      const ok = verifyDesktopTicket(keys, ticket)
-      if (!ok || ok.seatId !== seatId) {
-        json(res, 401, { error: '桌面票无效或已过期（Gateway 验的）。回对话页重新打开这块屏' })
-        return true
-      }
-      const base = `/desktop/${encodeURIComponent(seatId)}`
-      const maxAge = Math.max(60, ok.exp - Math.floor(Date.now() / 1000))
-      const wsPath = `${base.slice(1)}/websockify`
-      // 口令由票带过来（票已经验过签），这里转成 noVNC 认的 `password=`——它只从 URL
-      // 或输入框读凭据，没有别的入口。代价：这一跳之后 iframe 的地址里有明文口令。
-      // 换来的是「点开就是桌面」。没带口令时照旧弹输入框，不会更差。
-      const query =
-        `path=${encodeURIComponent(wsPath)}&autoconnect=1` +
-        (ok.vnc ? `&password=${encodeURIComponent(ok.vnc)}` : '') +
-        viewParams(url)
-      res.writeHead(302, {
-        // Secure 跟着 Gateway 自己走：https 部署时加上，http 内网部署时加了反而
-        // 会让浏览器直接丢掉这张 cookie。
-        'set-cookie':
-          `${deskCookieName(seatId)}=${encodeURIComponent(ticket)}; Path=${base}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax` +
-          (isHttps(req) ? '; Secure' : ''),
-        location: `${base}/vnc.html?${query}`,
-        'cache-control': 'no-store',
-      })
-      res.end()
-      return true
-    }
-    if (!seatOfCookie(req, keys, seatId)) {
+    if (!ticket) {
       json(res, 401, { error: '这块屏的凭据过期了（Gateway 验的）。回对话页重新打开它' })
       return true
     }
-    const target = await upstreamOf(db, seatId)
-    if (!target) {
-      json(res, 404, { error: '没有这个席位' })
+    /**
+     * 入口。验票之后跳到带票的路径（`/desktop/:seatId/t/:ticket/vnc.html`），之后
+     * noVNC 自己发的那些请求（静态资源、WebSocket 升级）按相对路径解析，天然都带着票。
+     * 以前是票换 cookie；为什么不再用 cookie 见文件头。
+     *
+     * **必须把 path 告诉 noVNC。** 它拼 WebSocket 地址的写法是 `'/' + path`，从
+     * **根**开始，而 path 默认是 `websockify`——不传的话它会去连 ws://<gateway>/
+     * websockify，那个路径不属于任何席位，反代认不出来直接 404。页面本身照样打得
+     * 开（静态资源是相对路径），坏的只有这一条连接，而它是唯一真正要紧的那条。
+     */
+    const ok = verifyDesktopTicket(keys, ticket)
+    if (!ok || ok.seatId !== seatId) {
+      json(res, 401, { error: '桌面票无效或已过期（Gateway 验的）。回对话页重新打开这块屏' })
       return true
     }
-    if (target.protocol < MIN_DESKTOP_PROTOCOL) {
-      json(res, 409, { error: TOO_OLD })
-      return true
-    }
-    // 落地页要改（关掉 noVNC 自己的控制条），别的资源原样对接两个流。
-    const send = rest === '/vnc.html' || rest === '/vnc_lite.html' ? pipeLanding : pipeUpstream
-    send(req, res, target, upstreamPath(seatId, rest, url.search))
+    const base = `/desktop/${encodeURIComponent(seatId)}/t/${encodeURIComponent(ticket)}`
+    const wsPath = `${base.slice(1)}/websockify`
+    // 口令由票带过来（票已经验过签），这里转成 noVNC 认的 `password=`——它只从 URL
+    // 或输入框读凭据，没有别的入口。代价：这一跳之后 iframe 的地址里有明文口令。
+    // 换来的是「点开就是桌面」。没带口令时照旧弹输入框，不会更差。
+    const query =
+      `path=${encodeURIComponent(wsPath)}&autoconnect=1` +
+      (ok.vnc ? `&password=${encodeURIComponent(ok.vnc)}` : '') +
+      viewParams(url)
+    res.writeHead(302, {
+      location: `${base}/vnc.html?${query}`,
+      'cache-control': 'no-store',
+    })
+    res.end()
     return true
   }
-}
-
-/** 反代前面通常还有一层。有 `x-forwarded-proto` 就信它，没有就看这一跳本身。 */
-function isHttps(req: IncomingMessage): boolean {
-  const fwd = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase()
-  if (fwd) return fwd === 'https'
-  return Boolean((req.socket as { encrypted?: boolean }).encrypted)
 }
 
 /**
@@ -319,15 +345,16 @@ export function attachDesktopUpgrade(server: Server, db: Db, keys: JwtKeys) {
     }
     void (async () => {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`)
-      const hit = DESKTOP_PREFIX.exec(url.pathname)
+      const hit = TICKET_PREFIX.exec(url.pathname)
       if (!hit) return bail('404 Not Found')
       const seatId = decodeURIComponent(hit[1])
-      if (!seatOfCookie(req, keys, seatId)) return bail('401 Unauthorized')
+      // 票在路径里，和普通请求同一套验法（见文件头）。
+      if (!seatOfTicketPath(keys, seatId, hit[2])) return bail('401 Unauthorized')
       const target = await upstreamOf(db, seatId)
       if (!target) return bail('404 Not Found')
       let up: URL
       try {
-        up = new URL(target.base + upstreamPath(seatId, hit[2] || '/', url.search))
+        up = new URL(target.base + upstreamPath(seatId, hit[3] || '/', url.search))
       } catch {
         return bail('502 Bad Gateway')
       }

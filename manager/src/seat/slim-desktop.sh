@@ -59,6 +59,21 @@ kill_stale() {
 kill_stale "Xvfb ${DISPLAY} "
 kill_stale "x11vnc .*-rfbport ${RFB}"
 kill_stale "websockify .*:${HTTP} "
+# 上一轮的 dbus-daemon 也要杀。它跟 Xvfb 一样落在 logind 的 session scope 里，stop
+# 杀不到，而它的命令行里没有任何席位标识（`dbus-daemon --fork --session`），按模式找会把
+# 同一员工别的屏的总线一起杀掉。所以按 pid 找：起总线时把 pid 记进席位自己的
+# XDG_RUNTIME_DIR（下面），这里核对一下那个 pid 还是不是我们的 dbus-daemon 再动手——
+# pid 早被回收给别的进程的话就不能杀。不这么做每次重启都多留一个 dbus-daemon。
+DBUS_PIDFILE="$XDG_RUNTIME_DIR/dbus-daemon.pid"
+if [ -f "$DBUS_PIDFILE" ]; then
+  old_pid="$(tr -dc '0-9' < "$DBUS_PIDFILE" 2>/dev/null || true)"
+  if [ -n "$old_pid" ] \
+    && [ "$(ps -o comm= -p "$old_pid" 2>/dev/null | tr -d ' ')" = dbus-daemon ] \
+    && [ "$(ps -o uid= -p "$old_pid" 2>/dev/null | tr -d ' ')" = "$(id -u)" ]; then
+    kill "$old_pid" 2>/dev/null || true
+  fi
+  rm -f "$DBUS_PIDFILE"
+fi
 # 等端口真的松手再往下走，否则新进程照样撞上「address already in use」。
 for _ in $(seq 1 25); do
   if ! (command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ":(${RFB}|${HTTP})\b"); then break; fi
@@ -79,6 +94,13 @@ rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" 2>/dev/null 
 # 所以不问，直接起一条。unset 是必须的：dbus-launch 看到已有地址会直接复用它。
 unset DBUS_SESSION_BUS_ADDRESS
 eval "$(dbus-launch --sh-syntax)"
+# 记下 pid 给下一轮的 kill_stale 用，并且本轮正常收场（Xvfb 退了、或者收到 stop 的
+# SIGTERM）时自己把它带走。TERM 要显式 trap：不 trap 的话 bash 被信号打死，EXIT 那条
+# 跑不到。没选 `dbus-launch --exit-with-session`：它靠 stdin 的 HUP 或 X 连接断开来
+# 判断，而这里 stdin 是 /dev/null、起总线时 Xvfb 还没起来，两条都靠不住。
+printf '%s\n' "${DBUS_SESSION_BUS_PID:-}" > "$DBUS_PIDFILE"
+trap 'kill "${DBUS_SESSION_BUS_PID:-}" 2>/dev/null || true; rm -f "$DBUS_PIDFILE"' EXIT
+trap 'exit 143' TERM
 Xvfb "$DISPLAY" -screen 0 1280x800x24 -ac +extension GLX +render -noreset &
 XVFB_PID=$!
 ready=0
@@ -89,7 +111,15 @@ done
 if [ "$ready" != 1 ]; then echo "X display did not become ready" >&2; exit 1; fi
 hsetroot -solid "#e8e8e8" || xsetroot -solid "#e8e8e8" || true
 PASSFILE="$SEAT_DIR/vnc-passwd"
-x11vnc -display "$DISPLAY" -localhost -rfbauth "$PASSFILE" -shared -forever -noxdamage -rfbport "$RFB" &
+# 口令文件有两种格式，按大小分：deploy-seat.sh 现在直接写明文（口令一行加换行，Gateway
+# 发的口令固定 16 位），x11vnc 用 -passwdfile 读；老席位留下的是 `x11vnc -storepasswd`
+# 生成的 DES 文件，恰好 8 字节、没有换行，还得用 -rfbauth。这样管家升级之后没重铺过
+# 的席位重启照样能连——这份脚本是全机共享的，不能只认新格式。
+if [ "$(stat -c %s "$PASSFILE" 2>/dev/null || echo 0)" = 8 ]; then
+  x11vnc -display "$DISPLAY" -localhost -rfbauth "$PASSFILE" -shared -forever -noxdamage -rfbport "$RFB" &
+else
+  x11vnc -display "$DISPLAY" -localhost -passwdfile "$PASSFILE" -shared -forever -noxdamage -rfbport "$RFB" &
+fi
 NOVNC_WEB="/usr/share/novnc"
 # 只听回环：对外那一跳由管家反代，并且要过 Gateway 签的桌面票。绑 0.0.0.0 会让
 # 6081+N 直接暴露在网上，票就白验了——停用的员工照样能连上桌面。

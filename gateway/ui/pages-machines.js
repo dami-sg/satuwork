@@ -322,10 +322,9 @@ const LOAD_TABS = [
   { key: 'day', label: '日' },
 ]
 
-/** `YYYY-MM-DD`，**本地日历**。不用 toISOString——那是 UTC，晚上八点之后会差一天。 */
+/** `YYYY-MM-DD`，按 **SATU_TZ 的日历**（见 state.js）。不用 toISOString——那是 UTC，会差一天。 */
 function localDateKey(d) {
-  const p = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  return tzDayKey(d.getTime())
 }
 
 /** 当前选的那一天。空 = 今天——不写死进 state，跨了零点也不会僵在昨天。 */
@@ -344,16 +343,15 @@ function loadMinDateOf() {
 }
 
 /**
- * 当前这一档要看的时间范围，**按浏览器本地日历圈**。
+ * 当前这一档要看的时间范围，**按 SATU_TZ 的日历圈**（和 fmtTime、审计/会话的日期
+ * 筛选同一个时区，见 state.js 的 tzDayStart）。
  *
- * 格子在库里是 UTC 整分，「今天」是哪 24 小时只有看的人那本日历说得清。`new Date(y,
- * m-1, d)` 出来就是本地零点，减出来的 epoch 毫秒正是要传给接口的那两个数。
+ * 格子在库里是 UTC 整分，「今天」是哪 24 小时要按同一本日历说。用「下一天的零点」
+ * 而不是 +24h：夏令时那两天一天是 23 或 25 小时。
  */
 function loadRangeOf() {
-  const [y, mo, d] = loadDateOf().split('-').map(Number)
-  const from = new Date(y, mo - 1, d).getTime()
-  // 用「下一天的零点」而不是 +24h：夏令时那两天一天是 23 或 25 小时。
-  return { from, to: new Date(y, mo - 1, d + 1).getTime() }
+  const key = loadDateOf()
+  return { from: tzDayStart(key), to: tzDayStart(key, 1) }
 }
 
 /** 这一屏该拿的那份数据叫什么。换机器、换日期都要换一份，比对靠它。 */

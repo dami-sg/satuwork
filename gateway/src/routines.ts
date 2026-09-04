@@ -28,7 +28,7 @@
  * 因为一次失败就被挪走。哪些失败不补（人按了停止、等结果超时、有交接单挡着），见
  * 下面 `settle` 那一段。
  */
-import type { Db, Routine, RoutineRun, RoutineRunTrigger } from './db.ts'
+import { RoutineBusyError, type Db, type Routine, type RoutineRun, type RoutineRunTrigger } from './db.ts'
 import { nextRunAtOf } from './lib/schedule.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
 import { sweepHandoffs } from './handoff-sweep.ts'
@@ -441,13 +441,20 @@ const LATE_MS = Math.max(60_000, Math.trunc(Number(process.env.GATEWAY_ROUTINE_L
 
 /** 错过的那一次也要留痕：流水上记一条，否则界面上「昨晚没跑」和「跑了没事」长得一样。 */
 async function noteMissed(db: Db, routine: Routine, dueAt: number): Promise<void> {
-  const run = await db.insertRoutineRun({
-    routineId: routine.id,
-    botId: routine.botId,
-    accountId: routine.accountId,
-    companyId: routine.companyId,
-    trigger: 'schedule',
-  })
+  let run: RoutineRun
+  try {
+    run = await db.insertRoutineRun({
+      routineId: routine.id,
+      botId: routine.botId,
+      accountId: routine.accountId,
+      companyId: routine.companyId,
+      trigger: 'schedule',
+    })
+  } catch (e) {
+    // 正有一次在跑（迁移 0035 的唯一索引）：那次会自己收场，「错过」这条留痕就不必了。
+    if (e instanceof RoutineBusyError) return
+    throw e
+  }
   const late = Math.round((Date.now() - dueAt) / 60_000)
   await db.finishRoutineRun(run.id, { status: 'error', error: `错过了这一次（该跑的时候 Gateway 没在跑，已经迟了 ${late} 分钟）` })
 }

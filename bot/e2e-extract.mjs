@@ -4,7 +4,7 @@
  * 样本全是**现场造的**，不放 checked-in 的二进制：二进制样本没人看得懂，改一个字段
  * 就得整个重新生成，而且 review 时只能看见「一坨变了」。
  */
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import JSZip from 'jszip'
@@ -12,6 +12,9 @@ import ExcelJS from 'exceljs'
 import { docKindOf, extractDocument } from './src/workspace/extract.ts'
 
 const dir = mkdtempSync(join(tmpdir(), 'satu-doc-'))
+// 退出时收掉临时目录（和 e2e-memory / e2e-skills 那几个探针同一个写法）：探针是顶层 await 的
+// 脚本，没有一个能包 finally 的函数体；exit 钩子在 process.exit、正常结束和未捕获异常三条路上都会跑。
+process.on('exit', () => { try { rmSync(dir, { recursive: true, force: true }) } catch {} })
 const out = {}
 
 // ── 造一个最小的、带真文字层的 PDF ───────────────────────────────────

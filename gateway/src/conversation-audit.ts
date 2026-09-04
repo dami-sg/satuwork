@@ -18,12 +18,20 @@ function addDays(y: number, mo: number, d: number, n: number) {
   return { year: at.getUTCFullYear(), month: at.getUTCMonth() + 1, day: at.getUTCDate() }
 }
 
-/** 最近若干个已关闭的 8 小时窗口，旧到新。 */
-export function closedAuditWindows(tz: string, now = Date.now(), count = 24): { start: number; end: number }[] {
+/**
+ * 最近若干个已关闭的 8 小时窗口，旧到新。
+ *
+ * `since` 给的是已有水位（coverage.windowEnd）：比它早的窗口本来就会被滤掉，没必要
+ * 先算出几十天的边界再扔——每个边界要过四次 partsIn，这段跑在每个 tick 的每家公司上。
+ */
+export function closedAuditWindows(tz: string, now = Date.now(), count = 24, since?: number): { start: number; end: number }[] {
   // 先让 Intl 验时区；非法值要在设置接口被挡，这里仍不能让整个调度 tick 崩掉。
   const p = partsIn(tz, now)
   const boundaries: number[] = []
-  const daysBack = Math.ceil(Math.max(3, count) / 3) + 3
+  let daysBack = Math.ceil(Math.max(3, count) / 3) + 3
+  // 多退两天：水位所在的那个窗口本身也要在列表里（它是下一个窗口的 start）。
+  // 下限 1 天：最近一个已关闭窗口的起点可能在昨天 17 点，一天都不退会把它漏掉。
+  if (since != null && since > 0) daysBack = Math.max(1, Math.min(daysBack, Math.ceil((now - since) / 86_400_000) + 2))
   for (let delta = -daysBack; delta <= 2; delta++) {
     const day = addDays(p.year, p.month, p.day, delta)
     for (const hour of [1, 9, 17]) boundaries.push(fromZoned(tz, day.year, day.month, day.day, hour, 0))
@@ -36,6 +44,15 @@ export function closedAuditWindows(tz: string, now = Date.now(), count = 24): { 
   }
   return out.slice(-Math.max(1, count))
 }
+
+/**
+ * 「审计模型没配」已经提醒过的公司 → 当时提醒的是哪个角色。
+ *
+ * 审计默认开启而模型未配是新装环境的常态，每 30 秒的 tick 对每个目标各刷一条 error，
+ * 一夜下来日志里全是同一句话。改成每家公司只说一次，配好了就把记忆清掉——再次拆掉配置
+ * 或换了角色时会再提醒一次。
+ */
+const warnedNoModel = new Map<string, string>()
 
 function pickedModel(platform: Awaited<ReturnType<Db['platformSettings']>>, settings: ConversationAuditSettings) {
   const role = settings.modelRole
@@ -66,18 +83,25 @@ async function createScheduledBatches(db: Db, now = Date.now()): Promise<number>
   for (const company of await db.companies()) {
     const settings = (await db.settings(company.id)).conversationAudit
     if (!settings.enabled) continue
+    // 先取各目标的水位：窗口只需要回溯到最老的那条水位，没有水位的目标只看最近一个窗口。
+    const targets: { target: Awaited<ReturnType<Db['conversationAuditTargets']>>[number]; coverage: Awaited<ReturnType<Db['conversationAuditCoverage']>> }[] = []
+    for (const target of await db.conversationAuditTargets(company.id)) {
+      targets.push({ target, coverage: await db.conversationAuditCoverage(target.accountId, target.botId || '') })
+    }
+    const oldest = targets.reduce<number | undefined>((acc, t) => (t.coverage.windowEnd ? Math.min(acc ?? Infinity, t.coverage.windowEnd) : acc), undefined)
     let windows: { start: number; end: number }[]
     try {
       // 停机后的缺口补到保留期边界；更老的摘要即使生成也会立刻过期，没有回填价值。
-      windows = closedAuditWindows(settings.timezone, now, settings.retentionDays * 3 + 3)
+      windows = closedAuditWindows(settings.timezone, now, settings.retentionDays * 3 + 3, oldest)
     } catch (e) {
       console.error(`satuwork-gateway: 公司 ${company.id} 的审计时区不可用：${(e as Error).message}`)
       continue
     }
     const latest = windows.at(-1)
     if (!latest) continue
-    for (const target of await db.conversationAuditTargets(company.id)) {
-      const coverage = await db.conversationAuditCoverage(target.accountId, target.botId || '')
+    const model = pickedModel(platform, settings)
+    if (model) warnedNoModel.delete(company.id)
+    for (const { target, coverage } of targets) {
       // 第一次启用不回填整段历史，只从最近刚关闭的窗口开始；一旦有水位，停机期间的缺口全补。
       const eligible = coverage.windowEnd
         ? windows.filter((w) => w.end > coverage.windowEnd)
@@ -90,9 +114,12 @@ async function createScheduledBatches(db: Db, now = Date.now()): Promise<number>
         // 仍落一个 empty 水位，避免 Gateway 重启后反复检查同一窗口，但不派发 Bot、
         // 不读会话正文，也不会产生模型调用。删除前终审不走这里，不能被该优化绕过。
         const skipEmpty = target.messageCount === 0 || target.updatedAt < window.start
-        const model = pickedModel(platform, settings)
         if (!model && !skipEmpty) {
-          console.error(`satuwork-gateway: 公司 ${company.id} 的审计模型 ${settings.modelRole} 尚未配置`)
+          // 每家公司只说一次（见 warnedNoModel）。
+          if (warnedNoModel.get(company.id) !== settings.modelRole) {
+            warnedNoModel.set(company.id, settings.modelRole)
+            console.warn(`satuwork-gateway: 公司 ${company.id} 的审计模型 ${settings.modelRole} 尚未配置，自动审计暂停，配好后自动恢复`)
+          }
           continue
         }
         const selected = model ?? {
@@ -160,7 +187,12 @@ async function targetHeaders(db: Db, batch: ConversationAuditBatch) {
   }
 }
 
-async function dispatchBatch(db: Db, batch: ConversationAuditBatch): Promise<void> {
+/**
+ * 把任务 POST 给席位。**幂等**：席位对同一个 jobId 回 `accepted`（新接下）/ `running`
+ * （还在跑）/ `cached`（已经跑完，重放结果），都不会再花一次模型费——所以派发和续租
+ * 用的是同一个请求。
+ */
+async function postAuditJob(db: Db, batch: ConversationAuditBatch): Promise<void> {
   const target = await targetHeaders(db, batch)
   const deletion = batch.deletionRequestId ? await db.botDeletion(batch.deletionRequestId) : undefined
   const r = await fetch(target.url, {
@@ -189,7 +221,34 @@ async function dispatchBatch(db: Db, batch: ConversationAuditBatch): Promise<voi
     const body = await r.text().catch(() => '')
     throw new Error(`席位返回 HTTP ${r.status}${body ? ` ${body.slice(0, 160)}` : ''}`)
   }
+}
+
+async function dispatchBatch(db: Db, batch: ConversationAuditBatch): Promise<void> {
+  await postAuditJob(db, batch)
   await db.markConversationAuditProcessing(batch.id, Date.now() + LEASE_MS)
+}
+
+/**
+ * 给还在跑的批次续租。
+ *
+ * 租约只有 10 分钟，而一次审计可能更久（删除前终审先要静默 5 分钟，再加一轮模型）。
+ * 以前没有续租：到期就被 claim 回去、attempts +1、重新派发——席位那头虽然幂等，
+ * 但 attempts 会一路涨上去，界面上看着像反复失败。现在每过 lease/2 问一次席位：
+ * 它还认这个任务（2xx）就把租约再撑满；问不到（席位挂了、机器关了）就什么都不做，
+ * 让租约自然过期走原来的重试路径——续租不能变成给一个死掉的席位无限续命。
+ */
+async function renewProcessingLeases(db: Db, now = Date.now()): Promise<number> {
+  let renewed = 0
+  for (const batch of await db.processingConversationAuditBatches(now + LEASE_MS / 2, DISPATCH_LIMIT)) {
+    try {
+      await postAuditJob(db, batch)
+      await db.markConversationAuditProcessing(batch.id, Date.now() + LEASE_MS)
+      renewed++
+    } catch {
+      // 到期由 claim 那条路接手；这里不记错，免得一台关机的机器每 30 秒刷一条。
+    }
+  }
+  return renewed
 }
 
 async function dispatchDueBatches(db: Db): Promise<number> {
@@ -219,6 +278,7 @@ export async function tickConversationAudits(db: Db): Promise<{ created: number;
     lastPruneAt = now
   }
   const created = await createScheduledBatches(db, now)
+  await renewProcessingLeases(db, now)
   const dispatched = await dispatchDueBatches(db)
   return { created, dispatched }
 }

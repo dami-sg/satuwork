@@ -22,6 +22,32 @@ export const PROBE_TIMEOUT_MS = Number(process.env.E2E_PROBE_TIMEOUT_MS) || 60_0
  * `skippable`：探针可以打印 `__SKIP__<理由>` 表示这台机器上跑不了（如没装 Chrome），
  * 这时返回 `{ skip }` 而不是抛错。
  */
+/** 还没退出的探针进程。detached 之后终端的 Ctrl-C 到不了它们，得由 run.mjs 的 killAll 来收。 */
+const live = new Set()
+
+/**
+ * 按**进程组**杀一个探针。
+ *
+ * 探针自己会再起子进程（e2e-browser 起 Chrome、e2e-process 起 sleep），只杀探针本身
+ * 的话那些孙进程会活下来：Chrome 继续占着调试端口，下一轮跑起来就撞。spawn 时给了
+ * `detached: true`，探针于是是自己进程组的组长，`kill(-pid)` 一次把整组带走。
+ */
+function killGroup(child) {
+  try {
+    process.kill(-child.pid, 'SIGKILL')
+  } catch {
+    try {
+      child.kill('SIGKILL')
+    } catch {}
+  }
+}
+
+/** 把所有还活着的探针（连同它们的子进程）杀掉。run.mjs 收尾时调。 */
+export function killProbes() {
+  for (const child of live) killGroup(child)
+  live.clear()
+}
+
 export function runProbe(root, script, { env, args = [], timeout = PROBE_TIMEOUT_MS, skippable = false } = {}) {
   const file = join(root, script)
   const name = basename(script)
@@ -30,22 +56,27 @@ export function runProbe(root, script, { env, args = [], timeout = PROBE_TIMEOUT
       cwd: dirname(file),
       env: env ? { ...process.env, ...env } : process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // 自成一个进程组：超时时要连它起的子进程一起杀（见 killGroup）。
+      detached: true,
     })
+    live.add(child)
     let out = ''
     let err = ''
     child.stdout.on('data', (d) => (out += d))
     child.stderr.on('data', (d) => (err += d))
     // 挂住的探针必须自己变成一条失败，而不是把整套 e2e 一起拖死。
     const timer = setTimeout(() => {
-      child.kill('SIGKILL')
+      killGroup(child)
       reject(new Error(`探针 ${name} ${Math.round(timeout / 1000)} 秒没跑完\n${err || out}`))
     }, timeout)
     child.on('error', (e) => {
       clearTimeout(timer)
+      live.delete(child)
       reject(e)
     })
     child.on('close', (code) => {
       clearTimeout(timer)
+      live.delete(child)
       const lines = out.split('\n')
       if (skippable) {
         const skip = lines.find((l) => l.startsWith('__SKIP__'))

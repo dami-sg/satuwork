@@ -806,8 +806,10 @@ function usageRangeMs(range) {
   const now = Date.now()
   if (range === '近 7 天') return { from: now - 7 * 24 * 3600 * 1000, to: now }
   if (range === '本月') {
+    // 本地日历的 1 号零点，和 statsWindow() 一个算法：这一屏的日线也是按看的人的
+    // 时区切的（见 loadUsage 传的 tz），月初按 UTC 算的话东八区月初那八小时会算到上个月。
     const d = new Date()
-    return { from: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1), to: now }
+    return { from: new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0).getTime(), to: now }
   }
   return { from: now - 30 * 24 * 3600 * 1000, to: now }
 }
@@ -967,7 +969,7 @@ async function loadPage() {
       await Promise.all([loadBilling(), loadCharges('org')])
     } else if (state.path === '/usage') {
       await reloadUsagePage()
-    } else if (isChatPath(state.path) || (memberChatHome() && state.path === '/')) {
+    } else if (isChatPath(state.path)) {
       await loadChatPage()
     }
   } catch (err) {

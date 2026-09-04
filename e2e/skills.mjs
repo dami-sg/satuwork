@@ -389,5 +389,7 @@ export async function runSkills({ root, gwRoot, test, req, start, waitHttp, asse
     })
   } finally {
     gw.kill('SIGTERM')
+    // 自己的数据目录自己收。
+    rmSync(GW_HOME, { recursive: true, force: true })
   }
 }

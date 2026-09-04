@@ -173,7 +173,8 @@ chown "$LINUX_USER:$LINUX_USER" "$HOME_DIR" "$WORK_DIR" "$HOME_DIR/.satuwork"
 # 席位级：整棵子树都归这个席位，chown -R 只扫它，不扫可能很大的 work/。
 mkdir -p "$SEAT_DIR" "$SEAT_DIR/app" "$SEAT_DIR/bin" "$SEAT_DIR/chrome" "$SEAT_DIR/cache" \
   "$SEAT_DIR/config/picom" "$SEAT_DIR/config/plank/dock1/launchers" "$SEAT_DIR/share/applications"
-# 先归属，后写文件：下面 x11vnc -storepasswd 是以员工身份跑的，目录还归 root 就写不进去。
+# 先归属一次：后面的文件都是 root 写的，最后（step 5 之后）还会整体 chown 一遍，这里
+# 先归属是让中途失败时目录也不至于留成 root 的。
 chown -R "$LINUX_USER:$LINUX_USER" "$SEAT_DIR"
 
 install -m 755 "$SEAT_ASSETS/slim-desktop.sh" /usr/local/bin/slim-desktop.sh
@@ -209,16 +210,14 @@ HTTP=$HTTP
 CDP=$CDP
 WORK_DIR=$WORK_DIR
 EOF_ENV
-# x11vnc 把「stored passwd in file: …」这句**正常输出**打在 stderr 上，直接放行的话它
-# 会混进部署失败时收集的错误里，还恰好排在最前面。但原先是 `>/dev/null 2>&1` 一倒了
-# 之——**成功时安静了，失败时也安静**，于是这一步挂掉的表现是「脚本退出码 1、两个流
-# 一个字都没有」，谁也不知道断在哪。真栽过两次。
-#
-# 改成收进变量：成功就扔掉，失败才打出来。口令要先抹掉——这段话会一路送到浏览器上。
-if ! vnc_out=$(runuser -u "$LINUX_USER" -- x11vnc -storepasswd "$VNC_PASSWORD" "$SEAT_DIR/vnc-passwd" 2>&1); then
-  echo "x11vnc -storepasswd 失败：${vnc_out//"$VNC_PASSWORD"/***}" >&2
-  exit 1
-fi
+# 口令**直接写文件**，不再经 `x11vnc -storepasswd <口令> <文件>`：那样口令挂在命令行上，
+# 这台机器上任何用户 `ps` 一下都看得见（虽然只有一瞬）。x11vnc 的 -storepasswd 没有
+# 从 stdin 读的口子（只给文件名时它走 getpass 找 /dev/tty，runuser 下没有）。所以写成
+# 明文文件（0600、归席位用户，见下面的 chmod），slim-desktop.sh 用 -passwdfile 读它；
+# 老席位留下的 DES 文件那边照旧用 -rfbauth 认，按大小分（DES 文件恰好 8 字节）。
+# 顺带也没了「storepasswd 的正常输出混进错误里」那桩老毛病。
+# 加密强度没有变差：-rfbauth 那个 DES 文件用的是公开的固定密钥，本来就等于明文。
+(umask 077; printf '%s\n' "$VNC_PASSWORD" > "$SEAT_DIR/vnc-passwd")
 printf 'backend = "xrender";\nvsync = false;\nuse-damage = false;\n' > "$SEAT_DIR/config/picom/picom.conf"
 
 step 5 "拷贝 Bot 程序"
