@@ -6,7 +6,7 @@ import { pairingCodeHash } from './channels/pairing.ts'
 import {
   TelegramError, normalizeTelegramCallback, normalizeTelegramUpdate, telegramAnswerCallbackQuery,
   telegramClearApprovalButtons, telegramGetUpdates, telegramJoinedSharedChat, telegramSendApproval,
-  startTelegramTyping, telegramLeaveChat, telegramSendText, telegramSetMyCommands,
+  startTelegramTyping, telegramLeaveChat, telegramSendDraft, telegramSendText, telegramSetMyCommands,
 } from './channels/telegram.ts'
 
 interface StoredSecret { token: string; pairingCode: string }
@@ -36,6 +36,10 @@ const POLL_TIMEOUT_SECONDS = Math.min(50, Math.max(1, Math.trunc(Number(process.
 const POLL_LEASE_MS = (POLL_TIMEOUT_SECONDS + 20) * 1000
 /** 长轮询/API 暂时失败后不要每秒轰 Telegram；429 给的 retry_after 优先。 */
 const POLL_RETRY_MS = Math.max(1000, Math.trunc(Number(process.env.GATEWAY_CHANNEL_POLL_RETRY_MS ?? 5000)))
+/** 草稿与 typing 共用 Telegram 的 live-action 限额；一秒一帧留足突发余量。 */
+const DRAFT_MIN_MS = Math.max(800, Math.trunc(Number(process.env.GATEWAY_TELEGRAM_DRAFT_MIN_MS ?? 1000)))
+/** live draft 约 30 秒失效。工具长时间没产出文字时，在失效前续一帧。 */
+const DRAFT_KEEPALIVE_MS = Math.max(5000, Math.min(25_000, Math.trunc(Number(process.env.GATEWAY_TELEGRAM_DRAFT_KEEPALIVE_MS ?? 20_000))))
 let wakeCurrent: (() => void) | null = null
 /** 本进程已经给哪些存量绑定补过私聊命令菜单。失败不记，下一轮继续试。 */
 const commandsConfigured = new Set<string>()
@@ -86,7 +90,11 @@ async function runSeatTurn(
   db: Db,
   event: ChannelEvent,
   binding: NonNullable<Awaited<ReturnType<Db['channelBinding']>>>,
-  hooks: { onApproval?: (approval: ChannelApprovalSnapshot) => Promise<void>; onRunning?: () => void } = {},
+  hooks: {
+    onApproval?: (approval: ChannelApprovalSnapshot) => Promise<void>
+    onDraft?: (draft: string) => Promise<void>
+    onRunning?: () => void
+  } = {},
 ) {
   const access = await seatAccess(db, binding)
   const deadline = Date.now() + TURN_TIMEOUT_MS
@@ -106,6 +114,7 @@ async function runSeatTurn(
       status?: 'running' | 'approval'
       sessionId?: string
       reply?: string
+      draft?: string
       approval?: ChannelApprovalSnapshot
       error?: string
     } | null
@@ -115,7 +124,10 @@ async function runSeatTurn(
       return { sessionId: data.sessionId, reply: String(data.reply || '').trim() || '已处理，但没有可发送的文本回复。' }
     }
     if (data?.status === 'approval' && data.approval?.key) await hooks.onApproval?.(data.approval)
-    else hooks.onRunning?.()
+    else {
+      if (data?.draft) await hooks.onDraft?.(String(data.draft))
+      hooks.onRunning?.()
+    }
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   throw new Error('席位处理渠道消息超时')
@@ -149,6 +161,16 @@ function quotedMarkdown(value: unknown): string {
   const text = String(value ?? '').replace(/\r\n?/g, '\n')
   if (!text) return '> （空）'
   return text.split('\n').map((line) => line ? `> ${line}` : '>').join('\n')
+}
+
+/** 同一个渠道事件在重试/接管后仍使用同一个非零草稿 id。 */
+function telegramDraftId(value: string): number {
+  let hash = 0x811c9dc5
+  for (const char of value) {
+    hash ^= char.codePointAt(0) || 0
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash & 0x7fffffff) || 1
 }
 
 function emailApprovalDetails(fields: ChannelApprovalField[]): string {
@@ -234,6 +256,13 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
     try {
       if (!reply) {
         let typingWarned = false
+        let draftWarned = false
+        let draftUnsupported = false
+        let draftVisible = false
+        let lastDraft = ''
+        let lastDraftSentAt = 0
+        let nextDraftAt = 0
+        const draftId = telegramDraftId(current.externalEventId)
         let stopTyping: (() => void) | null = null
         const startTyping = () => {
           if (stopTyping) return
@@ -249,13 +278,51 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
           stopTyping?.()
           stopTyping = null
         }
+        const resetDraft = () => {
+          draftVisible = false
+          lastDraft = ''
+          lastDraftSentAt = 0
+          nextDraftAt = 0
+        }
+        const publishDraft = async (draft: string): Promise<boolean> => {
+          const text = String(draft || '').trim()
+          if (!text || draftUnsupported) return false
+          const now = Date.now()
+          const previousStillVisible = draftVisible && now - lastDraftSentAt < 30_000
+          if (now < nextDraftAt) return previousStillVisible
+          if (text === lastDraft && now - lastDraftSentAt < DRAFT_KEEPALIVE_MS) return previousStillVisible
+          try {
+            await telegramSendDraft(secret.token, current.externalConversationId, draftId, text)
+            lastDraft = text
+            lastDraftSentAt = Date.now()
+            nextDraftAt = lastDraftSentAt + DRAFT_MIN_MS
+            draftVisible = true
+            return true
+          } catch (error) {
+            const tg = error instanceof TelegramError ? error : null
+            nextDraftAt = Date.now() + Math.max(DRAFT_MIN_MS, tg?.retryAfterMs || 0)
+            // 两种 draft 方法都不存在时，后面整轮继续用 typing，不要每秒再撞一次 404。
+            if (tg?.method === 'sendMessageDraft' && tg.status === 404) draftUnsupported = true
+            if (!draftWarned) {
+              draftWarned = true
+              console.warn(`satuwork-gateway: Telegram 流式草稿发送失败，继续等待最终回复：${(error as Error).message}`)
+            }
+            draftVisible = previousStillVisible && !draftUnsupported
+            return draftVisible
+          }
+        }
         startTyping()
         let ran: Awaited<ReturnType<typeof runSeatTurn>>
         try {
           ran = await runSeatTurn(db, current, binding, {
-            onRunning: startTyping,
+            onRunning: () => { if (!draftVisible) startTyping() },
+            onDraft: async (draft) => {
+              if (await publishDraft(draft)) pauseTyping()
+            },
             onApproval: async (approval) => {
               pauseTyping()
+              // 发送审批消息会清掉 Telegram 临时草稿；批准后即使正文没变也要重发一帧。
+              resetDraft()
               const latest = await db.channelEvent(current.id)
               if (latest?.approvalKey === approval.key && latest.approvalMessageId != null) return
               const messageId = await telegramSendApproval(

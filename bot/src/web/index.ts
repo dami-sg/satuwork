@@ -25,14 +25,87 @@ export const inject = ['server', 'sessions', 'agents', 'llm', 'storage', 'roster
 export interface Config {
 }
 
+/**
+ * 渠道这一轮目前已经写到哪儿。
+ *
+ * 一步模型调用会先落若干 assistant/chunk，收口时再落一条完整的 assistant/message；
+ * 两份是同一句话，不能直接全拼起来。这里按 step 归并：有完整消息就用完整消息，否则用
+ * 尚未收口的 delta。这样 Telegram 草稿既能跟着当前 token 长，也不会在每一步结束时把
+ * 同一句话重复一遍。
+ */
+export function channelDraft(events: SessionEvent[], eventId: string): string {
+  const start = events.findIndex((event) => {
+    if (event.type !== 'user/message') return false
+    const source = (event.data as { source?: MessageSource }).source
+    return source?.kind === 'plugin' && source.plugin === 'channel' && source.form === eventId
+  })
+  if (start < 0) return ''
+  const turnStart = events.slice(start + 1).find((event) => event.type === 'turn/start')
+  const turn = Number((turnStart?.data as { turn?: unknown } | undefined)?.turn)
+  if (!Number.isFinite(turn)) return ''
+
+  const steps = new Map<number, { chunks: string; settled?: string }>()
+  for (const event of events.slice(start + 1)) {
+    const data = event.data as {
+      turn?: unknown
+      step?: unknown
+      chunk?: { type?: string; text?: unknown }
+      message?: { content?: unknown }
+    }
+    if (Number(data.turn) !== turn) continue
+    const step = Number(data.step)
+    if (!Number.isFinite(step)) continue
+    const row = steps.get(step) || { chunks: '' }
+    if (event.type === 'assistant/chunk' && data.chunk?.type === 'text-delta' && typeof data.chunk.text === 'string') {
+      row.chunks += data.chunk.text
+    } else if (event.type === 'assistant/message') {
+      const content = data.message?.content
+      row.settled = Array.isArray(content)
+        ? content
+          .filter((block): block is { type: 'text'; text: string } =>
+            block?.type === 'text' && typeof block.text === 'string')
+          .map((block) => block.text)
+          .join('')
+        : ''
+    }
+    steps.set(step, row)
+  }
+  return [...steps.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, row]) => row.settled === undefined ? row.chunks : row.settled)
+    .filter((text) => text.trim())
+    .join('\n\n')
+    .trim()
+}
+
 export function apply(ctx: Context, _config: Config = {}) {
 
   interface ChannelSessionRow { sessionId: string; botId: string; bindingId: string; conversationId: string }
   interface ChannelResultRow { sessionId: string; reply: string }
   const channelSessions = ctx.storage.collection<ChannelSessionRow>('channel-sessions')
   const channelResults = ctx.storage.collection<ChannelResultRow>('channel-results')
-  interface ChannelInflightRow { sessionId: string; run: Promise<ChannelResultRow> }
+  interface ChannelInflightRow {
+    sessionId: string
+    eventId: string
+    collecting: boolean
+    events: SessionEvent[]
+    run: Promise<ChannelResultRow>
+  }
   const channelInflight = new Map<string, ChannelInflightRow>()
+
+  // 每条渠道请求只留自己这一轮的事件。202 状态查询因此不必每 500ms 复制并扫描整条长会话。
+  ctx.on('session/event', (sessionId: string, event: SessionEvent) => {
+    for (const active of channelInflight.values()) {
+      if (active.sessionId !== sessionId) continue
+      if (!active.collecting) {
+        if (event.type !== 'user/message') continue
+        const source = (event.data as { source?: MessageSource }).source
+        if (source?.kind !== 'plugin' || source.plugin !== 'channel' || source.form !== active.eventId) continue
+        active.collecting = true
+      }
+      active.events.push(event)
+    }
+  })
 
   const channelKey = (bindingId: string, conversationId: string) => `${bindingId}\u0000${conversationId}`
 
@@ -356,7 +429,10 @@ export function apply(ctx: Context, _config: Config = {}) {
     const key = channelKey(input.bindingId, input.eventId)
     let active = channelInflight.get(key)
     if (!active) {
-      active = { sessionId: '', run: Promise.resolve({ sessionId: '', reply: '' }) }
+      active = {
+        sessionId: '', eventId: input.eventId, collecting: false, events: [],
+        run: Promise.resolve({ sessionId: '', reply: '' }),
+      }
       active.run = runChannelMessage(input, (sessionId) => { active!.sessionId = sessionId })
         .finally(() => channelInflight.delete(key))
       channelInflight.set(key, active)
@@ -376,6 +452,7 @@ export function apply(ctx: Context, _config: Config = {}) {
       res.json({
         status: pending ? 'approval' : 'running',
         sessionId: active.sessionId || undefined,
+        draft: channelDraft(active.events, input.eventId),
         ...(pending ? { approval: { ...pending, key: channelApprovalKey(pending.callId) } } : {}),
       })
     } catch (e) {

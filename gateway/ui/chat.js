@@ -1999,6 +1999,9 @@ async function startChatStream(sessionId, attempt = 0, botId = '') {
             state.chatEvents.push(ev)
           }
           if (!isActive()) continue
+          // replay/done 之前都是历史，不能因为翻到昨天生成过一个网页就突然弹预览。
+          // 只有真正的实时 tool/result 才触发自动打开/刷新。
+          if (sawDone) maybeLivePreview(ev)
           // 重放还在继续：把「静默」判定往后推。**但照画**——合并重绘由 rAF 管，
           // 状态由 paintChat 摁着不会说假话（两处都见重放闸那段说明）。以前这里是
           // 「重放期间一帧都不画」，代价是刷新之后最长四秒屏幕上什么都没有。
@@ -5880,11 +5883,46 @@ function previewKindOf(name, type) {
 /** 文本类不该按图片那个尺度收：一份 2MB 的日志已经没人会在弹窗里读了。 */
 const PREVIEW_TEXT_MAX = 2 * 1024 * 1024
 
-async function openPreview(path, name) {
+/**
+ * 每轮、每个 HTML 只自动打开一次。人把预览关掉之后，这一轮后续 patch 不能又把它顶回来；
+ * 下一轮重新生成同一路径则仍会打开。集合只记最近一小段，避免开几周的标签页只涨不落。
+ */
+const AUTO_PREVIEW_MAX = 200
+const autoPreviewed = new Set()
+
+function rememberAutoPreview(key) {
+  autoPreviewed.add(key)
+  while (autoPreviewed.size > AUTO_PREVIEW_MAX) autoPreviewed.delete(autoPreviewed.values().next().value)
+}
+
+/** 实时产出 HTML 时自动打开；已经打开的任意产出文件被再次写入时自动重载。 */
+function maybeLivePreview(event) {
+  if (!event || event.type !== 'tool/result' || !state.chatSessionId) return false
+  const data = event.data || {}
+  const files = Array.isArray(data.files) ? data.files.filter((file) => file && file.path) : []
+  if (!files.length) return false
+  const current = state.preview
+  if (current) {
+    const changed = files.find((file) => file.path === current.path)
+    if (!changed) return false
+    void openPreview(changed.path, changed.name || current.name || changed.path, { mode: current.mode })
+    return true
+  }
+  const html = files.find((file) => previewKindOf(file.name || file.path, '') === 'html')
+  if (!html) return false
+  const key = `${state.chatSessionId}:${Number(data.turn) || 0}:${html.path}`
+  if (autoPreviewed.has(key)) return false
+  rememberAutoPreview(key)
+  void openPreview(html.path, html.name || html.path)
+  return true
+}
+
+async function openPreview(path, name, options = {}) {
   if (!state.chatSessionId) return
   revokePreview()
   const kind = previewKindOf(name || path, '')
-  state.preview = { path, name, loading: true, url: '', type: '', size: 0, error: '', kind, mode: 'view' }
+  const mode = options.mode === 'source' ? 'source' : 'view'
+  state.preview = { path, name, loading: true, url: '', type: '', size: 0, error: '', kind, mode }
   render()
   const url = '/runtime/sessions/' + encodeURIComponent(state.chatSessionId) + '/files?path=' + encodeURIComponent(path)
   const ac = new AbortController()
@@ -5920,21 +5958,21 @@ async function openPreview(path, name) {
     if (!k || (size && size > cap)) {
       ac.abort()
       if (!state.preview || state.preview.path !== path) return
-      state.preview = { path, name, loading: false, url: '', type, size, error: '', kind: k, mode: 'view', tooBig: true }
+      state.preview = { path, name, loading: false, url: '', type, size, error: '', kind: k, mode, tooBig: true }
       render()
       return
     }
     if (k === 'doc') {
       const blob = await res.blob()
       if (!state.preview || state.preview.path !== path) return
-      state.preview = { path, name, loading: false, url: '', type, size: blob.size, error: '', kind: k, mode: 'view', docLoading: true }
+      state.preview = { path, name, loading: false, url: '', type, size: blob.size, error: '', kind: k, mode, docLoading: true }
       render()
       void fetchDocText(path, name)
       return
     }
     const blob = await res.blob()
     if (!state.preview || state.preview.path !== path) return
-    const next = { path, name, loading: false, url: '', type, size: blob.size, error: '', kind: k, mode: 'view' }
+    const next = { path, name, loading: false, url: '', type, size: blob.size, error: '', kind: k, mode }
     if (k === 'markdown' || k === 'html' || k === 'text') {
       next.text = await blob.text()
       // HTML 要一个**自称 text/html** 的 blob，iframe 才会当页面渲染。原始响应是
@@ -5956,7 +5994,7 @@ async function openPreview(path, name) {
   } catch (err) {
     if (ac.signal.aborted) return
     if (!state.preview || state.preview.path !== path) return
-    state.preview = { path, name, loading: false, url: '', type: '', size: 0, error: err.message, kind, mode: 'view' }
+    state.preview = { path, name, loading: false, url: '', type: '', size: 0, error: err.message, kind, mode }
   }
   render()
   // 刚画出来的 Markdown 里可能有代码块 / 公式 / mermaid，和聊天气泡一样要过一遍。
