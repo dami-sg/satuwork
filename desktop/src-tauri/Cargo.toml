@@ -12,8 +12,14 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 # 站外链接交给系统浏览器——壳子里没有地址栏，跳出去就回不来了。
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+flate2 = "1"
+tar = "0.4"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+sha2 = "0.10"
 
 # 壳子不该有调试符号那么大。桌面包是用户下载的东西，几 MB 和几十 MB 的区别他们看得见。
 [profile.release]

@@ -9,7 +9,7 @@ import { accessUrlFor } from '../lib/catalog.ts'
 import { bodyOf, intField, strField } from '../lib/validate.ts'
 import { installScript } from '../install.ts'
 import { proxyJson, proxySse } from '../lib/runtime.ts'
-import { parseBotVersion, publicBotRelease, storeUploadedRelease } from '../releases.ts'
+import { localBotReleaseTarget, parseBotVersion, publicBotRelease, storeUploadedRelease } from '../releases.ts'
 import { requireOrgUser, requireOwnerUser, requireReleaseAuthor } from '../lib/guards.ts'
 import { MANAGER_VACUUM_TIMEOUT_MS, MAX_LOG_CAP_MB, METRIC_RETENTION_MS, MINUTE_MS } from '../lib/telemetry.ts'
 import { signDesktopTicket } from '../crypto.ts'
@@ -936,6 +936,43 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
     json(res, 200, { release: publicBotRelease(release, gatewayBaseFor(req)) })
   })
 
+  // ── Desktop 本地 Bot 发布包。按 darwin/windows/linux + x64/arm64 分开。──
+
+  router.get('/platform/local-bot-releases', async (req, res) => {
+    await requireReleaseAuthor(req, db, keys)
+    const releases = await db.botReleases('local-bot')
+    json(res, 200, {
+      releases: releases.map((r) => publicBotRelease(r, gatewayBaseFor(req))),
+      latestByTarget: Object.fromEntries(releases.flatMap((release) => {
+        const target = localBotReleaseTarget(release.version)
+        if (!target) return []
+        const key = `${target.platform}-${target.arch}`
+        return releases.find((row) => {
+          const candidate = localBotReleaseTarget(row.version)
+          return candidate && `${candidate.platform}-${candidate.arch}` === key
+        }) === release ? [[key, release.version]] : []
+      })),
+    })
+  })
+
+  router.putRaw('/platform/local-bot-releases/:version', async (req, res) => {
+    const accountId = await requireReleaseAuthor(req, db, keys)
+    const version = parseBotVersion(req.params.version)
+    if (!localBotReleaseTarget(version)) {
+      throw new HttpError(400, '本地 Bot 版本必须带 darwin/windows/linux 与 x64/arm64 目标后缀')
+    }
+    const note = (req.query.get('note') || '').trim()
+    const sha256 = String(req.headers['x-bot-sha256'] || '').trim()
+    const release = await storeUploadedRelease(db, {
+      version, note, body: req, sha256, kind: 'local-bot',
+    })
+    await db.audit({
+      companyId: '', accountId: accountId || null, action: 'local-bot-release.upload',
+      detail: { version: release.version, sha256: release.sha256, size: release.size },
+    })
+    json(res, 200, { release: publicBotRelease(release, gatewayBaseFor(req)) })
+  })
+
   /**
    * 替某个席位签一张桌面票。owner 的支持入口——员工那边打不开桌面时，不用去问
    * VNC 口令，也不用登机器。
@@ -1014,6 +1051,18 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
   router.post('/platform/manager-releases', async (req, res) => {
     await requireReleaseAuthor(req, db, keys)
     json(res, 201, { release: publicBotRelease(await registerFromBody(db, req, 'manager'), gatewayBaseFor(req)) })
+  })
+
+  router.post('/platform/local-bot-releases', async (req, res) => {
+    await requireReleaseAuthor(req, db, keys)
+    const body = bodyOf(req)
+    const version = strField(body, 'version')
+    if (!localBotReleaseTarget(version)) {
+      throw new HttpError(400, '本地 Bot 版本缺少平台与架构后缀')
+    }
+    json(res, 201, {
+      release: publicBotRelease(await registerFromBody(db, req, 'local-bot'), gatewayBaseFor(req)),
+    })
   })
 
   /**

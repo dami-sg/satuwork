@@ -882,6 +882,65 @@ export async function runMachineDeploy({ gwRoot, test, req, start, waitHttp, ass
       assert(bad.status === 401, `bogus token ${bad.status}`)
     })
 
+    await test('Desktop local-bot 包按平台上传、探测并用 sat_ 下载', async () => {
+      const version = '1.0.0+desktop-darwin-arm64'
+      const sha = sha256Of(goodPack)
+      const uploaded = await req(
+        gwBase,
+        'PUT',
+        `/platform/local-bot-releases/${encodeURIComponent(version)}?note=desktop`,
+        { token: PLATFORM_TOK, raw: goodPack, headers: { 'x-bot-sha256': sha } },
+      )
+      assert(uploaded.status === 200, `local upload ${uploaded.status} ${uploaded.text}`)
+      assert(uploaded.json.release.kind === 'local-bot', `kind ${uploaded.json.release.kind}`)
+      assert(
+        existsSync(join(GW_HOME, 'releases', `local-bot-${version}.tgz`)),
+        'Desktop 本地运行时包没落盘',
+      )
+
+      const detail = await req(gwBase, 'GET', `/platform/accounts/${memberId}`, { token: ownerTok })
+      const seatAccess = detail.json.accessToken
+      assert(String(seatAccess).startsWith('sat_'), '没有席位 access token')
+      const manifest = await req(
+        gwBase,
+        'GET',
+        '/runtime/local-bot-release?platform=darwin&arch=arm64&have=old',
+        { token: seatAccess },
+      )
+      assert(manifest.status === 200, `manifest ${manifest.status} ${manifest.text}`)
+      assert(manifest.json.version === version, `manifest version ${manifest.json.version}`)
+      assert(manifest.json.sha256 === sha, 'manifest sha256')
+      assert(manifest.json.size === goodPack.length, 'manifest size')
+
+      const downloaded = await fetch(manifest.json.url, {
+        headers: { authorization: `Bearer ${seatAccess}` },
+      })
+      if (downloaded.status !== 200) {
+        assert(false, `local download ${downloaded.status} ${manifest.json.url}: ${await downloaded.text()}`)
+      }
+      assert(Buffer.compare(Buffer.from(await downloaded.arrayBuffer()), goodPack) === 0, '下载字节不一致')
+
+      const current = await req(
+        gwBase,
+        'GET',
+        `/runtime/local-bot-release?platform=darwin&arch=arm64&have=${encodeURIComponent(version)}`,
+        { token: seatAccess },
+      )
+      assert(current.status === 204, `已有最新版应是 204，实际 ${current.status}`)
+      const other = await req(gwBase, 'GET', '/runtime/local-bot-release?platform=linux&arch=x64', {
+        token: seatAccess,
+      })
+      assert(other.status === 204, `没有当前目标包应是 204，实际 ${other.status}`)
+    })
+
+    await test('Desktop local-bot 发布拒绝缺少目标后缀的版本', async () => {
+      const r = await req(gwBase, 'PUT', '/platform/local-bot-releases/1.0.1', {
+        token: PLATFORM_TOK,
+        raw: goodPack,
+      })
+      assert(r.status === 400, `错误目标版本 ${r.status} ${r.text}`)
+    })
+
     /**
      * 桌面反代：`/desktop/:seatId/*` → 管家的 noVNC。
      *

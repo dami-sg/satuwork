@@ -110,7 +110,10 @@ async function runConfirm() {
       await loadRuntimeBots().catch(() => {})
       // 删的正是当前对话的那个 Bot 时，正文、会话、桌面和它的流都得跟着走（见
       // chat.js 的 forgetChatBot）。「终审中、稍后自动删」那种它还在名单上，先留着。
-      if (!(state.runtimeBots || []).some((b) => b.id === c.id)) forgetChatBot(c.id)
+      if (!(state.runtimeBots || []).some((b) => b.id === c.id)) {
+        forgetChatBot(c.id)
+        if (window.__SATUWORK_LOCAL_BOT__?.stop) void window.__SATUWORK_LOCAL_BOT__.stop(c.id).catch(() => {})
+      }
       flashDeletedBot(data)
       go('/')
       return
@@ -1035,7 +1038,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
     return
   }
   if (act === 'new-bot') {
-    state.newBot = { name: '', description: '', extraPrompt: '', icon: 'c-bot' }
+    state.newBot = { name: '', description: '', extraPrompt: '', icon: 'c-bot', runtimeKind: 'remote' }
     state.newBotError = ''
     render()
     return
@@ -1071,6 +1074,7 @@ document.getElementById('app').addEventListener('click', async (e) => {
         description: f.description.trim(),
         extraPrompt: f.extraPrompt.trim(),
         icon: f.icon,
+        runtimeKind: f.runtimeKind === 'local' ? 'local' : 'remote',
       })
       state.newBot = null
       state.busy = false
@@ -1087,7 +1091,14 @@ document.getElementById('app').addEventListener('click', async (e) => {
        * 只是这会儿没机器可装（公司还没配机器、没发布过版本、槽位满了）。那一屏上
        * 「还没有部署」底下的那行小字就是给这句话留的。
        */
-      state.deployHint = data.deploy && !data.deploy.started ? data.deploy.error || '' : ''
+      state.deployHint = data.deploy && !data.deploy.started && !data.deploy.local ? data.deploy.error || '' : ''
+      if (data.bot.runtimeKind === 'local') {
+        try {
+          await startDesktopLocalBot(data.bot.id)
+        } catch (err) {
+          state.deployHint = err instanceof Error ? err.message : String(err || t('本地 Bot 启动失败', 'Could not start the local bot'))
+        }
+      }
       await loadRuntimeBots().catch(() => {})
       // 直接进它的对话页：装好之后那一页会自己变成对话（见 chat.js 的 ensureDeployWatch）。
       go('/a/' + data.bot.id)
@@ -1096,6 +1107,34 @@ document.getElementById('app').addEventListener('click', async (e) => {
       state.busy = false
       render()
     }
+    return
+  }
+  if (act === 'local-bot-start') {
+    const id = btn.getAttribute('data-bot') || chatBotIdOf(state.path)
+    if (!id) return
+    try {
+      const status = await startDesktopLocalBot(id)
+      if (!(status && status.runtimeUpdateError)) state.deployHint = ''
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      await loadRuntimeBots()
+      await ensureChatSession(id).catch(() => {})
+    } catch (err) {
+      state.deployHint = err instanceof Error ? err.message : String(err || t('本地 Bot 启动失败', 'Could not start the local bot'))
+    }
+    render()
+    return
+  }
+  if (act === 'local-dir-approve') {
+    const id = btn.getAttribute('data-bot') || chatBotIdOf(state.path)
+    const bridge = window.__SATUWORK_LOCAL_BOT__
+    if (!id || !bridge || typeof bridge.approveDirectory !== 'function') return
+    try {
+      const approved = await bridge.approveDirectory(id)
+      if (approved) flash('ok', t(`已批准。Bot 可通过 ${approved.mount} 访问这个文件夹。`, `Approved. The bot can access it at ${approved.mount}.`))
+    } catch (err) {
+      flash('err', err instanceof Error ? err.message : String(err || t('没有批准这个文件夹', 'The folder was not approved')))
+    }
+    render()
     return
   }
   if (act === 'bot-list-enabled') {
@@ -2256,6 +2295,9 @@ document.getElementById('app').addEventListener('input', (e) => {
   const nb = el.getAttribute('data-newbot')
   if (nb && state.newBot) {
     state.newBot = { ...state.newBot, [nb]: el.value }
+    // 名字、简介这些文字框不能边输入边重画，否则光标会丢；运行位置是一次性的
+    // 单选，边框、圆点和底部动作文案都要在点击这一拍同步切换。
+    if (nb === 'runtimeKind') render()
     return
   }
   const botField = el.getAttribute('data-bot')

@@ -411,6 +411,12 @@ function runForeground(command: string, cwd: string, timeoutMs: number, abort?: 
 }
 
 export function apply(ctx: Context, config: Config = {}) {
+  // 本地 Bot 的文件工具受 workspace.resolve() 约束；真 shell 可以 `cd /` 绕过它。
+  // 在 OS 沙箱与“跨目录批准”代理完成前，本地模式不注册 terminal/process。
+  if ((process.env.SATUWORK_RUNTIME_KIND || '').trim() === 'local') {
+    ctx.logger?.info?.('terminal: 本地 Bot 已禁用 shell，只开放受工作区约束的文件工具')
+    return
+  }
   const resolveIn = (path?: string) => ctx.workspace.resolve(path)
   const show = (path: string) => ctx.workspace.show(path)
   const defaultTimeout = Math.min(Math.max(1, Math.trunc(config.timeout || DEFAULT_TIMEOUT)), MAX_TIMEOUT)

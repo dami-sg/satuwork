@@ -191,7 +191,7 @@ function chatRosterNav() {
             ${/* 状态点在名字**前面**：一列对齐的点，扫一眼就知道哪几个在动，
                  不用把视线甩到行尾去找。 */ ''}
             <span class="satu-botdot" data-state="${sum.state}" title="${esc(botStateLabel(sum.state))}" aria-label="${esc(botStateLabel(sum.state))}"></span>
-            <span class="satu-botname">${esc(b.name || b.id)}</span>
+            <span class="satu-botname">${esc(b.name || b.id)}${b.runtimeKind === 'local' ? ` <span class="satu-localtag" data-compact>${t('本地', 'Local')}</span>` : ''}</span>
             ${/* 「有事等你」的图标。一颗 8px 的点在一列名字里太容易滑过去，而这一格说的
                  是「你不点它就一直停在那儿」——确认那一路是真的有一轮停在席位上等着。 */ ''}
             <span class="satu-botneed" data-need="${esc(sum.need || '')}" title="${esc(botNeedLabel(sum.need))}" aria-label="${esc(

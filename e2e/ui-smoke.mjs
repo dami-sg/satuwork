@@ -90,6 +90,48 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(/\nboot\(\)\s*$/.test(last), `最后一个分片 ${parts[parts.length - 1]} 末尾没有 boot()`)
     })
 
+    await test('Desktop 本地命令权限覆盖带端口的开发 Gateway', async () => {
+      // URLPattern 里省略端口不是「任意端口」，而是只认协议默认端口。开发环境固定会
+      // 带 localhost:3080；这里不钉住的话 capability 看着有 http://*，invoke 仍会被拒。
+      const cap = JSON.parse(readFileSync(join(root, 'desktop/src-tauri/capabilities/remote.json'), 'utf8'))
+      const urls = cap.remote?.urls || []
+      const allowed = (url) => urls.some((pattern) => new URLPattern(pattern).test(url))
+      assert(allowed('http://localhost:3080/'), `Desktop 权限不匹配开发地址：${JSON.stringify(urls)}`)
+      assert(allowed('https://gateway.example:8443/'), `Desktop 权限不匹配 HTTPS 自定义端口：${JSON.stringify(urls)}`)
+      assert(!allowed('file:///tmp/x'), '本地 Bot 命令权限不该放给 file: 页面')
+    })
+
+    await test('桌面端关窗后恢复登录，浏览器仍只保留当前标签页', async () => {
+      const key = 'satuwork.gateway.token'
+
+      // 网页版的边界不变：票仍只写 sessionStorage。
+      const browser = loadApp({ appPath, base: gwBase })
+      browser.setToken('browser-token')
+      assert(browser.sessionStorage.getItem(key) === 'browser-token', '网页版没有把票写进 sessionStorage')
+      assert(browser.localStorage.getItem(key) == null, '网页版不该变成长期登录')
+
+      // 桌面端登录后，关掉窗口会丢掉 sessionStorage；用同一份持久存储重开仍应拿回票。
+      const first = loadApp({ appPath, base: gwBase, desktop: true })
+      first.setToken('desktop-token')
+      assert(first.sessionStorage.getItem(key) == null, '桌面票不该只留在会随关窗消失的 sessionStorage')
+      assert(first.localStorage.getItem(key) === 'desktop-token', '桌面票没有写进持久存储')
+      const reopened = loadApp({
+        appPath,
+        base: gwBase,
+        desktop: true,
+        persistentStorage: first.localStorage,
+      })
+      assert(reopened.token() === 'desktop-token', '桌面窗口重开后没有恢复登录票')
+      reopened.clearToken()
+      assert(reopened.localStorage.getItem(key) == null, '显式退出后持久票没有清掉')
+
+      // 已经开着的旧版桌面页会有一张 sessionStorage 票；升级后第一次读取应无感迁移。
+      const legacy = loadApp({ appPath, base: gwBase, desktop: true, token: 'legacy-token' })
+      assert(legacy.token() === 'legacy-token', '旧桌面会话的登录票没有被读取')
+      assert(legacy.localStorage.getItem(key) === 'legacy-token', '旧桌面会话的登录票没有迁到持久存储')
+      assert(legacy.sessionStorage.getItem(key) == null, '迁移后 sessionStorage 里还留着重复票')
+    })
+
     await test('空壳工具调用不画成药丸，它的结果也不许赖到别人头上', async () => {
       // bot 那边的下标错位已经修了（见 e2e/toolcalls.mjs），但**已经写下的日志里还留着**：
       // 翻上去看昨天那轮，每轮开头挂一颗红色的「tool · 失败」，点开里面什么都没有。
@@ -397,6 +439,34 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(said.some((t) => t.includes('转人工交还')), `交还那条被滤掉了：${JSON.stringify(said)}`)
     })
 
+    await test('交接卡：按钮真的派发请求，失败不能静默成“点不动”', async () => {
+      /**
+       * 以前只断言 handoffHtml 里存在 data-act，没真正向 #app 派发 click。于是按钮画得
+       * 完全正常，但失败分支只改 state.error、不 render，用户看到的就是点了没反应。
+       */
+      const calls = []
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: 'ui-handoff-token',
+        fetchImpl: async (path, init) => {
+          calls.push({ path, method: init?.method || 'GET' })
+          return new Response(JSON.stringify({ error: '席位没应答：测试断线' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          })
+        },
+      })
+      ui.app.innerHTML = 'before-click'
+      await ui.fire('click', el('button', { 'data-act': 'chat-handoff-claim', 'data-id': 'h-click' }))
+      assert(
+        calls.some((c) => c.method === 'POST' && c.path === '/runtime/handoffs/h-click/claim'),
+        `点击没有进入转人工接口：${JSON.stringify(calls)}`,
+      )
+      assert(ui.state.error.includes('席位没应答'), `失败原因没有留下：${ui.state.error}`)
+      assert(ui.html() !== 'before-click', '失败后没有重绘，界面仍表现成按钮点不动')
+    })
+
     await test('交接卡：中间隔了几轮对话，也还是同一张卡', async () => {
       /**
        * 一张单的后续状态常常隔几小时才来，那时人多半又跟 Bot 说过话——「当前这一块」
@@ -657,6 +727,24 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.state.runtimeBots = [{ id: 'b1', name: '小满', runtime: { status: 'ready' } }]
       assert(ui.liveLamp(false).text === '在线', '字段缺席时被猜成了失联')
       assert(ui.machineDownBanner() === '', '字段缺席时弹了失联横幅')
+
+      // 本地 Bot 不装远程桌面。隧道在线就是「本机运行中」，不能因为 desktopRuntime
+      // 为空而显示离线；真停了也说「本机未运行」，不冒充远程机器失联。
+      ui.state.desktopRuntime = null
+      ui.state.runtimeBots = [{
+        id: 'b1', name: '小满', runtimeKind: 'local',
+        runtime: { kind: 'local', status: 'ready', machineLink: 'online' },
+      }]
+      assert(ui.liveLamp(false).text === '本机运行中', `本地隧道在线却显示「${ui.liveLamp(false).text}」`)
+      assert(ui.liveLamp(false).state === '1', '本地隧道在线没有使用绿色在线态')
+      assert(ui.liveLamp(true).state === 'busy', '本地 Bot 工作时没有进入正在处理态')
+      ui.render()
+      assert(ui.html().includes('class="satu-localtag">本地 Bot</span>'), '会话顶栏没有醒目的本地 Bot 徽标')
+      assert(ui.html().includes('class="satu-localtag" data-compact>本地</span>'), '侧栏没有本地徽标')
+
+      ui.state.runtimeBots[0].runtime = { kind: 'local', status: 'none', machineLink: 'offline' }
+      assert(ui.liveLamp(false).text === '本机未运行', `本地 Bot 停止后显示「${ui.liveLamp(false).text}」`)
+      assert(ui.machineDownBanner() === '', '本地 Bot 停止后不该弹远程机器失联横幅')
     })
 
     await test('建完 Bot 那一屏：说得出在装第几步、装了多久，装好之前不给按钮', async () => {
@@ -1582,6 +1670,56 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       const html = ui.html()
       assert(!html.includes('UI-SMOKE-上一个人说的'), '登出后页面上还留着上一个人的对话')
       assert(!html.includes('UI-SMOKE-没发出去的草稿'), '登出后页面上还留着上一个人的草稿')
+    })
+
+    await test('新建 Bot 的运行位置：选哪个，红框和按钮就跟到哪个', async () => {
+      const ui = loadApp({ appPath, base: gwBase, token: adminToken, desktop: true })
+      await ui.boot()
+      await ui.fire('click', el('button', { 'data-act': 'new-bot' }))
+
+      const selected = (html, value) => new RegExp(
+        `<label class="satu-card" style="[^"]*border-color:var\\(--primary\\)[^"]*;">\\s*<input[^>]*value="${value}"[^>]*checked`,
+      ).test(html)
+
+      assert(selected(ui.html(), 'remote'), '默认选远程时，红框没有落在远程 Bot')
+      await ui.fire('input', el('input', { 'data-newbot': 'runtimeKind' }, 'local'))
+      assert(ui.state.newBot.runtimeKind === 'local', '点击本地后，表单值没有切到本地')
+      assert(selected(ui.html(), 'local'), '点击本地后，红框没有切到本地 Bot')
+      assert(ui.html().includes('创建并启动'), '点击本地后，底部按钮没有同步切换')
+
+      await ui.fire('input', el('input', { 'data-newbot': 'runtimeKind' }, 'remote'))
+      assert(selected(ui.html(), 'remote'), '切回远程后，红框没有回到远程 Bot')
+      assert(ui.html().includes('创建并安装'), '切回远程后，底部按钮没有同步切换')
+    })
+
+    await test('本地 Bot 启动失败要把真实原因画出来，不能永远停在等待 Desktop', async () => {
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        desktop: true,
+        localBotBridge: {
+          start: async () => { throw new Error('本地 Bot 启动后立即退出：测试日志') },
+        },
+        fetchImpl: async (path) => {
+          if (path === '/runtime/bots/local-1/local-bootstrap') {
+            return new Response(JSON.stringify({
+              botId: 'local-1', gatewayUrl: gwBase, accessToken: 'sat_test', apiKey: 'sk_sw_test',
+            }), { status: 200, headers: { 'content-type': 'application/json' } })
+          }
+          return new Response(JSON.stringify({ error: `unexpected ${path}` }), {
+            status: 404, headers: { 'content-type': 'application/json' },
+          })
+        },
+      })
+      ui.state.path = '/a/local-1'
+      ui.state.runtimeBots = [{
+        id: 'local-1', name: 'Mac 助手', runtimeKind: 'local',
+        runtime: { kind: 'local', status: 'none', machineLink: 'offline' },
+      }]
+      await ui.fire('click', el('button', { 'data-act': 'local-bot-start', 'data-bot': 'local-1' }))
+      assert(ui.state.deployHint.includes('启动后立即退出'), `启动原因没有留下：${ui.state.deployHint}`)
+      assert(ui.chatDeployPrompt('local-1').includes('启动后立即退出'), '启动原因没有画在等待卡片上')
     })
 
     await test('Bot 名单在非对话页也要在——它是顶层导航，不是对话页的附属', async () => {

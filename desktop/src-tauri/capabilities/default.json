@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "setup",
-  "description": "只给打进包里的「连服务器」那一屏。主窗口装的是远端页面，不在这张名单里——它拿不到任何 Tauri 命令。",
+  "description": "只给打进包里的「连服务器」设置页，允许它读取和保存 Gateway 地址。",
   "windows": ["setup"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "setup-commands"]
 }

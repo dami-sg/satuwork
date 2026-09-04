@@ -1,7 +1,9 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { lookup } from 'node:dns/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { delimiter, join } from 'node:path'
 import { satuworkHome } from '../home.ts'
 import { childEnv } from '../workspace/index.ts'
 import { blockedHost, hostOf, privateAddress, siteAllowed, type ActionContext } from '../policy/browser.ts'
@@ -38,6 +40,50 @@ export interface Config {
    * 松掉的只有「域名解析到内网」这一种（探针靠 --host-resolver-rules 造出这种情况）。
    */
   trustPrivateAddresses?: boolean
+}
+
+/**
+ * Desktop 本地 Bot 使用本机浏览器；远程席位仍走部署好的 seat-chrome。
+ *
+ * 优先认显式覆盖，方便公司统一安装在非标准位置。其余候选只挑已经存在的可执行文件，
+ * 不在这里运行 `which` / shell，避免浏览器路径变成一段可执行命令。
+ */
+export function localBrowserExecutable(): string | null {
+  const override = process.env.SATUWORK_CHROME?.trim()
+  if (override) return existsSync(override) ? override : null
+
+  const names =
+    process.platform === 'win32'
+      ? ['chrome.exe', 'msedge.exe', 'chromium.exe']
+      : ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
+  const onPath = names.flatMap((name) =>
+    (process.env.PATH || '').split(delimiter).filter(Boolean).map((dir) => join(dir, name)),
+  )
+  const candidates =
+    process.platform === 'darwin'
+      ? [
+          '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+          join(homedir(), 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+          '/Applications/Chromium.app/Contents/MacOS/Chromium',
+          join(homedir(), 'Applications/Chromium.app/Contents/MacOS/Chromium'),
+          '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+          ...onPath,
+        ]
+      : process.platform === 'win32'
+        ? [
+            ...(process.env.PROGRAMFILES
+              ? [join(process.env.PROGRAMFILES, 'Google/Chrome/Application/chrome.exe')]
+              : []),
+            ...(process.env['PROGRAMFILES(X86)']
+              ? [join(process.env['PROGRAMFILES(X86)'], 'Google/Chrome/Application/chrome.exe')]
+              : []),
+            ...(process.env.LOCALAPPDATA
+              ? [join(process.env.LOCALAPPDATA, 'Google/Chrome/Application/chrome.exe')]
+              : []),
+            ...onPath,
+          ]
+        : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', ...onPath]
+  return candidates.find((candidate) => existsSync(candidate)) ?? null
 }
 
 /** 一次动作之后等页面消化多久。够 SPA 跑完一轮渲染，又不至于每一步都明显卡一下。 */
@@ -154,6 +200,8 @@ export class BrowserService extends Service {
 
   readonly port: number
   private readonly trustPrivate: boolean
+  /** 只有本地 Bot 才由本服务拉起浏览器；远程席位的 Chrome 不归 Bot 生命周期管理。 */
+  private localBrowser: ChildProcess | null = null
   private cdp: Cdp | null = null
   private sessionId = ''
   private targetId = ''
@@ -296,27 +344,56 @@ export class BrowserService extends Service {
     }
   }
 
-  /**
-   * 把席位上那个 Chrome 拉起来。
-   *
-   * **走包装脚本，不自己拼命令行。** 脚本里的 flags 和 `--user-data-dir` 必须和员工
-   * 点 dock 那一格时**完全一致**：同一个 profile 上起第二个 Chrome 不会真的启动，
-   * 它会把请求转给第一个实例然后自己退出。flags 分叉的表现是「Bot 开的窗口没有 CDP」，
-   * 而那件事从日志上看跟「浏览器没装」一模一样。
-   */
+  /** 拉起浏览器。本地 Bot 用本机 Chrome 和独立 profile；远程席位保持原来的 wrapper。 */
   private async launch(): Promise<void> {
-    const wrapper = satuworkHome('bin/seat-chrome')
-    if (!existsSync(wrapper)) {
-      throw new CdpError(
-        `这个席位上没有浏览器可用（找不到 ${wrapper}）。桌面那套没部署，或者机器上装不上 Chrome。`,
-      )
+    if ((process.env.SATUWORK_RUNTIME_KIND || '').trim() === 'local') {
+      const executable = localBrowserExecutable()
+      if (!executable) {
+        const override = process.env.SATUWORK_CHROME?.trim()
+        throw new CdpError(
+          override
+            ? `本机浏览器路径不存在：${override}。请修正 SATUWORK_CHROME。`
+            : '本机没有找到 Chrome、Chromium 或 Edge，安装其中一个后即可使用浏览器工具。',
+        )
+      }
+      const profile = satuworkHome('browser', 'chrome')
+      mkdirSync(profile, { recursive: true })
+      const args = [
+        `--remote-debugging-port=${this.port}`,
+        '--remote-debugging-address=127.0.0.1',
+        `--user-data-dir=${profile}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--new-window',
+        'about:blank',
+      ]
+      const child = spawn(executable, args, { stdio: 'ignore', env: childEnv() })
+      this.localBrowser = child
+      child.once('exit', () => {
+        if (this.localBrowser === child) this.localBrowser = null
+      })
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve)
+        child.once('error', (error) => reject(new CdpError(`启动本机浏览器失败：${error.message}`)))
+      })
+    } else {
+      const wrapper = satuworkHome('bin/seat-chrome')
+      if (!existsSync(wrapper)) {
+        throw new CdpError(
+          `这个席位上没有浏览器可用（找不到 ${wrapper}）。桌面那套没部署，或者机器上装不上 Chrome。`,
+        )
+      }
+      // env 用剔过凭据的副本（见 workspace 的 childEnv）：Chrome 及它拉起的一切都不该
+      // 看到 GATEWAY_TOKEN 这类东西。包装脚本自己不读 SATUWORK_*，DISPLAY / HOME 都还在。
+      spawn(wrapper, ['--new-window', 'about:blank'], { detached: true, stdio: 'ignore', env: childEnv() }).unref()
     }
-    // env 用剔过凭据的副本（见 workspace 的 childEnv）：Chrome 及它拉起的一切都不该
-    // 看到 GATEWAY_TOKEN 这类东西。包装脚本自己不读 SATUWORK_*，DISPLAY / HOME 都还在。
-    spawn(wrapper, ['--new-window', 'about:blank'], { detached: true, stdio: 'ignore', env: childEnv() }).unref()
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 250))
       if (await this.listening()) return
+    }
+    if (this.localBrowser) {
+      this.localBrowser.kill()
+      this.localBrowser = null
     }
     throw new CdpError('浏览器起来了但调试端口一直没响应')
   }
@@ -1042,6 +1119,10 @@ export class BrowserService extends Service {
    */
   private teardown(): void {
     this.cdp?.close()
+    if (this.localBrowser) {
+      this.localBrowser.kill()
+      this.localBrowser = null
+    }
     this.cdp = null
     this.sessionId = ''
     this.targetId = ''

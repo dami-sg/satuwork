@@ -1,5 +1,5 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { createReadStream, createWriteStream, type WriteStream } from 'node:fs'
+import { createReadStream, createWriteStream, existsSync, lstatSync, readFileSync, realpathSync, statSync, type WriteStream } from 'node:fs'
 import { lstat, mkdir, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
@@ -69,7 +69,50 @@ export class WorkspaceService extends Service {
     if (target !== this.root && !target.startsWith(this.root + sep)) {
       throw new WorkspaceError(`路径越界：${path}。只能访问工作区 ${this.root} 以内的文件。`)
     }
+    if ((process.env.SATUWORK_RUNTIME_KIND || '').trim() === 'local') {
+      // 本地 Bot 没有 OS 级专用用户可兜底，所以现存路径的每一段都拒绝符号链接。
+      // 写新文件时末段可以不存在，但它前面的目录必须已经通过这道检查。
+      const rel = relative(this.root, target)
+      let cursor = this.root
+      for (const part of rel ? rel.split(sep) : []) {
+        cursor = join(cursor, part)
+        if (!existsSync(cursor)) break
+        if (lstatSync(cursor).isSymbolicLink() && !this.isApprovedLink(cursor)) {
+          throw new WorkspaceError(`路径越界：${path}。本地 Bot 不能经过符号链接访问工作区外部。`)
+        }
+      }
+    }
     return target
+  }
+
+  private isApprovedPath(path: string): boolean {
+    if ((process.env.SATUWORK_RUNTIME_KIND || '').trim() !== 'local') return false
+    const manifest = (process.env.SATUWORK_APPROVED_DIRS || '').trim()
+    if (!manifest) return false
+    let roots: string[] = []
+    try {
+      const parsed = JSON.parse(readFileSync(manifest, 'utf8'))
+      if (Array.isArray(parsed)) roots = parsed.filter((item): item is string => typeof item === 'string')
+    } catch {
+      return false
+    }
+    let real: string
+    try {
+      real = realpathSync(path)
+    } catch {
+      return false
+    }
+    return roots.some((root) => {
+      let approved = root
+      try { approved = realpathSync(root) } catch {}
+      return real === approved || real.startsWith(approved + sep)
+    })
+  }
+
+  /** 只认 Desktop 创建的 `External/<名字>` 第一层挂载；批准目录里的其他链接不跟。 */
+  isApprovedLink(path: string): boolean {
+    const parts = relative(this.root, path).split(sep)
+    return parts.length === 2 && parts[0] === 'External' && lstatSync(path).isSymbolicLink() && this.isApprovedPath(path)
   }
 
   /** 展示用相对路径。根目录本身显示成 `.`。 */
@@ -149,11 +192,16 @@ export class WorkspaceService extends Service {
     const info = await stat(target)
     if (!info.isDirectory()) throw new WorkspaceError(`${this.show(target)} 不是目录。`)
     const here = this.show(target)
+    const isDir = (e: import('node:fs').Dirent) => {
+      if (e.isDirectory()) return true
+      if (!e.isSymbolicLink() || !this.isApprovedLink(join(target, e.name))) return false
+      try { return statSync(join(target, e.name)).isDirectory() } catch { return false }
+    }
     const raw = (await readdir(target, { withFileTypes: true }))
-      .filter((e) => !e.name.startsWith('.') && !e.isSymbolicLink() && (e.isDirectory() || e.isFile()))
+      .filter((e) => !e.name.startsWith('.') && (isDir(e) || e.isFile()))
       // 目录在前，其余按名字排。和 `ls` 工具同一个顺序——同一个目录在两处看到的
       // 排法不一样，人会以为是两个地方。
-      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+      .sort((a, b) => Number(isDir(b)) - Number(isDir(a)) || a.name.localeCompare(b.name))
     const shown = raw.slice(0, LIST_MAX)
     const entries = await Promise.all(
       shown.map(async (e) => {
@@ -162,8 +210,8 @@ export class WorkspaceService extends Service {
         return {
           name: e.name,
           path: here === '.' ? e.name : `${here}/${e.name}`,
-          dir: e.isDirectory(),
-          size: e.isDirectory() ? 0 : (s?.size ?? 0),
+          dir: isDir(e),
+          size: isDir(e) ? 0 : (s?.size ?? 0),
           mtime: s?.mtimeMs ?? 0,
         }
       }),
@@ -204,7 +252,7 @@ export class WorkspaceService extends Service {
     const info = await lstat(target)
     if (info.isSymbolicLink()) throw new WorkspaceError(`${this.show(target)} 是符号链接，不能删。`)
     const [rootReal, parentReal] = await Promise.all([realpath(this.root), realpath(dirname(target))])
-    if (parentReal !== rootReal && !parentReal.startsWith(rootReal + sep)) {
+    if (parentReal !== rootReal && !parentReal.startsWith(rootReal + sep) && !this.isApprovedPath(dirname(target))) {
       throw new WorkspaceError(`路径越界：${path}。它经过一条指向工作区外面的符号链接。`)
     }
     // force 不给：文件在这一趟之前被别人删掉了，那是「已经不在了」，得让上面回 404，

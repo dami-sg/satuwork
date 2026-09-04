@@ -74,6 +74,9 @@ importers:
       pg:
         specifier: ^8.23.0
         version: 8.23.0
+      ws:
+        specifier: ^8.21.3
+        version: 8.21.3
     devDependencies:
       '@types/node':
         specifier: ^26.2.0

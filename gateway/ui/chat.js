@@ -1016,11 +1016,53 @@ function forgetChatBot(botId) {
 async function loadRuntimeBots() {
   state.runtimeError = ''
   try {
+    const before = state.runtimeBots || []
     const data = await api('GET', '/runtime/bots')
     state.runtimeBots = data.bots || []
+    if (window.__SATUWORK_LOCAL_BOT__?.stop) {
+      const ids = new Set(state.runtimeBots.map((bot) => bot.id))
+      for (const bot of before) {
+        if (bot.runtimeKind === 'local' && !ids.has(bot.id)) void window.__SATUWORK_LOCAL_BOT__.stop(bot.id).catch(() => {})
+      }
+    }
+    void ensureDesktopLocalBots(state.runtimeBots)
   } catch (err) {
     state.runtimeBots = []
     throw err
+  }
+}
+
+const localBotStarts = new Map()
+
+async function startDesktopLocalBot(botId) {
+  const bridge = window.__SATUWORK_LOCAL_BOT__
+  if (!window.__SATUWORK_DESKTOP__ || !bridge || typeof bridge.start !== 'function') {
+    throw new Error(t('请在 Satuwork Desktop 中启动本地 Bot', 'Open Satuwork Desktop to start this local bot'))
+  }
+  const bootstrap = await api('POST', `/runtime/bots/${encodeURIComponent(botId)}/local-bootstrap`, {})
+  const status = await bridge.start(bootstrap)
+  if (status && status.runtimeUpdateError) {
+    state.deployHint = t(
+      `本地 Bot 已用旧版本启动；自动升级失败：${status.runtimeUpdateError}`,
+      `The local bot started on the previous version; automatic update failed: ${status.runtimeUpdateError}`,
+    )
+  }
+  return status
+}
+
+async function ensureDesktopLocalBots(bots) {
+  if (!window.__SATUWORK_DESKTOP__ || !window.__SATUWORK_LOCAL_BOT__) return
+  const now = Date.now()
+  for (const bot of bots || []) {
+    if (bot.runtimeKind !== 'local' || (bot.runtime && bot.runtime.status === 'ready')) continue
+    if (now - (localBotStarts.get(bot.id) || 0) < 10_000) continue
+    localBotStarts.set(bot.id, now)
+    void startDesktopLocalBot(bot.id).catch((err) => {
+      state.deployHint = err instanceof Error
+        ? err.message
+        : String(err || t('本地 Bot 启动失败', 'Could not start the local bot'))
+      if (chatBotIdOf(state.path) === bot.id) render()
+    })
   }
 }
 
@@ -4231,7 +4273,17 @@ function paintChat() {
  * 而「机器失联时这盏灯说了什么」正是这次要钉住的那句话。
  */
 function liveLamp(busy) {
+  const bot = chatBotOf()
   const link = seatLink()
+  // 本地 Bot 没有远程桌面（state.desktopRuntime），它是否在线由反向隧道投影到
+  // runtime.status + machineLink。拿远程桌面判断它，会出现一边正常对话、一边写着
+  // 「离线」的自相矛盾状态。
+  if (bot && bot.runtimeKind === 'local') {
+    const ready = bot.runtime && bot.runtime.status === 'ready' && link === 'online'
+    if (!ready) return { state: '0', text: t('本机未运行', 'Not running locally') }
+    if (busy) return { state: 'busy', text: t('正在处理') }
+    return { state: '1', text: t('本机运行中', 'Running locally') }
+  }
   if (linkDown(link)) return { state: link, text: (LINK_TEXT[link] || LINK_TEXT.unknown)() }
   if (busy) return { state: 'busy', text: t('正在处理') }
   const ready = state.desktopRuntime && state.desktopRuntime.status === 'ready'
@@ -4710,7 +4762,7 @@ function linkDown(link) {
  */
 function machineDownBanner() {
   const bot = chatBotOf()
-  if (!bot || seatLinkOf(bot) !== 'offline') return ''
+  if (!bot || bot.runtimeKind === 'local' || seatLinkOf(bot) !== 'offline') return ''
   const age = bot.runtime.machineHeartbeatAge
   const when = age == null ? t('从未心跳') : t('最后一次心跳 %s').replace('%s', sinceMs(age))
   const name = bot.name || t('这个 Bot')
@@ -4752,6 +4804,8 @@ function deployProgressNow() {
  * 一颗按钮，而机器上已经开工了。
  */
 function seatStage() {
+  const bot = chatBotOf()
+  if (bot && bot.runtimeKind === 'local') return bot.runtime && bot.runtime.status === 'ready' ? 'ready' : 'none'
   if (!(state.runtimeMachine && state.runtimeMachine.paired)) return 'unbound'
   const p = deployProgressNow()
   /**
@@ -4838,12 +4892,21 @@ function installProgressBody() {
 function chatDeployPrompt(botId) {
   const stage = seatStage()
   if (stage === 'ready') return ''
-  const name = (chatBotOf() || {}).name || t('这个 Bot')
+  const bot = chatBotOf() || {}
+  const name = bot.name || t('这个 Bot')
   let title = ''
   let body = ''
   let action = ''
   let extra = ''
-  if (stage === 'unbound') {
+  if (bot.runtimeKind === 'local') {
+    title = t('%s 正在等待 Desktop', '%s is waiting for Desktop').replace('%s', name)
+    body = window.__SATUWORK_DESKTOP__
+      ? t('本地运行时正在启动；它会使用这台 Mac 上独立的默认工作目录。', 'The local runtime is starting with its own workspace on this Mac.')
+      : t('请用 Satuwork Desktop 打开这个页面。本地 Bot 不会在普通浏览器里启动。', 'Open this page in Satuwork Desktop; local bots do not start in a regular browser.')
+    action = window.__SATUWORK_DESKTOP__
+      ? `<button type="button" class="btn btn-primary" data-act="local-bot-start" data-bot="${esc(botId)}">${t('重新启动', 'Start again')}</button>`
+      : ''
+  } else if (stage === 'unbound') {
     title = t('公司的运行机器还没配好')
     body = t('公司的运行机器还没有配对机器管家，请系统管理员在公司详情里生成配对码。')
   } else if (stage === 'deploying') {
@@ -4894,10 +4957,20 @@ function chatMachinePanel() {
   const mine = state.desktopRuntime
   const stage = seatStage()
   const rows = []
+  const local = (chatBotOf() || {}).runtimeKind === 'local'
 
   // 没上线时右栏只报状态，**不再摆第二颗部署按钮**——那句话和那颗按钮现在在正文
   // 中间，同一块屏幕上放两个一模一样的主操作，只会让人先分辨该点哪一个。
-  if (stage === 'unbound') {
+  if (local) {
+    rows.push(`<p style="margin:0;font-size:12px;color:var(--muted-foreground);line-height:1.6;">${esc(
+      stage === 'ready'
+        ? t('运行在这台 Mac；默认只访问自己的工作目录。', 'Running on this Mac with access limited to its own workspace.')
+        : t('本地运行时尚未连接。', 'The local runtime is not connected yet.'),
+    )}</p>`)
+    if (window.__SATUWORK_DESKTOP__) {
+      rows.push(`<button type="button" class="btn btn-secondary" data-act="local-dir-approve" data-bot="${esc(selected)}">${t('批准访问其他文件夹', 'Approve another folder')}</button>`)
+    }
+  } else if (stage === 'unbound') {
     rows.push(
       `<p style="margin: 0; font-size: 12px; color: var(--muted-foreground); line-height: 1.6;">${t('公司的运行机器还没有配对机器管家，请系统管理员在公司详情里生成配对码。')}</p>`,
     )
@@ -6230,6 +6303,7 @@ function chatHeadInline() {
     <div class="sw-convo-id">
       <div class="sw-convo-title">
         <span class="sw-convo-name">${esc(name)}</span>
+        ${bot && bot.runtimeKind === 'local' ? `<span class="satu-localtag">${t('本地 Bot', 'Local bot')}</span>` : ''}
         <span class="sw-convo-live" id="chat-live" data-live="0"><i aria-hidden="true"></i><span>${t('离线')}</span></span>
       </div>
       <p class="sw-convo-meta" id="chat-meta"></p>
@@ -7119,9 +7193,15 @@ async function actOnHandoff(id, act, body) {
     void loadHandoffs()
   } catch (err) {
     if (box) box.removeAttribute('data-busy')
+    // render 会换掉 textarea，先保住人已经写好的交接说明。此前这里只改 state.error
+    // 却不重绘，所以远程席位离线、本地通道断开、工单已被别人接走时，用户看到的都是
+    // “按钮完全点不动”，连真实错误都没有。
+    const draft = handoffNote(id)
+    if (draft) handoffDrafts.set(id, draft)
     // 409「已经被别人接走了 / 这张单不在了」不是错误，但必须说出来：点了一下什么都
     // 没发生才是最糟的。
     flash('err', (err && err.message) || t('这一下没成', 'That did not go through'))
+    render()
   }
 }
 

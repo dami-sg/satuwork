@@ -27,3 +27,5 @@ bot/cordis.mounted.yml
 # 桌面壳（Rust 编译产物与 Tauri 生成的 schema）
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+desktop/src-tauri/runtime/*
+!desktop/src-tauri/runtime/README.txt

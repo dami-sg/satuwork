@@ -104,7 +104,7 @@ export interface WalkBudget {
  * `.env` 这类东西摆进结果里只会把真正的文件挤下去；要它们就把模式写成 `.env` 这样
  * **以点开头**，那时这个开关自己会打开。
  */
-export async function* walkFiles(dir: string, budget: WalkBudget, hidden: boolean): AsyncGenerator<string> {
+export async function* walkFiles(dir: string, budget: WalkBudget, hidden: boolean, approvedLink?: (path: string) => boolean): AsyncGenerator<string> {
   let entries: Dirent[]
   try {
     entries = await readdir(dir, { withFileTypes: true })
@@ -118,10 +118,13 @@ export async function* walkFiles(dir: string, budget: WalkBudget, hidden: boolea
     }
     if (!hidden && entry.name.startsWith('.')) continue
     const full = join(dir, entry.name)
-    if (entry.isSymbolicLink()) continue
+    if (entry.isSymbolicLink()) {
+      if (approvedLink?.(full)) yield* walkFiles(full, budget, hidden, approvedLink)
+      continue
+    }
     if (entry.isDirectory()) {
       if (SKIPPED_DIRS.has(entry.name)) continue
-      yield* walkFiles(full, budget, hidden)
+      yield* walkFiles(full, budget, hidden, approvedLink)
     } else if (entry.isFile()) {
       budget.left -= 1
       yield full

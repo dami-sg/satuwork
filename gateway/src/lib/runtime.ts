@@ -11,6 +11,13 @@ import { companyMachineOf, listSeatRuntime, managerHeaders } from '../deploy.ts'
 import { pipeline } from 'node:stream/promises'
 import { type Account, type Db, type Machine } from '../db.ts'
 import { BlockList, isIP } from 'node:net'
+import { localRuntimeFetch } from '../local-runtime.ts'
+
+/** fetch 的唯一入口：satu-local:// 走 Desktop 反向通道，其余保持原来的 HTTP。 */
+export async function runtimeFetch(url: string, init?: RequestInit): Promise<Response> {
+  const local = await localRuntimeFetch(url, init)
+  return local ?? fetch(url, init)
+}
 
 /** Node 在双栈 socket 上给的是 ::ffff:1.2.3.4，统一去掉那层壳。 */
 function plainIp(raw: string): string {
@@ -249,7 +256,7 @@ export async function proxyJson(
   const bearerTok = token || ''
   let r: Response
   try {
-    r = await fetch(url, {
+    r = await runtimeFetch(url, {
       method,
       headers: {
         authorization: bearerTok ? `Bearer ${bearerTok}` : '',
@@ -295,7 +302,7 @@ export async function proxyUpload(
 ) {
   let r: Response
   try {
-    r = await fetch(url, {
+    r = await runtimeFetch(url, {
       method: 'POST',
       headers: {
         authorization: token ? `Bearer ${token}` : '',
@@ -395,7 +402,7 @@ export async function proxyDownload(req: Req, res: ServerResponse, url: string, 
   req.on('close', onClose)
   let r: Response
   try {
-    r = await fetch(url, {
+    r = await runtimeFetch(url, {
       headers: {
         authorization: token ? `Bearer ${token}` : '',
         ...machineHeader(machineToken),
@@ -450,7 +457,7 @@ export async function proxySse(req: Req, res: ServerResponse, url: string, token
   req.on('close', onClose)
   let r: Response
   try {
-    r = await fetch(url, {
+    r = await runtimeFetch(url, {
       headers: {
         authorization: bearerTok ? `Bearer ${bearerTok}` : '',
         accept: 'text/event-stream',
