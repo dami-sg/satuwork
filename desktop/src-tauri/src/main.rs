@@ -731,19 +731,30 @@ fn stage_runtime_update(
     Ok(Some(version))
 }
 
+fn node_in_runtime(runtime: &Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    return runtime.join("node").join("node.exe");
+    #[cfg(not(target_os = "windows"))]
+    return runtime.join("node").join("bin").join("node");
+}
+
 fn node_program(app: &AppHandle) -> PathBuf {
     if let Ok(raw) = std::env::var("SATUWORK_NODE") {
         return PathBuf::from(raw);
     }
+    // `tauri dev` 会把 resources 再复制到 target/debug。macOS 对带嵌入签名的 Node
+    // 做这次复制/临时签名后，可能留下互相冲突的 attached signature，内核会在 exec
+    // 之前直接 SIGKILL（日志是 `embedded signature doesn't match attached signature`）。
+    // 开发版和 bot_runtime 一样直接走源码侧资源；正式包仍只执行 .app 内的版本。
+    #[cfg(debug_assertions)]
+    {
+        let source = node_in_runtime(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime"));
+        if source.is_file() {
+            return source;
+        }
+    }
     if let Ok(resources) = app.path().resource_dir() {
-        #[cfg(target_os = "windows")]
-        let bundled = resources.join("runtime").join("node").join("node.exe");
-        #[cfg(not(target_os = "windows"))]
-        let bundled = resources
-            .join("runtime")
-            .join("node")
-            .join("bin")
-            .join("node");
+        let bundled = node_in_runtime(&resources.join("runtime"));
         if bundled.is_file() {
             return bundled;
         }
@@ -791,18 +802,21 @@ fn spawn_local_bot_process(
         .append(true)
         .open(&log_path)
         .map_err(|e| format!("创建本地 Bot 日志失败：{e}"))?;
+    let node = node_program(app);
     let _ = writeln!(
         log,
-        "\n--- {} Desktop 启动本地 Bot ---",
+        "\n--- {} Desktop 启动本地 Bot ---\nNode: {}\nRuntime: {}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs()
+            .as_secs(),
+        node.display(),
+        entry.display()
     );
     let stderr = log
         .try_clone()
         .map_err(|e| format!("打开本地 Bot 错误日志失败：{e}"))?;
-    let mut command = Command::new(node_program(app));
+    let mut command = Command::new(node);
     command
         .arg("--import")
         .arg("tsx")
