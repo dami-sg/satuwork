@@ -16,6 +16,10 @@
 #   sudo caddy run --config /etc/caddy/Caddyfile
 #
 # 换成你自己的域名（证书按它签），Gateway 仍然只听 127.0.0.1:3080。
+#
+# Caddy 会自动追加 X-Forwarded-For。机器配对靠它认「机器在哪儿」，但 Gateway 只在
+# GATEWAY_TRUSTED_PROXIES 里有这台 Caddy 的地址（这份配置下是 127.0.0.1）时才信它——
+# Gateway 的环境里记得配上，不然每台机器都会被记成 127.0.0.1。
 
 satuwork.example.com {
 	encode zstd gzip

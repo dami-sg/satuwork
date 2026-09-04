@@ -202,14 +202,20 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
 
   // ── 安装与连接（员工自己）─────────────────────────────────────────
 
-  /** 员工只能操作**自己公司看得见**的那些连接器。owner 没有公司，也就没有安装。 */
-  async function seatConnector(account: Account, id: string) {
+  /**
+   * 员工只能操作**自己公司看得见**的那些连接器。owner 没有公司，也就没有安装。
+   *
+   * `allowDisabled`：平台把连接器停掉之后，员工手上的安装和授权还在——卸载 / 断开这
+   * 两条路必须仍然走得通，不然那把授权就永远挂在供应商那边收不回来。装、连、调用
+   * 的路照旧把停掉的当成不存在。
+   */
+  async function seatConnector(account: Account, id: string, opts: { allowDisabled?: boolean } = {}) {
     if (!account.companyId) throw new HttpError(403, '平台账号没有连接器')
     const items = await db.visibleCatalog('connector', account.companyId)
     const item = items.find((i) => i.id === (id || '').trim() && i.scope === 'global')
     if (!item) throw new HttpError(404, '没有这个连接器')
     const def = connectorDefOf(item)
-    if (!def.enabled) throw new HttpError(404, '没有这个连接器')
+    if (!def.enabled && !opts.allowDisabled) throw new HttpError(404, '没有这个连接器')
     const block = blockMapOf(items).get(item.id)
     return { item, def, blocked: block?.blocked === true, blockedReason: block?.reason ?? '', companyId: account.companyId }
   }
@@ -425,7 +431,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
    */
   router.delete('/me/connectors/:connectorId/install', async (req, res) => {
     const account = await requireUser(req, db, keys)
-    const { item, def } = await seatConnector(account, req.params.connectorId)
+    const { item, def } = await seatConnector(account, req.params.connectorId, { allowDisabled: true })
     const install = await db.connectorInstall(item.id, account.id)
     if (!install) throw new HttpError(404, '还没装这个连接器')
     const mine = (await db.connectionsFor(account.id, account.companyId)).filter((c) => c.connectorId === item.id && c.scope === 'user')
@@ -470,6 +476,14 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
     if (!Array.isArray(raw)) throw new HttpError(400, 'enabledTools 必须是数组')
     const tools = [...new Set(raw.map((x) => String(x).trim()).filter(Boolean))].slice(0, 500)
     const next = await db.setInstallTools(install.id, tools)
+    // 开了哪些工具决定了 Bot 能替这个人碰什么，和装 / 卸一样要留痕。只记个数不记名单：
+    // 名单可到 500 条，审计里塞不下也没人看。
+    await db.audit({
+      companyId: account.companyId!,
+      accountId: account.id,
+      action: 'connector.tools.update',
+      detail: { connectorId: item.id, enabledTools: tools.length, mode: tools.length ? 'subset' : 'all' },
+    })
     json(res, 200, { install: publicInstall(next!) })
   })
 
@@ -571,7 +585,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
 
   router.delete('/me/connectors/:connectorId/connections/:connectionId', async (req, res) => {
     const account = await requireUser(req, db, keys)
-    const { item, def } = await seatConnector(account, req.params.connectorId)
+    const { item, def } = await seatConnector(account, req.params.connectorId, { allowDisabled: true })
     const row = await ownConnection(account, item.id, req.params.connectionId)
     let orphan: { externalId: string; error: string } | null = null
     if (row.externalId) {

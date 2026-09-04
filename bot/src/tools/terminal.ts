@@ -5,7 +5,7 @@ import { basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { StringDecoder } from 'node:string_decoder'
-import { humanSize, safeName } from '../workspace/index.ts'
+import { childEnv, humanSize, safeName } from '../workspace/index.ts'
 import { satuworkHome } from '../home.ts'
 import { fail, registerTool, SKIPPED_DIRS, walkFiles, type WalkBudget } from './common.ts'
 import type { ReassignedItem, ToolCall, WorkspaceFile } from './index.ts'
@@ -329,7 +329,8 @@ function since(ms: number): string {
 function spawnShell(command: string, cwd: string): ChildProcess {
   return spawn('bash', ['-c', command], {
     cwd,
-    env: process.env,
+    // 不递整份 process.env：里面有 Gateway 凭据和 SATUWORK_* 内部配置，见 childEnv。
+    env: childEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   })
@@ -687,6 +688,9 @@ export function apply(ctx: Context, config: Config = {}) {
     const exact = mine.find((p) => p.id === key)
     if (exact) return exact
     const bare = key.replace(/^proc_/, '')
+    // 只剩前缀 `proc_`（或空）时不做前缀匹配：空串谁都 startsWith，只有一个进程时会
+    // 「恰好」命中它，模型抄漏了 id 也就杀错了进程。当成没找到。
+    if (!bare) fail(`${key} 不是一个完整的 session_id。用 process(action="list") 看有哪些。`)
     const hit = mine.filter((p) => p.id.slice('proc_'.length).startsWith(bare))
     if (hit.length === 1) return hit[0]
     if (hit.length > 1) fail(`${key} 对应 ${hit.length} 个进程（${hit.map((p) => p.id).join('、')}），写全一点。`)

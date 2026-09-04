@@ -156,7 +156,10 @@ export function verifyJwt(keys: JwtKeys, token: string): JwtPayload {
   if (payload.role !== 'owner' && payload.role !== 'admin' && payload.role !== 'member') throw new Error('票缺字段')
   const iss = process.env.GATEWAY_ISS ?? 'satuwork-gateway'
   if (payload.iss !== iss) throw new Error('票签发方不对')
-  if (typeof payload.exp === 'number' && payload.exp < Math.floor(Date.now() / 1000)) throw new Error('票已过期')
+  // exp 不是有限数字（NaN 序列化成 null、或者被人改成字符串）一律拒：没有过期时间的票
+  // 等于永不过期，而这里签出去的每一张都是带 exp 的。
+  if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp)) throw new Error('票缺过期时间')
+  if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('票已过期')
   return payload
 }
 

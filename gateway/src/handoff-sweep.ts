@@ -16,6 +16,7 @@
  */
 import type { Db, Handoff } from './db.ts'
 import { callSeat } from './lib/handoff.ts'
+import { safeFetch } from './web-tools.ts'
 
 /**
  * 多久没人接就再推一次。30 分钟：够一次会议，又不至于让人下班了才看见。
@@ -74,6 +75,9 @@ export function noticeText(h: Handoff, kind: NudgeKind, who: string, link: strin
  * 发一条。**失败只记一笔，不抛**：通知发不出去不该影响单子本身的状态流转——
  * 那张单已经开出来了，站内照样看得见。
  */
+/** 仅供 e2e：让转人工 webhook 可以指向本机（写入校验和发送侧共用）。生产别开。 */
+export const HANDOFF_WEBHOOK_ALLOW_PRIVATE = process.env.GATEWAY_HANDOFF_WEBHOOK_ALLOW_PRIVATE === '1'
+
 export async function notify(db: Db, h: Handoff, kind: NudgeKind): Promise<boolean> {
   const company = await db.company(h.companyId)
   const url = (company?.handoffWebhook || '').trim()
@@ -82,12 +86,20 @@ export async function notify(db: Db, h: Handoff, kind: NudgeKind): Promise<boole
   const base = (company?.accessUrl || '').replace(/\/$/, '')
   const text = noticeText(h, kind, owner?.name || owner?.email || h.accountId, base ? `${base}/handoffs` : '')
   try {
-    const r = await fetch(url, {
+    // 走 web-tools 那道 SSRF 闸（内网、link-local、云 metadata 一律拒，跳转逐跳重查、
+    // IP 钉死）。这个地址是公司管理员填的，而 Gateway 手里有库和平台凭证——裸 fetch
+    // 等于让任何一个管理员拿 Gateway 去打它够不着的内网服务。
+    const init = {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(webhookPayload(text)),
-      signal: AbortSignal.timeout(POST_TIMEOUT_MS),
-    })
+    }
+    // e2e 的假群机器人听在本机，SSRF 闸会拒它；只有那个开关打开时才走裸 fetch。
+    const r = HANDOFF_WEBHOOK_ALLOW_PRIVATE
+      ? await fetch(url, { ...init, signal: AbortSignal.timeout(POST_TIMEOUT_MS) })
+      : await safeFetch(url, { ...init, timeoutMs: POST_TIMEOUT_MS })
+    // 3xx 到最后一跳、正文用不上：排空，别把连接挂着。
+    await r.body?.cancel().catch(() => {})
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
     return true
   } catch (e) {

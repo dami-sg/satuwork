@@ -175,6 +175,10 @@ export async function patchAccount(
     patch.name = name
   }
   if (body.role !== undefined && body.role !== '') patch.role = roleOf(body.role)
+  // owner 这一行只能停用，**不能改成 admin / member**：roleOf 已经不收 `owner`，所以任何
+  // 送来的角色都是降级；降完的 owner 属于哪家公司说不清（它没有 companyId），而且平台
+  // 那一层的写入口全都 requireOwner，降掉最后一个之后再没人能改回来。
+  if (row.role === 'owner' && patch.role && patch.role !== 'owner') throw new HttpError(400, '系统管理员的角色不能改')
   if (body.status !== undefined && body.status !== '') patch.status = statusOf(body.status)
   const nextRole = patch.role ?? row.role
   const nextStatus = patch.status ?? row.status
@@ -193,7 +197,9 @@ export async function patchAccount(
    * 平台账号不属于任何公司，上面那条按公司数的检查够不着它。把最后一个 owner 停掉之后，
    * 没有任何一条路能再把它开回来——这一层的写入口全都 requireOwner。
    */
-  if (!row.companyId && row.role === 'owner' && patch.status === 'disabled' && (await db.activeOwnerCount()) <= 1) {
+  // 不再要求 `!row.companyId`：owner 行本不该有公司，但万一有（老数据、手改的库），
+  // 上面那条按公司数的检查看的是 admin，仍然够不着它。
+  if (row.role === 'owner' && patch.status === 'disabled' && (await db.activeOwnerCount()) <= 1) {
     throw new HttpError(409, '至少要留一个能登录的系统管理员')
   }
   if (patch.status === 'disabled') patch.tokenRevokedAt = Date.now()

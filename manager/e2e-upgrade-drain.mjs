@@ -7,7 +7,7 @@
  * 放 manager/ 而不是 e2e/：和别的探针同一个理由，裸导入按文件所在目录往上找。
  */
 import { createServer } from 'node:http'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,6 +15,9 @@ import { join } from 'node:path'
 // 早读一步更保险，也让这份探针不碰宿主机的 /etc 和 /opt。
 const HOME = mkdtempSync(join(tmpdir(), 'satuwork-drain-home-'))
 const ROOT = mkdtempSync(join(tmpdir(), 'satuwork-drain-root-'))
+// 退出时收掉临时目录（和 e2e-memory / e2e-skills 那几个探针同一个写法）：探针是顶层 await 的
+// 脚本，没有一个能包 finally 的函数体；exit 钩子在 process.exit、正常结束和未捕获异常三条路上都会跑。
+process.on('exit', () => { try { rmSync(HOME, { recursive: true, force: true }) } catch {} try { rmSync(ROOT, { recursive: true, force: true }) } catch {} })
 process.env.SATUWORK_MANAGER_HOME = HOME
 process.env.SATUWORK_MANAGER_ROOT = ROOT
 

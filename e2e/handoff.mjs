@@ -136,7 +136,7 @@ function listen(server) {
   })
 }
 
-export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
+export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, assert, log, skip }) {
   log('\n# handoff')
 
   // ── 第一段：席位内的状态机 ─────────────────────────────────────────
@@ -231,6 +231,8 @@ export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, ass
       SATUWORK_DEPLOY_STUB: '1',
       // 自签证书只对这一个子进程放开。测 https 那条分支的代价就是这一行。
       ...(hook.secure ? { NODE_TLS_REJECT_UNAUTHORIZED: '0' } : {}),
+      // 假群机器人听在本机：SSRF 闸对这一个子进程放开，生产没有这个变量。
+      GATEWAY_HANDOFF_WEBHOOK_ALLOW_PRIVATE: '1',
       // 催办那两档压到秒级，否则这一段要等半小时。下限是 1 秒（见 handoff-sweep.ts）。
       GATEWAY_ROUTINE_TICK_MS: '1000',
       GATEWAY_HANDOFF_NUDGE_MS: '1000',
@@ -343,11 +345,10 @@ export async function runHandoff({ root, gwRoot, test, req, start, waitHttp, ass
       assert(bad.status === 400, `乱填的 webhook 收下了：${bad.status}`)
     })
 
-    await test('开单就往群里推一条，正文说得出要人做什么', async () => {
-      if (!hook.secure) {
-        log('  # 跳过送达断言：本机没有 openssl，签不出自签证书')
-        return
-      }
+    // 没有 openssl 就签不出自签证书，送达那条路（只收 https）验不了。**记成 skip，
+    // 不进 test()**：以前在用例里静默 return 会算成一条 ok，看清单的人以为送达验过了。
+    if (!hook.secure) skip('handoff 送达断言：本机没有 openssl，签不出自签证书')
+    else await test('开单就往群里推一条，正文说得出要人做什么', async () => {
       const set = await req(gwBase, 'PATCH', `/orgs/${orgId}`, { token: adminTok, body: { handoffWebhook: hookUrl } })
       assert(set.status === 200, `设 webhook ${set.status} ${set.text}`)
       const id = 'h-notify-' + Date.now()

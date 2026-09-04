@@ -256,6 +256,14 @@ export function attachUpgrade(server: Server, deps: ProxyDeps) {
         socket.on('close', shut)
       })
       upstream.on('error', () => bail('502 Bad Gateway'))
+      // 上游没升级、回了一个普通响应（websockify 没起来时前面顶着的东西、404、5xx）：
+      // 不接这个事件的话 Node 会把 upstream 当普通请求收完，而浏览器那头的 socket 一直
+      // 悬着，直到它自己超时。给它一句 502 然后关掉，noVNC 才会立刻显示连不上。
+      upstream.on('response', (upRes) => {
+        upRes.resume()
+        upstream.destroy()
+        bail('502 Bad Gateway')
+      })
       // 有些客户端把第一帧和升级请求粘在一起发，那段字节在 head 里，不转就丢了。
       if (head?.length) upstream.write(head)
       upstream.end()

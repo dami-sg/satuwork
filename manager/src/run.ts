@@ -35,6 +35,10 @@ export function run(
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // 自成一个进程组：超时时要杀的是整棵树（deploy-seat.sh 下面的 apt-get、tar、
+      // runuser……），只 SIGKILL 那个 bash 会留下一堆孤儿继续占着端口和锁。正常路径不受
+      // 影响：stdio 还是管道，这边照旧等 close，也没有 unref。
+      detached: true,
     })
     let stdout = ''
     let stderr = ''
@@ -63,9 +67,15 @@ export function run(
     })
     const timer = setTimeout(
       () => {
+        // 负的 pid = 整个进程组（detached 让 child.pid 就是组长）。组杀不动再退回只杀它自己。
         try {
-          child.kill('SIGKILL')
-        } catch {}
+          if (child.pid) process.kill(-child.pid, 'SIGKILL')
+          else child.kill('SIGKILL')
+        } catch {
+          try {
+            child.kill('SIGKILL')
+          } catch {}
+        }
         stderr = cap(stderr, `\n[manager] ${file} timed out`)
       },
       opts.timeout ?? 600_000,

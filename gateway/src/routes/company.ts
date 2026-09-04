@@ -2,6 +2,7 @@
  * 一家公司自己的那一摊：资料、模型角色、员工与分组、订阅、账单、用量、机器。
  */
 import type { RouteCtx } from './ctx.ts'
+import { HANDOFF_WEBHOOK_ALLOW_PRIVATE } from '../handoff-sweep.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { INVITE_TTL, MIN_PASSWORD, RESET_LINK_TTL, hashPassword } from '../crypto.ts'
 import { accessUrlFor } from '../lib/catalog.ts'
@@ -15,6 +16,56 @@ import { desktopTicketFor, machineHostOf, machineResolver } from '../lib/machine
 import { inviteLinkOf, issueInvite, rangeQuery, requireOrg, requireOwner, requireUser, usagePayload } from '../lib/guards.ts'
 import { randomUUID } from 'node:crypto'
 import { type CompanyStatus, type Group } from '../db.ts'
+
+/**
+ * 转人工通知地址的形状检查。
+ *
+ * **只收 https**：这条 URL 是一把凭据（拿到就能往那个群里发东西），走明文等于把它交给
+ * 路上的每一跳。**主机不能是字面的内网 / 回环 / link-local / 云元数据地址**：发通知的是
+ * Gateway 进程自己，一条 `https://169.254.169.254/…` 就是拿 Gateway 当跳板去打它所在
+ * 网络里的东西。这里只做字面 IP 判断，主机名解析到内网那一层由发送侧（handoff-sweep）
+ * 再挡一道。认不出的形状一律 400，不静静地存下一个永远发不出去的值。
+ */
+export function handoffWebhookOf(raw: string): string {
+  let u: URL
+  try {
+    u = new URL(raw)
+  } catch {
+    throw new HttpError(400, '通知地址要是一条 https 链接')
+  }
+  if (u.protocol !== 'https:' || !u.hostname) throw new HttpError(400, '通知地址要是一条 https 链接')
+  // e2e 的假群机器人听在本机；只有这个开关打开时才放过内网地址（发送侧同一个开关）。
+  if (HANDOFF_WEBHOOK_ALLOW_PRIVATE) return raw
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  if (host === 'localhost' || host.endsWith('.localhost')) throw new HttpError(400, '通知地址不能指向本机')
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])]
+    const private4 =
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      a >= 224
+    if (private4) throw new HttpError(400, '通知地址不能是内网或本机地址')
+  } else if (host.includes(':')) {
+    // IPv6：回环、未指定、ULA（fc00::/7）、link-local（fe80::/10）、v4 映射。
+    const bare = host.split('%')[0]
+    if (
+      bare === '::1' ||
+      bare === '::' ||
+      /^f[cd]/.test(bare) ||
+      /^fe[89ab]/.test(bare) ||
+      bare.startsWith('::ffff:')
+    ) {
+      throw new HttpError(400, '通知地址不能是内网或本机地址')
+    }
+  }
+  return raw
+}
 
 export function attachCompany(router: Router, ctx: RouteCtx) {
   const { db, keys, llm, meter } = ctx
@@ -66,17 +117,10 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     // 地址和网站可以清空，空串就是清空。
     if (body.address !== undefined) patch.address = strField(body, 'address', false)
     if (body.website !== undefined) patch.website = websiteOf(strField(body, 'website', false))
-    /**
-     * 转人工的通知地址。空串 = 关掉。
-     *
-     * **只收 https**：这条 URL 是一把凭据（拿到就能往那个群里发东西），走明文等于
-     * 把它交给路上的每一跳。认不出的形状一律 400，不静静地存下一个永远发不出去的值。
-     */
+    // 转人工的通知地址。空串 = 关掉。形状规矩见 handoffWebhookOf。
     if (body.handoffWebhook !== undefined) {
       const raw = strField(body, 'handoffWebhook', false)
-      if (!raw) patch.handoffWebhook = null
-      else if (!/^https:\/\/\S+$/i.test(raw)) throw new HttpError(400, '通知地址要是一条 https 链接')
-      else patch.handoffWebhook = raw
+      patch.handoffWebhook = raw ? handoffWebhookOf(raw) : null
     }
     if (body.accessUrl !== undefined) {
       if (body.accessUrl === null || body.accessUrl === '') patch.accessUrl = null
@@ -91,7 +135,13 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
     if (body.machineId !== undefined) {
       if (body.machineId === null || body.machineId === '') {
         const prev = company.machineId
-        if (prev) await db.updateMachine(prev, { companyId: null })
+        if (prev) {
+          // 和 PUT /platform/machines/:id/company 同一条判据：机器上还有席位就不许解绑。
+          // 席位是按公司建的，解绑不会把它们搬走，只会留下一台谁也找不回席位的机器。
+          const seats = await db.seatRuntimesOfMachine(prev)
+          if (seats.length) throw new HttpError(409, `这台机器上还有 ${seats.length} 个席位，先把它们拆掉再解绑`)
+          await db.updateMachine(prev, { companyId: null })
+        }
         patch.machineId = null
       } else {
         const machineId = strField(body, 'machineId')
@@ -130,7 +180,13 @@ export function attachCompany(router: Router, ctx: RouteCtx) {
       if (patch.slug && isUniqueViolation(e)) throw new HttpError(409, '这个 slug 已被占用')
       throw e
     }
-    await db.audit({ companyId: company.id, accountId: account.id, action: 'org.update', detail: patch })
+    // 审计里**不躺 webhook 明文**：它是一把凭据（同 platform.tools.web.update 那条的做法），
+    // 只记换没换、换成了哪个域名。
+    const detail: Record<string, unknown> = { ...patch }
+    if ('handoffWebhook' in patch) {
+      detail.handoffWebhook = patch.handoffWebhook ? { changed: true, host: new URL(patch.handoffWebhook).host } : null
+    }
+    await db.audit({ companyId: company.id, accountId: account.id, action: 'org.update', detail })
     json(res, 200, { company: publicCompany(next) })
   })
 

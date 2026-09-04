@@ -13,6 +13,8 @@ import { rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
+import { freePort } from './ports.mjs'
+import { closeServer } from './probe.mjs'
 
 const TOOLKITS = {
   items: [
@@ -121,7 +123,8 @@ function mockComposio() {
 
 export async function runToolSearch({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-tool-search')
-  const GW_PORT = 18991
+  // 端口向内核要（见 ports.mjs）：写死的数迟早撞上别的套件或别的 worktree。
+  const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })
@@ -144,7 +147,8 @@ export async function runToolSearch({ root, gwRoot, test, req, start, waitHttp, 
       CONNECTOR_TOOL_TTL_MS: '1',
     },
   })
-  await waitHttp(`${base}/health`)
+  // 带上 child：起不来时有用的是它的输出，不是三十秒后那句「等不到」。
+  await waitHttp(`${base}/health`, { child: gw, what: 'tool-search gateway' })
 
   let owner = ''
   let adminTok = ''
@@ -570,7 +574,10 @@ export async function runToolSearch({ root, gwRoot, test, req, start, waitHttp, 
       assert(gmail.json.toolMode === 'direct', `gmail 该是 direct，实际 ${gmail.json.toolMode}`)
     })
   } finally {
-    mock.server.close()
+    // closeServer 先掐 keep-alive 连接再关：裸 close() 会等 Gateway 反代那条连接自己断，那永远不来。
+    await closeServer(mock.server, 'composio mock')
     gw.kill()
+    // 自己的数据目录自己收。
+    rmSync(GW_HOME, { recursive: true, force: true })
   }
 }

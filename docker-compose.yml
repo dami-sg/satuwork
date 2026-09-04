@@ -54,10 +54,21 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
-      - '${GATEWAY_PORT:-3080}:3080'
+      # 和 PG 一样只映射到回环：生产前面本来就要有 Caddy/nginx 终结 TLS
+      # （见 gateway/deploy/*.example），Gateway 自己的 3080 没有理由直接挂在公网上。
+      # 真要裸奔对外（比如内网测试），把左边的 127.0.0.1: 去掉即可。
+      - '127.0.0.1:${GATEWAY_PORT:-3080}:3080'
     volumes:
       # JWT 密钥对和 Bot 发布包在磁盘上，不在库里——重启不能让已发出的票全失效。
       - gwdata:/var/lib/satuwork-gateway
+    healthcheck:
+      # GET /health 是 gateway/src/routes/auth.ts 里那条不鉴权的探活。镜像是 slim 的，
+      # 没有 curl/wget，用 node 自己的 fetch 问。
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3080/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # ── 可选：自托管 SearXNG ────────────────────────────────────────────────
   #
@@ -80,7 +91,9 @@ services:
   # （官方 compose 里那个 valkey 其实也没接上，镜像默认 valkey.url = false）。
   searxng:
     profiles: ['searxng']
-    image: docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}
+    # 钉死版本：latest 每天都在滚，settings.yml 的字段隔几个月就会对不上，一次
+    # `compose pull` 就能把搜索弄挂。要升就改 SEARXNG_VERSION，顺手核对一遍 settings.yml。
+    image: docker.io/searxng/searxng:${SEARXNG_VERSION:-2026.9.3-a1144dda3}
     restart: unless-stopped
     environment:
       SEARXNG_SECRET: ${SEARXNG_SECRET:-ultrasecretkey}

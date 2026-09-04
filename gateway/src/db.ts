@@ -73,6 +73,14 @@ export function databaseUrl(): string {
  */
 const LEDGER_BY_REF = '(select "refId", sum("amountMicros") as micros from usage_charges group by "refId")'
 
+/** 同一条日常任务已有一条 running 流水（见迁移 0035）。路由把它翻成 409。 */
+export class RoutineBusyError extends Error {
+  constructor(readonly routineId: string) {
+    super('上一次还在跑')
+    this.name = 'RoutineBusyError'
+  }
+}
+
 export class Db {
   private pool: pg.Pool
   private schema: string
@@ -1342,10 +1350,12 @@ export class Db {
       where.push('"createdAt" <= ?')
       args.push(range.to)
     }
+    // 同文件别处一样先按 refId 汇总再 join：直接 join 账本的话，一次调用落了两行账
+    // （被拒一行 + 成功一行）会把 count(*) 也算成两次调用。
     const rows = await this.many(
       `select c."companyId", c.connector, count(*) as calls,
-              coalesce(sum(u."amountMicros"), 0) as micros, max(c."createdAt") as "lastAt"
-       from connector_calls c left join usage_charges u on u."refId" = c.id
+              coalesce(sum(u.micros), 0) as micros, max(c."createdAt") as "lastAt"
+       from connector_calls c left join ${LEDGER_BY_REF} u on u."refId" = c.id
        where ${where.join(' and ').replace(/"createdAt"/g, 'c."createdAt"')}
        group by c."companyId", c.connector order by c."companyId", c.connector`,
       args,
@@ -1376,6 +1386,14 @@ export class Db {
     bonusMicros?: number
     unpriced?: boolean
     refId?: string | null
+    /**
+     * 赠送桶的上限：本账期一共送了多少微元、账期从哪一刻起。给了它，`bonusMicros` 就
+     * 不信调用方算的那个数，而是在**同一条 insert 里**按库里已扣的 sum 现算——
+     * `least(amount, greatest(0, grant − sum_so_far))`。几十次并发落账各自读到同一份
+     * 「还剩 $0.30」时，内存里算出来的 bonus 会把赠送桶扣穿，超出的那截本该走充值桶
+     * （docs/billing.md §6.1 的公式）。要真挡住并发，调用方还得先拿 lockCompanyLedger。
+     */
+    bonusCap?: { grantMicros: number; since: number }
   }): Promise<UsageCharge> {
     const amount = Math.max(0, Math.trunc(input.amountMicros ?? 0))
     const row: UsageCharge = {
@@ -1397,8 +1415,16 @@ export class Db {
       refId: input.refId ?? null,
       createdAt: Date.now(),
     }
-    await this.run(
-      'insert into usage_charges (id, "companyId", "accountId", "botId", "sessionId", kind, subject, status, quantity, "unitPrice", multiplier, "amountMicros", "bonusMicros", unpriced, "refId", "createdAt") values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    const cap = input.bonusCap && row.companyId ? input.bonusCap : undefined
+    const bonusSql = cap
+      ? 'least(?, greatest(0, ? - coalesce((select sum("bonusMicros") from usage_charges where "companyId" = ? and "createdAt" >= ?), 0)))'
+      : '?'
+    const bonusArgs = cap
+      ? [amount, Math.max(0, Math.trunc(cap.grantMicros)), row.companyId, cap.since]
+      : [row.bonusMicros]
+    const r = await this.one(
+      `insert into usage_charges (id, "companyId", "accountId", "botId", "sessionId", kind, subject, status, quantity, "unitPrice", multiplier, "amountMicros", "bonusMicros", unpriced, "refId", "createdAt")
+       values (?,?,?,?,?,?,?,?,?,?,?,?,${bonusSql},?,?,?) returning "bonusMicros"`,
       [
         row.id,
         row.companyId,
@@ -1412,13 +1438,25 @@ export class Db {
         JSON.stringify(row.unitPrice),
         row.multiplier,
         row.amountMicros,
-        row.bonusMicros,
+        ...bonusArgs,
         row.unpriced,
         row.refId,
         row.createdAt,
       ],
     )
+    // 库里算出来的才是真扣掉的那份，调用方据此更新自己的余额记忆。
+    if (r) row.bonusMicros = num(r.bonusMicros)
     return row
+  }
+
+  /**
+   * 一家公司的账本锁。insertUsageCharge 的 `bonusCap` 是「读 sum 再写」——两次并发
+   * 落账各自读到同一个 sum 仍会把赠送桶扣穿，所以落账那一条 insert 要排队。
+   * **必须在 db.tx 里调**（同 lockExclusive）。按公司散列，不同公司互不等。
+   */
+  async lockCompanyLedger(companyId: string): Promise<void> {
+    if (!this.txClient.getStore()) throw new Error('lockCompanyLedger 必须在 db.tx 里调——事务外的锁当场就放了')
+    await this.one('select pg_advisory_xact_lock(hashtext(?::text))', [`usage_charges:${companyId}`])
   }
 
   /**
@@ -2125,7 +2163,12 @@ export class Db {
   }
 
   async machineOfCompany(companyId: string): Promise<Machine | undefined> {
-    const r = await this.one('select * from machines where "companyId" = ? and "removedAt" is null', [companyId])
+    // 公司名下不止一台时要有确定的答案：没有 order by 的话，PG 给哪一行取决于物理顺序，
+    // 两次调用可能答两台不同的机器。取最早配对的那台，和 machinesOfCompany 的兜底顺序一致。
+    const r = await this.one(
+      'select * from machines where "companyId" = ? and "removedAt" is null order by "pairedAt" nulls last, "createdAt", id limit 1',
+      [companyId],
+    )
     return r ? machineOf(r) : undefined
   }
 
@@ -2441,16 +2484,12 @@ export class Db {
     return (await this.seatRuntime(row.accountId, row.botId))!
   }
 
-  async deleteSeatRuntime(accountId: string): Promise<void> {
-    await this.run('delete from seat_runtimes where "accountId" = ?', [accountId])
-  }
-
   /**
    * 拆掉**一个** Bot 的席位，连同它的实例地址和会话索引。
    *
-   * 员工删自己建的 Bot 走这条：他名下别的 Bot 还在跑，上面那条按账号删的会把它们
-   * 一起抹掉——slot 立刻能被下一个人分走，而机器上那几套 systemd 单元还占着端口
-   * （理由见 deploy.ts 的 releaseSeats）。
+   * 员工删自己建的 Bot 走这条。**没有「按账号删全部席位」那条**——原来有过，全仓没有
+   * 调用点，而它会把这个人名下别的 Bot 一起抹掉：slot 立刻能被下一个人分走，而机器上
+   * 那几套 systemd 单元还占着端口（理由见 deploy.ts 的 releaseSeats）。
    *
    * 会话索引一起删：全文本来就在席位目录里，管家拆席位时跟着没了，留着索引只会让
    * 管理员点进一条永远打不开的会话。
@@ -2973,17 +3012,37 @@ export class Db {
     lastPolledAt?: number | null
     pollLastError?: string | null
   }): Promise<ChannelBinding> {
-    const cur = await this.channelBinding(id)
-    if (!cur) throw new Error('渠道不存在')
-    const next = { ...cur, ...patch, updatedAt: Date.now() }
-    await this.run(
-      `update channel_bindings set status=?, "credentialCiphertext"=?, "webhookSecretHash"=?, "externalBotId"=?,
-       "externalUsername"=?, "pairingCodeHash"=?, "pollOffset"=?, "pollLeaseUntil"=?, "lastPolledAt"=?, "pollLastError"=?,
-       "lastReceivedAt"=?, "lastError"=?, config=?, "updatedAt"=? where id=?`,
-      [next.status, next.credentialCiphertext, next.webhookSecretHash, next.externalBotId, next.externalUsername,
-        next.pairingCodeHash, next.pollOffset, next.pollLeaseUntil, next.lastPolledAt, next.pollLastError,
-        next.lastReceivedAt, next.lastError, JSON.stringify(next.config || {}), next.updatedAt, id],
-    )
+    /**
+     * **只写传进来的字段**，不整行读改写。
+     *
+     * 以前是「读一行、合并、把全部列写回去」：轮询器在这期间用 claimChannelPoll /
+     * advanceChannelPollOffset / finishChannelPoll 推进的 pollOffset / pollLeaseUntil /
+     * lastPolledAt 会被读到的旧值盖回去——游标倒退等于把已经处理过的 update 再收一遍，
+     * 租约倒退等于两个进程同时轮询同一个 Bot。调用点传的本来就都是「改这几项」，
+     * 没有谁依赖「顺手把别的列也写一遍」。
+     */
+    const fields: string[] = ['"updatedAt"=?']
+    const values: unknown[] = [Date.now()]
+    const set = (column: string, value: unknown) => {
+      fields.push(`${column}=?`)
+      values.push(value)
+    }
+    if (patch.status !== undefined) set('status', patch.status)
+    if (patch.credentialCiphertext !== undefined) set('"credentialCiphertext"', patch.credentialCiphertext)
+    if (patch.webhookSecretHash !== undefined) set('"webhookSecretHash"', patch.webhookSecretHash)
+    if (patch.externalBotId !== undefined) set('"externalBotId"', patch.externalBotId)
+    if (patch.externalUsername !== undefined) set('"externalUsername"', patch.externalUsername)
+    if (patch.pairingCodeHash !== undefined) set('"pairingCodeHash"', patch.pairingCodeHash)
+    if (patch.pollOffset !== undefined) set('"pollOffset"', patch.pollOffset)
+    if (patch.pollLeaseUntil !== undefined) set('"pollLeaseUntil"', patch.pollLeaseUntil)
+    if (patch.lastPolledAt !== undefined) set('"lastPolledAt"', patch.lastPolledAt)
+    if (patch.pollLastError !== undefined) set('"pollLastError"', patch.pollLastError)
+    if (patch.lastReceivedAt !== undefined) set('"lastReceivedAt"', patch.lastReceivedAt)
+    if (patch.lastError !== undefined) set('"lastError"', patch.lastError)
+    if (patch.config !== undefined) set('config', JSON.stringify(patch.config || {}))
+    values.push(id)
+    const n = await this.run(`update channel_bindings set ${fields.join(', ')} where id=?`, values)
+    if (n !== 1) throw new Error('渠道不存在')
     return (await this.channelBinding(id))!
   }
 
@@ -3411,6 +3470,16 @@ export class Db {
       [now + leaseMs, now, now, now],
     )
     return r ? conversationAuditBatchOf(r) : undefined
+  }
+
+  /** 还在席位上跑、租约将在 `leaseEndsBefore` 之前到期的批次——续租用（见 conversation-audit.ts）。 */
+  async processingConversationAuditBatches(leaseEndsBefore: number, limit = 20): Promise<ConversationAuditBatch[]> {
+    const rows = await this.many(
+      `select * from conversation_audit_batches where status='processing' and "leaseUntil" <= ?
+       order by "leaseUntil" asc limit ?`,
+      [leaseEndsBefore, Math.max(1, limit)],
+    )
+    return rows.map(conversationAuditBatchOf)
   }
 
   async markConversationAuditProcessing(id: string, leaseUntil: number): Promise<void> {
@@ -4145,10 +4214,17 @@ export class Db {
       startedAt: Date.now(),
       endedAt: null,
     }
-    await this.run(
-      'insert into routine_runs (id, "routineId", "botId", "accountId", "companyId", trigger, status, "sessionId", error, "startedAt", "endedAt") values (?,?,?,?,?,?,?,?,?,?,?)',
-      [row.id, row.routineId, row.botId, row.accountId, row.companyId, row.trigger, row.status, row.sessionId, row.error, row.startedAt, row.endedAt],
-    )
+    try {
+      await this.run(
+        'insert into routine_runs (id, "routineId", "botId", "accountId", "companyId", trigger, status, "sessionId", error, "startedAt", "endedAt") values (?,?,?,?,?,?,?,?,?,?,?)',
+        [row.id, row.routineId, row.botId, row.accountId, row.companyId, row.trigger, row.status, row.sessionId, row.error, row.startedAt, row.endedAt],
+      )
+    } catch (e) {
+      // 0035 的部分唯一索引：同一条任务已有 running 流水。调用方先查 `routineRunning` 只是
+      // 让常见路径少一次报错，真正的判据在这里，并发也挡得住。
+      if (isUniqueViolation(e)) throw new RoutineBusyError(input.routineId)
+      throw e
+    }
     // 只留最近几十条。这张表是「昨晚跑没跑」，留全量只会让侧栏那一列越查越慢。
     await this.run(
       'delete from routine_runs where "routineId" = ? and id not in (select id from routine_runs where "routineId" = ? order by "startedAt" desc limit ?)',

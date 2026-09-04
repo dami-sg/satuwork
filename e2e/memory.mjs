@@ -13,10 +13,12 @@ import { join } from 'node:path'
 import { loadApp } from './ui-dom.mjs'
 import { PG_URL } from './pg.mjs'
 import { schemaOf, tmpOf } from './isolate.mjs'
+import { freePort } from './ports.mjs'
 
 export async function runMemory({ root, gwRoot, test, req, start, waitHttp, assert, log }) {
   const GW_HOME = tmpOf('satuwork-e2e-memory')
-  const GW_PORT = 18994
+  // 端口向内核要（见 ports.mjs）：写死的数迟早撞上别的套件或别的 worktree。
+  const GW_PORT = await freePort()
   const base = `http://127.0.0.1:${GW_PORT}`
 
   rmSync(GW_HOME, { recursive: true, force: true })
@@ -396,5 +398,7 @@ export async function runMemory({ root, gwRoot, test, req, start, waitHttp, asse
     })
   } finally {
     gw.kill('SIGTERM')
+    // 自己的数据目录自己收。
+    rmSync(GW_HOME, { recursive: true, force: true })
   }
 }

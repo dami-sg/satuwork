@@ -65,6 +65,8 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     const company = await db.company(pairing.companyId)
     if (!company) throw new HttpError(404, '公司不存在')
 
+    // 过了反代之后 socket 另一头是 127.0.0.1；sourceIpOf 只在 socket 源地址落在
+    // GATEWAY_TRUSTED_PROXIES 名单里时才看 x-forwarded-for（见 lib/runtime.ts）。
     const ip = sourceIpOf(req)
     if (!ip) throw new HttpError(400, '取不到来源地址，无法配对')
     const host = managerHostOf(`${ip.includes(':') ? `[${ip}]` : ip}:${port}`)
@@ -307,6 +309,9 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     const reportedHost = instanceHostOf(strField(bodyOf(req), 'host'))
     const seat = await db.seatRuntime(account.id, botId)
     if (!seat) throw new HttpError(404, '还没有部署')
+    // 机器票只能替**自己机器上的**席位说话：同公司的另一台机器报上来，会把这个席位的
+    // 反代入口改写成它自己的地址，之后 Gateway 就一直敲错机器。
+    if (caller.kind === 'machine' && seat.machineId !== caller.machine.id) throw new HttpError(403, '这个席位不在这台机器上')
     // **不再采信 body.host。** bot 报的是自己看到的地址，而它只听 127.0.0.1；那个
     // 地址对管家是对的，对 Gateway 是打不通的。以前采信它，结果是 bot 一上线就把
     // Gateway 写好的地址覆盖成 loopback，之后 Gateway 再也打不到这个 bot。
@@ -359,10 +364,17 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     // null`），按 botId 查的话这种会话就落不到机器上，拉全文时又回落到公司默认机器——
     // 正是 machineTokenFor 修掉的那个 host/token 错配。账号粘住机器（见
     // docs/gateway-runtime.md §3.0），所以取该账号任意一个席位的机器都是对的。
+    const seatsOfAccount = await db.seatRuntimesOfAccount(accountId)
+    // 机器票那条同样只认自己机器上的账号：这个人的席位一个都不在这台机器上，那这条
+    // 索引就不是它该报的——写进去的 machineId 会让拉全文时敲到一台没有这条会话的机器。
+    // 一个席位都没有的账号（老数据 / stub）放过，那时没有依据可核。
+    if (caller.kind === 'machine' && seatsOfAccount.length && !seatsOfAccount.some((s) => s.machineId === caller.machine.id)) {
+      throw new HttpError(403, '这个账号的席位不在这台机器上')
+    }
     const machineId =
       caller.kind === 'machine'
         ? caller.machine.id
-        : (await db.seatRuntimesOfAccount(accountId))[0]?.machineId ?? null
+        : seatsOfAccount[0]?.machineId ?? null
     const session = await db.upsertSessionIndex({
       sessionId,
       companyId,

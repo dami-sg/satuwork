@@ -18,6 +18,7 @@ import {
   observedPromptHighWater,
 } from './src/agent/index.ts'
 import { parseAt, rowsOf } from './src/tools/history.ts'
+import { historySlice } from './src/session/replay.ts'
 import { budgetToolText, MODEL_TOOL_RESULT_MAX_CHARS } from './src/tools/result-budget.ts'
 
 let seq = 0
@@ -324,6 +325,37 @@ out.rows = {
   ]
   const replay = await toAgentMessages(old)
   const replayText = replay.find((m) => m.role === 'toolResult')?.content?.[0]?.text ?? ''
+  /**
+   * 下面两条是从 bot/e2e-result-budget.mjs 并过来的——那个探针没有任何套件引用，
+   * 它独有的断言从来没跑过。
+   *
+   * - 对外历史（界面翻历史那条路，historySlice）也要瘦身，而且同样不许改写服务端日志。
+   * - 压缩边界之前那个 66 万的高水位不能污染压缩后的新上下文；边界之后的新 usage 才算。
+   */
+  const publicTool = historySlice(old).events.find((e) => e.type === 'tool/result')
+  const compacted = [
+    ...old,
+    ev('turn/end', T0 + 2, { turn: 1, reason: 'completed' }),
+    ev('session/compact', T0 + 3, {
+      throughSeq: seq,
+      from: T0,
+      to: T0 + 3,
+      summary: 'summary',
+      by: 'auto',
+      tokensBefore: 665_223,
+      tokensAfter: 100,
+    }),
+  ]
+  const highWaterAfterCompact = observedPromptHighWater(compacted)
+  compacted.push(
+    ev('assistant/message', T0 + 4, {
+      turn: 2,
+      step: 1,
+      message: { id: 'b', role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      usage: { inputTokens: 100, outputTokens: 1, cacheReadTokens: 2_000, reasoningTokens: 0 },
+    }),
+  )
+  const highWaterNext = observedPromptHighWater(compacted)
   out.resultBudget = {
     rawChars: raw.length,
     modelChars: budgeted.text.length,
@@ -333,6 +365,11 @@ out.rows = {
     underHardLimit: budgeted.text.length <= MODEL_TOOL_RESULT_MAX_CHARS,
     oldLogSlimmed: replayText.length === budgeted.text.length,
     promptHighWater: observedPromptHighWater(old),
+    publicHistoryChars: publicTool?.data?.text?.length ?? -1,
+    publicHistorySlimmed:
+      (publicTool?.data?.text?.length ?? Infinity) <= MODEL_TOOL_RESULT_MAX_CHARS && old[1].data.text === raw,
+    highWaterAfterCompact,
+    highWaterNext,
   }
 }
 

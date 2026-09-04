@@ -10,6 +10,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
+import { createServer as createNetServer } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -93,7 +94,21 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r))
 const httpPort = server.address().port
 
 const profile = mkdtempSync(join(tmpdir(), 'satu-e2e-chrome-'))
-const cdpPort = 9333 + (process.pid % 300)
+/**
+ * 调试端口向内核要，不按 pid 算。
+ *
+ * `9333 + pid % 300` 看着随机，但两个 worktree 同时跑、或者上一轮被 SIGKILL 的 Chrome
+ * 还占着口，撞上就撞上了——而撞上之后 Chrome 起不来、下面那段探活等满就打 `__SKIP__`，
+ * 整套浏览器用例悄悄变绿。listen(0) 拿一个当下空着的口，关掉再交给 Chrome。
+ */
+const cdpPort = await new Promise((resolve, reject) => {
+  const s = createNetServer()
+  s.once('error', reject)
+  s.listen(0, '127.0.0.1', () => {
+    const p = s.address().port
+    s.close(() => resolve(p))
+  })
+})
 const chrome = spawn(
   bin,
   [
@@ -123,7 +138,11 @@ const done = (code) => {
 process.on('SIGINT', () => done(130))
 process.on('SIGTERM', () => done(143))
 
-// 等调试端口起来。起不来就当这台机器跑不了这套，跳过而不是红。
+// 等调试端口起来。
+//
+// **起不来是失败，不是跳过。** 上面已经确认这台机器有 Chrome；到这里还起不来，是端口
+// 被占、Chrome 崩了之类的真问题。以前打 `__SKIP__` 的写法把这些全变成了绿——有浏览器
+// 的机器上整套用例一次都没跑，而没有人会去看 skip 清单。
 let up = false
 for (let i = 0; i < 40; i++) {
   await new Promise((r) => setTimeout(r, 250))
@@ -133,8 +152,8 @@ for (let i = 0; i < 40; i++) {
   } catch { /* 还没起来 */ }
 }
 if (!up) {
-  console.log('__SKIP__Chrome 的调试端口没起来')
-  done(0)
+  console.error(`Chrome（${bin}）的调试端口 ${cdpPort} 10 秒没起来：exitCode=${chrome.exitCode}`)
+  done(1)
 }
 
 const browserMod = await import('./src/browser/index.ts')

@@ -106,7 +106,8 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
         SATUWORK_DEPLOY_STUB: '1',
       },
     })
-    await waitHttp(gwBase + '/health')
+    // 带上 child：起不来时有用的是它的输出，不是三十秒后那句「等不到」。
+    await waitHttp(gwBase + '/health', { child: gw, what: 'chat gateway' })
 
     const reg = await createCompany(req, gwBase, {
       ownerEmail: 'owner@chat.test',
@@ -276,17 +277,28 @@ export async function runGatewayChat({ gwRoot, botRoot, test, req, start, waitHt
        * 这一跳只验**通道**：要票、找得到席位、席位的判断（含 4xx 和那句中文原话）
        * 一个字不改地回到浏览器。业务判断全在席位那边，Gateway 这层什么都不该懂。
        *
-       * 不断言 200：这条会话跑没跑完一轮由上游那个假模型决定。但无论哪种结果，
-       * **都不该是 5xx，也不该是一句没有 error 字段的空回复**——那才是通道坏了。
+       * 状态码按席位那头的判断钉死（bot/src/agent/index.ts 的 compactNow / resetContext）：
+       *
+       * - compact：这条会话到这里只有一轮，要么还在跑（409「还在跑」），要么太短没有
+       *   可压的历史（409「太短」）——两条路都是 409，且都带一句中文原话。
+       * - reset：跑完了那一轮就切得动（200，reset:true）；还在跑就是 409。哪一种由那个
+       *   假模型什么时候收口决定，但**只能是这两种**，而且拒的那条必须带 error。
+       *
+       * 以前只挡 5xx，等于「随便回什么都行」。
        */
       for (const act of ['compact', 'reset']) {
         const anon = await req(gwBase, 'POST', `/runtime/sessions/${sessionId}/${act}`)
         assert(anon.status === 401, `${act} 无票该 401，实际 ${anon.status} ${anon.text}`)
 
         const r = await req(gwBase, 'POST', `/runtime/sessions/${sessionId}/${act}`, { token: adminTok })
-        assert(r.status < 500, `${act} 不该是 5xx：${r.status} ${r.text}`)
+        if (act === 'compact') {
+          assert(r.status === 409, `compact 在只有一轮的会话上该 409，实际 ${r.status} ${r.text}`)
+        } else {
+          assert(r.status === 200 || r.status === 409, `reset 只能是 200 或 409，实际 ${r.status} ${r.text}`)
+          if (r.status === 200) assert(r.json && r.json.reset === true, `reset 200 却没带 reset:true：${r.text}`)
+        }
         if (r.status !== 200) {
-          assert(r.json && r.json.error, `${act} 被拒了却没说为什么：${r.status} ${r.text}`)
+          assert(r.json && typeof r.json.error === 'string' && r.json.error, `${act} 被拒了却没说为什么：${r.status} ${r.text}`)
         }
       }
     })

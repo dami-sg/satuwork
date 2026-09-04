@@ -20,7 +20,7 @@
 # 坏了的永久故障。撞上的概率大约是窗口除以 120 秒，十次里有一两次。
 #
 # 所以只在**距离换版已经超过宽限期**时才判它失败。宽限期要大于「换链接 → 新进程第一
-# 次心跳」的最坏情况：2 秒延迟 + 15 秒 TimeoutStopSec + 启动 + 一轮心跳，180 秒留得很宽。
+# 次心跳」的最坏情况：2 秒延迟 + 停机等待（不忙时 3 秒；有部署在跑时管家会先等它跑完，但换版前已复查过 busy，这个窗口只剩那 2 秒）+ 启动 + 一轮心跳，180 秒留得很宽。
 #
 # ROOT / STATE 可以用环境变量顶掉，`SATUWORK_CONFIRM_DECIDE_ONLY=1` 则只打印结论
 # （rollback / keep 加一句理由）就退出，不动任何东西。**这两个口子是给测试用的**：
@@ -71,5 +71,8 @@ mv -T "$ROOT/.current.tmp" "$ROOT/current"
 rm -f "$ROOT/previous"
 # 留个记号给管家：这次版本对不上是**回滚**造成的，不是发布包里的 VERSION 写错了。
 # 两者的处置完全不同（一个去查网络，一个去查打包），而管家自己分不出来。
+# 管家看到这个记号会把同一版本**再试最多 3 次**（次数记在 manager.json 的
+# upgradeRetries 里，见 upgrade.ts）：心跳不通往往只是那几分钟网络抖了。VERSION 对不上
+# 那种（没有这个记号）它一次都不再试。
 printf '%s' "$CUR" > "$ROOT/rolled-back"
 systemctl restart satuwork-manager.service

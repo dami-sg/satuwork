@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { agentsOf, type ToolCall } from '../tools/index.ts'
-import { applyEdits, type ApprovalForm } from './forms.ts'
+import { applyEdits, unwrapCall, type ApprovalForm } from './forms.ts'
 
 /** 一条还等着人拍板的调用。刷新页面之后界面靠它把卡片摆回来。 */
 export interface PendingApproval {
@@ -16,6 +16,14 @@ export interface PendingApproval {
 }
 
 export type Verdict = 'approved' | 'denied' | 'timeout' | 'aborted'
+
+/**
+ * 放行 / 拦停名单里的键：剥掉 `*_sw_run` 这层壳之后的真实工具名。
+ * 没套壳时就是工具名本身，所以非壳工具的行为和以前完全一样。
+ */
+function grantKey(call: { name: string; arguments: string }): string {
+  return unwrapCall(call).tool
+}
 
 /**
  * 一次确认的结果。
@@ -147,11 +155,20 @@ export class ApprovalGate {
      * 排在放行名单前面——同一把工具不可能既在放行名单又在拦停名单里（点了一个就落定了），
      * 但万一将来两边都能进，**拒绝优先**才是安全的那一侧。
      */
+    /**
+     * 名单按**剥壳后的内层工具名**记，不按 `call.name`。
+     *
+     * 连接器收成 `*_sw_run` 元工具之后，`call.name` 对同一个连接器的所有工具都是同一个
+     * 壳名：按它记账，人对「查一次仓库列表」点的「这一轮都批准」会顺带放行同一个壳里
+     * 的「删仓库」。没套壳的工具 unwrapCall 原样返回，行为不变。查和写（decide）两边
+     * 都走 grantKey。
+     */
+    const toolKey = grantKey(call)
     const blocked = this.denials.get(sessionId)
-    if (blocked?.has(call.name)) return { verdict: 'denied', scope: 'turn', viaBlock: true }
+    if (blocked?.has(toolKey)) return { verdict: 'denied', scope: 'turn', viaBlock: true }
 
     const granted = this.grants.get(sessionId)
-    if (granted?.has(call.name)) return { verdict: 'approved', scope: 'turn', viaGrant: true }
+    if (granted?.has(toolKey)) return { verdict: 'approved', scope: 'turn', viaGrant: true }
 
     const key = `${sessionId}:${call.callId}`
     const now = Date.now()
@@ -261,15 +278,17 @@ export class ApprovalGate {
      * 然后默许了之后几封没人看过的。
      */
     if (edited.length) scope = 'once'
+    // 记的是剥壳后的内层工具名（见 ask 里的说明），和查的那一侧用同一把钥匙。
+    const toolKey = grantKey(hit.rec)
     if (decision === 'approve' && scope === 'turn') {
       const set = this.grants.get(sessionId) ?? new Set<string>()
-      set.add(hit.rec.name)
+      set.add(toolKey)
       this.grants.set(sessionId, set)
     }
     // 「这一轮别再试了」：拒绝也能带范围，落进拦停名单，这一轮同一把工具直接挡。
     if (decision === 'deny' && scope === 'turn') {
       const set = this.denials.get(sessionId) ?? new Set<string>()
-      set.add(hit.rec.name)
+      set.add(toolKey)
       this.denials.set(sessionId, set)
     }
     /**

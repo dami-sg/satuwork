@@ -341,6 +341,27 @@ export function humanSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+/**
+ * 交给子进程（`terminal` 的 bash、席位上的 Chrome）的环境变量。
+ *
+ * **不能原样把 `process.env` 递下去。** 这个进程的 env 里带着 `GATEWAY_TOKEN` /
+ * `GATEWAY_API_KEY` 这类凭据和 `SATUWORK_*` 这批内部配置——模型在 terminal 里一句
+ * `env` 就能把它们全打印出来，Chrome 那边任何一个扩展或子进程也读得到。剔掉
+ * `GATEWAY_*`、`SATUWORK_*`，以及名字里明显是密钥的（`*_TOKEN` / `*_API_KEY` /
+ * `*_SECRET` / `*_PASSWORD`）；PATH / HOME / LANG / DISPLAY / XDG_* 这些子进程真要
+ * 用的都留着。每次调用现算一份副本，调用方改它不会污染本进程。
+ */
+export function childEnv(): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue
+    if (/^(GATEWAY|SATUWORK)_/i.test(key)) continue
+    if (/(_TOKEN|_API_KEY|_SECRET|_PASSWORD)$/i.test(key)) continue
+    out[key] = value
+  }
+  return out
+}
+
 /** \0 出现在头部就当二进制。够用，且比嗅探 MIME 便宜。 */
 export function looksBinary(buf: Buffer): boolean {
   return buf.subarray(0, 8000).includes(0)

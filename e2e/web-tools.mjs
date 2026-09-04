@@ -60,7 +60,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
   const webCalls = async () =>
     (
       await client.query(
-        'select w.kind, w.backend, w.units, w."createdAt", coalesce(u."amountMicros", 0)::int as micros' +
+        'select w.kind, w.backend, w.units, w."companyId", w."createdAt", coalesce(u."amountMicros", 0)::int as micros' +
           ' from web_calls w left join usage_charges u on u."refId" = w.id order by w."createdAt"',
       )
     ).rows
@@ -69,6 +69,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
     let token = ''
     let adminToken = ''
     let seatToken = ''
+    let companyId = ''
 
     await test('种数据：一家公司、一个员工席位', async () => {
       const setup = await req(base, 'POST', '/auth/setup', {
@@ -86,6 +87,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
         },
       })
       assert(org.status === 201, `org ${org.status} ${org.text}`)
+      companyId = org.json.company.id
 
       const login = await req(base, 'POST', '/auth/login', {
         body: { email: 'a@web.test', password: 'correct-horse-1' },
@@ -379,14 +381,17 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
     })
 
     await test('公司配额：用满就拦住，且拦住的那次不记账', async () => {
-      const used = (await webCalls()).filter((r) => r.companyId !== null).length || (await webCalls()).length
+      // 配额是按公司计的，就按这家公司的 companyId 数。以前那句「非空的条数，否则全部」
+      // 在查询根本不带 companyId 的情况下永远落到「全部」——碰巧对，但没验到按公司。
+      const used = (await webCalls()).filter((r) => r.companyId === companyId).length
+      assert(used > 0, '这家公司到这里该已经有过网页调用')
       // 把上限设成「已经用掉的次数」，下一次必然撞线。
       const put = await req(base, 'PUT', '/platform/tools/web', { token, body: { dailyLimit: used } })
       assert(put.status === 200 && put.json.web.dailyLimit === used, `配额没存住：${put.text}`)
       const r = await req(base, 'POST', '/runtime/web/search', { token: seatToken, body: { query: '撞线' } })
       assert(r.status === 200 && r.json.ok === false, `没拦住：${r.text}`)
       assert(r.json.error.includes('用满'), `话没说清楚：${r.json.error}`)
-      assert((await webCalls()).length === used, '被拦住的调用记了账')
+      assert((await webCalls()).filter((r) => r.companyId === companyId).length === used, '被拦住的调用记了账')
       // 调高就该放行。
       await req(base, 'PUT', '/platform/tools/web', { token, body: { dailyLimit: 0 } })
       const ok = await req(base, 'POST', '/runtime/web/search', { token: seatToken, body: { query: '放行' } })
@@ -433,5 +438,7 @@ export async function runWebTools({ gwRoot, test, req, start, waitHttp, assert, 
   } finally {
     gw.kill()
     await client.end().catch(() => {})
+    // 自己的数据目录自己收。
+    rmSync(GW_HOME, { recursive: true, force: true })
   }
 }

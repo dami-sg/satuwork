@@ -8,7 +8,7 @@ import { companyMachineOf } from '../deploy.ts'
 import { bodyOf, intField } from '../lib/validate.ts'
 import { modelProviderCreds, publicPlatformCred, publicSessionIndex, sessionCursorOf } from '../lib/org.ts'
 import { rangeQuery, requireOrg, requireUser } from '../lib/guards.ts'
-import { seatBearer } from '../lib/runtime.ts'
+import { seatBearer, seatMachineOf } from '../lib/runtime.ts'
 import { sessionPageLimit } from '../db.ts'
 
 export function attachSessions(router: Router, ctx: RouteCtx) {
@@ -103,8 +103,12 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
       action: 'session.pull',
       detail: { sessionId: row.sessionId },
     })
+    // host 和机器票必须来自**同一台**机器：`instances.host` 是按席位实际所在那台写的，
+    // 票以前却按 `sessions.machineId` / 公司默认机器取——多机公司里这两台可能不是一台，
+    // 拿 M1 的票敲 M2 只会得到一个 401。所以先按席位查机器，查不到才回落到老路。
+    const seatMachine = row.botId ? await seatMachineOf(db, row.accountId, row.botId) : undefined
     const machineId = row.machineId || company.machineId
-    const machine = machineId ? await db.machine(machineId) : await companyMachineOf(db, company.id)
+    const machine = seatMachine ?? (machineId ? await db.machine(machineId) : await companyMachineOf(db, company.id))
     const instance = row.botId ? await db.instance(row.accountId, row.botId) : undefined
     const host = (instance?.host || machine?.host || '').trim()
     if (!host) {

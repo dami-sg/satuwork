@@ -104,6 +104,36 @@ export class Llm {
     return this.builtinIds.has(id)
   }
 
+  /**
+   * 公司目录里的一条 model 能不能进目录。**路由写入前和 catalog() 合并时各问一次**——
+   * 写入那道挡人，合并那道挡库里已经躺着的老条目和别的进程写进来的。
+   *
+   * 三条规矩：provider 得是平台注册表里有的（密钥是按 provider 名去索引 process.env
+   * 的，一条 `{"provider":"stripe"}` 就能让网关拿 STRIPE_API_KEY 去打模型接口；注册表
+   * 这一关就把它挡掉了。**不要求平台已经配好密钥**：没密钥的模型照样进目录，调用时
+   * 回 402「没配密钥」，这是 /v1 一直以来的口径）；模型得在 enabledModels 白名单里，
+   * 白名单为空时得是平台目录 / 自动发现里真有的；`cost` 一律不认（单价由平台定，
+   * 公司条目自带一份就是自己给自己定价）。
+   *
+   * 调用前要先 syncCustomProviders + syncDiscovered，注册表才是新的。
+   */
+  async companyModelAllowed(
+    provider: string,
+    id: string,
+    enabled?: unknown,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (!PROVIDER_ID_RE.test(provider) || !isModelId(id)) return { ok: false, reason: 'provider 或模型 id 形状不对' }
+    if (!this.models.getProviders().some((p) => p.id === provider)) return { ok: false, reason: `平台没有 ${provider} 这个供应商` }
+    const list = enabled === undefined ? (await this.db.platformSettings()).enabledModels : enabled
+    const key = `${provider}/${id}`
+    if (Array.isArray(list) && list.length) {
+      if (!list.includes(key)) return { ok: false, reason: `${key} 不在平台启用的模型名单里` }
+    } else if (!this.models.getModel(provider, id)) {
+      return { ok: false, reason: `平台目录里没有 ${key}` }
+    }
+    return { ok: true }
+  }
+
   builtinProviderIds(): ReadonlySet<string> {
     return this.builtinIds
   }
@@ -209,15 +239,19 @@ export class Llm {
         })
       }
     }
+    const enabled = (await this.db.platformSettings()).enabledModels
     for (const item of await this.db.visibleCatalog('model', companyId || null)) {
       const def = (item.definition ?? {}) as Record<string, unknown>
       const provider = String(def.provider ?? item.name ?? '').trim()
       const id = String(def.id ?? def.model ?? item.name ?? '').trim()
       if (!provider || !id) continue
       // provider 会被 envSecret 拼成 `<PROVIDER>_API_KEY` 去索引 process.env，所以它
-      // 不能是任意字符串：一条 `{"provider":"stripe"}` 的公司模型就能让网关拿着
-      // STRIPE_API_KEY 去打模型接口。形状不对的条目直接不进目录。
+      // 不能是任意字符串。形状不对的条目直接不进目录——平台条目和公司条目都一样。
       if (!PROVIDER_ID_RE.test(provider) || !isModelId(id)) continue
+      // **公司条目**还要过 companyModelAllowed（provider 在注册表里、模型在白名单 / 平台
+      // 目录里）：写入口（routes/catalog.ts）已经挡过一次，这里再挡一层，库里可能躺着规矩
+      // 收紧前写进去的老条目。平台条目是 owner 自己写的，只查形状，不查这些。
+      if (item.scope === 'company' && !(await this.companyModelAllowed(provider, id, enabled)).ok) continue
       const key = `${provider}/${id}`
       if (seen.has(key)) continue
       seen.add(key)
@@ -232,12 +266,12 @@ export class Llm {
         contextWindow: typeof def.contextWindow === 'number' ? def.contextWindow : undefined,
         maxTokens: typeof def.maxTokens === 'number' ? def.maxTokens : undefined,
         reasoning: Boolean(def.reasoning),
-        // 之前这里没带 cost，界面上这类模型的单价一律是空的。
-        cost: def.cost,
+        // **公司条目不带自己的 cost**：单价是平台定的，公司条目里写一份等于自己给自己
+        // 定价。平台条目（owner 写的）照旧带，之前没带时界面上这类模型的单价一律是空的。
+        cost: item.scope === 'company' ? undefined : def.cost,
         source: 'company',
       })
     }
-    const enabled = (await this.db.platformSettings()).enabledModels
     if (Array.isArray(enabled) && enabled.length) {
       const allow = new Set(enabled)
       return out.filter((m) => allow.has(`${m.provider}/${m.id}`))

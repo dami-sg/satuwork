@@ -54,6 +54,9 @@ export interface CreateSession {
   parent?: { sessionId: string; callId: string; taskId: string }
 }
 
+/** 内存里最多留多少条会话（见 SessionService.cache）。一条主会话加几十条委派够用。 */
+const CACHE_MAX = Math.max(8, Math.trunc(Number(process.env.SATUWORK_SESSION_CACHE_MAX) || 64))
+
 interface SessionState {
   id: string
   events: SessionEvent[]
@@ -70,6 +73,13 @@ interface SessionState {
  * 读取一律走事件列表的派生——不维护第二份可变状态，因为那必然会跟日志漂移。
  */
 export class SessionService extends Service {
+  /**
+   * 内存里的会话，按最近使用排（Map 的插入序；每次命中都挪到末尾）。
+   *
+   * 有上限：一台席位能跑几周、委派几千次，每条子会话的全部事件都常驻的话只涨不落。
+   * 超了先淘汰非 main 的（委派子会话读完结论就没人再碰），再淘汰最久没用的主会话。
+   * 淘汰只丢内存态，下次访问从盘上重读。
+   */
   private cache = new Map<string, SessionState>()
   /**
    * 正在读盘的会话。两个请求同时碰一条还没缓存的会话时，必须共用同一次 load——
@@ -102,7 +112,7 @@ export class SessionService extends Service {
      */
     const id = `${opts.kind === 'task' ? 't' : 's'}-${randomUUID()}`
     const state: SessionState = { id, events: [], seq: 0, file: join(this.root, `${id}.jsonl`) }
-    this.cache.set(id, state)
+    this.remember(state)
     await this.append(id, 'session', {
       version: SESSION_FORMAT_VERSION,
       id,
@@ -163,7 +173,15 @@ export class SessionService extends Service {
     const rows = await Promise.all(
       files.map(async (f) => {
         const id = f.replace(/\.jsonl$/, '')
-        const events = await this.events(id)
+        // 一条会话读不出来（格式版本太新、文件损坏）只跳过它自己，不让整张列表 reject
+        // ——那样侧栏会一条都画不出来，包括那些好好的。
+        let events: SessionEvent[]
+        try {
+          events = await this.events(id)
+        } catch (e) {
+          this.ctx.logger?.warn?.(`sessions: 列表跳过 ${id}：${(e as Error).message}`)
+          return null
+        }
         const root = events.find((e) => e.type === 'session')
         if (!root) return null
         const titled = [...events].reverse().find((e) => e.type === 'session/title')
@@ -215,7 +233,12 @@ export class SessionService extends Service {
   /** 惰性从磁盘恢复。进程重启后第一次访问某会话会走这里。并发进来的共用同一次。 */
   private async load(sessionId: string): Promise<SessionState> {
     const cached = this.cache.get(sessionId)
-    if (cached) return cached
+    if (cached) {
+      // 命中挪到末尾：淘汰从头开始挑，这样丢的是最久没碰的那条。
+      this.cache.delete(sessionId)
+      this.cache.set(sessionId, cached)
+      return cached
+    }
     const inflight = this.loading.get(sessionId)
     if (inflight) return inflight
     const run = this.read(sessionId).finally(() => this.loading.delete(sessionId))
@@ -229,9 +252,32 @@ export class SessionService extends Service {
 
     const events: SessionEvent[] = []
     let rewritten = false
-    for (const line of (await readFile(file, 'utf8')).split('\n')) {
+    const raw = await readFile(file, 'utf8')
+    const lines = raw.split('\n')
+    /**
+     * 坏行跳过，不让整个会话读不出来。
+     *
+     * 最常见的坏行是**尾行截断**：进程正写到一半被杀（换版、断电），最后一行只剩半截
+     * JSON。原来这里 `JSON.parse` 一抛，这条会话从此打不开——列表也跟着整个 reject。
+     * 跳过的那行记进 seq 水位（见下面 badSeq），下一条事件不会和它撞号；文件末尾没有
+     * 换行时先补一个，否则下一次 append 会接在半截行后面，把新事件也一起写坏。
+     */
+    let badSeq = 0
+    let skipped = 0
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!
       if (!line.trim()) continue
-      const event = JSON.parse(line) as SessionEvent
+      let event: SessionEvent
+      try {
+        event = JSON.parse(line) as SessionEvent
+      } catch {
+        skipped++
+        const n = Number(/"seq"\s*:\s*(\d+)/.exec(line)?.[1])
+        if (Number.isFinite(n) && n > badSeq) badSeq = n
+        const tail = i === lines.length - 1 && !raw.endsWith('\n')
+        this.ctx.logger?.warn?.(`sessions: ${sessionId} 第 ${i + 1} 行不是合法 JSON，跳过（${tail ? '尾行截断' : '中间坏行'}）`)
+        continue
+      }
       // 更新的版本拒绝，不要猜。旧版本就地迁到当前：补 botId / origin，不丢文件。
       if (event.type === 'session') {
         const data = event.data as SessionEventMap['session'] & { agentId?: string }
@@ -260,6 +306,9 @@ export class SessionService extends Service {
       const tmp = `${file}.${randomUUID()}.tmp`
       await writeFile(tmp, events.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8')
       await rename(tmp, file)
+    } else if (skipped && raw && !raw.endsWith('\n')) {
+      // 尾行截断且没重写：补个换行，让下一条 append 从新的一行开始（理由见上面）。
+      await appendFile(file, '\n', 'utf8')
     }
 
     const state: SessionState = {
@@ -269,15 +318,40 @@ export class SessionService extends Service {
       // writer 各自拿号、写入顺序由文件锁决定），迁移重写也可能改变行序。按最后一行
       // 恢复会把游标退回到一个已经用过的号上，下一条事件的 seq 就和历史撞号——SSE 的
       // ?after=N 游标从此认不出新事件。
+      // 跳过的坏行里能认出 seq 的也计入水位：那个号已经在磁盘上出现过。
       seq: events.reduce((max, e) => {
         const n = Number((e as { seq?: unknown }).seq)
         return Number.isFinite(n) && n > max ? n : max
-      }, 0),
+      }, badSeq),
       file,
     }
-    this.cache.set(sessionId, state)
+    this.remember(state)
     await this.healDanglingTurn(state)
     return state
+  }
+
+  /** 进缓存，超上限就淘汰（规则见 cache 上的说明）。刚放进去的这条不会被自己淘汰掉。 */
+  private remember(state: SessionState): void {
+    this.cache.delete(state.id)
+    this.cache.set(state.id, state)
+    const isMain = (s: SessionState) => {
+      const root = s.events.find((e) => e.type === 'session')
+      const kind = (root?.data as { kind?: string } | undefined)?.kind
+      return !kind || kind === 'main'
+    }
+    while (this.cache.size > CACHE_MAX) {
+      let victim: string | undefined
+      for (const [id, s] of this.cache) {
+        if (id === state.id) continue
+        if (!isMain(s)) {
+          victim = id
+          break
+        }
+        victim ??= id
+      }
+      if (!victim) return
+      this.cache.delete(victim)
+    }
   }
 
   /**

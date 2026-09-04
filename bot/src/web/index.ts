@@ -47,8 +47,16 @@ export function apply(ctx: Context, _config: Config = {}) {
     .filter((server) => server.enabled && server.connected && server.connector)
     .map((server) => ({ id: server.id, label: server.name }))
 
+  /**
+   * 渠道回复的去重表有上限：每条渠道消息都写一行、从来不删的话，这张表跟着聊天量只增
+   * 不减。只留最近 CHANNEL_RESULTS_MAX 条（按写入时间淘汰）——它的用处只是挡住渠道
+   * 短时间内的重投，几百条早就够了。
+   */
+  const CHANNEL_RESULTS_MAX = 500
   const saveChannelResult = (key: string, result: ChannelResultRow): ChannelResultRow => {
     channelResults.put(key, result)
+    // list() 按 updatedAt 倒序，尾巴上就是最老的。
+    for (const row of channelResults.list().slice(CHANNEL_RESULTS_MAX)) channelResults.delete(row.id)
     return result
   }
 

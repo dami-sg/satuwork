@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { cachedSkills, type CachedSkill } from '../catalog/index.ts'
 import { satuworkHome } from '../home.ts'
@@ -250,8 +250,10 @@ export function apply(ctx: Context) {
 
   /** 一个文件的内容。缓存命中就不出门。返回文本和它落在磁盘上的绝对路径。 */
   const fetchFile = async (s: CachedSkill, path: string): Promise<{ text: string; abs: string }> => {
-    const abs = join(cacheDir(s), 'files', path)
-    if (!abs.startsWith(join(cacheDir(s), 'files'))) fail(`路径越界：${path}`)
+    const filesDir = join(cacheDir(s), 'files')
+    const abs = join(filesDir, path)
+    // 比较要带分隔符：不带的话 `files-evil/x` 也以 `files` 开头，越界检查形同虚设。
+    if (abs !== filesDir && !abs.startsWith(filesDir + sep)) fail(`路径越界：${path}`)
     try {
       return { text: await readFile(abs, 'utf8'), abs }
     } catch {

@@ -208,67 +208,6 @@ function auditEventsTable() {
         </div>`
 }
 
-function auditChatsTable() {
-  const members = state.accounts || []
-  const opts = [`<option value="">${t('全部')}</option>`]
-    .concat(
-      members.map(
-        (m) =>
-          `<option value="${esc(m.id)}" ${state.sessionAccountId === m.id ? 'selected' : ''}>${esc(m.name || m.email || m.id)}</option>`,
-      ),
-    )
-    .join('')
-  const grid = 'grid-template-columns: minmax(140px, 2fr) minmax(100px, 1.2fr) minmax(80px, 1fr) minmax(130px, 1.2fr) 64px;'
-  const rows = (state.sessions || [])
-    .map((row) => {
-      return `<div class="satu-usagerow" style="${grid}">
-        <span style="font-size: 13.5px; font-weight: 600;">${esc(row.title || t('未命名'))}</span>
-        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(row.accountName || row.accountId || '—')}</span>
-        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(row.botName || row.botId || '—')}</span>
-        <span style="font-size: 12px; color: var(--muted-foreground);">${esc(fmtTime(row.updatedAt))}</span>
-        <button type="button" class="satu-linkbtn" data-act="go" data-href="/audit/${esc(row.sessionId)}">${t('打开')}</button>
-      </div>`
-    })
-    .join('')
-  return `
-        <form id="audit-filter-form" style="display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: flex-end;">
-          <div class="field" style="margin: 0;">
-            <label for="audit-account">${t('员工')}</label>
-            <select class="input" id="audit-account" name="accountId" style="width: 200px;">${opts}</select>
-          </div>
-          <div class="field" style="margin: 0;">
-            <label for="audit-from">${t('开始日期')}</label>
-            <input class="input" id="audit-from" name="from" type="date" value="${esc(state.sessionFrom || '')}">
-          </div>
-          <div class="field" style="margin: 0;">
-            <label for="audit-to">${t('结束日期')}</label>
-            <input class="input" id="audit-to" name="to" type="date" value="${esc(state.sessionTo || '')}">
-          </div>
-          <button type="submit" class="btn btn-secondary" style="flex: none;">${t('筛选')}</button>
-        </form>
-        <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
-          <div class="satu-usagehead" style="${grid}">
-            <span>${t('标题')}</span><span>${t('员工')}</span><span>Bot</span><span>${t('更新时间')}</span><span>${t('打开')}</span>
-          </div>
-          ${rows || `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${t('还没有对话索引。实例上报之后会列在这里。')}</div>`}
-        </div>
-        ${
-          state.sessionsHasMore
-            ? `<div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
-                 <button type="button" class="btn btn-secondary" style="flex: none;" data-act="sessions-more"${
-                   state.sessionsLoadingMore ? ' disabled' : ''
-                 }>${state.sessionsLoadingMore ? t('加载中…') : t('加载更多')}</button>
-                 <span style="font-size: 13px; color: var(--muted-foreground);">${esc(
-                   t(
-                     `已列出 ${(state.sessions || []).length} 条，还有更早的。`,
-                     `${(state.sessions || []).length} listed so far; there are older ones.`,
-                   ),
-                 )}</span>
-               </div>`
-            : ''
-        }`
-}
-
 function auditPage() {
   return `
     <div class="gw-page">
@@ -301,41 +240,6 @@ function conversationAuditDetailPage() {
     <div class="satu-panel" style="margin: 0;"><span class="satu-panel-title">${t('任务时间线')}</span><div style="display: flex; flex-direction: column; gap: var(--space-2);">${timeline || `<span style="font-size: 13px; color: var(--muted-foreground);">${t('没有时间线')}</span>`}</div></div>
     ${(item.riskFlags || []).length ? `<div class="gw-flash gw-flash-err">${esc(t('风险标记'))}: ${esc(item.riskFlags.join('、'))}</div>` : ''}
   </div></div>`
-}
-
-function auditDetailPage() {
-  const row = state.sessionDetail
-  if (!row) {
-    return `
-    <div class="gw-page">
-      <div class="gw-page-inner">
-        ${flashes()}
-        <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${t('找不到这条对话。')}</p>
-      </div>
-    </div>`
-  }
-  const err = state.sessionPullError
-  const events = state.sessionEvents
-  let body
-  if (err) {
-    body = `<div class="gw-flash gw-flash-err">${esc(err)}</div>`
-  } else if (events == null) {
-    body = `<div class="gw-flash gw-flash-err">${t('机器不在线，全文拉不下来')}</div>`
-  } else {
-    body = auditTranscript(events)
-  }
-  return `
-    <div class="gw-page">
-      <div class="gw-page-inner">
-        <div>
-          ${/* 返回在内容区头上的面包屑里，这儿不再重复一个。 */ ''}
-          <h1 style="font-size: 24px; margin: 0 0 4px;">${esc(row.title || t('未命名'))}</h1>
-          <p style="margin: 0; font-size: 14px; color: var(--muted-foreground);">${esc(row.accountName || row.accountId || '—')} · ${esc(fmtTime(row.updatedAt || row.createdAt))}</p>
-        </div>
-        ${flashes()}
-        ${body}
-      </div>
-    </div>`
 }
 
 function roleTag(role) {

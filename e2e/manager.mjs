@@ -314,7 +314,9 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         assert(r.json.busy === true, `没带 busy 标记，Gateway 分不出「忙」和「失败」：${r.text}`)
         assert(String(r.json.error).includes('有会话在跑'), `理由不对：${r.json.error}`)
         // 真的等过：排空窗口 4 秒（见上面的 SATUWORK_SEAT_DRAIN_MS），当场拒是另一回事。
-        assert(waited >= 3500, `压根没等就拒了（${waited}ms）——那不叫排空`)
+        // 阈值取窗口的一半：等过的会在 4 秒上下，没等的在几百毫秒内，2 秒两边都有余量，
+        // 不会因为 CI 机器慢半拍就误报。
+        assert(waited >= 2000, `压根没等就拒了（${waited}ms）——那不叫排空`)
         const list = await req(mgrBase, 'GET', '/seats', { token: machineTok })
         const row = list.json.seats.find((x) => x.seatId === 'seat-1')
         assert(row.botVersion === '0.0.0-e2e', `没换版却把版本号写成了新的：${row.botVersion}`)
@@ -328,11 +330,12 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
     await test('席位跑完了，换版自己接上，不用人再来一次', async () => {
       bot.health.busy = true
       bot.health.running = 1
-      // 1.2 秒后这一轮结束——排空要在窗口内自己认出来，接着往下走。
+      // 0.8 秒后这一轮结束——排空要在 4 秒窗口内自己认出来，接着往下走。放在窗口
+      // 前段，给探活的轮询间隔和慢机器留足余量：贴着窗口尾巴的话，慢一拍就成了 409。
       const done = setTimeout(() => {
         bot.health.busy = false
         bot.health.running = 0
-      }, 1200)
+      }, 800)
       try {
         const r = await req(mgrBase, 'PUT', '/seats/seat-1', {
           token: machineTok,
@@ -467,8 +470,9 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         assert(r.status === 409, `drainMs=0 撞上忙席位该当场 409，实际 ${r.status} ${r.text}`)
         assert(r.json.busy === true, `没带 busy 标记：${r.text}`)
         // 排空窗口是 4 秒（SATUWORK_SEAT_DRAIN_MS），drainMs=0 必须明显快过它。留到
-        // 2.5 秒是给探活那一跳的余量（机器忙时它自己就要几百毫秒），不是给「等了一轮」的。
-        assert(waited < 2500, `drainMs=0 还是等了 ${waited}ms——调用方的预算没被认`)
+        // 3 秒是给探活那一跳的余量（机器忙时它自己就要几百毫秒），不是给「等了一轮」的：
+        // 真等了一轮的会在 4 秒开外。
+        assert(waited < 3000, `drainMs=0 还是等了 ${waited}ms——调用方的预算没被认`)
       } finally {
         bot.health.busy = false
         bot.health.running = 0
@@ -518,7 +522,8 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         })
         const waited = Date.now() - at
         assert(r.status === 200, `手工重新部署被忙挡住了：${r.status} ${r.text}`)
-        assert(waited < 2000, `手工重新部署也去排空了（等了 ${waited}ms）——那就没有自助修复手段了`)
+        // 同上：去排空的会等满 4 秒，没去的是一次部署的耗时；3 秒离两边都有余量。
+        assert(waited < 3000, `手工重新部署也去排空了（等了 ${waited}ms）——那就没有自助修复手段了`)
       } finally {
         bot.health.busy = false
         bot.health.running = 0
@@ -1577,7 +1582,8 @@ export async function runManager({ root, gwRoot, test, req, start, waitHttp, ass
         assert(dl.headers.get('x-bot-sha256') === sha256Of(pkg), '校验头丢了')
         assert(Buffer.from(await dl.arrayBuffer()).equals(pkg), '字节对不上')
       } finally {
-        host.close()
+        // closeServer 先掐 keep-alive 连接再关：裸 close() 会等 Gateway 那条拉包连接自己断。
+        await closeServer(host, 'release host')
       }
     })
 

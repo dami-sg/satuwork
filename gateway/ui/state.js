@@ -355,10 +355,53 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
+/**
+ * 全站时间戳按这个时区读：fmtTime、对话页的时钟和「今天/昨天」（chat.js）、日期筛选
+ * 的零点（dayStart/dayEnd、pages-machines.js 的 loadRangeOf）都用它。**只在这里定义**，
+ * 以前 chat.js 另有一份 CHAT_TZ、筛选按浏览器本地零点算——同一屏上列表按此时区显示
+ * 日期、筛选却按本地日历圈，差八小时的人会看到「筛了今天却有昨天的」。
+ */
+const SATU_TZ = 'Asia/Kuching'
+
+/** 某一刻在 SATU_TZ 下的墙钟偏移（毫秒）：墙钟当作 UTC 读出来的值减去真实 epoch。 */
+function tzOffsetMs(ms) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: SATU_TZ,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(ms))
+  const n = (type) => Number(parts.find((x) => x.type === type)?.value)
+  const wall = Date.UTC(n('year'), n('month') - 1, n('day'), n('hour') % 24, n('minute'), n('second'))
+  return wall - Math.floor(ms / 1000) * 1000
+}
+
+/**
+ * SATU_TZ 下某一天（YYYY-MM-DD）的零点 epoch 毫秒。`dayOffset` 为 1 是「下一天零点」。
+ * 先当 UTC 算，再按该时区当时的偏移修正；修两轮是为了跨夏令时切换那两天也稳。
+ */
+function tzDayStart(dateStr, dayOffset = 0) {
+  const [y, m, d] = String(dateStr || '').split('-').map(Number)
+  if (!y || !m || !d) return NaN
+  const wall = Date.UTC(y, m - 1, d + dayOffset)
+  let guess = wall - tzOffsetMs(wall)
+  guess = wall - tzOffsetMs(guess)
+  return guess
+}
+
+/** SATU_TZ 下的 YYYY-MM-DD。 */
+function tzDayKey(ms) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: SATU_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ms))
+}
+
 function fmtTime(ms) {
   if (!ms) return '—'
   return new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Kuching',
+    timeZone: SATU_TZ,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -512,8 +555,14 @@ function allowedHrefs() {
   return set
 }
 
+/**
+ * 在不在对话页。**`/` 对公司侧的人也算**（见 memberChatHome）：以前这里不认 `/`，
+ * 而 render.js 的 onChatPage 认，于是落在 `/` 上时顶栏和右栏按对话页画、正文那边
+ * 的事件却不重绘、会话也不去拿——半个对话页。判据只留这一处，别处都调它。
+ */
 function isChatPath(p) {
-  return p === '/chat' || (typeof p === 'string' && p.startsWith('/a/'))
+  if (typeof p !== 'string') return false
+  return p === '/chat' || p.startsWith('/a/') || (p === '/' && memberChatHome())
 }
 
 function connectorIdOfPath(p) {
@@ -522,6 +571,8 @@ function connectorIdOfPath(p) {
 }
 
 function chatBotIdOf(p) {
+  // `/` 上没有 Bot id，它就是「上次看的那个」——和 chatPage / chatBotIdNow 的回落一致。
+  if (p === '/' && memberChatHome()) return state.chatBotId || ''
   if (!p || !p.startsWith('/a/')) return ''
   return decodeURIComponent(p.slice('/a/'.length).split('/')[0] || '')
 }
@@ -602,7 +653,7 @@ function auditItemIdOfPath(p) {
 
 /** 一级页面头上那个标题。二级页面走 crumbsOf()，不经过这里。 */
 function pageTitle(path) {
-  if (isChatPath(path) || (memberChatHome() && path === '/')) return t('对话')
+  if (isChatPath(path)) return t('对话')
   // owner 在这两个页面上管的是全局那份，标题得说清楚，别跟公司页混起来。
   if (isOwner() && PATHS[path]?.ownerTitle) return t(PATHS[path].ownerTitle)
   return t(PATHS[path]?.title || 'Satuwork')
@@ -654,15 +705,16 @@ function crumbsOf(path) {
   return null
 }
 
+/** 筛选框里那一天的起止，按 SATU_TZ 算零点（列表里的时间也是按它显示的，见 fmtTime）。 */
 function dayStart(dateStr) {
   if (!dateStr) return ''
-  const t = new Date(dateStr + 'T00:00:00').getTime()
+  const t = tzDayStart(dateStr)
   return Number.isFinite(t) ? t : ''
 }
 
 function dayEnd(dateStr) {
   if (!dateStr) return ''
-  const t = new Date(dateStr + 'T23:59:59.999').getTime()
+  const t = tzDayStart(dateStr, 1) - 1
   return Number.isFinite(t) ? t : ''
 }
 
@@ -695,6 +747,9 @@ function joinToken() {
   return decodeURIComponent(state.path.slice('/join/'.length).split('/')[0] || '')
 }
 
+/** 导航序号：每次 go() 加一。loadPage 回来时序号已经变了，说明人又点去了别处。 */
+let navSeq = 0
+
 function go(href) {
   if (location.pathname !== href) history.pushState({}, '', href)
   state.path = href
@@ -709,5 +764,11 @@ function go(href) {
   state.userReveal = { apiKey: false, accessToken: false }
   state.seatReveal = false
   state.seatError = ''
-  loadPage().then(render)
+  // 慢的那一页回来时人已经点到下一页去了：那次 render 会把新页面盖成旧页面的内容，
+  // 所以序号不对就不画。loadPage 自己写的共享字段（state.path 之类）由它内部各自把关，
+  // 这里只保证「不重画」这一条最小闸。
+  const seq = ++navSeq
+  loadPage().then(() => {
+    if (seq === navSeq) render()
+  })
 }

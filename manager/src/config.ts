@@ -54,6 +54,14 @@ export interface ManagerState {
    * src/seat/manager-confirm.sh 里的宽限期那一段。
    */
   lastUpgradeAt: number
+  /**
+   * `lastUpgradeTo` 那个版本被回滚脚本搬回来之后，又重试了几次。
+   *
+   * 「被回滚」有两种成因：包里的 VERSION 对不上是确定性的，重试一万次都一样；心跳不通
+   * 却可能只是那一刻网络抖了。后者允许有限次重试（见 upgrade.ts 的 ROLLBACK_RETRY_MAX），
+   * 这里记的就是已经用掉几次。换到别的版本、或者版本确认成功，都归零。
+   */
+  upgradeRetries: number
 }
 
 export function managerHome(...segments: string[]): string {
@@ -108,6 +116,7 @@ export function readState(): ManagerState | undefined {
       confirmedVersion: raw.confirmedVersion ?? '',
       lastUpgradeTo: raw.lastUpgradeTo ?? '',
       lastUpgradeAt: Number(raw.lastUpgradeAt) || 0,
+      upgradeRetries: Number(raw.upgradeRetries) || 0,
     }
   } catch {
     return
@@ -121,6 +130,36 @@ export function writeState(state: ManagerState): void {
   const tmp = path + '.tmp'
   writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 })
   renameSync(tmp, path)
+}
+
+/** patchState 每次落盘之后叫一下：index.ts 用它把内存里那份 state 跟磁盘对齐。 */
+let onPatched: ((state: ManagerState) => void) | undefined
+export function watchState(fn: (state: ManagerState) => void): void {
+  onPatched = fn
+}
+
+/**
+ * 就地改 manager.json：**现读磁盘、打补丁、写回**，读改写之间一个 await 都没有。
+ *
+ * 以前有三处各自「readState → 隔着一段 await → 整份 writeState」（adoptGatewayUrl、
+ * maybeUpgrade、jwksOf），互相之间是整份覆盖的：adoptGatewayUrl 手里那份快照是启动时
+ * 读的，等它落盘时会把 confirmVersion 刚写进磁盘的 confirmedVersion 抹回旧值——
+ * 回滚脚本随即看到「current 是新版、confirmedVersion 还是旧版」，把一次好端端的升级搬
+ * 回去并熔断。照 seats.ts 的 update() 那个写法：Node 单线程，三步之间不让出事件循环
+ * 就是原子的。`patch` 回 undefined 表示这次不用改，不白写一次盘；写完（或者不用写）
+ * 都把最终那份交给 watchState 登记的回调，内存里的 state 因此永远等于磁盘。
+ *
+ * 没配对（读不到 state）回 undefined，什么都不做。写盘失败照样抛出去，让调用方自己
+ * 决定怎么说。
+ */
+export function patchState(patch: (state: ManagerState) => Partial<ManagerState> | undefined): ManagerState | undefined {
+  const cur = readState()
+  if (!cur) return
+  const delta = patch(cur)
+  const next = delta ? { ...cur, ...delta } : cur
+  if (delta) writeState(next)
+  onPatched?.(next)
+  return next
 }
 
 export interface BootConfig {

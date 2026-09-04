@@ -1,6 +1,6 @@
 import { createPublicKey, verify } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
-import { readState, writeState } from './config.ts'
+import { patchState, readState } from './config.ts'
 
 /**
  * 桌面 ticket。
@@ -25,19 +25,46 @@ function b64urlJson(part: string): unknown {
   return JSON.parse(Buffer.from(part, 'base64url').toString('utf8'))
 }
 
+/**
+ * 未知 kid 的负缓存：kid → 什么时候查过。
+ *
+ * 验票是浏览器直连那条路，谁都能发一张 kid 随便写的票过来；没有这层，每一张都会让
+ * 管家外呼一次 Gateway 再写一次盘。同一个 kid 60 秒内只问一次——Gateway 真轮换了密钥，
+ * 一分钟后照样认得。
+ */
+const UNKNOWN_KID_TTL_MS = 60_000
+const unknownKids = new Map<string, number>()
+/** 同一时刻只让一路去抓 JWKS：一屏 noVNC 起来是一串并发请求，不该变成一串并发外呼。 */
+let jwksInflight: Promise<{ keys: Record<string, unknown>[] } | undefined> | null = null
+
 async function jwksOf(gatewayUrl: string, kid: string): Promise<Record<string, unknown> | undefined> {
   const state = readState()
   const find = (set: { keys: Record<string, unknown>[] } | null) =>
     set?.keys?.find((k) => k.kid === kid) ?? undefined
   const cached = find(state?.jwks ?? null)
   if (cached) return cached
+  const asked = unknownKids.get(kid)
+  if (asked !== undefined && Date.now() - asked < UNKNOWN_KID_TTL_MS) return
+  unknownKids.set(kid, Date.now())
+  // 别让这张表无限长：过期的顺手清掉。
+  for (const [k, at] of unknownKids) if (Date.now() - at >= UNKNOWN_KID_TTL_MS) unknownKids.delete(k)
   // kid 对不上就再抓一次：Gateway 轮换密钥之后不该要求管家重装。
   try {
-    const res = await fetch(`${gatewayUrl}/.well-known/jwks.json`, { signal: AbortSignal.timeout(8000) })
-    if (!res.ok) return
-    const fresh = (await res.json()) as { keys: Record<string, unknown>[] }
-    if (state) writeState({ ...state, jwks: fresh })
-    return find(fresh)
+    jwksInflight ??= (async () => {
+      const res = await fetch(`${gatewayUrl}/.well-known/jwks.json`, { signal: AbortSignal.timeout(8000) })
+      if (!res.ok) return
+      return (await res.json()) as { keys: Record<string, unknown>[] }
+    })().finally(() => {
+      jwksInflight = null
+    })
+    const fresh = await jwksInflight
+    if (!fresh) return
+    // patchState 现读现写，而且只在 keys 真变了时才落盘——原来是拿函数开头那份快照整份
+    // 写回，会把期间别处写的字段（confirmedVersion 等）抹掉，而且每张未知 kid 的票都写一次。
+    patchState((s) => (JSON.stringify(s.jwks?.keys ?? null) === JSON.stringify(fresh.keys ?? null) ? undefined : { jwks: fresh }))
+    const hit = find(fresh)
+    if (hit) unknownKids.delete(kid)
+    return hit
   } catch {
     return
   }

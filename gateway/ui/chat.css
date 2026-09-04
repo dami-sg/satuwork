@@ -256,6 +256,9 @@
   gap: 6px;
   margin-top: 10px;
 }
+/* 下面这几个类都自己写了 display，会盖掉 [hidden] 自带的 display:none（作者样式赢 UA
+   样式，见 app.css 的 .gw-aside-stack[hidden]）。少了这一行，hidden 了还占着位置。 */
+.sw-chips[hidden] { display: none; }
 .sw-chip {
   display: inline-flex;
   align-items: center;
@@ -528,6 +531,7 @@
    第一反应是「出错了」，然后开始学着忽略它——而这张卡片一旦被习惯性忽略，这个开关
    就等于没有。左边那条竖线用品牌色，够醒目，也说得清「这里在等你」。 */
 .sw-approvals { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.sw-approvals[hidden] { display: none; }
 .sw-approval {
   border: 1px solid var(--border);
   border-left: 3px solid var(--primary);
@@ -579,6 +583,7 @@
    **这里有一件事在等你**。区别只在左边那条竖线的颜色（交接是第二品牌色，说的是
    "换个人来"而不是"要不要放行"）和多出来的那个输入框。 */
 .sw-handoffs { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.sw-handoffs[hidden] { display: none; }
 .sw-handoff { border-left-color: var(--color-accent-2-600, var(--primary)); }
 .sw-handoff .sw-approval-head svg { color: var(--color-accent-2-600, var(--primary)); }
 /* 卡上最大的那行字是「要人做什么」，不是「为什么卡住」：接手的人先要知道自己该干嘛。 */
@@ -700,6 +705,7 @@
    为什么往上开：输入框已经贴着窗口底边，往下没有地方；而且往上开的话，浮层盖住的是
    消息流最下面那几行——刚读过的内容，比盖住输入框和发送键代价小。 */
 .sw-ctx { position: relative; flex: none; display: inline-flex; }
+.sw-ctx[hidden] { display: none; }
 .sw-ctx-chip {
   padding: 2px 7px;
   border: 0;

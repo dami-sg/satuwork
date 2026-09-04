@@ -160,7 +160,14 @@ async function meterCall(
  */
 async function checkCredit(meter: Meter, account: Account, backends: string[], kind: WebCallKind): Promise<void> {
   const gate = await meter.gate(account, { kind: 'web', backends, webKind: kind })
-  if (!gate.ok) throw new WebToolError('no credit', gate.reason)
+  if (gate.ok) return
+  // 被拒的也落一行（金额 0，units 0）——同 v1.ts 的 gateOr402。「为什么我的 Bot
+  // 搜不了网页」得和「谁搜了」在同一张表上答；模型那条路早就这么做了，这条路以前漏了。
+  await meter.charge(
+    { kind: 'web', account, status: 'denied', backend: backends[0] ?? 'unknown', webKind: kind, units: 0 },
+    { amountMicros: 0, unitPrice: {}, multiplier: 1, unpriced: false },
+  )
+  throw new WebToolError('no credit', gate.reason)
 }
 
 /**

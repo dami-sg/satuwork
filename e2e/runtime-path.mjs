@@ -12,28 +12,16 @@ import { publishRelease } from './release.mjs'
 import { pairMachine } from './pair.mjs'
 import { freePorts } from './ports.mjs'
 
-const LIVE_GW_DB = '/workspace/satuwork/.data/gateway/gateway.db'
+/**
+ * **一律用桩模型。** 以前这里会去读本机 live 库（一个写死的 sqlite 路径）把真实的
+ * 平台密钥灌进测试 Gateway：那台机器上有 key 就真的打上游、没有就走桩——同一套用例
+ * 在两台机器上验的是两条路，而且把线上密钥复制进 /tmp 下的测试目录里。e2e 不出网，
+ * 也不该碰任何 live 数据。
+ */
+const STUB_LLM = true
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
-}
-
-async function readLiveCreds() {
-  if (!existsSync(LIVE_GW_DB)) return []
-  try {
-    const { DatabaseSync } = await import('node:sqlite')
-    const db = new DatabaseSync(LIVE_GW_DB, { readOnly: true })
-    try {
-      return db.prepare('select provider, secret from platform_credentials').all().map((r) => ({
-        provider: String(r.provider),
-        secret: String(r.secret),
-      }))
-    } finally {
-      db.close()
-    }
-  } catch {
-    return []
-  }
 }
 
 export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, waitHttp, assert, log }) {
@@ -67,7 +55,8 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
       SATUWORK_DEPLOY_STUB: '1',
     },
   })
-  await waitHttp(gwBase + '/health')
+  // 带上 child：起不来时有用的是它的输出，不是三十秒后那句「等不到」。
+  await waitHttp(gwBase + '/health', { child: gw, what: 'runtime gateway' })
 
   let mock
   let botChild
@@ -94,16 +83,7 @@ export async function runRuntimePath({ root, gwRoot, botRoot, test, req, start, 
       assert(typeof seatApiKey === 'string' && seatApiKey.startsWith('sk_sw_'), 'api key')
       const machineTok = (await pairMachine({ req, gwBase, ownerTok, orgId })).token
       assert(typeof machineTok === 'string' && machineTok.startsWith('smt_'), 'smt_')
-      const creds = await readLiveCreds()
-      for (const c of creds) {
-        const put = await req(gwBase, 'POST', '/platform/credentials', {
-          token: ownerTok,
-          body: { provider: c.provider, secret: c.secret },
-        })
-        assert(put.status === 201 || put.status === 200, `copy cred ${c.provider} ${put.status}`)
-        assert(!JSON.stringify(put.json).includes(c.secret), 'copy 泄漏 secret')
-      }
-      const stubLlm = creds.length === 0
+      const stubLlm = STUB_LLM
 
       const skill = await req(gwBase, 'POST', `/orgs/${orgId}/skills`, {
         token: adminTok,

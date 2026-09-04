@@ -17,7 +17,7 @@ import { bodyOf, strField } from '../lib/validate.ts'
 import { requireSeatOrUser, requireUser } from '../lib/guards.ts'
 import { visibleBotOf } from '../lib/runtime.ts'
 import { companyMachineOf } from '../deploy.ts'
-import { canonicalTimezone, parseRoutineTriggers, ROUTINE_MAX_TRIGGERS, type Account, type Db, type Routine, type RoutineModelRole, type RoutineRun } from '../db.ts'
+import { canonicalTimezone, parseRoutineTriggers, ROUTINE_MAX_TRIGGERS, RoutineBusyError, type Account, type Db, type Routine, type RoutineModelRole, type RoutineRun } from '../db.ts'
 import { nextRunAtOf } from '../lib/schedule.ts'
 import { ROUTINE_RETRY_MAX, runRoutine } from '../routines.ts'
 
@@ -294,7 +294,14 @@ export function attachRoutines(router: Router, ctx: RouteCtx) {
     const routine = await ownRoutineOf(db, account, req.params.rid, seatBotId)
     if (!routine.instruction.trim()) throw new HttpError(400, '先写清楚它每次要做什么')
     if (await db.routineRunning(routine.id)) throw new HttpError(409, '上一次还在跑')
-    const run = await runRoutine(db, routine, 'manual')
+    // 先查只是少一次报错；并发点两下真正靠库里的部分唯一索引挡（迁移 0035）。
+    let run: RoutineRun
+    try {
+      run = await runRoutine(db, routine, 'manual')
+    } catch (e) {
+      if (e instanceof RoutineBusyError) throw new HttpError(409, '上一次还在跑')
+      throw e
+    }
     json(res, 200, { run: publicRun(run) })
   })
 }

@@ -62,6 +62,10 @@ function loadChat(root) {
     initialOf: () => 'X',
     chatBotIdOf: () => 'b',
     fmtTime: (n) => new Date(n).toISOString(),
+    // 分割线按 SATU_TZ 切天，state.js 里的实现；这里照抄一份。
+    SATU_TZ: 'Asia/Kuching',
+    tzDayKey: (n) =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kuching', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(n)),
     document: {
       getElementById: (id) => (id === 'chat-todock' ? todock : null),
       addEventListener() {},

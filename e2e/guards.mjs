@@ -199,6 +199,20 @@ export async function runGuards({ root, test, assert, log }) {
     assert(r.shell.git日志里搜push === null, 'git log --grep push 被当成了推送')
   })
 
+  await test('模型自己会写的几种 shell 形状也切得开', () => {
+    // 单个 &、子 shell 括号、命令组花括号、if / ! 关键字、`env -i`：文档说扫描只是
+    // 「挡顺手」，但这几种是模型日常就会写的，漏了等于没挡。
+    assert(r.shell.单个与号 === 'curl', '`a & curl` 没认出来')
+    assert(r.shell.子shell括号 === 'curl', '`(curl …)` 没认出来')
+    assert(r.shell.命令组花括号 === 'curl', '`{ curl …; }` 没认出来')
+    assert(r.shell.套在if里 === 'curl', '`if curl …; then` 没认出来')
+    assert(r.shell.取反 === 'curl', '`! curl …` 没认出来')
+    assert(r.shell.env空环境 === 'curl', '`env -i curl …` 把 -i 当成了命令')
+    assert(r.destructive.短写的强制推送 === 'git push', '`git push -f` 没要求确认')
+    assert(r.destructive.强制推送加lease === 'git push', '`--force-with-lease` 没要求确认')
+    assert(r.destructive.followTags不算强制 === null, '`--follow-tags` 被当成了强制推送')
+  })
+
   await test('定制审批：发信这一类认得出来，字段摆得开', () => {
     const f = r.form
     // 连接器工具装不下时会收进 SW_RUN，真正的工具名跑到参数里。不剥这层壳，卡片上写的

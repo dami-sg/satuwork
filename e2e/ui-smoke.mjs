@@ -1588,16 +1588,18 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       // 名单从「对话」子项提到侧栏顶层之后，取数的路径没跟着搬：loadRuntimeBots 一直
       // 只在 loadChatPage 里跑。于是管理员一进概览页（首页就是概览，根本不走那条路），
       // 侧栏上的 Bot 就整片消失了——而它现在是这个产品的主导航。
+      // 先保证这位管理员名下有一个 Bot：不然下面「画进侧栏」那两条永远走不到，
+      // 用例看着绿，实际只验了「取过了」。管理员也是员工，自己建一个就行。
+      const made = await req(gwBase, 'POST', '/runtime/bots', { token: adminToken, body: { name: 'UI-SMOKE-侧栏用的 Bot' } })
+      assert(made.status === 201, `建 Bot ${made.status} ${made.text}`)
       const ui = loadApp({ appPath, base: gwBase, token: adminToken })
       await ui.boot()
       assert(ui.state.path === '/', `管理员首页应是概览，实际 ${ui.state.path}`)
       assert(Array.isArray(ui.state.runtimeBots), '非对话页也该把名单取回来')
-      // 有没有 Bot 取决于这套数据，但「取过了」这件事必须成立——空数组和没取过是两回事。
+      assert(ui.state.runtimeBots.some((b) => b.id === made.json.bot.id), '刚建的 Bot 不在名单里')
       const html = ui.html()
-      if (ui.state.runtimeBots.length) {
-        assert(html.includes('satu-botrow'), '名单取回来了却没画进侧栏')
-        assert(html.includes('satu-botdot'), '状态点没画')
-      }
+      assert(html.includes('satu-botrow'), '名单取回来了却没画进侧栏')
+      assert(html.includes('satu-botdot'), '状态点没画')
     })
 
     await test('公司管理员可以折叠并重新展开公司分类菜单', async () => {
@@ -2407,8 +2409,9 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         assert(!ui.state.chatDraft, `补发之后草稿还留着，人会以为没发出去：${JSON.stringify(ui.state.chatDraft)}`)
 
         // 再拿一次会话不该把同一条又发一遍——标记是一次性的。
+        // 负向断言要等够久：50ms 里没发不等于不会发，补发是异步排上的。
         await ui.ensureChatSession('bot-h')
-        await new Promise((r) => setTimeout(r, 50))
+        await new Promise((r) => setTimeout(r, 300))
         assert(posted.length === 1, `同一条被补发了 ${posted.length} 次`)
       } finally {
         sse.close()
@@ -2450,14 +2453,14 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
         assert(posted.length === 0, '前置没成立')
         assert(ui.state.chatDraft === '这句是写给 bot-one 的', '前置没成立：草稿该留着')
 
-        // 人切到别的 Bot 去了……
+        // 人切到别的 Bot 去了……（负向断言：等够 300ms，异步补发要是会发，这时早发了）
         await ui.ensureChatSession('bot-two')
-        await new Promise((r) => setTimeout(r, 50))
+        await new Promise((r) => setTimeout(r, 300))
         assert(posted.length === 0, `挂着的那条被发进了另一个 Bot 的对话：${JSON.stringify(posted)}`)
 
         // ……又切了回来。草稿原样回来了，但那次「按发送」的意图早就不作数了。
         await ui.ensureChatSession('bot-one')
-        await new Promise((r) => setTimeout(r, 80))
+        await new Promise((r) => setTimeout(r, 300))
         assert(
           posted.length === 0,
           `切回来时把它自动发了出去，而人一个键都没按：${JSON.stringify(posted)}`,
@@ -3079,7 +3082,8 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
 
       // 掐掉的那条就算还有半截数据在手，也不该落进新会话的桶里。
       first.push({ seq: 99, time: 1, type: 'user/message', data: { message: { content: [{ type: 'text', text: '旧会话的话' }] }, source: { kind: 'user' } } })
-      await new Promise((r) => setTimeout(r, 60))
+      // 负向断言：等够 300ms，串进来的话这时早串了；60ms 只是「还没来得及」。
+      await new Promise((r) => setTimeout(r, 300))
       assert(
         !JSON.stringify(row.events).includes('旧会话的话'),
         `旧会话的事件串进新会话了：${JSON.stringify(row.events)}`,
@@ -3592,7 +3596,8 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       ui.state.chatSessionId = 's-b'
       ui.state.chatEvents = []
       sseA.push({ type: 'assistant/chunk', seq: 2, data: { chunk: { type: 'text-delta', text: '迟到的 A' } } })
-      await new Promise((r) => setTimeout(r, 40))
+      // 负向断言：等够 300ms，落进来的话这时早落了；40ms 只是「还没来得及」。
+      await new Promise((r) => setTimeout(r, 300))
       assert(
         ui.state.chatEvents.length === 0,
         `旧流的事件落进了新会话：${JSON.stringify(ui.state.chatEvents)}`,

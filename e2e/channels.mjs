@@ -424,5 +424,7 @@ export async function runChannels({ gwRoot, test, req, start, waitHttp, assert, 
     gw.kill()
     await closeServer(telegram.server, 'telegram mock')
     await closeServer(seat.server, 'seat mock')
+    // 自己的数据目录自己收。
+    rmSync(GW_HOME, { recursive: true, force: true })
   }
 }

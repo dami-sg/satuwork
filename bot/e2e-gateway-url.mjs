@@ -8,7 +8,7 @@
  * 3. 本地开发（没有 bot.env）被顺手改掉内存 —— 同上。
  * 4. 什么都往里塞：带路径的、file:// 的、垃圾串。
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { adoptGatewayUrl, resetAdoptState } from './src/gateway-url.ts'
@@ -28,8 +28,14 @@ const ENV_BODY = [
 ].join('\n')
 
 /** 每个用例一个干净的 SATUWORK_HOME。`withEnv` 决定要不要在里面放 bot.env。 */
+// 每个用例一个目录，退出时一起收掉（和 e2e-memory 那几个探针同一个写法）。
+const homes = []
+process.on('exit', () => {
+  for (const h of homes) try { rmSync(h, { recursive: true, force: true }) } catch {}
+})
 function seat({ withEnv = true, asDir = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'satu-gwurl-'))
+  homes.push(home)
   process.env.SATUWORK_HOME = home
   process.env.GATEWAY_URL = OLD
   resetAdoptState()

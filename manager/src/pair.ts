@@ -104,6 +104,7 @@ async function pairWithCode(boot: BootConfig): Promise<PairResult> {
     confirmedVersion: managerVersion(),
     lastUpgradeTo: '',
     lastUpgradeAt: 0,
+    upgradeRetries: 0,
   }
   // 桌面 ticket 要用它验签。现在抓一次，省得第一个员工点开桌面时才发现拿不到。
   try {
