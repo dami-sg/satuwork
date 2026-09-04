@@ -690,6 +690,8 @@ export interface ChannelEvent {
   approvalMessageId: number | null
   sessionId: string | null
   reply: string
+  /** 这一轮工具明确报出的产出文件；路径相对该席位工作区。 */
+  files: { path: string; name: string }[]
   lastError: string | null
   createdAt: number
   updatedAt: number

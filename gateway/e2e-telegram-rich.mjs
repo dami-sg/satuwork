@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 const token = '123456789:telegram-rich-e2e'
 const seen = []
 let rejectRich = false
+let rejectLinkOptions = false
 
 const server = createServer((req, res) => {
   let raw = ''
@@ -17,6 +18,11 @@ const server = createServer((req, res) => {
       res.end(JSON.stringify({ ok: false, error_code: 404, description: 'Method not found' }))
       return
     }
+    if (method === 'sendMessage' && body.link_preview_options && rejectLinkOptions) {
+      res.statusCode = 400
+      res.end(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: unknown field link_preview_options' }))
+      return
+    }
     res.end(JSON.stringify({ ok: true, result: { message_id: seen.length } }))
   })
 })
@@ -28,8 +34,10 @@ process.env.TELEGRAM_API_BASE = `http://127.0.0.1:${address.port}`
 try {
   const {
     normalizeTelegramCallback, startTelegramTyping, telegramAnswerCallbackQuery,
-    telegramClearApprovalButtons, telegramRichTextParts, telegramSendApproval, telegramSendDraft, telegramSendText,
+    telegramClearApprovalButtons, telegramRichTextParts, telegramSendApproval, telegramSendArtifactPreviews,
+    telegramSendDraft, telegramSendText,
   } = await import('./src/channels/telegram.ts')
+  const { createDraftPump } = await import('./src/channels/draft-pump.ts')
   const stopTyping = startTelegramTyping(token, '456', { intervalMs: 20 })
   await new Promise((resolve) => setTimeout(resolve, 75))
   stopTyping()
@@ -67,7 +75,36 @@ try {
 
   rejectRich = true
   await telegramSendDraft(token, '456', 31415, '**旧 API 草稿**', '88')
-  const fallbackDraft = seen.slice(1)
+  const secondDraft = seen.slice(1)
+
+  let activeDraftSends = 0
+  let maxActiveDraftSends = 0
+  const pumpedDrafts = []
+  const pump = createDraftPump(async (text) => {
+    activeDraftSends += 1
+    maxActiveDraftSends = Math.max(maxActiveDraftSends, activeDraftSends)
+    await new Promise((resolve) => setTimeout(resolve, 45))
+    pumpedDrafts.push(text)
+    activeDraftSends -= 1
+  }, {
+    minMs: 15,
+    batchChars: 4,
+    maxWaitMs: 35,
+    initialWaitMs: 20,
+    keepaliveMs: 1000,
+  })
+  const enqueueStarted = performance.now()
+  pump.enqueue('一')
+  pump.enqueue('一二三四')
+  const enqueueElapsedMs = performance.now() - enqueueStarted
+  await new Promise((resolve) => setTimeout(resolve, 8))
+  pump.enqueue('一二三四五')
+  pump.enqueue('一二三四五六七八')
+  pump.enqueue('一二三四五六七八九十')
+  await new Promise((resolve) => setTimeout(resolve, 140))
+  await pump.finish()
+  pump.enqueue('结束后不能再发')
+  await new Promise((resolve) => setTimeout(resolve, 30))
 
   rejectRich = false
   seen.length = 0
@@ -100,7 +137,22 @@ try {
   const fallbackApproval = `## 需要批准\n\n### 正文\n\n${'旧接口正文 '.repeat(2_000)}\n\n${fallbackApprovalTail}`
   const fallbackApprovalMessageId = await telegramSendApproval(token, '456', fallbackApproval, approvalKey)
   const fallbackApprovalMessages = seen.filter((entry) => entry.method === 'sendMessage')
+  const fallbackApprovalMessageIdIsLast = fallbackApprovalMessageId === seen.length
   rejectRich = false
+
+  seen.length = 0
+  await telegramSendArtifactPreviews(token, '456', [
+    { name: 'ETH <报告>.html', url: 'https://example.test/channel-artifacts/ticket/eth.html' },
+  ], '88')
+  const artifactPreview = seen[0]
+
+  rejectLinkOptions = true
+  seen.length = 0
+  await telegramSendArtifactPreviews(token, '456', [
+    { name: '兼容预览.html', url: 'https://example.test/channel-artifacts/ticket/legacy.html' },
+  ])
+  const artifactFallback = [...seen]
+  rejectLinkOptions = false
 
   const huge = `\`\`\`txt\n${'x'.repeat(31_000)}\n\`\`\``
   const parts = telegramRichTextParts(huge)
@@ -112,10 +164,13 @@ try {
     fallbackText: fallback.at(-1)?.body?.text,
     nativeDraftMethod: nativeDraft?.method,
     nativeDraftId: nativeDraft?.body?.draft_id,
-    nativeDraftMarkdown: nativeDraft?.body?.rich_message?.markdown,
+    nativeDraftText: nativeDraft?.body?.text,
     nativeDraftThread: nativeDraft?.body?.message_thread_id,
-    fallbackDraftMethods: fallbackDraft.map((entry) => entry.method),
-    fallbackDraftText: fallbackDraft.at(-1)?.body?.text,
+    secondDraftMethods: secondDraft.map((entry) => entry.method),
+    secondDraftText: secondDraft.at(-1)?.body?.text,
+    pumpedDrafts,
+    maxActiveDraftSends,
+    enqueueElapsedMs,
     typingCount: typingAtStop.length,
     typingStopped: typingAfterStop.length === typingAtStop.length,
     typingValid: typingAtStop.every((entry) => entry.body?.chat_id === '456' && entry.body?.action === 'typing'),
@@ -133,7 +188,14 @@ try {
     fallbackApprovalComplete: fallbackApprovalMessages.some((entry) => entry.body?.text?.includes(fallbackApprovalTail)),
     fallbackApprovalButtonsOnlyLast: fallbackApprovalMessages.slice(0, -1).every((entry) => !entry.body?.reply_markup)
       && Boolean(fallbackApprovalMessages.at(-1)?.body?.reply_markup),
-    fallbackApprovalMessageIdIsLast: fallbackApprovalMessageId === seen.length,
+    fallbackApprovalMessageIdIsLast,
+    artifactMethod: artifactPreview?.method,
+    artifactText: artifactPreview?.body?.text,
+    artifactButton: artifactPreview?.body?.reply_markup?.inline_keyboard?.[0]?.[0],
+    artifactLinkPreview: artifactPreview?.body?.link_preview_options,
+    artifactThread: artifactPreview?.body?.message_thread_id,
+    artifactFallbackMethods: artifactFallback.map((entry) => entry.method),
+    artifactFallbackHasButton: Boolean(artifactFallback.at(-1)?.body?.reply_markup?.inline_keyboard?.[0]?.[0]?.url),
     callback,
     answerMethod: answer?.method,
     answerId: answer?.body?.callback_query_id,

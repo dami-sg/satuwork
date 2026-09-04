@@ -1,10 +1,11 @@
 import { randomBytes, randomUUID } from 'node:crypto'
+import { basename } from 'node:path'
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { requireUser } from '../lib/guards.ts'
-import { requireSeat, pairRuntime } from '../lib/runtime.ts'
-import { encryptChannelSecret, decryptChannelSecret } from '../crypto.ts'
+import { requireSeat, pairRuntime, proxyDownload, seatBearer, seatTargetForSession } from '../lib/runtime.ts'
+import { encryptChannelSecret, decryptChannelSecret, verifyArtifactTicket } from '../crypto.ts'
 import { startSeatDeploy } from '../deploy.ts'
 import { botContext, publicBot } from '../lib/catalog.ts'
 import { newPairingCode, pairingCodeHash } from '../channels/pairing.ts'
@@ -16,6 +17,57 @@ const MAX_USER_BOTS = Math.max(1, Math.trunc(Number(process.env.GATEWAY_MAX_USER
 const CHANNEL_BIND_LOCK = USER_BOT_QUOTA_LOCK
 
 interface StoredSecret { token: string; pairingCode: string }
+
+function htmlAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function channelPreviewKind(path: string): 'html' | 'markdown' | 'pdf' | 'text' | 'unknown' {
+  if (/\.html?$/i.test(path)) return 'html'
+  if (/\.(?:md|markdown)$/i.test(path)) return 'markdown'
+  if (/\.pdf$/i.test(path)) return 'pdf'
+  if (/\.txt$/i.test(path)) return 'text'
+  return 'unknown'
+}
+
+function channelPreviewPage(name: string, path: string, kind: ReturnType<typeof channelPreviewKind>, rawUrl: string): string {
+  const safeName = htmlAttr(name || '文档')
+  const safePath = htmlAttr(path)
+  const safeKind = htmlAttr(kind)
+  const safeRawUrl = htmlAttr(rawUrl)
+  const tabs = kind === 'markdown' || kind === 'html'
+    ? `<div class="sw-preview-tabs" id="preview-tabs">
+        <button type="button" class="sw-preview-tab" data-mode="view" data-on="1">预览</button>
+        <button type="button" class="sw-preview-tab" data-mode="source">原文</button>
+      </div>`
+    : '<div id="preview-tabs" hidden></div>'
+  return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${safeName} · Satuwork</title><meta property="og:title" content="${safeName}"><meta property="og:type" content="website">
+<meta property="og:description" content="Satuwork 生成文档预览">
+<link rel="icon" type="image/png" href="/assets/satuwork-logo.png">
+<link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/chat.css">
+</head><body class="sw-channel-preview-page" data-kind="${safeKind}" data-name="${safeName}" data-raw-url="${safeRawUrl}">
+<main class="gw-modal sw-preview sw-channel-preview">
+  <div class="sw-preview-head">
+    <div class="sw-preview-title"><h2>${safeName}</h2><p><code>${safePath}</code><span id="preview-size"></span></p></div>
+    <div class="sw-preview-acts">${tabs}
+      <button type="button" class="btn btn-secondary" id="preview-download">下载</button>
+      <button type="button" class="btn btn-ghost btn-icon" id="preview-close" aria-label="关闭">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18"></path><path d="M6 6l12 12"></path></svg>
+      </button>
+    </div>
+  </div>
+  <div class="sw-preview-body" id="preview-body" data-flow="center"><p class="sw-preview-note"><span class="sw-preview-spin" aria-hidden="true"></span>正在取文件…</p></div>
+</main>
+<script src="/markdown.js"></script><script src="/channel-preview.js"></script>
+</body></html>`
+}
 
 function publicBinding(row: Awaited<ReturnType<RouteCtx['db']['channelBinding']>>, bot?: unknown, runtime?: unknown, pairingCode = '', identity?: Awaited<ReturnType<RouteCtx['db']['channelIdentity']>>) {
   if (!row) return null
@@ -54,6 +106,41 @@ async function fullBinding(ctx: RouteCtx, row: NonNullable<Awaited<ReturnType<Ro
 
 export function attachChannels(router: Router, ctx: RouteCtx) {
   const { db, keys, channelKey } = ctx
+
+  /**
+   * Telegram 消息里的限时预览链接。票只授权 session + path 这一对；这里再确认会话仍属于
+   * 同一账号，然后沿现有工作区反代读取，不能借一张票列目录或换 path。
+   *
+   * 顶层返回和 Web 对话一致的预览壳；壳内用同一 URL 的 `?raw=1` 取字节。原始响应仍带
+   * 下载反代的 CSP/nosniff，HTML 到浏览器后再进入无 allow-* 的 sandbox iframe。
+   */
+  router.get('/channel-artifacts/:ticket/:name', async (req, res) => {
+    const ticket = verifyArtifactTicket(keys, req.params.ticket)
+    if (!ticket) throw new HttpError(404, '预览链接不存在或已过期')
+    const account = await db.account(ticket.accountId)
+    if (!account || account.status !== 'active') throw new HttpError(404, '预览链接不存在或已过期')
+    const target = await seatTargetForSession(db, account, ticket.sessionId)
+      .catch(() => { throw new HttpError(404, '预览链接不存在或已过期') })
+    const upstream = `${target.host}/api/workspace/file?path=${encodeURIComponent(ticket.path)}`
+    const token = await seatBearer(db, account.id)
+    const name = basename(ticket.path) || req.params.name || '文档'
+    if (req.query.get('raw') === '1') {
+      await proxyDownload(req, res, upstream, token, target.machineToken)
+      return
+    }
+    const rawUrl = `/channel-artifacts/${encodeURIComponent(req.params.ticket)}/${encodeURIComponent(req.params.name)}?raw=1`
+    const page = channelPreviewPage(name, ticket.path, channelPreviewKind(ticket.path), rawUrl)
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-length': String(Buffer.byteLength(page)),
+      'content-security-policy': "default-src 'none'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; connect-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob: https:; media-src data: blob: https:; frame-src blob:; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors *",
+      'referrer-policy': 'no-referrer',
+      'x-content-type-options': 'nosniff',
+      'x-robots-tag': 'noindex, nofollow, noarchive',
+      'cache-control': 'private, no-store',
+    })
+    res.end(page)
+  })
 
   router.get('/channels', async (req, res) => {
     const account = await requireUser(req, db, keys)

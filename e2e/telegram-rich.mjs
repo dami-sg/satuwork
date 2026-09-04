@@ -23,16 +23,23 @@ export async function runTelegramRich({ root, test, assert, log }) {
     assert(result.fallbackText === '**旧 API 降级**', '降级文本被改写')
   })
 
-  await test('Telegram 用同一个 RichMessage draft id 流式展示半截 Markdown', async () => {
-    assert(result.nativeDraftMethod === 'sendRichMessageDraft', `实际调用 ${result.nativeDraftMethod}`)
+  await test('Telegram 用同一个纯文本 draft id 流式展示，避免半截 Markdown 双重请求', async () => {
+    assert(result.nativeDraftMethod === 'sendMessageDraft', `实际调用 ${result.nativeDraftMethod}`)
     assert(result.nativeDraftId === 31415, `draft id 变成了 ${result.nativeDraftId}`)
-    assert(result.nativeDraftMarkdown.includes('## 正在生成'), '草稿 Markdown 丢失')
+    assert(result.nativeDraftText.includes('## 正在生成'), '草稿文本丢失')
     assert(result.nativeDraftThread === '88', '草稿没有带话题 id')
   })
 
-  await test('旧 Bot API 不支持 RichMessage 草稿时降级为纯文本草稿', async () => {
-    assert(result.fallbackDraftMethods.join(',') === 'sendRichMessageDraft,sendMessageDraft', `调用顺序 ${result.fallbackDraftMethods}`)
-    assert(result.fallbackDraftText === '**旧 API 草稿**', '草稿降级文本被改写')
+  await test('流式草稿每帧只调用一次 Telegram API', async () => {
+    assert(result.secondDraftMethods.join(',') === 'sendMessageDraft', `调用顺序 ${result.secondDraftMethods}`)
+    assert(result.secondDraftText === '**旧 API 草稿**', '草稿文本被改写')
+  })
+
+  await test('Telegram 慢请求不会阻塞模型快照，等待帧只保留最新内容', async () => {
+    assert(result.enqueueElapsedMs < 15, `入队竟然阻塞了 ${result.enqueueElapsedMs}ms`)
+    assert(result.maxActiveDraftSends === 1, `同时有 ${result.maxActiveDraftSends} 个草稿请求`)
+    assert(result.pumpedDrafts.length === 2, `没有合并中间帧：${JSON.stringify(result.pumpedDrafts)}`)
+    assert(result.pumpedDrafts.at(-1) === '一二三四五六七八九十', `最后快照丢失：${JSON.stringify(result.pumpedDrafts)}`)
   })
 
   await test('Telegram 审批卡可点击、回调有应答且完成后移除按钮', async () => {
@@ -62,5 +69,15 @@ export async function runTelegramRich({ root, test, assert, log }) {
   await test('超大代码块拆分后每段仍是完整 Markdown 控件', async () => {
     assert(result.hugeParts > 1, '超限内容没有拆分')
     assert(result.hugePartsValid, '拆分后 fence 不完整或仍超限')
+  })
+
+  await test('Telegram 产出文件带网页预览卡和打开按钮，旧 API 会保留按钮降级', async () => {
+    assert(result.artifactMethod === 'sendMessage', `文件预览实际调用 ${result.artifactMethod}`)
+    assert(result.artifactText.includes('ETH &lt;报告&gt;.html'), '文件名没有按 HTML 安全转义')
+    assert(result.artifactButton?.text === '打开预览' && result.artifactButton?.url.includes('/channel-artifacts/'), '缺少预览按钮')
+    assert(result.artifactLinkPreview?.is_disabled === false, '链接预览被禁用')
+    assert(result.artifactThread === '88', '文件预览没有带话题 id')
+    assert(result.artifactFallbackMethods.join(',') === 'sendMessage,sendMessage', '旧 API 没有去掉 link_preview_options 后重试')
+    assert(result.artifactFallbackHasButton, '旧 API 降级时丢失预览按钮')
   })
 }

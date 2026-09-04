@@ -228,6 +228,52 @@ export function verifyDesktopTicket(keys: JwtKeys, token: string): DesktopTicket
   return payload
 }
 
+export interface ArtifactTicket {
+  typ: 'satu-artifact'
+  accountId: string
+  sessionId: string
+  path: string
+  iat: number
+  exp: number
+}
+
+/**
+ * Telegram 预览票。它只授权读取某一条会话工作区里的某一个文件，不能拿来登录、列目录
+ * 或读取相邻路径。七天够消息里的卡片反复点开，也不会把一次转发变成永久公开链接。
+ */
+export function signArtifactTicket(
+  keys: JwtKeys,
+  accountId: string,
+  sessionId: string,
+  path: string,
+  ttlSec = 7 * 24 * 3600,
+): string {
+  const now = Math.floor(Date.now() / 1000)
+  const payload: ArtifactTicket = { typ: 'satu-artifact', accountId, sessionId, path, iat: now, exp: now + ttlSec }
+  const h = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: keys.kid }))
+  const p = b64url(JSON.stringify(payload))
+  return `${h}.${p}.${sign('sha256', Buffer.from(`${h}.${p}`), keys.privatePem).toString('base64url')}`
+}
+
+/** 严格验形状；失败统一返回 undefined，公开预览入口不泄露是哪一格不对。 */
+export function verifyArtifactTicket(keys: JwtKeys, token: string): ArtifactTicket | undefined {
+  const parts = (token || '').split('.')
+  if (parts.length !== 3) return
+  const [h, p, s] = parts
+  try {
+    if (!verify('sha256', Buffer.from(`${h}.${p}`), keys.publicPem, Buffer.from(s, 'base64url'))) return
+    const payload = JSON.parse(Buffer.from(p, 'base64url').toString('utf8')) as ArtifactTicket
+    if (payload.typ !== 'satu-artifact') return
+    if (typeof payload.accountId !== 'string' || !payload.accountId) return
+    if (typeof payload.sessionId !== 'string' || !payload.sessionId) return
+    if (typeof payload.path !== 'string' || !payload.path || payload.path.length > 2048 || payload.path.includes('\0')) return
+    if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || payload.exp < Math.floor(Date.now() / 1000)) return
+    return payload
+  } catch {
+    return
+  }
+}
+
 /** JWKS。实例拿它验 Gateway 签的票。 */
 export function jwks(keys: JwtKeys): { keys: Record<string, unknown>[] } {
   const jwk = createPublicKey(keys.publicPem).export({ format: 'jwk' }) as Record<string, unknown>

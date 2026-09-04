@@ -26,4 +26,17 @@ export async function runTelegramChannel({ root, test, assert, log }) {
     assert(result.draft === '我先查行情。\n\n正在生成报告', `草稿合并错误：${JSON.stringify(result.draft)}`)
     assert(result.draft.match(/我先查行情/g)?.length === 1, '完整消息和流式分片重复了')
   })
+
+  await test('Telegram 临时草稿展示工具调用状态，但不泄漏参数和结果', async () => {
+    assert(result.toolDraft.includes('✓ web_search · 完成'), `完成状态没有展示：${result.toolDraft}`)
+    assert(result.toolDraft.includes('⏳ web_extract · 调用中'), `运行状态没有展示：${result.toolDraft}`)
+    assert(result.toolDraft.includes('✗ browser_navigate · 失败'), `失败状态没有展示：${result.toolDraft}`)
+    assert(!result.toolDraft.includes('ETH') && !result.toolDraft.includes('example.test') && !result.toolDraft.includes('不能露出来'),
+      `工具参数或结果泄漏到草稿：${result.toolDraft}`)
+  })
+
+  await test('Telegram 只带回当前轮工具明确产出的文件并按路径去重', async () => {
+    assert(result.files.map((f) => f.path).join(',') === 'reports/eth.html,reports/summary.pdf',
+      `产出文件归集错误：${JSON.stringify(result.files)}`)
+  })
 }

@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import type { Db, ChannelEvent } from './db.ts'
-import { decryptChannelSecret, encryptChannelSecret, timingSafeToken } from './crypto.ts'
+import { decryptChannelSecret, encryptChannelSecret, signArtifactTicket, timingSafeToken, type JwtKeys } from './crypto.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
+import { gatewayPublicUrl } from './deploy.ts'
 import { pairingCodeHash } from './channels/pairing.ts'
+import { createDraftPump } from './channels/draft-pump.ts'
 import {
   TelegramError, normalizeTelegramCallback, normalizeTelegramUpdate, telegramAnswerCallbackQuery,
   telegramClearApprovalButtons, telegramGetUpdates, telegramJoinedSharedChat, telegramSendApproval,
-  startTelegramTyping, telegramLeaveChat, telegramSendDraft, telegramSendText, telegramSetMyCommands,
+  startTelegramTyping, telegramLeaveChat, telegramSendArtifactPreviews, telegramSendDraft, telegramSendText, telegramSetMyCommands,
 } from './channels/telegram.ts'
 
 interface StoredSecret { token: string; pairingCode: string }
@@ -36,8 +38,14 @@ const POLL_TIMEOUT_SECONDS = Math.min(50, Math.max(1, Math.trunc(Number(process.
 const POLL_LEASE_MS = (POLL_TIMEOUT_SECONDS + 20) * 1000
 /** 长轮询/API 暂时失败后不要每秒轰 Telegram；429 给的 retry_after 优先。 */
 const POLL_RETRY_MS = Math.max(1000, Math.trunc(Number(process.env.GATEWAY_CHANNEL_POLL_RETRY_MS ?? 5000)))
+/** 席位接口自己最多等 250ms；短间隔继续取最新快照，不让 HTTP 轮询成为逐字瓶颈。 */
+const TURN_POLL_MS = Math.max(50, Math.trunc(Number(process.env.GATEWAY_CHANNEL_TURN_POLL_MS ?? 100)))
 /** 草稿与 typing 共用 Telegram 的 live-action 限额；一秒一帧留足突发余量。 */
 const DRAFT_MIN_MS = Math.max(800, Math.trunc(Number(process.env.GATEWAY_TELEGRAM_DRAFT_MIN_MS ?? 1000)))
+/** Telegram 官方建议按 N 字符或 M 秒组包；避免每个 token 都触发客户端动画。 */
+const DRAFT_BATCH_CHARS = Math.max(4, Math.trunc(Number(process.env.GATEWAY_TELEGRAM_DRAFT_BATCH_CHARS ?? 24)))
+const DRAFT_MAX_WAIT_MS = Math.max(DRAFT_MIN_MS, Math.trunc(Number(process.env.GATEWAY_TELEGRAM_DRAFT_MAX_WAIT_MS ?? 1200)))
+const DRAFT_INITIAL_WAIT_MS = Math.max(0, Math.trunc(Number(process.env.GATEWAY_TELEGRAM_DRAFT_INITIAL_WAIT_MS ?? 250)))
 /** live draft 约 30 秒失效。工具长时间没产出文字时，在失效前续一帧。 */
 const DRAFT_KEEPALIVE_MS = Math.max(5000, Math.min(25_000, Math.trunc(Number(process.env.GATEWAY_TELEGRAM_DRAFT_KEEPALIVE_MS ?? 20_000))))
 let wakeCurrent: (() => void) | null = null
@@ -66,6 +74,33 @@ interface ChannelApprovalSnapshot {
 interface SeatAccess {
   host: string
   headers: Record<string, string>
+}
+
+interface ChannelFile { path: string; name: string }
+
+function channelFiles(raw: unknown): ChannelFile[] {
+  if (!Array.isArray(raw)) return []
+  const out = new Map<string, ChannelFile>()
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const path = String((item as { path?: unknown }).path ?? '').trim()
+    const name = String((item as { name?: unknown }).name ?? '').trim()
+    if (!path || !name || path.length > 2048 || name.length > 512) continue
+    out.set(path, { path, name })
+    if (out.size >= 32) break
+  }
+  return [...out.values()]
+}
+
+function artifactPreviews(keys: JwtKeys, accountId: string, sessionId: string, files: ChannelFile[]) {
+  const base = gatewayPublicUrl()
+  return files.map((file) => {
+    const ticket = signArtifactTicket(keys, accountId, sessionId, file.path)
+    return {
+      name: file.name,
+      url: `${base}/channel-artifacts/${encodeURIComponent(ticket)}/${encodeURIComponent(file.name)}`,
+    }
+  })
 }
 
 async function seatAccess(db: Db, binding: NonNullable<Awaited<ReturnType<Db['channelBinding']>>>): Promise<SeatAccess> {
@@ -115,20 +150,25 @@ async function runSeatTurn(
       sessionId?: string
       reply?: string
       draft?: string
+      files?: unknown
       approval?: ChannelApprovalSnapshot
       error?: string
     } | null
     if (!r.ok && r.status !== 202) throw new Error(data?.error || `席位 HTTP ${r.status}`)
     if (r.status !== 202) {
       if (!data?.sessionId) throw new Error('席位没有返回渠道会话 id')
-      return { sessionId: data.sessionId, reply: String(data.reply || '').trim() || '已处理，但没有可发送的文本回复。' }
+      return {
+        sessionId: data.sessionId,
+        reply: String(data.reply || '').trim() || '已处理，但没有可发送的文本回复。',
+        files: channelFiles(data.files),
+      }
     }
     if (data?.status === 'approval' && data.approval?.key) await hooks.onApproval?.(data.approval)
     else {
       if (data?.draft) await hooks.onDraft?.(String(data.draft))
       hooks.onRunning?.()
     }
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    await new Promise((resolve) => setTimeout(resolve, TURN_POLL_MS))
   }
   throw new Error('席位处理渠道消息超时')
 }
@@ -222,7 +262,7 @@ export function approvalMarkdown(approval: ChannelApprovalSnapshot): string {
   ].join('\n')
 }
 
-async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<void> {
+async function processOne(db: Db, key: Buffer, keys: JwtKeys, event: ChannelEvent): Promise<void> {
   const leaseToken = randomUUID()
   if (!await db.claimChannelEvent(event.id, Date.now(), Date.now() + EVENT_LEASE_MS, leaseToken)) return
   let renewing = false
@@ -252,16 +292,12 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
     }
     let reply = current.reply
     let sessionId = current.sessionId
+    let files = current.files
     const secret = decryptChannelSecret<StoredSecret>(key, binding.credentialCiphertext)
     try {
       if (!reply) {
         let typingWarned = false
         let draftWarned = false
-        let draftUnsupported = false
-        let draftVisible = false
-        let lastDraft = ''
-        let lastDraftSentAt = 0
-        let nextDraftAt = 0
         const draftId = telegramDraftId(current.externalEventId)
         let stopTyping: (() => void) | null = null
         const startTyping = () => {
@@ -278,51 +314,39 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
           stopTyping?.()
           stopTyping = null
         }
-        const resetDraft = () => {
-          draftVisible = false
-          lastDraft = ''
-          lastDraftSentAt = 0
-          nextDraftAt = 0
-        }
-        const publishDraft = async (draft: string): Promise<boolean> => {
-          const text = String(draft || '').trim()
-          if (!text || draftUnsupported) return false
-          const now = Date.now()
-          const previousStillVisible = draftVisible && now - lastDraftSentAt < 30_000
-          if (now < nextDraftAt) return previousStillVisible
-          if (text === lastDraft && now - lastDraftSentAt < DRAFT_KEEPALIVE_MS) return previousStillVisible
-          try {
-            await telegramSendDraft(secret.token, current.externalConversationId, draftId, text)
-            lastDraft = text
-            lastDraftSentAt = Date.now()
-            nextDraftAt = lastDraftSentAt + DRAFT_MIN_MS
-            draftVisible = true
-            return true
-          } catch (error) {
-            const tg = error instanceof TelegramError ? error : null
-            nextDraftAt = Date.now() + Math.max(DRAFT_MIN_MS, tg?.retryAfterMs || 0)
-            // 两种 draft 方法都不存在时，后面整轮继续用 typing，不要每秒再撞一次 404。
-            if (tg?.method === 'sendMessageDraft' && tg.status === 404) draftUnsupported = true
-            if (!draftWarned) {
-              draftWarned = true
-              console.warn(`satuwork-gateway: Telegram 流式草稿发送失败，继续等待最终回复：${(error as Error).message}`)
-            }
-            draftVisible = previousStillVisible && !draftUnsupported
-            return draftVisible
-          }
-        }
+        const drafts = createDraftPump(
+          (text) => telegramSendDraft(secret.token, current.externalConversationId, draftId, text),
+          {
+            minMs: DRAFT_MIN_MS,
+            batchChars: DRAFT_BATCH_CHARS,
+            maxWaitMs: DRAFT_MAX_WAIT_MS,
+            initialWaitMs: DRAFT_INITIAL_WAIT_MS,
+            keepaliveMs: DRAFT_KEEPALIVE_MS,
+            onSent: pauseTyping,
+            onError: (error) => {
+              const tg = error instanceof TelegramError ? error : null
+              if (!draftWarned) {
+                draftWarned = true
+                console.warn(`satuwork-gateway: Telegram 流式草稿发送失败，继续等待最终回复：${(error as Error).message}`)
+              }
+              // 草稿上的非限流 4xx 原样重试不会变好；本轮退回 typing，最终消息仍照常发送。
+              return {
+                retryAfterMs: tg?.retryAfterMs || 0,
+                stop: Boolean(tg && tg.status >= 400 && tg.status < 500 && tg.status !== 429),
+              }
+            },
+          },
+        )
         startTyping()
         let ran: Awaited<ReturnType<typeof runSeatTurn>>
         try {
           ran = await runSeatTurn(db, current, binding, {
-            onRunning: () => { if (!draftVisible) startTyping() },
-            onDraft: async (draft) => {
-              if (await publishDraft(draft)) pauseTyping()
-            },
+            onRunning: () => { if (!drafts.isVisible()) startTyping() },
+            onDraft: async (draft) => { drafts.enqueue(draft) },
             onApproval: async (approval) => {
               pauseTyping()
               // 发送审批消息会清掉 Telegram 临时草稿；批准后即使正文没变也要重发一帧。
-              resetDraft()
+              await drafts.reset()
               const latest = await db.channelEvent(current.id)
               if (latest?.approvalKey === approval.key && latest.approvalMessageId != null) return
               const messageId = await telegramSendApproval(
@@ -334,15 +358,17 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
             },
           })
         } finally {
+          await drafts.finish()
           pauseTyping()
         }
         reply = ran.reply
         sessionId = ran.sessionId
+        files = ran.files
         // AI 已经跑完，先把结果落盘，但继续持有租约。进程若在发送前崩溃，接管者只会
         // 重发这份 reply，绝不会再烧一轮模型。
         const saved = await db.updateClaimedChannelEvent(current.id, leaseToken, {
           status: 'processing', attempts: current.attempts, nextTryAt: Date.now(),
-          sessionId, reply, lastError: null,
+          sessionId, reply, files, lastError: null,
         })
         if (!saved) return
       }
@@ -350,9 +376,16 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
       if (!await db.renewChannelEventLease(current.id, leaseToken, Date.now() + EVENT_LEASE_MS)) return
       // 渠道只接受私聊，conversationId 就是唯一配对用户的 chat id。
       await telegramSendText(secret.token, current.externalConversationId, reply)
+      if (sessionId && files.length) {
+        await telegramSendArtifactPreviews(
+          secret.token,
+          current.externalConversationId,
+          artifactPreviews(keys, binding.accountId, sessionId, files),
+        )
+      }
       const delivered = await db.updateClaimedChannelEvent(current.id, leaseToken, {
         status: 'delivered', attempts: current.attempts, nextTryAt: null, leaseUntil: null,
-        sessionId, reply, lastError: null, deliveredAt: Date.now(),
+        sessionId, reply, files, lastError: null, deliveredAt: Date.now(),
       })
       if (delivered) await db.updateChannelBinding(binding.id, { lastError: null })
     } catch (e) {
@@ -557,7 +590,7 @@ async function pollOne(db: Db, key: Buffer, candidate: Awaited<ReturnType<Db['ch
   }
 }
 
-export function startChannelDispatcher(db: Db, key: Buffer): () => void {
+export function startChannelDispatcher(db: Db, key: Buffer, keys: JwtKeys): () => void {
   let scanning = false
   let stopped = false
   const activeEvents = new Set<string>()
@@ -571,7 +604,7 @@ export function startChannelDispatcher(db: Db, key: Buffer): () => void {
           activeEvents.add(event.id)
           // 扫描只负责派活，不等最长二十分钟的模型轮次。一个慢会话不能挡住其它渠道
           // 或其它会话的新消息；同一远端会话的顺序仍由 dueChannelEvents 的前驱条件保证。
-          void processOne(db, key, event)
+          void processOne(db, key, keys, event)
             .catch((e: Error) => console.error(`satuwork-gateway: 渠道事件 ${event.id} 处理失败：${e.message}`))
             .finally(() => activeEvents.delete(event.id))
         }
