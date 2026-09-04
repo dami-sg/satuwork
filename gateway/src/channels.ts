@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import type { Db, ChannelEvent } from './db.ts'
-import { decryptChannelSecret, encryptChannelSecret, timingSafeToken } from './crypto.ts'
+import { decryptChannelSecret, encryptChannelSecret, signArtifactTicket, timingSafeToken, type JwtKeys } from './crypto.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
+import { gatewayPublicUrl } from './deploy.ts'
 import { pairingCodeHash } from './channels/pairing.ts'
 import {
   TelegramError, normalizeTelegramCallback, normalizeTelegramUpdate, telegramAnswerCallbackQuery,
   telegramClearApprovalButtons, telegramGetUpdates, telegramJoinedSharedChat, telegramSendApproval,
-  startTelegramTyping, telegramLeaveChat, telegramSendDraft, telegramSendText, telegramSetMyCommands,
+  startTelegramTyping, telegramLeaveChat, telegramSendArtifactPreviews, telegramSendDraft, telegramSendText, telegramSetMyCommands,
 } from './channels/telegram.ts'
 
 interface StoredSecret { token: string; pairingCode: string }
@@ -68,6 +69,33 @@ interface SeatAccess {
   headers: Record<string, string>
 }
 
+interface ChannelFile { path: string; name: string }
+
+function channelFiles(raw: unknown): ChannelFile[] {
+  if (!Array.isArray(raw)) return []
+  const out = new Map<string, ChannelFile>()
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const path = String((item as { path?: unknown }).path ?? '').trim()
+    const name = String((item as { name?: unknown }).name ?? '').trim()
+    if (!path || !name || path.length > 2048 || name.length > 512) continue
+    out.set(path, { path, name })
+    if (out.size >= 32) break
+  }
+  return [...out.values()]
+}
+
+function artifactPreviews(keys: JwtKeys, accountId: string, sessionId: string, files: ChannelFile[]) {
+  const base = gatewayPublicUrl()
+  return files.map((file) => {
+    const ticket = signArtifactTicket(keys, accountId, sessionId, file.path)
+    return {
+      name: file.name,
+      url: `${base}/channel-artifacts/${encodeURIComponent(ticket)}/${encodeURIComponent(file.name)}`,
+    }
+  })
+}
+
 async function seatAccess(db: Db, binding: NonNullable<Awaited<ReturnType<Db['channelBinding']>>>): Promise<SeatAccess> {
   const instance = await db.instance(binding.accountId, binding.botId)
   const host = String(instance?.host || '').trim().replace(/\/$/, '')
@@ -115,13 +143,18 @@ async function runSeatTurn(
       sessionId?: string
       reply?: string
       draft?: string
+      files?: unknown
       approval?: ChannelApprovalSnapshot
       error?: string
     } | null
     if (!r.ok && r.status !== 202) throw new Error(data?.error || `席位 HTTP ${r.status}`)
     if (r.status !== 202) {
       if (!data?.sessionId) throw new Error('席位没有返回渠道会话 id')
-      return { sessionId: data.sessionId, reply: String(data.reply || '').trim() || '已处理，但没有可发送的文本回复。' }
+      return {
+        sessionId: data.sessionId,
+        reply: String(data.reply || '').trim() || '已处理，但没有可发送的文本回复。',
+        files: channelFiles(data.files),
+      }
     }
     if (data?.status === 'approval' && data.approval?.key) await hooks.onApproval?.(data.approval)
     else {
@@ -222,7 +255,7 @@ export function approvalMarkdown(approval: ChannelApprovalSnapshot): string {
   ].join('\n')
 }
 
-async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<void> {
+async function processOne(db: Db, key: Buffer, keys: JwtKeys, event: ChannelEvent): Promise<void> {
   const leaseToken = randomUUID()
   if (!await db.claimChannelEvent(event.id, Date.now(), Date.now() + EVENT_LEASE_MS, leaseToken)) return
   let renewing = false
@@ -252,6 +285,7 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
     }
     let reply = current.reply
     let sessionId = current.sessionId
+    let files = current.files
     const secret = decryptChannelSecret<StoredSecret>(key, binding.credentialCiphertext)
     try {
       if (!reply) {
@@ -338,11 +372,12 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
         }
         reply = ran.reply
         sessionId = ran.sessionId
+        files = ran.files
         // AI 已经跑完，先把结果落盘，但继续持有租约。进程若在发送前崩溃，接管者只会
         // 重发这份 reply，绝不会再烧一轮模型。
         const saved = await db.updateClaimedChannelEvent(current.id, leaseToken, {
           status: 'processing', attempts: current.attempts, nextTryAt: Date.now(),
-          sessionId, reply, lastError: null,
+          sessionId, reply, files, lastError: null,
         })
         if (!saved) return
       }
@@ -350,9 +385,16 @@ async function processOne(db: Db, key: Buffer, event: ChannelEvent): Promise<voi
       if (!await db.renewChannelEventLease(current.id, leaseToken, Date.now() + EVENT_LEASE_MS)) return
       // 渠道只接受私聊，conversationId 就是唯一配对用户的 chat id。
       await telegramSendText(secret.token, current.externalConversationId, reply)
+      if (sessionId && files.length) {
+        await telegramSendArtifactPreviews(
+          secret.token,
+          current.externalConversationId,
+          artifactPreviews(keys, binding.accountId, sessionId, files),
+        )
+      }
       const delivered = await db.updateClaimedChannelEvent(current.id, leaseToken, {
         status: 'delivered', attempts: current.attempts, nextTryAt: null, leaseUntil: null,
-        sessionId, reply, lastError: null, deliveredAt: Date.now(),
+        sessionId, reply, files, lastError: null, deliveredAt: Date.now(),
       })
       if (delivered) await db.updateChannelBinding(binding.id, { lastError: null })
     } catch (e) {
@@ -557,7 +599,7 @@ async function pollOne(db: Db, key: Buffer, candidate: Awaited<ReturnType<Db['ch
   }
 }
 
-export function startChannelDispatcher(db: Db, key: Buffer): () => void {
+export function startChannelDispatcher(db: Db, key: Buffer, keys: JwtKeys): () => void {
   let scanning = false
   let stopped = false
   const activeEvents = new Set<string>()
@@ -571,7 +613,7 @@ export function startChannelDispatcher(db: Db, key: Buffer): () => void {
           activeEvents.add(event.id)
           // 扫描只负责派活，不等最长二十分钟的模型轮次。一个慢会话不能挡住其它渠道
           // 或其它会话的新消息；同一远端会话的顺序仍由 dueChannelEvents 的前驱条件保证。
-          void processOne(db, key, event)
+          void processOne(db, key, keys, event)
             .catch((e: Error) => console.error(`satuwork-gateway: 渠道事件 ${event.id} 处理失败：${e.message}`))
             .finally(() => activeEvents.delete(event.id))
         }

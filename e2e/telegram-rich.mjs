@@ -63,4 +63,14 @@ export async function runTelegramRich({ root, test, assert, log }) {
     assert(result.hugeParts > 1, '超限内容没有拆分')
     assert(result.hugePartsValid, '拆分后 fence 不完整或仍超限')
   })
+
+  await test('Telegram 产出文件带网页预览卡和打开按钮，旧 API 会保留按钮降级', async () => {
+    assert(result.artifactMethod === 'sendMessage', `文件预览实际调用 ${result.artifactMethod}`)
+    assert(result.artifactText.includes('ETH &lt;报告&gt;.html'), '文件名没有按 HTML 安全转义')
+    assert(result.artifactButton?.text === '打开预览' && result.artifactButton?.url.includes('/channel-artifacts/'), '缺少预览按钮')
+    assert(result.artifactLinkPreview?.is_disabled === false, '链接预览被禁用')
+    assert(result.artifactThread === '88', '文件预览没有带话题 id')
+    assert(result.artifactFallbackMethods.join(',') === 'sendMessage,sendMessage', '旧 API 没有去掉 link_preview_options 后重试')
+    assert(result.artifactFallbackHasButton, '旧 API 降级时丢失预览按钮')
+  })
 }

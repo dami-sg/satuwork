@@ -438,3 +438,63 @@ export async function telegramSendText(token: string, chatId: string, text: stri
     }
   }
 }
+
+export interface TelegramArtifactPreview {
+  name: string
+  url: string
+}
+
+function telegramHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/**
+ * 给每个产出文件发一张标准 Bot API 链接卡。
+ *
+ * URL 同时放在正文链接和 inline button：Telegram 能抓到公开地址时会画网页预览；抓不
+ * 到（例如 Gateway 只在局域网）时，桌面/手机仍能点按钮在自己的网络里打开。新版本的
+ * link_preview_options 被旧 API 拒绝时只去掉提示字段重试，链接和按钮都保留。
+ */
+export async function telegramSendArtifactPreviews(
+  token: string,
+  chatId: string,
+  artifacts: TelegramArtifactPreview[],
+  threadId = '',
+): Promise<void> {
+  const unique = new Map<string, TelegramArtifactPreview>()
+  for (const artifact of artifacts) {
+    const name = String(artifact?.name || '').trim()
+    const url = String(artifact?.url || '').trim()
+    if (!name || !/^https?:\/\//i.test(url)) continue
+    unique.set(url, { name: name.slice(0, 200), url })
+    if (unique.size >= 8) break
+  }
+  for (const artifact of unique.values()) {
+    const text = `📄 <a href="${telegramHtml(artifact.url)}">${telegramHtml(artifact.name)}</a>`
+    const common = {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '打开预览', url: artifact.url }]] },
+      ...(threadId ? { message_thread_id: threadId } : {}),
+    }
+    try {
+      await call(token, 'sendMessage', {
+        ...common,
+        link_preview_options: {
+          is_disabled: false,
+          url: artifact.url,
+          prefer_large_media: true,
+          show_above_text: false,
+        },
+      })
+    } catch (error) {
+      if (!(error instanceof TelegramError) || error.status !== 400) throw error
+      await call(token, 'sendMessage', common)
+    }
+  }
+}

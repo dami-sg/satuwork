@@ -441,6 +441,83 @@ export async function proxyDownload(req: Req, res: ServerResponse, url: string, 
   }
 }
 
+const CHANNEL_HTML_MAX = 10 * 1024 * 1024
+
+function htmlAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
+ * 把生成的 HTML 放进一个无同源权限的 iframe。
+ *
+ * 直接把工作区 HTML 当 Gateway 页面返回会让其中的脚本读同源登录数据；完全禁脚本又会
+ * 让图表和交互报告变成半张页面。`sandbox` 不给 `allow-same-origin`：脚本可以画图、切页，
+ * 但所在的是不透明源，碰不到 Gateway、父页面和签名票。srcdoc 里看到的地址也是
+ * `about:srcdoc`，外部资源的 referrer 明确关掉，不会把票带出去。
+ */
+export async function proxyHtmlArtifact(
+  req: Req,
+  res: ServerResponse,
+  url: string,
+  title: string,
+  token?: string,
+  machineToken?: string,
+): Promise<void> {
+  const ac = new AbortController()
+  const onClose = () => ac.abort()
+  req.on('close', onClose)
+  try {
+    let upstream: Response
+    try {
+      upstream = await fetch(url, {
+        headers: {
+          authorization: token ? `Bearer ${token}` : '',
+          ...machineHeader(machineToken),
+        },
+        signal: ac.signal,
+      })
+    } catch {
+      if (ac.signal.aborted) return
+      throw new HttpError(503, INSTANCE_DOWN)
+    }
+    if (!upstream.ok) {
+      await relayUpstreamError(res, upstream, [400, 404])
+      return
+    }
+    const announced = Number(upstream.headers.get('content-length') || 0)
+    if (Number.isFinite(announced) && announced > CHANNEL_HTML_MAX) {
+      throw new HttpError(413, '网页太大，不能在线预览')
+    }
+    const bytes = Buffer.from(await upstream.arrayBuffer())
+    if (bytes.length > CHANNEL_HTML_MAX) throw new HttpError(413, '网页太大，不能在线预览')
+    const safeTitle = htmlAttr(title || '生成的网页')
+    const srcdoc = htmlAttr(bytes.toString('utf8'))
+    const page = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${safeTitle}</title><meta property="og:title" content="${safeTitle}"><meta property="og:type" content="website">
+<meta property="og:description" content="Satuwork 生成文档预览">
+<style>html,body,iframe{box-sizing:border-box;width:100%;height:100%;margin:0;border:0;background:#fff}body{overflow:hidden}</style>
+</head><body><iframe title="${safeTitle}" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" referrerpolicy="no-referrer" srcdoc="${srcdoc}"></iframe></body></html>`
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-length': String(Buffer.byteLength(page)),
+      'content-security-policy': "base-uri 'none'; object-src 'none'; frame-ancestors *",
+      'referrer-policy': 'no-referrer',
+      'x-content-type-options': 'nosniff',
+      'x-robots-tag': 'noindex, nofollow, noarchive',
+      'cache-control': 'private, no-store',
+    })
+    res.end(page)
+  } finally {
+    req.off('close', onClose)
+  }
+}
+
 export async function proxySse(req: Req, res: ServerResponse, url: string, token?: string, machineToken?: string) {
   // authorization 上只能是席位票。bot 不认机器票了，回落到 smt_ 只会换回 401，
   // 而且会让人以为「票带了但没生效」，比空着更难查。

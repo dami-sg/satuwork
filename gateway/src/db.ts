@@ -3138,10 +3138,10 @@ export class Db {
     try {
       await this.run(
         `insert into channel_events
-         (id,"bindingId","externalEventId","externalConversationId","remoteUserId","remoteDisplayName",title,text,status,attempts,"nextTryAt","leaseUntil","leaseToken","sessionId",reply,"lastError","createdAt","updatedAt","deliveredAt")
-         values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         (id,"bindingId","externalEventId","externalConversationId","remoteUserId","remoteDisplayName",title,text,status,attempts,"nextTryAt","leaseUntil","leaseToken","sessionId",reply,files,"lastError","createdAt","updatedAt","deliveredAt")
+         values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [id, input.bindingId, input.externalEventId, input.externalConversationId, input.remoteUserId || '',
-          input.remoteDisplayName || '', input.title || '', input.text, 'pending', 0, now, null, '', null, '', null, now, now, null],
+          input.remoteDisplayName || '', input.title || '', input.text, 'pending', 0, now, null, '', null, '', '[]', null, now, now, null],
       )
     } catch (e) {
       if (!isUniqueViolation(e)) throw e
@@ -3216,6 +3216,7 @@ export class Db {
     leaseUntil?: number | null
     sessionId?: string | null
     reply?: string
+    files?: { path: string; name: string }[]
     lastError?: string | null
     deliveredAt?: number | null
   }): Promise<boolean> {
@@ -3225,10 +3226,10 @@ export class Db {
     const keepLease = next.status === 'processing'
     return (await this.run(
       `update channel_events set status=?, attempts=?, "nextTryAt"=?, "leaseUntil"=?, "leaseToken"=?,
-       "sessionId"=?, reply=?, "lastError"=?, "updatedAt"=?, "deliveredAt"=?
+       "sessionId"=?, reply=?, files=?, "lastError"=?, "updatedAt"=?, "deliveredAt"=?
        where id=? and status='processing' and "leaseToken"=?`,
       [next.status, next.attempts, next.nextTryAt, keepLease ? next.leaseUntil : null,
-        keepLease ? leaseToken : '', next.sessionId, next.reply, next.lastError, next.updatedAt,
+        keepLease ? leaseToken : '', next.sessionId, next.reply, JSON.stringify(next.files), next.lastError, next.updatedAt,
         next.deliveredAt, id, leaseToken],
     )) === 1
   }
@@ -3240,6 +3241,7 @@ export class Db {
     leaseUntil?: number | null
     sessionId?: string | null
     reply?: string
+    files?: { path: string; name: string }[]
     lastError?: string | null
     deliveredAt?: number | null
   }): Promise<void> {
@@ -3247,11 +3249,11 @@ export class Db {
     if (!cur) return
     const next = { ...cur, ...patch, updatedAt: Date.now() }
     await this.run(
-      `update channel_events set status=?, attempts=?, "nextTryAt"=?, "leaseUntil"=?, "leaseToken"=?, "sessionId"=?, reply=?,
+      `update channel_events set status=?, attempts=?, "nextTryAt"=?, "leaseUntil"=?, "leaseToken"=?, "sessionId"=?, reply=?, files=?,
        "lastError"=?, "updatedAt"=?, "deliveredAt"=? where id=?`,
       [next.status, next.attempts, next.nextTryAt, next.status === 'processing' ? next.leaseUntil : null,
         next.status === 'processing' ? next.leaseToken : '', next.sessionId, next.reply,
-        next.lastError, next.updatedAt, next.deliveredAt, id],
+        JSON.stringify(next.files), next.lastError, next.updatedAt, next.deliveredAt, id],
     )
   }
 

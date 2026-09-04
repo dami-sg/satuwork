@@ -78,10 +78,49 @@ export function channelDraft(events: SessionEvent[], eventId: string): string {
     .trim()
 }
 
+export interface ChannelFile {
+  path: string
+  name: string
+}
+
+/**
+ * 这一条渠道消息对应的工具产出。
+ *
+ * Web 端直接从事件流里的 `tool/result.files` 画文件药丸；Telegram 没有那条事件流，
+ * 所以在轮次收口时把同一份旁路元数据带回 Gateway。只认明确的 files，不从模型正文
+ * 猜路径——正文措辞会变，也可能提到一个根本没写出来的文件。
+ */
+export function channelFiles(events: SessionEvent[], eventId: string): ChannelFile[] {
+  const start = events.findIndex((event) => {
+    if (event.type !== 'user/message') return false
+    const source = (event.data as { source?: MessageSource }).source
+    return source?.kind === 'plugin' && source.plugin === 'channel' && source.form === eventId
+  })
+  if (start < 0) return []
+  const turnStart = events.slice(start + 1).find((event) => event.type === 'turn/start')
+  const turn = Number((turnStart?.data as { turn?: unknown } | undefined)?.turn)
+  if (!Number.isFinite(turn)) return []
+
+  const out = new Map<string, ChannelFile>()
+  for (const event of events.slice(start + 1)) {
+    if (event.type !== 'tool/result') continue
+    const data = event.data as { turn?: unknown; files?: unknown }
+    if (Number(data.turn) !== turn || !Array.isArray(data.files)) continue
+    for (const raw of data.files) {
+      if (!raw || typeof raw !== 'object') continue
+      const path = String((raw as { path?: unknown }).path ?? '').trim()
+      const name = String((raw as { name?: unknown }).name ?? '').trim()
+      if (!path || !name || path.length > 2048 || name.length > 512) continue
+      out.set(path, { path, name })
+    }
+  }
+  return [...out.values()]
+}
+
 export function apply(ctx: Context, _config: Config = {}) {
 
   interface ChannelSessionRow { sessionId: string; botId: string; bindingId: string; conversationId: string }
-  interface ChannelResultRow { sessionId: string; reply: string }
+  interface ChannelResultRow { sessionId: string; reply: string; files?: ChannelFile[] }
   const channelSessions = ctx.storage.collection<ChannelSessionRow>('channel-sessions')
   const channelResults = ctx.storage.collection<ChannelResultRow>('channel-results')
   interface ChannelInflightRow {
@@ -223,9 +262,14 @@ export function apply(ctx: Context, _config: Config = {}) {
       })
     }
     // 上一代可能已经跑完，只来不及把结果写进 SQLite。日志里的 eventId 是幂等事实源。
-    const recovered = channelReply(await ctx.sessions.events(mapped.sessionId), input.eventId)
+    const recoveredHistory = await ctx.sessions.events(mapped.sessionId)
+    const recovered = channelReply(recoveredHistory, input.eventId)
     if (recovered !== null) {
-      const result = { sessionId: mapped.sessionId, reply: recovered }
+      const result: ChannelResultRow = {
+        sessionId: mapped.sessionId,
+        reply: recovered,
+        files: channelFiles(recoveredHistory, input.eventId),
+      }
       result.reply = withChannelTodos(result.reply, readTodos(ctx, mapped.sessionId))
       return saveChannelResult(resultKey, result)
     }
@@ -240,11 +284,13 @@ export function apply(ctx: Context, _config: Config = {}) {
       // send 的失败路径通常也会写一条可见的 assistant/message；先从日志回收它。
       failure = e as Error
     }
-    const reply = channelReply(await ctx.sessions.events(mapped.sessionId), input.eventId)
+    const history = await ctx.sessions.events(mapped.sessionId)
+    const reply = channelReply(history, input.eventId)
     if (reply === null) throw failure || new Error('渠道消息没有完成')
     return saveChannelResult(resultKey, {
       sessionId: mapped.sessionId,
       reply: withChannelTodos(reply, readTodos(ctx, mapped.sessionId)),
+      files: channelFiles(history, input.eventId),
     })
   }
 

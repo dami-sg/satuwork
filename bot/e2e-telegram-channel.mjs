@@ -1,7 +1,7 @@
 import {
   channelCommand, channelMentionHelp, channelTodoMarkdown, parseChannelMentions,
 } from './src/web/channel.ts'
-import { channelDraft } from './src/web/index.ts'
+import { channelDraft, channelFiles } from './src/web/index.ts'
 
 const candidates = [
   { id: 'gmail-personal', label: 'Gmail (personal)' },
@@ -24,6 +24,17 @@ const draft = channelDraft([
   { type: 'assistant/message', data: { turn: 7, step: 1, message: { content: [{ type: 'text', text: '我先查行情。' }] } } },
   { type: 'assistant/chunk', data: { turn: 7, step: 2, chunk: { type: 'text-delta', text: '正在生成报告' } } },
 ], 'update-7')
+const files = channelFiles([
+  { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'channel', form: 'update-7' } } },
+  { type: 'turn/start', data: { turn: 7 } },
+  { type: 'tool/result', data: { turn: 7, files: [
+    { path: 'reports/eth.html', name: 'eth.html' },
+    { path: 'reports/eth.html', name: 'eth.html' },
+    { path: 'reports/summary.pdf', name: 'summary.pdf' },
+  ] } },
+  // 别轮的产出不能跟进这一条 Telegram 回复。
+  { type: 'tool/result', data: { turn: 8, files: [{ path: 'later.txt', name: 'later.txt' }] } },
+], 'update-7')
 
 console.log('__RESULT__' + JSON.stringify({
   commands: [channelCommand('/new'), channelCommand('/new@satuwork_bot'), channelCommand('/tasks'), channelCommand('/mentions')],
@@ -32,4 +43,5 @@ console.log('__RESULT__' + JSON.stringify({
   help: channelMentionHelp(candidates),
   todos,
   draft,
+  files,
 }))

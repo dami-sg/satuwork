@@ -104,7 +104,7 @@ attachDesktopUpgrade(server, db, keys)
  * 不是藏在某组路由里：停机时要有人明确地把它和它等着的那几条流一起掐掉。
  */
 const stopRoutines = startRoutineScheduler(db)
-const stopChannels = startChannelDispatcher(db, channelKey)
+const stopChannels = startChannelDispatcher(db, channelKey, keys)
 
 let closing = false
 /**

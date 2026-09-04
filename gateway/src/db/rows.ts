@@ -114,6 +114,15 @@ export function channelIdentityOf(r: Row): ChannelIdentity {
 export function channelEventOf(r: Row): ChannelEvent {
   const statuses = new Set(['pending', 'processing', 'ready', 'retry', 'delivered', 'dead'])
   const status = str(r.status)
+  const rawFiles = jsonOf(r.files)
+  const files = Array.isArray(rawFiles)
+    ? rawFiles
+      .filter((f): f is { path: string; name: string } =>
+        Boolean(f && typeof f === 'object'
+          && typeof (f as { path?: unknown }).path === 'string'
+          && typeof (f as { name?: unknown }).name === 'string'))
+      .map((f) => ({ path: f.path, name: f.name }))
+    : []
   return {
     id: str(r.id), bindingId: str(r.bindingId), externalEventId: str(r.externalEventId),
     externalConversationId: str(r.externalConversationId), remoteUserId: str(r.remoteUserId || ''),
@@ -122,7 +131,7 @@ export function channelEventOf(r: Row): ChannelEvent {
     nextTryAt: numOrNull(r.nextTryAt), leaseUntil: numOrNull(r.leaseUntil), leaseToken: str(r.leaseToken || ''),
     approvalKey: str(r.approvalKey || ''), approvalMessageId: numOrNull(r.approvalMessageId),
     sessionId: strOrNull(r.sessionId),
-    reply: str(r.reply || ''), lastError: strOrNull(r.lastError), createdAt: num(r.createdAt),
+    reply: str(r.reply || ''), files, lastError: strOrNull(r.lastError), createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt), deliveredAt: numOrNull(r.deliveredAt),
   }
 }

@@ -33,6 +33,7 @@ import { SQL as m0032 } from './0032-channel-event-lease-token.ts'
 import { SQL as m0033 } from './0033-channel-approval-prompt.ts'
 import { SQL as m0034 } from './0034-drop-task-board.ts'
 import { SQL as m0035 } from './0035-routine-one-running.ts'
+import { SQL as m0036 } from './0036-channel-event-files.ts'
 
 export interface Migration {
   /** 四位编号加短横线名字，例如 `0002-seat-labels`。排序就是执行顺序。 */
@@ -112,6 +113,7 @@ export const MIGRATIONS: Migration[] = [
   { id: '0033-channel-approval-prompt', name: '渠道审批提示去重与重启恢复', sql: m0033 },
   { id: '0034-drop-task-board', name: '移除任务看板、时间线与对话任务抽取日志', sql: m0034 },
   { id: '0035-routine-one-running', name: '日常任务同一时刻只允许一条 running 流水', sql: m0035 },
+  { id: '0036-channel-event-files', name: '渠道事件保存本轮产出文件，供 Telegram 可靠投递预览', sql: m0036 },
 ]
 
 /**

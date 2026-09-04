@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 const token = '123456789:telegram-rich-e2e'
 const seen = []
 let rejectRich = false
+let rejectLinkOptions = false
 
 const server = createServer((req, res) => {
   let raw = ''
@@ -17,6 +18,11 @@ const server = createServer((req, res) => {
       res.end(JSON.stringify({ ok: false, error_code: 404, description: 'Method not found' }))
       return
     }
+    if (method === 'sendMessage' && body.link_preview_options && rejectLinkOptions) {
+      res.statusCode = 400
+      res.end(JSON.stringify({ ok: false, error_code: 400, description: 'Bad Request: unknown field link_preview_options' }))
+      return
+    }
     res.end(JSON.stringify({ ok: true, result: { message_id: seen.length } }))
   })
 })
@@ -28,7 +34,8 @@ process.env.TELEGRAM_API_BASE = `http://127.0.0.1:${address.port}`
 try {
   const {
     normalizeTelegramCallback, startTelegramTyping, telegramAnswerCallbackQuery,
-    telegramClearApprovalButtons, telegramRichTextParts, telegramSendApproval, telegramSendDraft, telegramSendText,
+    telegramClearApprovalButtons, telegramRichTextParts, telegramSendApproval, telegramSendArtifactPreviews,
+    telegramSendDraft, telegramSendText,
   } = await import('./src/channels/telegram.ts')
   const stopTyping = startTelegramTyping(token, '456', { intervalMs: 20 })
   await new Promise((resolve) => setTimeout(resolve, 75))
@@ -100,7 +107,22 @@ try {
   const fallbackApproval = `## 需要批准\n\n### 正文\n\n${'旧接口正文 '.repeat(2_000)}\n\n${fallbackApprovalTail}`
   const fallbackApprovalMessageId = await telegramSendApproval(token, '456', fallbackApproval, approvalKey)
   const fallbackApprovalMessages = seen.filter((entry) => entry.method === 'sendMessage')
+  const fallbackApprovalMessageIdIsLast = fallbackApprovalMessageId === seen.length
   rejectRich = false
+
+  seen.length = 0
+  await telegramSendArtifactPreviews(token, '456', [
+    { name: 'ETH <报告>.html', url: 'https://example.test/channel-artifacts/ticket/eth.html' },
+  ], '88')
+  const artifactPreview = seen[0]
+
+  rejectLinkOptions = true
+  seen.length = 0
+  await telegramSendArtifactPreviews(token, '456', [
+    { name: '兼容预览.html', url: 'https://example.test/channel-artifacts/ticket/legacy.html' },
+  ])
+  const artifactFallback = [...seen]
+  rejectLinkOptions = false
 
   const huge = `\`\`\`txt\n${'x'.repeat(31_000)}\n\`\`\``
   const parts = telegramRichTextParts(huge)
@@ -133,7 +155,14 @@ try {
     fallbackApprovalComplete: fallbackApprovalMessages.some((entry) => entry.body?.text?.includes(fallbackApprovalTail)),
     fallbackApprovalButtonsOnlyLast: fallbackApprovalMessages.slice(0, -1).every((entry) => !entry.body?.reply_markup)
       && Boolean(fallbackApprovalMessages.at(-1)?.body?.reply_markup),
-    fallbackApprovalMessageIdIsLast: fallbackApprovalMessageId === seen.length,
+    fallbackApprovalMessageIdIsLast,
+    artifactMethod: artifactPreview?.method,
+    artifactText: artifactPreview?.body?.text,
+    artifactButton: artifactPreview?.body?.reply_markup?.inline_keyboard?.[0]?.[0],
+    artifactLinkPreview: artifactPreview?.body?.link_preview_options,
+    artifactThread: artifactPreview?.body?.message_thread_id,
+    artifactFallbackMethods: artifactFallback.map((entry) => entry.method),
+    artifactFallbackHasButton: Boolean(artifactFallback.at(-1)?.body?.reply_markup?.inline_keyboard?.[0]?.[0]?.url),
     callback,
     answerMethod: answer?.method,
     answerId: answer?.body?.callback_query_id,

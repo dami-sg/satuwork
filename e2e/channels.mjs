@@ -35,6 +35,11 @@ async function mockSeat() {
       try { body = JSON.parse(raw || '{}') } catch {}
       const path = new URL(req.url, 'http://seat.test').pathname
       res.setHeader('content-type', 'application/json')
+      if (req.method === 'GET' && path === '/api/workspace/file') {
+        res.setHeader('content-type', 'application/octet-stream')
+        res.end('<!doctype html><html><body><h1>ETH report</h1><script>document.body.dataset.ready="1"</script></body></html>')
+        return
+      }
       if (/\/api\/channels\/[^/]+\/messages$/.test(path)) {
         seen.messages.push(body)
         if (!seen.approved) {
@@ -54,7 +59,10 @@ async function mockSeat() {
           }))
           return
         }
-        res.end(JSON.stringify({ sessionId: 'session-telegram', reply: '审批通过，操作已经完成。' }))
+        res.end(JSON.stringify({
+          sessionId: 'session-telegram', reply: '审批通过，操作已经完成。',
+          files: [{ path: 'reports/eth-report.html', name: 'eth-report.html' }],
+        }))
         return
       }
       if (/\/api\/channels\/[^/]+\/approvals\/[A-Za-z0-9_-]+$/.test(path)) {
@@ -345,6 +353,46 @@ export async function runChannels({ gwRoot, test, req, start, waitHttp, assert, 
       })
       await waitFor(() => seat.seen.successfulApprovals === 1, '席位收到 Telegram 批准')
       await waitFor(() => telegram.seen.sent.some((m) => String(m.rich_message?.markdown || m.text).includes('审批通过，操作已经完成')), '审批后原轮次完成并回复')
+      const previewMessage = await waitFor(
+        () => telegram.seen.sent.find((m) => m.reply_markup?.inline_keyboard?.[0]?.[0]?.text === '打开预览'),
+        'Telegram 收到产出文件预览卡',
+      )
+      const previewUrl = previewMessage.reply_markup.inline_keyboard[0][0].url
+      assert(previewMessage.link_preview_options?.url === previewUrl, '链接预览与按钮不是同一个地址')
+      assert(String(previewMessage.text).includes('eth-report.html'), '预览卡没有文件名')
+
+      // 模拟 Bot 正常上报的会话索引，使签名链接能沿会话归属找到同一席位。
+      const require = createRequire(new URL('../gateway/package.json', import.meta.url))
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      try {
+        const binding = await client.query(
+          `select "accountId","companyId","botId" from "${schema}".channel_bindings where id=$1`,
+          [bindingId],
+        )
+        const owner = binding.rows[0]
+        await client.query(
+          `insert into "${schema}".session_index
+           ("sessionId","companyId","accountId","botId",origin,"messageCount",title,"createdAt","updatedAt")
+           values ($1,$2,$3,$4,'user',1,'Telegram',$5,$5)
+           on conflict ("sessionId") do nothing`,
+          ['session-telegram', owner.companyId, owner.accountId, owner.botId, Date.now()],
+        )
+      } finally { await client.end() }
+
+      const preview = await fetch(previewUrl, { headers: { accept: 'text/html' } })
+      const previewHtml = await preview.text()
+      assert(preview.status === 200, `预览链接 ${preview.status} ${previewHtml}`)
+      assert(previewHtml.includes('sandbox="allow-scripts') && previewHtml.includes('ETH report'), 'HTML 没有进入可运行的隔离预览')
+      assert(preview.headers.get('referrer-policy') === 'no-referrer', '预览没有阻止签名票随 referrer 外泄')
+
+      const parsedPreview = new URL(previewUrl)
+      const pieces = parsedPreview.pathname.split('/')
+      pieces[2] = pieces[2].slice(0, -1) + (pieces[2].endsWith('a') ? 'b' : 'a')
+      parsedPreview.pathname = pieces.join('/')
+      const tampered = await fetch(parsedPreview)
+      assert(tampered.status === 404, `篡改后的预览票仍拿到 ${tampered.status}`)
       assert(seat.seen.approvals[0].body.decision === 'approve' && seat.seen.approvals[0].body.scope === 'once', '批准范围传错')
       assert(telegram.seen.callbackAnswers.some((a) => a.callback_query_id === 'callback-approved' && String(a.text).includes('已批准')), '批准回调没有应答')
       assert(telegram.seen.editedMarkups.some((m) => Array.isArray(m.reply_markup?.inline_keyboard) && m.reply_markup.inline_keyboard.length === 0), '审批完成后没有移除按钮')

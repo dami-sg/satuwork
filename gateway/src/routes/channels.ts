@@ -1,10 +1,11 @@
 import { randomBytes, randomUUID } from 'node:crypto'
+import { basename } from 'node:path'
 import type { RouteCtx } from './ctx.ts'
 import { HttpError, json, type Router } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { requireUser } from '../lib/guards.ts'
-import { requireSeat, pairRuntime } from '../lib/runtime.ts'
-import { encryptChannelSecret, decryptChannelSecret } from '../crypto.ts'
+import { requireSeat, pairRuntime, proxyDownload, proxyHtmlArtifact, seatBearer, seatTargetForSession } from '../lib/runtime.ts'
+import { encryptChannelSecret, decryptChannelSecret, verifyArtifactTicket } from '../crypto.ts'
 import { startSeatDeploy } from '../deploy.ts'
 import { botContext, publicBot } from '../lib/catalog.ts'
 import { newPairingCode, pairingCodeHash } from '../channels/pairing.ts'
@@ -54,6 +55,27 @@ async function fullBinding(ctx: RouteCtx, row: NonNullable<Awaited<ReturnType<Ro
 
 export function attachChannels(router: Router, ctx: RouteCtx) {
   const { db, keys, channelKey } = ctx
+
+  /**
+   * Telegram 消息里的限时预览链接。票只授权 session + path 这一对；这里再确认会话仍属于
+   * 同一账号，然后沿现有工作区反代读取，不能借一张票列目录或换 path。
+   */
+  router.get('/channel-artifacts/:ticket/:name', async (req, res) => {
+    const ticket = verifyArtifactTicket(keys, req.params.ticket)
+    if (!ticket) throw new HttpError(404, '预览链接不存在或已过期')
+    const account = await db.account(ticket.accountId)
+    if (!account || account.status !== 'active') throw new HttpError(404, '预览链接不存在或已过期')
+    const target = await seatTargetForSession(db, account, ticket.sessionId)
+      .catch(() => { throw new HttpError(404, '预览链接不存在或已过期') })
+    const upstream = `${target.host}/api/workspace/file?path=${encodeURIComponent(ticket.path)}`
+    const token = await seatBearer(db, account.id)
+    const name = basename(ticket.path) || req.params.name || '文档'
+    if (/\.html?$/i.test(ticket.path)) {
+      await proxyHtmlArtifact(req, res, upstream, name, token, target.machineToken)
+      return
+    }
+    await proxyDownload(req, res, upstream, token, target.machineToken)
+  })
 
   router.get('/channels', async (req, res) => {
     const account = await requireUser(req, db, keys)
