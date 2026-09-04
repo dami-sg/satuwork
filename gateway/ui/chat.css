@@ -1080,7 +1080,6 @@
 .sw-channel-preview {
   height: calc(100vh - var(--space-6) - var(--space-6));
   height: calc(100dvh - var(--space-6) - var(--space-6));
-  max-height: 900px;
 }
 .sw-channel-preview .sw-preview-title { min-width: 0; }
 .sw-channel-preview .sw-preview-body { flex: 1; min-height: 0; height: auto; }
