@@ -1,7 +1,7 @@
 import {
   channelCommand, channelMentionHelp, channelTodoMarkdown, parseChannelMentions,
 } from './src/web/channel.ts'
-import { channelDraft, channelFiles } from './src/web/index.ts'
+import { channelDraft, channelFiles, channelHandoffs } from './src/web/index.ts'
 import { clearSettledTodos } from './src/tools/todo.ts'
 
 function todoFixture(items) {
@@ -71,6 +71,19 @@ const files = channelFiles([
   // 别轮的产出不能跟进这一条 Telegram 回复。
   { type: 'tool/result', data: { turn: 8, files: [{ path: 'later.txt', name: 'later.txt' }] } },
 ], 'update-7')
+const handoffs = channelHandoffs([
+  { time: 100, type: 'user/message', data: { source: { kind: 'plugin', plugin: 'channel', form: 'update-handoff' } } },
+  { time: 101, type: 'turn/start', data: { turn: 9 } },
+  { time: 102, type: 'human/handoff', data: {
+    id: 'handoff-current', callId: 'call-1', state: 'open', reason: '需要短信验证码', ask: '提供验证码',
+    summary: '已经登录到验证页', blocking: true, repeats: 0, at: 102,
+  } },
+  { time: 103, type: 'turn/end', data: { turn: 9 } },
+  // 这一轮结束后的旧卡变化不能跟进当前 Telegram 回复。
+  { time: 104, type: 'human/handoff', data: {
+    id: 'handoff-old', callId: 'call-old', state: 'open', reason: '旧原因', ask: '旧任务', blocking: true, at: 104,
+  } },
+], 'update-handoff')
 const settled = todoFixture([
   { id: '1', task: '完成报告', status: 'completed' },
   { id: '2', task: '不再需要', status: 'cancelled' },
@@ -91,6 +104,7 @@ console.log('__RESULT__' + JSON.stringify({
   draft,
   toolDraft,
   files,
+  handoffs,
   settledCleared,
   settledValue: settled.value(),
   settledSnapshots: settled.snapshots,

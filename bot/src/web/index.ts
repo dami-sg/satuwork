@@ -110,6 +110,19 @@ export interface ChannelFile {
   name: string
 }
 
+/** Telegram 要画的转人工卡，只带交接所需的公开字段。 */
+export interface ChannelHandoff {
+  id: string
+  state: 'open' | 'claimed'
+  reason: string
+  ask: string
+  summary?: string
+  blocking: boolean
+  repeats: number
+  createdAt: number
+  updatedAt: number
+}
+
 /**
  * 这一条渠道消息对应的工具产出。
  *
@@ -144,10 +157,63 @@ export function channelFiles(events: SessionEvent[], eventId: string): ChannelFi
   return [...out.values()]
 }
 
+/**
+ * 这一轮新开的转人工单。
+ *
+ * 不能直接回 `ctx.handoffs.of(sessionId)`：会话上几天前尚未闭合的旧单也在里面，每发一
+ * 条 Telegram 消息就会把旧卡再发一次。`human/handoff` 与开单工具调用落在同一轮的
+ * turn/start 和 turn/end 之间，所以只取这一段，并按 id 取最后状态。
+ */
+export function channelHandoffs(events: SessionEvent[], eventId: string): ChannelHandoff[] {
+  const messageIndex = events.findIndex((event) => {
+    if (event.type !== 'user/message') return false
+    const source = (event.data as { source?: MessageSource }).source
+    return source?.kind === 'plugin' && source.plugin === 'channel' && source.form === eventId
+  })
+  if (messageIndex < 0) return []
+  const startOffset = events.slice(messageIndex + 1).findIndex((event) => event.type === 'turn/start')
+  if (startOffset < 0) return []
+  const start = messageIndex + 1 + startOffset
+  const turn = Number((events[start].data as { turn?: unknown }).turn)
+  if (!Number.isFinite(turn)) return []
+  const endOffset = events.slice(start + 1).findIndex((event) =>
+    event.type === 'turn/end' && Number((event.data as { turn?: unknown }).turn) === turn)
+  if (endOffset < 0) return []
+  const end = start + 1 + endOffset
+  const latest = new Map<string, ChannelHandoff | null>()
+  for (const event of events.slice(start + 1, end + 1)) {
+    if (event.type !== 'human/handoff') continue
+    const data = event.data
+    const id = String(data.id ?? '').trim()
+    if (!id) continue
+    if (data.state !== 'open' && data.state !== 'claimed') {
+      latest.set(id, null)
+      continue
+    }
+    latest.set(id, {
+      id,
+      state: data.state,
+      reason: String(data.reason ?? '').trim(),
+      ask: String(data.ask ?? '').trim(),
+      ...(data.summary ? { summary: String(data.summary).trim() } : {}),
+      blocking: data.blocking !== false,
+      repeats: Math.max(0, Number(data.repeats) || 0),
+      createdAt: Number(data.at) || Number(event.time) || Date.now(),
+      updatedAt: Number(data.at) || Number(event.time) || Date.now(),
+    })
+  }
+  return [...latest.values()].filter((row): row is ChannelHandoff => Boolean(row))
+}
+
 export function apply(ctx: Context, _config: Config = {}) {
 
   interface ChannelSessionRow { sessionId: string; botId: string; bindingId: string; conversationId: string }
-  interface ChannelResultRow { sessionId: string; reply: string; files?: ChannelFile[] }
+  interface ChannelResultRow {
+    sessionId: string
+    reply: string
+    files?: ChannelFile[]
+    handoffs?: ChannelHandoff[]
+  }
   const channelSessions = ctx.storage.collection<ChannelSessionRow>('channel-sessions')
   const channelResults = ctx.storage.collection<ChannelResultRow>('channel-results')
   interface ChannelInflightRow {
@@ -297,6 +363,7 @@ export function apply(ctx: Context, _config: Config = {}) {
         sessionId: mapped.sessionId,
         reply: recovered,
         files: channelFiles(recoveredHistory, input.eventId),
+        handoffs: channelHandoffs(recoveredHistory, input.eventId),
       }
       result.reply = withChannelTodos(result.reply, readTodos(ctx, mapped.sessionId))
       return saveChannelResult(resultKey, result)
@@ -320,6 +387,7 @@ export function apply(ctx: Context, _config: Config = {}) {
       sessionId: mapped.sessionId,
       reply: withChannelTodos(reply, readTodos(ctx, mapped.sessionId)),
       files: channelFiles(history, input.eventId),
+      handoffs: channelHandoffs(history, input.eventId),
     })
   }
 

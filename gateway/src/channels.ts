@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto'
-import type { Db, ChannelEvent } from './db.ts'
+import type { Db, ChannelEvent, ChannelHandoffPrompt, Handoff } from './db.ts'
 import { decryptChannelSecret, encryptChannelSecret, signArtifactTicket, timingSafeToken, type JwtKeys } from './crypto.ts'
 import { machineTokenFor, seatBearer } from './lib/runtime.ts'
 import { gatewayPublicUrl } from './deploy.ts'
 import { pairingCodeHash } from './channels/pairing.ts'
 import { createDraftPump } from './channels/draft-pump.ts'
+import { callSeat, canActOn } from './lib/handoff.ts'
 import {
   TelegramError, normalizeTelegramCallback, normalizeTelegramUpdate, telegramAnswerCallbackQuery,
   telegramClearApprovalButtons, telegramGetUpdates, telegramJoinedSharedChat, telegramSendApproval,
+  telegramSendHandoff, telegramSendHandoffReplyPrompt,
   startTelegramTyping, telegramLeaveChat, telegramSendArtifactPreviews, telegramSendDraft, telegramSendText, telegramSetMyCommands,
 } from './channels/telegram.ts'
 
@@ -92,6 +94,30 @@ function channelFiles(raw: unknown): ChannelFile[] {
   return [...out.values()]
 }
 
+function channelHandoffs(raw: unknown): ChannelHandoffPrompt[] {
+  if (!Array.isArray(raw)) return []
+  const out = new Map<string, ChannelHandoffPrompt>()
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const row = item as Record<string, unknown>
+    const id = String(row.id ?? '').trim()
+    const state = row.state === 'claimed' ? 'claimed' : row.state === 'open' ? 'open' : null
+    const reason = String(row.reason ?? '').trim()
+    const ask = String(row.ask ?? '').trim()
+    if (!id || !state || !reason || !ask) continue
+    out.set(id, {
+      id, state, reason, ask,
+      ...(String(row.summary ?? '').trim() ? { summary: String(row.summary).trim() } : {}),
+      blocking: row.blocking !== false,
+      repeats: Math.max(0, Number(row.repeats) || 0),
+      createdAt: Number(row.createdAt) || Date.now(),
+      updatedAt: Number(row.updatedAt) || Date.now(),
+    })
+    if (out.size >= 8) break
+  }
+  return [...out.values()]
+}
+
 function artifactPreviews(keys: JwtKeys, accountId: string, sessionId: string, files: ChannelFile[]) {
   const base = gatewayPublicUrl()
   return files.map((file) => {
@@ -151,6 +177,7 @@ async function runSeatTurn(
       reply?: string
       draft?: string
       files?: unknown
+      handoffs?: unknown
       approval?: ChannelApprovalSnapshot
       error?: string
     } | null
@@ -161,6 +188,7 @@ async function runSeatTurn(
         sessionId: data.sessionId,
         reply: String(data.reply || '').trim() || '已处理，但没有可发送的文本回复。',
         files: channelFiles(data.files),
+        handoffs: channelHandoffs(data.handoffs),
       }
     }
     if (data?.status === 'approval' && data.approval?.key) await hooks.onApproval?.(data.approval)
@@ -262,6 +290,20 @@ export function approvalMarkdown(approval: ChannelApprovalSnapshot): string {
   ].join('\n')
 }
 
+export function handoffMarkdown(handoff: ChannelHandoffPrompt): string {
+  const sections = [
+    '## 转人工 · 等人接手',
+    '',
+    `**需要你做**：${compactMarkdown(handoff.ask, 800)}`,
+    '',
+    `**原因**：${compactMarkdown(handoff.reason, 800)}`,
+  ]
+  if (handoff.summary) sections.push('', `**当前进展**：${compactMarkdown(handoff.summary, 1400)}`)
+  if (handoff.repeats > 0) sections.push('', `_这件事又遇到了 ${handoff.repeats} 次。_`)
+  sections.push('', '处理完成或想换一种做法时，点按钮后直接回复 Telegram 的输入提示。')
+  return sections.join('\n')
+}
+
 async function processOne(db: Db, key: Buffer, keys: JwtKeys, event: ChannelEvent): Promise<void> {
   const leaseToken = randomUUID()
   if (!await db.claimChannelEvent(event.id, Date.now(), Date.now() + EVENT_LEASE_MS, leaseToken)) return
@@ -293,6 +335,7 @@ async function processOne(db: Db, key: Buffer, keys: JwtKeys, event: ChannelEven
     let reply = current.reply
     let sessionId = current.sessionId
     let files = current.files
+    let handoffs = current.handoffs
     const secret = decryptChannelSecret<StoredSecret>(key, binding.credentialCiphertext)
     try {
       if (!reply) {
@@ -364,11 +407,12 @@ async function processOne(db: Db, key: Buffer, keys: JwtKeys, event: ChannelEven
         reply = ran.reply
         sessionId = ran.sessionId
         files = ran.files
+        handoffs = ran.handoffs
         // AI 已经跑完，先把结果落盘，但继续持有租约。进程若在发送前崩溃，接管者只会
         // 重发这份 reply，绝不会再烧一轮模型。
         const saved = await db.updateClaimedChannelEvent(current.id, leaseToken, {
           status: 'processing', attempts: current.attempts, nextTryAt: Date.now(),
-          sessionId, reply, files, lastError: null,
+          sessionId, reply, files, handoffs, lastError: null,
         })
         if (!saved) return
       }
@@ -383,9 +427,14 @@ async function processOne(db: Db, key: Buffer, keys: JwtKeys, event: ChannelEven
           artifactPreviews(keys, binding.accountId, sessionId, files),
         )
       }
+      for (const handoff of handoffs) {
+        await telegramSendHandoff(
+          secret.token, current.externalConversationId, handoffMarkdown(handoff), handoff.id,
+        )
+      }
       const delivered = await db.updateClaimedChannelEvent(current.id, leaseToken, {
         status: 'delivered', attempts: current.attempts, nextTryAt: null, leaseUntil: null,
-        sessionId, reply, files, lastError: null, deliveredAt: Date.now(),
+        sessionId, reply, files, handoffs, lastError: null, deliveredAt: Date.now(),
       })
       if (delivered) await db.updateChannelBinding(binding.id, { lastError: null })
     } catch (e) {
@@ -418,6 +467,132 @@ function rawUpdateId(raw: unknown): number | null {
 }
 
 const APPROVAL_CALLBACK = /^swa:([A-Za-z0-9_-]{22}):(a1|at|d1|dt)$/
+const HANDOFF_CALLBACK = /^swh:([0-9a-f-]{36}):(c|d|i|x)$/i
+const HANDOFF_REPLY = /\[satuwork-handoff:([0-9a-f-]{36}):(done|instructions):(\d+)\]/i
+
+interface SeatHandoffSnapshot {
+  state?: unknown
+  claimedBy?: { accountId?: unknown } | null
+  repeats?: unknown
+  updatedAt?: unknown
+}
+
+async function syncChannelHandoff(db: Db, handoff: Handoff, seat: SeatHandoffSnapshot | undefined): Promise<Handoff> {
+  if (!seat || typeof seat.state !== 'string') return handoff
+  const claimedBy = typeof seat.claimedBy?.accountId === 'string' ? seat.claimedBy.accountId : handoff.claimedBy
+  return db.upsertHandoff({
+    ...handoff,
+    state: seat.state as Handoff['state'],
+    claimedBy: claimedBy || null,
+    repeats: typeof seat.repeats === 'number' ? seat.repeats : handoff.repeats,
+    updatedAt: typeof seat.updatedAt === 'number' ? seat.updatedAt : Date.now(),
+  })
+}
+
+/** 席位上报交接单走异步 outbox；给刚发出的 Telegram 按钮留一个很短的追平窗口。 */
+async function waitForChannelHandoff(db: Db, id: string): Promise<Handoff | undefined> {
+  for (let i = 0; i < 10; i += 1) {
+    const handoff = await db.handoff(id)
+    if (handoff) return handoff
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  return undefined
+}
+
+async function processTelegramHandoffCallback(
+  db: Db,
+  key: Buffer,
+  binding: NonNullable<Awaited<ReturnType<Db['channelBinding']>>>,
+  raw: unknown,
+): Promise<boolean> {
+  const callback = normalizeTelegramCallback(raw)
+  if (!callback) return false
+  const parsed = HANDOFF_CALLBACK.exec(callback.data)
+  if (!parsed) return false
+  const secret = decryptChannelSecret<StoredSecret>(key, binding.credentialCiphertext)
+  const answer = async (text: string, showAlert = false) => {
+    try { await telegramAnswerCallbackQuery(secret.token, callback.queryId, text, showAlert) }
+    catch (e) {
+      console.warn(`satuwork-gateway: Telegram 转人工回调 ${callback.queryId} 已无法应答：${(e as Error).message}`)
+    }
+  }
+  const identity = await db.channelIdentity(binding.id)
+  if (!identity || identity.externalUserId !== callback.remoteUserId || callback.chatId !== callback.remoteUserId) {
+    await answer('你不能处理这张转人工工单。', true)
+    return true
+  }
+  const account = await db.account(binding.accountId)
+  const handoff = await waitForChannelHandoff(db, parsed[1])
+  if (!account || !handoff || !canActOn(account, handoff)) {
+    await answer('这张工单已经结束，或你没有处理权限。', true)
+    return true
+  }
+  const action = parsed[2]
+  if (action === 'd' || action === 'i') {
+    try {
+      await telegramSendHandoffReplyPrompt(
+        secret.token,
+        callback.chatId,
+        handoff.id,
+        action === 'd' ? 'done' : 'instructions',
+        callback.messageId,
+      )
+      await answer(action === 'd' ? '请回复新消息填写处理结论。' : '请回复新消息填写新的做法。')
+    } catch (e) {
+      console.warn(`satuwork-gateway: Telegram 转人工输入提示发送失败：${(e as Error).message}`)
+      await answer('输入提示发送失败，请重试。', true)
+    }
+    return true
+  }
+  const actor = { accountId: account.id, name: account.name || account.email }
+  const result = await callSeat(db, handoff, action === 'c' ? 'claim' : 'cancel', { actor })
+  if (result.status !== 200) {
+    await answer(String(result.json.error || '处理失败，请重试。'), true)
+    return true
+  }
+  await syncChannelHandoff(db, handoff, result.json.handoff as SeatHandoffSnapshot | undefined)
+  if (action === 'c') await answer('已由你接手。处理后可继续点“处理完了”交回 Bot。')
+  else {
+    await answer('已关闭这张转人工工单。')
+    await telegramClearApprovalButtons(secret.token, callback.chatId, callback.messageId).catch(() => undefined)
+  }
+  return true
+}
+
+async function processTelegramHandoffReply(
+  db: Db,
+  key: Buffer,
+  binding: NonNullable<Awaited<ReturnType<Db['channelBinding']>>>,
+  message: NonNullable<ReturnType<typeof normalizeTelegramUpdate>>,
+): Promise<boolean> {
+  const parsed = HANDOFF_REPLY.exec(message.replyToText || '')
+  if (!parsed) return false
+  const secret = decryptChannelSecret<StoredSecret>(key, binding.credentialCiphertext)
+  const account = await db.account(binding.accountId)
+  const handoff = await waitForChannelHandoff(db, parsed[1])
+  if (!account || !handoff || !canActOn(account, handoff)) {
+    await telegramSendText(secret.token, message.chatId, '这张转人工工单已经结束，或你没有处理权限。')
+    return true
+  }
+  const actor = { accountId: account.id, name: account.name || account.email }
+  const result = await callSeat(db, handoff, 'return', {
+    disposition: parsed[2], text: message.text, actor,
+  })
+  if (result.status !== 200) {
+    await telegramSendText(secret.token, message.chatId, `交还失败：${String(result.json.error || '请回复同一条提示重试。')}`)
+    return true
+  }
+  await syncChannelHandoff(db, handoff, result.json.handoff as SeatHandoffSnapshot | undefined)
+  await telegramClearApprovalButtons(secret.token, message.chatId, Number(parsed[3])).catch(() => undefined)
+  await telegramSendText(
+    secret.token,
+    message.chatId,
+    parsed[2] === 'done'
+      ? '已把处理结论交还给 Bot，它会从这里继续。'
+      : '已把新的做法交还给 Bot，它会按你的指示继续。',
+  )
+  return true
+}
 
 async function processTelegramApprovalCallback(
   db: Db,
@@ -469,6 +644,7 @@ async function processTelegramApprovalCallback(
 async function processTelegramUpdate(db: Db, key: Buffer, binding: NonNullable<Awaited<ReturnType<Db['channelBinding']>>>, raw: unknown): Promise<void> {
   const live = await db.channelBinding(binding.id)
   if (!live || live.status !== 'active') return
+  if (await processTelegramHandoffCallback(db, key, live, raw)) return
   if (await processTelegramApprovalCallback(db, key, live, raw)) return
   const sharedChat = telegramJoinedSharedChat(raw)
   if (sharedChat) {
@@ -519,6 +695,9 @@ async function processTelegramUpdate(db: Db, key: Buffer, binding: NonNullable<A
   if (identity.externalUserId !== message.remoteUserId) return
   // 配对成功回包之后进程崩溃时，Telegram 会重送那条口令。它不能进入模型。
   if (identity.pairedEventId === message.externalEventId) return
+  // ForceReply 的正文里带工单 id 与处置方式。这是交接结果，不是普通用户消息；先在这里
+  // 消费掉，避免它既唤醒交接单、又作为新问题再跑一轮模型。
+  if (await processTelegramHandoffReply(db, key, live, message)) return
   const inserted = await db.tx(async () => {
     await db.lockChannelBinding(binding.id)
     const currentBinding = await db.channelBinding(binding.id)

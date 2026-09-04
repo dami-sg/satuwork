@@ -166,6 +166,22 @@ function approvalKeyboard(approvalKey: string) {
   }
 }
 
+function handoffKeyboard(handoffId: string) {
+  const data = (action: 'c' | 'd' | 'i' | 'x') => `swh:${handoffId}:${action}`
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ 处理完了', callback_data: data('d') },
+        { text: '🙋 我来接手', callback_data: data('c') },
+      ],
+      [
+        { text: '🔄 换个做法', callback_data: data('i') },
+        { text: '🛑 不用处理', callback_data: data('x') },
+      ],
+    ],
+  }
+}
+
 /**
  * 发带内联按钮的 RichMessage 审批内容。长正文会完整拆成多条，按钮只挂在最后一条；
  * 这样回调保存的 message id 始终指向真正带按钮的那条。旧 Bot API 逐段降级为普通文本。
@@ -199,6 +215,66 @@ export async function telegramSendApproval(token: string, chatId: string, markdo
     if (lastRichPart) messageId = Number(sent?.message_id)
   }
   if (!Number.isSafeInteger(messageId)) throw new TelegramError('Telegram 没有返回审批消息 id')
+  return messageId
+}
+
+/** 发一张可直接处理的转人工卡；按钮数据只放 UUID，低于 Telegram 的 64-byte 上限。 */
+export async function telegramSendHandoff(token: string, chatId: string, markdown: string, handoffId: string): Promise<number> {
+  const reply_markup = handoffKeyboard(handoffId)
+  const richParts = telegramRichTextParts(markdown)
+  let messageId = NaN
+  for (let i = 0; i < richParts.length; i += 1) {
+    const part = richParts[i]
+    const lastRichPart = i === richParts.length - 1
+    let sent: { message_id?: unknown } | undefined
+    try {
+      sent = await call(token, 'sendRichMessage', {
+        chat_id: chatId,
+        rich_message: { markdown: part },
+        ...(lastRichPart ? { reply_markup } : {}),
+      })
+    } catch (error) {
+      if (!canFallBackToPlain(error)) throw error
+      const plainParts = telegramTextParts(part, 4000)
+      for (let j = 0; j < plainParts.length; j += 1) {
+        const lastPlainPart = j === plainParts.length - 1
+        sent = await call(token, 'sendMessage', {
+          chat_id: chatId,
+          text: plainParts[j],
+          ...(lastRichPart && lastPlainPart ? { reply_markup } : {}),
+        })
+      }
+    }
+    if (lastRichPart) messageId = Number(sent?.message_id)
+  }
+  if (!Number.isSafeInteger(messageId)) throw new TelegramError('Telegram 没有返回转人工消息 id')
+  return messageId
+}
+
+/**
+ * “处理完了 / 换个做法”需要一段文字，使用 Telegram 原生 ForceReply 收集。
+ * marker 跟在被回复消息里，因此 Gateway 重启后也能知道这段回复属于哪张单、哪种处置。
+ */
+export async function telegramSendHandoffReplyPrompt(
+  token: string,
+  chatId: string,
+  handoffId: string,
+  disposition: 'done' | 'instructions',
+  cardMessageId: number,
+): Promise<number> {
+  const done = disposition === 'done'
+  const marker = `[satuwork-handoff:${handoffId}:${disposition}:${cardMessageId}]`
+  const sent = await call<{ message_id?: unknown }>(token, 'sendMessage', {
+    chat_id: chatId,
+    text: `${done ? '请回复这条消息，写明你做了什么和结论。' : '请回复这条消息，写明希望 Bot 改用什么做法。'}\n\n${marker}`,
+    reply_markup: {
+      force_reply: true,
+      selective: true,
+      input_field_placeholder: done ? '做了什么、结论是什么' : '新的做法或指示',
+    },
+  })
+  const messageId = Number(sent?.message_id)
+  if (!Number.isSafeInteger(messageId)) throw new TelegramError('Telegram 没有返回转人工回复提示 id')
   return messageId
 }
 
@@ -247,6 +323,8 @@ export interface TelegramInbound {
   remoteDisplayName: string
   title: string
   text: string
+  replyToMessageId?: number
+  replyToText?: string
 }
 
 export function normalizeTelegramUpdate(raw: unknown, binding: ChannelBinding): TelegramInbound | null {
@@ -275,6 +353,12 @@ export function normalizeTelegramUpdate(raw: unknown, binding: ChannelBinding): 
     remoteDisplayName: display,
     title: chatTitle,
     text,
+    ...(Number.isSafeInteger(Number(m.reply_to_message?.message_id))
+      ? { replyToMessageId: Number(m.reply_to_message.message_id) }
+      : {}),
+    ...(String(m.reply_to_message?.text ?? m.reply_to_message?.caption ?? '').trim()
+      ? { replyToText: String(m.reply_to_message?.text ?? m.reply_to_message?.caption).trim() }
+      : {}),
   }
 }
 
