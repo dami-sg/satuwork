@@ -35,7 +35,8 @@ try {
   const {
     normalizeTelegramCallback, startTelegramTyping, telegramAnswerCallbackQuery,
     telegramClearApprovalButtons, telegramRichTextParts, telegramSendApproval, telegramSendArtifactPreviews,
-    telegramSendDraft, telegramSendText,
+    telegramSendDraft, telegramSendHandoff, telegramSendHandoffReplyPrompt, telegramSendText,
+    normalizeTelegramUpdate,
   } = await import('./src/channels/telegram.ts')
   const { createDraftPump } = await import('./src/channels/draft-pump.ts')
   const stopTyping = startTelegramTyping(token, '456', { intervalMs: 20 })
@@ -126,6 +127,25 @@ try {
     ?.flatMap((row) => row.map((button) => button.callback_data)) || []
 
   seen.length = 0
+  const handoffId = '12345678-1234-4234-8234-123456789abc'
+  const handoffMessageId = await telegramSendHandoff(token, '456', '## 转人工\n\n请人工处理。', handoffId)
+  const handoff = seen[0]
+  const handoffButtons = handoff?.body?.reply_markup?.inline_keyboard
+    ?.flatMap((row) => row.map((button) => button.callback_data)) || []
+  await telegramSendHandoffReplyPrompt(token, '456', handoffId, 'done', handoffMessageId)
+  const handoffPrompt = seen[1]
+  const handoffReply = normalizeTelegramUpdate({
+    update_id: 100,
+    message: {
+      message_id: 77,
+      from: { id: 456, first_name: 'V' },
+      chat: { id: 456, type: 'private' },
+      text: '已经处理，结果正常。',
+      reply_to_message: { message_id: 2, text: handoffPrompt.body.text },
+    },
+  }, {})
+
+  seen.length = 0
   const longApprovalTail = '——长邮件正文结尾——'
   const longApproval = `## 需要批准\n\n### 正文\n\n> ${'完整正文 '.repeat(7_000)}\n>\n> ${longApprovalTail}\n\n请选择审批范围。`
   const longApprovalMessageId = await telegramSendApproval(token, '456', longApproval, approvalKey)
@@ -177,6 +197,14 @@ try {
     approvalMethod: approval?.method,
     approvalButtons: callbackData,
     approvalButtonsFit: callbackData.every((data) => Buffer.byteLength(data, 'utf8') <= 64),
+    handoffMethod: handoff?.method,
+    handoffButtons,
+    handoffButtonsFit: handoffButtons.every((data) => Buffer.byteLength(data, 'utf8') <= 64),
+    handoffPromptMethod: handoffPrompt?.method,
+    handoffForceReply: handoffPrompt?.body?.reply_markup?.force_reply,
+    handoffPromptMarker: handoffPrompt?.body?.text,
+    handoffReplyToText: handoffReply?.replyToText,
+    handoffReplyText: handoffReply?.text,
     longApprovalParts: longApprovalMessages.length,
     longApprovalComplete: longApprovalMessages.some((entry) => entry.body?.rich_message?.markdown?.includes(longApprovalTail)),
     longApprovalQuoted: longApprovalMessages.filter((entry) => entry.method === 'sendRichMessage')

@@ -13,6 +13,7 @@ import { runProbe } from './probe.mjs'
 
 const TOKEN = '123456789:telegram-e2e-token-never-store-plain'
 const APPROVAL_KEY = 'AbCdEfGhIjKlMnOpQrStUv'
+const HANDOFF_ID = '12345678-1234-4234-8234-123456789abc'
 const APPROVAL_EMAIL_BODY = [
   'Hi,',
   '',
@@ -26,7 +27,7 @@ const APPROVAL_EMAIL_BODY = [
 ].join('\n')
 
 async function mockSeat() {
-  const seen = { messages: [], approvals: [], approved: false, successfulApprovals: 0 }
+  const seen = { messages: [], approvals: [], approved: false, successfulApprovals: 0, handoffActions: [] }
   const server = createServer((req, res) => {
     let raw = ''
     req.on('data', (chunk) => { raw += chunk })
@@ -84,6 +85,10 @@ async function mockSeat() {
             { path: 'reports/eth-report.pdf', name: 'eth-report.pdf' },
             { path: 'reports/eth-report.txt', name: 'eth-report.txt' },
           ],
+          handoffs: [{
+            id: HANDOFF_ID, state: 'open', reason: '需要人工确认业务流程', ask: '确认测试结果并交还',
+            summary: '尚未做任何业务处理', blocking: true, repeats: 0, createdAt: Date.now(), updatedAt: Date.now(),
+          }],
         }))
         return
       }
@@ -97,6 +102,23 @@ async function mockSeat() {
         seen.approved = true
         seen.successfulApprovals += 1
         res.end(JSON.stringify({ ok: true, ...body }))
+        return
+      }
+      const handoffAction = new RegExp(`/api/sessions/session-telegram/handoffs/${HANDOFF_ID}/(claim|return|cancel)$`).exec(path)
+      if (handoffAction) {
+        const action = handoffAction[1]
+        seen.handoffActions.push({ action, body })
+        res.end(JSON.stringify({
+          ok: true,
+          handoff: {
+            id: HANDOFF_ID,
+            state: action === 'claim' ? 'claimed' : action === 'return' ? 'returned' : 'cancelled',
+            claimedBy: body.actor,
+            repeats: 0,
+            updatedAt: Date.now(),
+          },
+          ...(action === 'return' ? { resumed: true } : {}),
+        }))
         return
       }
       res.statusCode = 404
@@ -471,18 +493,95 @@ export async function runChannels({ gwRoot, test, req, start, waitHttp, assert, 
       assert(telegram.seen.callbackAnswers.some((a) => a.callback_query_id === 'callback-duplicate' && String(a.text).includes('已经结束')), '重复点击没有提示审批已结束')
     })
 
+    await test('Telegram 转人工卡可接手，并通过回复输入把结论交还原工单', async () => {
+      const card = await waitFor(
+        () => telegram.seen.sent.find((m) => m.reply_markup?.inline_keyboard?.flat()
+          ?.some((button) => String(button.callback_data).startsWith(`swh:${HANDOFF_ID}:`))),
+        'Telegram 收到转人工卡',
+      )
+      const cardButtons = card.reply_markup.inline_keyboard.flat()
+      assert(cardButtons.length === 4, `转人工卡不是四个动作：${JSON.stringify(cardButtons)}`)
+      assert(String(card.rich_message?.markdown || card.text).includes('确认测试结果并交还'), '转人工卡没有显示要人工做的事')
+      const cardMessageId = telegram.seen.sent.indexOf(card) + 1
+
+      // 生产里这行由席位 handoff outbox 上报；mock 席位不会主动推，所以在此补齐事实索引。
+      const require = createRequire(new URL('../gateway/package.json', import.meta.url))
+      const pg = require('pg')
+      const client = new pg.Client({ connectionString: PG_URL })
+      await client.connect()
+      try {
+        const binding = await client.query(
+          `select "accountId","companyId","botId" from "${schema}".channel_bindings where id=$1`,
+          [bindingId],
+        )
+        const owner = binding.rows[0]
+        const now = Date.now()
+        await client.query(
+          `insert into "${schema}".handoffs
+           (id,"sessionId","botId","accountId","companyId","machineId",state,assignee,"claimedBy",blocking,repeats,reason,ask,"notifyStep","createdAt","claimedAt","returnedAt","closedAt","updatedAt")
+           values ($1,'session-telegram',$2,$3,$4,null,'open',$3,null,true,0,$5,$6,0,$7,null,null,null,$7)`,
+          [HANDOFF_ID, owner.botId, owner.accountId, owner.companyId, '需要人工确认业务流程', '确认测试结果并交还', now],
+        )
+      } finally { await client.end() }
+
+      telegram.seen.updates.push({
+        update_id: 9010,
+        callback_query: {
+          id: 'handoff-claim', data: `swh:${HANDOFF_ID}:c`, from: { id: 456 },
+          message: { message_id: cardMessageId, chat: { id: 456, type: 'private' } },
+        },
+      })
+      await waitFor(() => seat.seen.handoffActions.some((row) => row.action === 'claim'), '席位收到接手动作')
+      assert(telegram.seen.callbackAnswers.some((a) => a.callback_query_id === 'handoff-claim' && String(a.text).includes('已由你接手')),
+        '接手回调没有得到明确应答')
+
+      telegram.seen.updates.push({
+        update_id: 9011,
+        callback_query: {
+          id: 'handoff-done', data: `swh:${HANDOFF_ID}:d`, from: { id: 456 },
+          message: { message_id: cardMessageId, chat: { id: 456, type: 'private' } },
+        },
+      })
+      const prompt = await waitFor(
+        () => telegram.seen.sent.find((m) => String(m.text || '').includes(`[satuwork-handoff:${HANDOFF_ID}:done:${cardMessageId}]`)),
+        'Telegram 弹出人工结论回复框',
+      )
+      assert(prompt.reply_markup?.force_reply === true, '处理完了没有使用 Telegram ForceReply')
+      const ordinaryMessagesBefore = seat.seen.messages.length
+      telegram.seen.updates.push({
+        update_id: 9012,
+        message: {
+          message_id: 12, chat: { id: 456, type: 'private' },
+          from: { id: 456, is_bot: false, first_name: 'Alice', username: 'alice' },
+          text: '已经确认测试结果正常，可以继续。',
+          reply_to_message: { message_id: telegram.seen.sent.indexOf(prompt) + 1, text: prompt.text },
+        },
+      })
+      const returned = await waitFor(
+        () => seat.seen.handoffActions.find((row) => row.action === 'return'),
+        '人工结论交还席位',
+      )
+      assert(returned.body.disposition === 'done' && returned.body.text === '已经确认测试结果正常，可以继续。',
+        `交还内容不对：${JSON.stringify(returned)}`)
+      assert(seat.seen.messages.length === ordinaryMessagesBefore, '人工结论又作为普通消息触发了第二轮')
+      assert(telegram.seen.editedMarkups.some((m) => Number(m.message_id) === cardMessageId
+        && m.reply_markup?.inline_keyboard?.length === 0), '交还后没有移除原转人工按钮')
+      assert(telegram.seen.sent.some((m) => String(m.rich_message?.markdown || m.text).includes('已把处理结论交还给 Bot')),
+        '交还成功后没有在 Telegram 明确提示')
+    })
+
     await test('过期审批回调不能毒死长轮询，后续私聊继续入队', async () => {
       const before = seat.seen.messages.length
       telegram.seen.updates.push(
         {
-          update_id: 9010,
+          update_id: 9020,
           callback_query: {
             id: 'callback-expired', data: `swa:${APPROVAL_KEY}:a1`, from: { id: 456 },
             message: { message_id: 1, chat: { id: 456, type: 'private' } },
           },
         },
         {
-          update_id: 9011,
+          update_id: 9021,
           message: {
             message_id: 11, chat: { id: 456, type: 'private' },
             from: { id: 456, is_bot: false, first_name: 'Alice', username: 'alice' },
@@ -503,9 +602,9 @@ export async function runChannels({ gwRoot, test, req, start, waitHttp, assert, 
             `select "pollOffset","pollLastError",status from "${schema}".channel_bindings where id=$1`,
             [bindingId],
           )
-          return Number(result.rows[0]?.pollOffset) >= 9012 ? result.rows[0] : null
+          return Number(result.rows[0]?.pollOffset) >= 9022 ? result.rows[0] : null
         }, '长轮询游标越过毒消息')
-        assert(Number(row.pollOffset) >= 9012, `游标仍卡在 ${row.pollOffset}`)
+        assert(Number(row.pollOffset) >= 9022, `游标仍卡在 ${row.pollOffset}`)
         assert(row.status === 'active', `过期回调把整个渠道标成了 ${row.status}`)
         assert(row.pollLastError == null, `成功处理后仍留着轮询错误：${row.pollLastError}`)
       } finally { await client.end() }

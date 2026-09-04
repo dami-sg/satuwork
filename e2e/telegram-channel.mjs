@@ -47,4 +47,11 @@ export async function runTelegramChannel({ root, test, assert, log }) {
     assert(result.files.map((f) => f.path).join(',') === 'reports/eth.html,reports/summary.pdf',
       `产出文件归集错误：${JSON.stringify(result.files)}`)
   })
+
+  await test('Telegram 只带回当前轮新开的转人工卡', async () => {
+    assert(result.handoffs.length === 1, `转人工卡数量不对：${JSON.stringify(result.handoffs)}`)
+    assert(result.handoffs[0].id === 'handoff-current', '把别轮的旧转人工卡重复发出去了')
+    assert(result.handoffs[0].ask === '提供验证码' && result.handoffs[0].summary === '已经登录到验证页',
+      '转人工卡缺少任务或当前进展')
+  })
 }

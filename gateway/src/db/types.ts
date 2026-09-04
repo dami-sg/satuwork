@@ -670,6 +670,19 @@ export interface ChannelIdentity {
 
 export type ChannelEventStatus = 'pending' | 'processing' | 'ready' | 'retry' | 'delivered' | 'dead'
 
+/** 一轮渠道消息新开的转人工卡；随回复一起落盘，保证 Gateway 重启后仍能投递按钮。 */
+export interface ChannelHandoffPrompt {
+  id: string
+  state: 'open' | 'claimed'
+  reason: string
+  ask: string
+  summary?: string
+  blocking: boolean
+  repeats: number
+  createdAt: number
+  updatedAt: number
+}
+
 export interface ChannelEvent {
   id: string
   bindingId: string
@@ -692,6 +705,8 @@ export interface ChannelEvent {
   reply: string
   /** 这一轮工具明确报出的产出文件；路径相对该席位工作区。 */
   files: { path: string; name: string }[]
+  /** 这一轮新开的转人工卡；和 reply/files 一起可靠投递。 */
+  handoffs: ChannelHandoffPrompt[]
   lastError: string | null
   createdAt: number
   updatedAt: number

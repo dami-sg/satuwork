@@ -123,6 +123,28 @@ export function channelEventOf(r: Row): ChannelEvent {
           && typeof (f as { name?: unknown }).name === 'string'))
       .map((f) => ({ path: f.path, name: f.name }))
     : []
+  const rawHandoffs = jsonOf(r.handoffs)
+  const handoffs = Array.isArray(rawHandoffs)
+    ? rawHandoffs
+      .filter((h): h is ChannelEvent['handoffs'][number] => Boolean(
+        h && typeof h === 'object'
+        && typeof (h as { id?: unknown }).id === 'string'
+        && ((h as { state?: unknown }).state === 'open' || (h as { state?: unknown }).state === 'claimed')
+        && typeof (h as { reason?: unknown }).reason === 'string'
+        && typeof (h as { ask?: unknown }).ask === 'string',
+      ))
+      .map((h) => ({
+        id: h.id,
+        state: h.state,
+        reason: h.reason,
+        ask: h.ask,
+        ...(typeof h.summary === 'string' && h.summary ? { summary: h.summary } : {}),
+        blocking: h.blocking !== false,
+        repeats: Math.max(0, Number(h.repeats) || 0),
+        createdAt: Number(h.createdAt) || 0,
+        updatedAt: Number(h.updatedAt) || 0,
+      }))
+    : []
   return {
     id: str(r.id), bindingId: str(r.bindingId), externalEventId: str(r.externalEventId),
     externalConversationId: str(r.externalConversationId), remoteUserId: str(r.remoteUserId || ''),
@@ -131,7 +153,7 @@ export function channelEventOf(r: Row): ChannelEvent {
     nextTryAt: numOrNull(r.nextTryAt), leaseUntil: numOrNull(r.leaseUntil), leaseToken: str(r.leaseToken || ''),
     approvalKey: str(r.approvalKey || ''), approvalMessageId: numOrNull(r.approvalMessageId),
     sessionId: strOrNull(r.sessionId),
-    reply: str(r.reply || ''), files, lastError: strOrNull(r.lastError), createdAt: num(r.createdAt),
+    reply: str(r.reply || ''), files, handoffs, lastError: strOrNull(r.lastError), createdAt: num(r.createdAt),
     updatedAt: num(r.updatedAt), deliveredAt: numOrNull(r.deliveredAt),
   }
 }

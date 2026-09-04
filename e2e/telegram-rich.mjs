@@ -51,6 +51,17 @@ export async function runTelegramRich({ root, test, assert, log }) {
     assert(result.clearMethod === 'editMessageReplyMarkup' && result.clearKeyboard.length === 0, '审批完成后没有移除旧按钮')
   })
 
+  await test('Telegram 转人工卡提供四种处理动作，并用原生回复收集结论', async () => {
+    assert(result.handoffMethod === 'sendRichMessage', `转人工卡实际调用 ${result.handoffMethod}`)
+    assert(result.handoffButtons.length === 4, `转人工按钮数量不对：${result.handoffButtons.length}`)
+    assert(result.handoffButtons.every((data) => /^swh:/.test(data)), `转人工按钮数据不对：${result.handoffButtons}`)
+    assert(result.handoffButtonsFit, '转人工 callback_data 超过 Telegram 64 字节限制')
+    assert(result.handoffPromptMethod === 'sendMessage' && result.handoffForceReply === true, '没有用 ForceReply 收集人工结论')
+    assert(result.handoffPromptMarker.includes('[satuwork-handoff:'), '回复提示没有携带可恢复的工单标记')
+    assert(result.handoffReplyToText === result.handoffPromptMarker, 'Telegram 回复没有保留工单提示正文')
+    assert(result.handoffReplyText === '已经处理，结果正常。', '人工结论正文被改写')
+  })
+
   await test('Telegram 长审批正文完整分段，格式和按钮位置不丢', async () => {
     assert(result.longApprovalParts > 1, '长审批正文没有分段')
     assert(result.longApprovalComplete, '长审批正文结尾丢失')
