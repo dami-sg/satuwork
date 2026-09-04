@@ -77,7 +77,8 @@ Desktop 壳与本地 Bot 分开发版。每次 Desktop 启动、第一颗本地 
    错误也不会阻止旧版本启动，界面会给出升级失败提示。
 
 运行时要求更高版本 Desktop 时不会硬装，会提示先升级 Desktop。运行时状态保存在应用数据
-目录的 `local-runtime/{CURRENT,PENDING,LAST_ERROR}`，可用于排查；正常使用不需要手工维护。
+目录的 `local-runtime/{CURRENT,PENDING,LAST_ERROR}`，可用于排查；每颗 Bot 的启动输出保存在
+`local-bots/<bot-id>/runtime.log`（超过 2 MiB 自动轮换）。正常使用不需要手工维护。
 
 **不能交叉编译**：Windows 包要 Windows 机器，Linux 包要 Linux 机器（和管家那边一样的
 道理，只是原因不同——这里是系统 webview 的开发库）。三个系统各要一台 runner。

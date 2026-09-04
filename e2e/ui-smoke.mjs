@@ -1692,6 +1692,36 @@ export async function runUiSmoke({ root, gwRoot, test, req, start, waitHttp, ass
       assert(ui.html().includes('创建并安装'), '切回远程后，底部按钮没有同步切换')
     })
 
+    await test('本地 Bot 启动失败要把真实原因画出来，不能永远停在等待 Desktop', async () => {
+      const ui = loadApp({
+        appPath,
+        base: gwBase,
+        token: adminToken,
+        desktop: true,
+        localBotBridge: {
+          start: async () => { throw new Error('本地 Bot 启动后立即退出：测试日志') },
+        },
+        fetchImpl: async (path) => {
+          if (path === '/runtime/bots/local-1/local-bootstrap') {
+            return new Response(JSON.stringify({
+              botId: 'local-1', gatewayUrl: gwBase, accessToken: 'sat_test', apiKey: 'sk_sw_test',
+            }), { status: 200, headers: { 'content-type': 'application/json' } })
+          }
+          return new Response(JSON.stringify({ error: `unexpected ${path}` }), {
+            status: 404, headers: { 'content-type': 'application/json' },
+          })
+        },
+      })
+      ui.state.path = '/a/local-1'
+      ui.state.runtimeBots = [{
+        id: 'local-1', name: 'Mac 助手', runtimeKind: 'local',
+        runtime: { kind: 'local', status: 'none', machineLink: 'offline' },
+      }]
+      await ui.fire('click', el('button', { 'data-act': 'local-bot-start', 'data-bot': 'local-1' }))
+      assert(ui.state.deployHint.includes('启动后立即退出'), `启动原因没有留下：${ui.state.deployHint}`)
+      assert(ui.chatDeployPrompt('local-1').includes('启动后立即退出'), '启动原因没有画在等待卡片上')
+    })
+
     await test('Bot 名单在非对话页也要在——它是顶层导航，不是对话页的附属', async () => {
       // 名单从「对话」子项提到侧栏顶层之后，取数的路径没跟着搬：loadRuntimeBots 一直
       // 只在 loadChatPage 里跑。于是管理员一进概览页（首页就是概览，根本不走那条路），

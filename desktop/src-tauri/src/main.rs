@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -782,6 +782,26 @@ fn spawn_local_bot_process(
     browser_port: u16,
 ) -> Result<Child, String> {
     let (root, entry, _) = bot_runtime(app)?;
+    let log_path = data.join("runtime.log");
+    if fs::metadata(&log_path).is_ok_and(|meta| meta.len() > 2 * 1024 * 1024) {
+        let _ = fs::write(&log_path, b"");
+    }
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("创建本地 Bot 日志失败：{e}"))?;
+    let _ = writeln!(
+        log,
+        "\n--- {} Desktop 启动本地 Bot ---",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let stderr = log
+        .try_clone()
+        .map_err(|e| format!("打开本地 Bot 错误日志失败：{e}"))?;
     let mut command = Command::new(node_program(app));
     command
         .arg("--import")
@@ -800,8 +820,8 @@ fn spawn_local_bot_process(
         .env("GATEWAY_TOKEN", &config.access_token)
         .env("GATEWAY_API_KEY", &config.api_key)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -811,6 +831,42 @@ fn spawn_local_bot_process(
     command
         .spawn()
         .map_err(|e| format!("启动本地 Bot 失败：{e}"))
+}
+
+fn local_bot_log_tail(data: &Path, config: &LocalBotConfig) -> String {
+    let Ok(raw) = fs::read_to_string(data.join("runtime.log")) else {
+        return String::new();
+    };
+    let start = raw
+        .char_indices()
+        .rev()
+        .nth(3_999)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    raw[start..]
+        .replace(&config.access_token, "<redacted>")
+        .replace(&config.api_key, "<redacted>")
+        .trim()
+        .to_string()
+}
+
+fn verify_local_bot_started(
+    mut child: Child,
+    data: &Path,
+    config: &LocalBotConfig,
+) -> Result<Child, String> {
+    // 配置、原生依赖或入口损坏通常会在这一拍退出。不能先回“运行中”再让 UI 静默等死。
+    std::thread::sleep(Duration::from_millis(500));
+    let Some(status) = child.try_wait().map_err(|e| e.to_string())? else {
+        return Ok(child);
+    };
+    let tail = local_bot_log_tail(data, config);
+    let _ = terminate_local_bot(&mut child);
+    Err(if tail.is_empty() {
+        format!("本地 Bot 启动后立即退出（{status}）")
+    } else {
+        format!("本地 Bot 启动后立即退出（{status}）：\n{tail}")
+    })
 }
 
 #[tauri::command]
@@ -875,7 +931,7 @@ fn start_local_bot(app: AppHandle, config: LocalBotConfig) -> Result<LocalBotSta
             browser_port,
         )
     };
-    let mut child = match start() {
+    let child = match start() {
         Ok(child) => child,
         Err(error) => {
             // 新版本连进程都拉不起来时立即回滚。旧目录仍保留，所以恢复只改一行指针。
@@ -897,14 +953,12 @@ fn start_local_bot(app: AppHandle, config: LocalBotConfig) -> Result<LocalBotSta
             start()?
         }
     };
-    // spawn 成功不等于运行时能加载。原生依赖或入口不兼容通常会在数百毫秒内退出；
-    // 只观察刚切换的新版本，避免把旧版本本身的业务错误误判成升级失败。
-    if promoted_runtime.is_some() {
-        std::thread::sleep(Duration::from_millis(400));
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+    let child = match verify_local_bot_started(child, &data, &config) {
+        Ok(child) => child,
+        Err(error) if promoted_runtime.is_some() => {
             let previous = previous_runtime
                 .as_deref()
-                .ok_or_else(|| format!("新运行时启动后立即退出（{status}），但找不到可回滚版本"))?;
+                .ok_or_else(|| format!("{error}，但找不到可回滚版本"))?;
             let home = runtime_home(&app)?;
             if !home
                 .join("releases")
@@ -912,19 +966,14 @@ fn start_local_bot(app: AppHandle, config: LocalBotConfig) -> Result<LocalBotSta
                 .join("bot/bin/satuwork.mjs")
                 .is_file()
             {
-                return Err(format!(
-                    "新运行时启动后立即退出（{status}），旧版本文件也已损坏"
-                ));
+                return Err(format!("{error}，旧版本文件也已损坏"));
             }
-            let _ = terminate_local_bot(&mut child);
             write_runtime_pointer(&home, "CURRENT", previous)?;
-            runtime_update_error(
-                &app,
-                Some(&format!("新运行时启动后立即退出（{status}），已回滚")),
-            );
-            child = start()?;
+            runtime_update_error(&app, Some(&format!("新运行时启动失败，已回滚：{error}")));
+            verify_local_bot_started(start()?, &data, &config)?
         }
-    }
+        Err(error) => return Err(error),
+    };
     bots.insert(bot_id, child);
     Ok(runtime_status(&app, true, &work))
 }

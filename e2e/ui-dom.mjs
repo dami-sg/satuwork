@@ -149,7 +149,7 @@ export function uiSource(uiDir) {
  * 见 uiSource。末尾那句 boot() 去掉，由调用方决定什么时候起，否则一 import 就开始打
  * 网络，断言没法安排在它前面。
  */
-export function loadApp({ appPath, base, token, fetchImpl, stubIds, desktop = false, persistentStorage }) {
+export function loadApp({ appPath, base, token, fetchImpl, stubIds, desktop = false, persistentStorage, localBotBridge }) {
   const raw = uiSource(dirname(appPath))
   const src = raw.replace(/\nboot\(\)\s*$/, '\n')
   const { document, app, page, listeners, stubs } = makeDom(stubIds)
@@ -201,6 +201,7 @@ export function loadApp({ appPath, base, token, fetchImpl, stubIds, desktop = fa
   const windowOpens = []
   const windowStub = {
     __SATUWORK_DESKTOP__: desktop,
+    __SATUWORK_LOCAL_BOT__: localBotBridge,
     addEventListener() {},
     satuUnzip: null,
     location,

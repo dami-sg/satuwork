@@ -1057,7 +1057,12 @@ async function ensureDesktopLocalBots(bots) {
     if (bot.runtimeKind !== 'local' || (bot.runtime && bot.runtime.status === 'ready')) continue
     if (now - (localBotStarts.get(bot.id) || 0) < 10_000) continue
     localBotStarts.set(bot.id, now)
-    void startDesktopLocalBot(bot.id).catch(() => {})
+    void startDesktopLocalBot(bot.id).catch((err) => {
+      state.deployHint = err instanceof Error
+        ? err.message
+        : String(err || t('本地 Bot 启动失败', 'Could not start the local bot'))
+      if (chatBotIdOf(state.path) === bot.id) render()
+    })
   }
 }
 
