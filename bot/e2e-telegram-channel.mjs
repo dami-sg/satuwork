@@ -2,6 +2,30 @@ import {
   channelCommand, channelMentionHelp, channelTodoMarkdown, parseChannelMentions,
 } from './src/web/channel.ts'
 import { channelDraft, channelFiles } from './src/web/index.ts'
+import { clearSettledTodos } from './src/tools/todo.ts'
+
+function todoFixture(items) {
+  let value = items
+  const snapshots = []
+  return {
+    ctx: {
+      storage: {
+        collection: () => ({
+          get: () => value,
+          delete: () => {
+            const existed = value !== undefined
+            value = undefined
+            return existed
+          },
+        }),
+      },
+      sessions: { append: async (_sessionId, type, data) => snapshots.push({ type, data }) },
+      logger: { warn: () => {} },
+    },
+    snapshots,
+    value: () => value,
+  }
+}
 
 const candidates = [
   { id: 'gmail-personal', label: 'Gmail (personal)' },
@@ -47,6 +71,16 @@ const files = channelFiles([
   // 别轮的产出不能跟进这一条 Telegram 回复。
   { type: 'tool/result', data: { turn: 8, files: [{ path: 'later.txt', name: 'later.txt' }] } },
 ], 'update-7')
+const settled = todoFixture([
+  { id: '1', task: '完成报告', status: 'completed' },
+  { id: '2', task: '不再需要', status: 'cancelled' },
+])
+const settledCleared = await clearSettledTodos(settled.ctx, 'session-1', 'channel:update-next')
+const open = todoFixture([
+  { id: '1', task: '继续处理', status: 'pending' },
+  { id: '2', task: '已完成部分', status: 'completed' },
+])
+const openCleared = await clearSettledTodos(open.ctx, 'session-2', 'channel:update-next')
 
 console.log('__RESULT__' + JSON.stringify({
   commands: [channelCommand('/new'), channelCommand('/new@satuwork_bot'), channelCommand('/tasks'), channelCommand('/mentions')],
@@ -57,4 +91,10 @@ console.log('__RESULT__' + JSON.stringify({
   draft,
   toolDraft,
   files,
+  settledCleared,
+  settledValue: settled.value(),
+  settledSnapshots: settled.snapshots,
+  openCleared,
+  openValue: open.value(),
+  openSnapshots: open.snapshots,
 }))

@@ -22,6 +22,14 @@ export async function runTelegramChannel({ root, test, assert, log }) {
     assert(result.todos.includes('- [ ] ✗ ~~旧步骤~~'), '取消任务没有显示取消状态')
   })
 
+  await test('Telegram 下一轮开始时清空已结束任务，但保留未完成任务', async () => {
+    assert(result.settledCleared && result.settledValue == null, '全部结束的旧任务没有清空')
+    assert(result.settledSnapshots.length === 1 && result.settledSnapshots[0].type === 'todo/list'
+      && result.settledSnapshots[0].data.items.length === 0, '清空后没有广播空任务快照')
+    assert(result.openCleared === false && result.openValue?.some((item) => item.status === 'pending'), '未完成任务被提前清空')
+    assert(result.openSnapshots.length === 0, '未完成任务不该广播空快照')
+  })
+
   await test('Telegram 草稿按步骤合并完整消息与当前 text delta', async () => {
     assert(result.draft === '我先查行情。\n\n正在生成报告', `草稿合并错误：${JSON.stringify(result.draft)}`)
     assert(result.draft.match(/我先查行情/g)?.length === 1, '完整消息和流式分片重复了')
