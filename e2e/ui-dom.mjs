@@ -149,12 +149,14 @@ export function uiSource(uiDir) {
  * 见 uiSource。末尾那句 boot() 去掉，由调用方决定什么时候起，否则一 import 就开始打
  * 网络，断言没法安排在它前面。
  */
-export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
+export function loadApp({ appPath, base, token, fetchImpl, stubIds, desktop = false, persistentStorage }) {
   const raw = uiSource(dirname(appPath))
   const src = raw.replace(/\nboot\(\)\s*$/, '\n')
   const { document, app, page, listeners, stubs } = makeDom(stubIds)
   const sessionStorage = makeStorage()
-  const localStorage = makeStorage()
+  // desktop 重开窗口时 sessionStorage 是一份新的，localStorage 仍是同一份。测试把上一
+  // 次的 persistentStorage 递回来，才能真的覆盖「关掉再打开」而不只是同页 reload。
+  const localStorage = persistentStorage || makeStorage()
   if (token) sessionStorage.setItem(tokenKey(appPath), token)
 
   const location = { pathname: '/', search: '', hash: '', href: base + '/' }
@@ -198,6 +200,7 @@ export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
    */
   const windowOpens = []
   const windowStub = {
+    __SATUWORK_DESKTOP__: desktop,
     addEventListener() {},
     satuUnzip: null,
     location,
@@ -240,7 +243,7 @@ export function loadApp({ appPath, base, token, fetchImpl, stubIds }) {
     }
   }
 
-  return { ...api, app, page, listeners, stubs, fire, sessionStorage, location, windowOpens, html: () => app.innerHTML }
+  return { ...api, app, page, listeners, stubs, fire, sessionStorage, localStorage, location, windowOpens, html: () => app.innerHTML }
 }
 
 /**

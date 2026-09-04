@@ -697,6 +697,7 @@ function myBotPage(bot, a) {
                 <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;">
                   <input class="input" style="max-width: 280px; font-family: var(--font-heading); font-size: 16px; font-weight: 600;" data-bot="name" value="${esc(a.name)}" placeholder="${esc(t('助理名字'))}">
                   <span class="tag ${a.enabled ? 'tag-accent-2' : 'tag-neutral'}">${a.enabled ? t('已上线') : t('未上线')}</span>
+                  <span class="tag tag-neutral">${bot.runtimeKind === 'local' ? t('本地 Bot', 'Local bot') : t('远程 Bot', 'Remote bot')}</span>
                 </div>
                 <input class="input" data-bot="description" value="${esc(a.description)}" placeholder="${esc(t('简介'))}">
                 <div style="font-size: 12.5px; color: var(--muted-foreground);">${t(`模型 ${esc(a.model || '—')}（平台指定）`, `model ${esc(a.model || '—')} (set by the platform)`)}</div>
@@ -739,7 +740,9 @@ function myBotPage(bot, a) {
           <button type="button" class="satu-linkbtn" style="text-align: left;" data-act="bot-delete">${t('删除这个 Bot')}</button>
           <button type="button" class="btn btn-primary" data-act="bot-save" ${state.busy ? 'disabled' : ''}>${state.busy ? t('保存中…') : t('保存配置')}</button>
         </div>
-        <p style="margin: 0 0 var(--space-4); font-size: 12px; color: var(--muted-foreground);">${t('删除会连它的席位一起拆掉，机器上那块屏和这个 Bot 的会话都不再保留。', 'Deleting also tears down its seat — that screen and this bot\'s conversations are gone.')}</p>
+        <p style="margin: 0 0 var(--space-4); font-size: 12px; color: var(--muted-foreground);">${bot.runtimeKind === 'local'
+          ? t('删除会移除这颗 Bot 的配置与会话；Mac 上的工作目录保留，避免误删你的文件。', 'Deleting removes this bot and its conversations; its Mac workspace is kept to avoid deleting your files.')
+          : t('删除会连它的席位一起拆掉，机器上那块屏和这个 Bot 的会话都不再保留。', 'Deleting also tears down its seat — that screen and this bot\'s conversations are gone.')}</p>
       </div>
     </div>`
 }
@@ -850,6 +853,22 @@ function newBotModal() {
         <input class="input" id="nb-name" data-newbot="name" value="${esc(f.name)}" placeholder="${esc(t('例如：回访助手'))}" autofocus>
       </div>
       <div class="field">
+        <label>${t('运行位置', 'Runs on')}</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <label class="satu-card" style="padding:12px;cursor:pointer;border-color:${f.runtimeKind === 'remote' ? 'var(--primary)' : 'var(--border)'};">
+            <input type="radio" name="nb-runtime" data-newbot="runtimeKind" value="remote" ${f.runtimeKind === 'remote' ? 'checked' : ''}>
+            <strong>${t('远程 Bot', 'Remote bot')}</strong>
+            <small style="display:block;margin-top:4px;color:var(--muted-foreground);">${t('运行在公司配置的机器上', 'Runs on the company machine')}</small>
+          </label>
+          <label class="satu-card" style="padding:12px;cursor:${window.__SATUWORK_DESKTOP__ ? 'pointer' : 'not-allowed'};opacity:${window.__SATUWORK_DESKTOP__ ? '1' : '.55'};border-color:${f.runtimeKind === 'local' ? 'var(--primary)' : 'var(--border)'};">
+            <input type="radio" name="nb-runtime" data-newbot="runtimeKind" value="local" ${f.runtimeKind === 'local' ? 'checked' : ''} ${window.__SATUWORK_DESKTOP__ ? '' : 'disabled'}>
+            <strong>${t('本地 Bot', 'Local bot')}</strong>
+            <small style="display:block;margin-top:4px;color:var(--muted-foreground);">${t('运行在这台 Mac，使用独立工作目录', 'Runs on this Mac with its own workspace')}</small>
+          </label>
+        </div>
+        ${window.__SATUWORK_DESKTOP__ ? '' : `<small style="color:var(--muted-foreground);">${t('本地 Bot 只能在 Satuwork Desktop 中创建。', 'Local bots can only be created in Satuwork Desktop.')}</small>`}
+      </div>
+      <div class="field">
         <label for="nb-desc">${t('简介')}</label>
         <input class="input" id="nb-desc" data-newbot="description" value="${esc(f.description)}" placeholder="${esc(t('一句话说清它管什么'))}">
       </div>
@@ -866,7 +885,7 @@ function newBotModal() {
         <button type="button" class="btn btn-secondary" data-act="new-bot-close">${t('取消')}</button>
         ${/* 「创建并安装」不是啰嗦：按下去之后机器上真的开始装东西（一台干净机器上要
               几分钟），这颗按钮得先把这件事说出来，人才不会在进度屏上愣一下。 */ ''}
-        <button type="button" class="btn btn-primary" data-act="new-bot-save" ${state.busy ? 'disabled' : ''}>${state.busy ? t('创建中…') : t('创建并安装', 'Create and install')}</button>
+        <button type="button" class="btn btn-primary" data-act="new-bot-save" ${state.busy ? 'disabled' : ''}>${state.busy ? t('创建中…') : f.runtimeKind === 'local' ? t('创建并启动', 'Create and start') : t('创建并安装', 'Create and install')}</button>
       </div>
     </div>
   </div>`
@@ -1732,4 +1751,3 @@ function usagePage() {
       </div>
     </div>`
 }
-

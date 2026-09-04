@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "prepare:runtime": "node scripts/prepare-runtime.mjs",
+    "pack:runtime-release": "node scripts/pack-runtime-release.mjs",
+    "build": "pnpm prepare:runtime && tauri build",
     "icon": "tauri icon"
   },
   "devDependencies": {

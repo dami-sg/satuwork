@@ -518,6 +518,7 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
       provider: pinned.provider,
       model: pinned.model,
       enabled: def.enabled !== false,
+      runtimeKind: def.runtimeKind === 'local' ? ('local' as const) : ('remote' as const),
       /**
        * **给运行面看的仍然是 company。** origin 会写进会话 JSONL 的信封
        * （SessionOrigin），那是落盘格式；为了一个只有界面用得上的区别去动它，等于让
@@ -554,6 +555,7 @@ export function publicBot(item: CatalogItem, pinned: { provider: string; model: 
     provider: pinned.provider,
     model: pinned.model,
     enabled: def.enabled !== false,
+    runtimeKind: 'remote' as const,
     origin: item.scope === 'global' ? ('global' as const) : ('company' as const),
     scope: item.scope === 'global' ? ('global' as const) : ('company' as const),
     ownerId: null as string | null,

@@ -21,6 +21,10 @@ pnpm --filter satuwork-desktop dev
 `~/Library/Application Support/sg.dami.satuwork/server.txt`（Windows 在
 `%APPDATA%`，Linux 在 `~/.config`）。要改地址走菜单「服务器 → 切换服务器…」。
 
+登录票在桌面壳里按 Gateway 来源持久保存：关掉窗口或退出应用后再打开会恢复登录；在
+个人设置里点「退出登录」仍会立即清掉。浏览器版继续使用 `sessionStorage`，关掉标签页
+不会长期保留登录。
+
 排查时可以绕过存的那个地址，它**不写盘**：
 
 ```bash
@@ -47,7 +51,33 @@ SATUWORK_SERVER=http://127.0.0.1:3080 pnpm --filter satuwork-desktop dev
 pnpm --filter satuwork-desktop build
 ```
 
-产物在 `src-tauri/target/release/bundle/`。macOS 上是 3.1 MB 的 .app。
+构建前会把当前平台的 Node 与 Bot 运行时一起放进资源目录；产物在
+`src-tauri/target/release/bundle/`。因此现在的安装包会明显大于只有 WebView 壳时的
+3.1 MB，但用户机器不需要另装 Node。
+
+本地 Bot 默认工作目录是 `文稿/Satuwork/<bot-id>/`，会话与本地索引存在应用数据目录。
+浏览器工具会使用本机已安装的 Chrome、Chromium 或 Edge，并为每颗本地 Bot 建立独立的
+浏览器 profile；它不会读取用户日常 Chrome 的个人 profile。首次访问需要登录的网站时，
+可直接在弹出的 Bot 浏览器窗口内登录，后续会保留该登录状态。
+Desktop 退出时本地进程会一起退出，再次打开并恢复登录后会自动启动。当前本地模式只开放
+受工作区约束的文件工具；真 shell 暂不开放，避免它用 `cd /` 绕过跨目录审批边界。需要
+访问其他目录时，在对话右栏点「批准访问其他文件夹」，系统选择器里由用户亲自选择；批准
+后的目录挂在工作区的 `External/` 下，记录按 Bot 独立保存。
+
+### 本地 Bot 运行时自动升级
+
+Desktop 壳与本地 Bot 分开发版。每次 Desktop 启动、第一颗本地 Bot 拉起之前，会用当前
+席位票向 Gateway 查询适合本机操作系统和架构的 `local-bot` 包：
+
+1. 包先下载到临时文件，并核对声明大小和 SHA-256；下载地址必须与当前 Gateway 同源。
+2. 校验通过后解到 `local-runtime/releases/<version>/`，旧版本目录保留。
+3. 没有 Bot 在运行时才原子切换 `CURRENT`；已有任务运行时绝不重启或混用版本，留到下一次
+   Desktop 启动再切换。
+4. 新运行时连进程都无法拉起时，自动把 `CURRENT` 指回旧版本并重试。网络、校验或兼容性
+   错误也不会阻止旧版本启动，界面会给出升级失败提示。
+
+运行时要求更高版本 Desktop 时不会硬装，会提示先升级 Desktop。运行时状态保存在应用数据
+目录的 `local-runtime/{CURRENT,PENDING,LAST_ERROR}`，可用于排查；正常使用不需要手工维护。
 
 **不能交叉编译**：Windows 包要 Windows 机器，Linux 包要 Linux 机器（和管家那边一样的
 道理，只是原因不同——这里是系统 webview 的开发库）。三个系统各要一台 runner。
@@ -95,9 +125,9 @@ Linux 那一列是三列里最可能出问题的。真要发 Linux 包，先跑�
 
 - **签名与公证**。macOS 要 Apple 开发者账号（99 美元/年）+ 公证；Windows 不签名就
   一路 SmartScreen。这是发给外人之前唯一的硬门槛，代码上没有工作量，全是行政成本。
-- **自动更新**（`tauri-plugin-updater`）。壳子很少变，但一旦要变就得有办法推下去。
-  Gateway 本来就在发 bot / 管家的包（`/platform/*-releases/:version`），多发一份
-  `latest.json` 是顺手的事，用的是同一套凭据和同一条 CI。
+- **Desktop 壳自动更新**（`tauri-plugin-updater`）。本地 Bot 运行时已经能独立静默升级，
+  但 Rust 壳、内置 Node、系统权限声明变更仍然必须发新安装器；这一层需要签名和公证后
+  才适合接自动更新。
 - **单实例 + 托盘 + 通知**。这三样是「装成桌面端」之后用户会立刻期待的东西，也是
   相对浏览器唯一说得出口的增量。通知要接的是聊天那条流。
 - **登录态**。token 现在在 `sessionStorage`（[gateway/ui/state.js](../gateway/ui/state.js)），

@@ -294,6 +294,12 @@ export function attachInternal(router: Router, ctx: RouteCtx) {
     await sendReleaseFile(res, 'bot', req.params.version, db)
   })
 
+  /** Desktop 用自己的 sat_ 席位票拉本机运行包；机器管家票同样可用于发布自检。 */
+  router.get('/internal/local-bot-releases/:version', async (req, res) => {
+    await requireInternalCaller(req, db)
+    await sendReleaseFile(res, 'local-bot', req.params.version, db)
+  })
+
   router.post('/internal/instances/:accountId/ready', async (req, res) => {
     const caller = await requireInternalCaller(req, db)
     const account = await db.account(req.params.accountId)

@@ -22,6 +22,38 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 
 const { Context } = vendored
 
+/**
+ * Desktop 开发进程被 `Ctrl-C` / 热重载直接结束时，Tauri 来不及跑 Exit 回调，macOS 会把
+ * 本地 Bot 重新挂到 pid 1。盯住启动它的 Desktop，主人不在了就结束整个本地进程组，
+ * 连同这颗 Bot 拉起的独立 Chrome 一起收掉。远程部署没有这个变量，行为完全不变。
+ */
+const desktopPid = Number(process.env.SATUWORK_DESKTOP_PID)
+if (
+  process.env.SATUWORK_RUNTIME_KIND === 'local' &&
+  Number.isSafeInteger(desktopPid) &&
+  desktopPid > 1
+) {
+  const ownerWatch = setInterval(() => {
+    try {
+      process.kill(desktopPid, 0)
+      if (process.ppid !== 1) return
+    } catch {
+      // 启动它的 Desktop 已经不存在。
+    }
+    clearInterval(ownerWatch)
+    if (process.platform !== 'win32') {
+      try {
+        process.kill(-process.pid, 'SIGTERM')
+        return
+      } catch {
+        // 不是进程组长时回落到只结束自己。
+      }
+    }
+    process.exit(0)
+  }, 1_000)
+  ownerWatch.unref()
+}
+
 // 别名断线时要在这里响亮地失败。否则症状会是「server 服务找不到」——因为
 // plugin-server 把自己注册到了另一份框架的 Context 上，排查起来完全指错方向。
 if (aliased.Context !== vendored.Context) {

@@ -341,14 +341,51 @@ const state = {
 }
 
 
-function token() {
-  return sessionStorage.getItem(TOKEN_KEY)
+/**
+ * 浏览器里的票只活在当前标签页；桌面壳没有「标签页」这个边界，关窗口再打开仍是同一
+ * 个应用，所以由壳注入标记后改存 localStorage。这样不会顺手把网页版也变成长期登录。
+ *
+ * token() 还认一次旧的 sessionStorage：用户在桌面端已经登录、Gateway 热更新到这一版
+ * 时，当前窗口里的旧票会无感迁过去，不必平白再登录一次。显式退出则两边都清，不能让
+ * 迁移留下的副本把人自动登回来。
+ */
+function desktopShell() {
+  return window.__SATUWORK_DESKTOP__ === true
 }
+
+function token() {
+  if (!desktopShell()) return sessionStorage.getItem(TOKEN_KEY)
+  try {
+    const saved = localStorage.getItem(TOKEN_KEY)
+    if (saved) return saved
+  } catch {}
+  const legacy = sessionStorage.getItem(TOKEN_KEY)
+  if (legacy) {
+    try {
+      localStorage.setItem(TOKEN_KEY, legacy)
+      sessionStorage.removeItem(TOKEN_KEY)
+    } catch {}
+  }
+  return legacy
+}
+
 function setToken(t) {
+  if (desktopShell()) {
+    try {
+      localStorage.setItem(TOKEN_KEY, t)
+      sessionStorage.removeItem(TOKEN_KEY)
+      return
+    } catch {}
+  }
   sessionStorage.setItem(TOKEN_KEY, t)
 }
+
 function clearToken() {
   sessionStorage.removeItem(TOKEN_KEY)
+  if (!desktopShell()) return
+  try {
+    localStorage.removeItem(TOKEN_KEY)
+  } catch {}
 }
 
 /** 列表画不出东西时那一格。三张账单表 + 用量表共用，别再各抄一份。 */

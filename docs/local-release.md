@@ -1,6 +1,7 @@
-# 本地出包（bot / manager）
+# 本地出包（bot / manager / Desktop local-bot）
 
-生产环境不走这条路。**生产是 CI 打包**（推 `bot-v*` / `manager-v*` tag），见最后一节。
+生产环境不走这条路。**生产是 CI 打包**（推 `bot-v*` / `manager-v*` / `local-bot-v*`
+tag），见最后一节。
 
 这份文档记的是**本地测试包**怎么出：改了代码想在自己的机器上验一遍，不想为此推一个 tag。
 
@@ -107,6 +108,25 @@ curl -X PUT "http://127.0.0.1:3099/platform/manager-releases/$(python3 -c \
 
 bot 换成 `/platform/bot-releases/`。
 
+Desktop 本地 Bot 包必须在它实际运行的平台上打（依赖里有当前平台的 esbuild）：
+
+```bash
+pnpm --filter satuwork-desktop pack:runtime-release -- --version "0.1.13+$(git rev-parse --short HEAD)"
+F=$(find dist -maxdepth 1 -name 'local-bot-*.tgz' -print -quit)
+V=$(basename "$F" .tgz | sed 's/^local-bot-//')
+curl -X PUT "http://127.0.0.1:3099/platform/local-bot-releases/$(python3 -c \
+      "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$V")" \
+  -H "authorization: Bearer $TOK" \
+  -H 'content-type: application/gzip' \
+  -H "x-bot-sha256: $(shasum -a 256 "$F" | awk '{print $1}')" \
+  --data-binary "@$F"
+```
+
+脚本自动给版本加 `-darwin-arm64`、`-windows-x64` 等目标后缀。Gateway 按后缀给 Desktop
+选包；不能手工改成另一种平台。正式发布推 `local-bot-v0.1.13` tag，
+`.github/workflows/local-bot-release.yml` 会构建六个目标包并上传。上传只让新版本变为可用，
+不会强杀正在运行的 Bot；Desktop 下次启动第一颗本地 Bot 时静默切换。
+
 版本号里的 `+` 编不编码都行：路由那层对每段做 `decodeURIComponent`，而**路径段里的 `+`
 是字面量**，不会被解成空格（那是 query string 的规矩，不是 path 的）。上面照着
 `pack.mjs` 编成 `%2B` 只是保持一致。
@@ -136,7 +156,7 @@ tar tzf "$M" | grep -o '@esbuild/[a-z0-9-]*' | sort -u                      # �
 ## 生产：CI
 
 ```bash
-git tag manager-v0.1.2 && git push --tags     # 或 bot-v0.1.1
+git tag manager-v0.1.2 && git push --tags     # 或 bot-v0.1.1 / local-bot-v0.1.13
 ```
 
 `.github/workflows/{bot,manager}-release.yml` 会：

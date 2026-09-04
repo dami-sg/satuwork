@@ -14,9 +14,11 @@ import { kindOf, originOf, requirePlatformToken, requireSeatOnly, requireUser } 
 import { MEMORY_PIN_MAX, MEMORY_TEXT_MAX, memoryExpiresAt, memoryKey, memoryKindAllowed, memoryKindOf, memoryScopeLayers, memoryStamp, memoryStoreMax, memoryText, publicMemory } from '../lib/memory.ts'
 import { WebToolError } from '../web-tools.ts'
 import { runExtract, runSearch } from '../web-service.ts'
-import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
+import { machineHeader, managerTargetFor, pairRuntime, proxyDownload, proxyJson, proxySse, proxyUpload, requireSeat, runtimeFetch, seatBearer, seatTargetFor, seatTargetForSession, visibleBotOf } from '../lib/runtime.ts'
 import { rosterStream } from '../lib/roster-stream.ts'
 import { requestBotDeletion } from '../conversation-audit.ts'
+import { localRuntimeOnline } from '../local-runtime.ts'
+import { localBotReleaseTarget } from '../releases.ts'
 
 /**
  * 一个人最多建几个 Bot。
@@ -25,6 +27,22 @@ import { requestBotDeletion } from '../conversation-audit.ts'
  * 屏、一个端口），不是一行配置。默认 10 够一个人分工用，真不够就调环境变量，不必改码。
  */
 export const MAX_USER_BOTS = Math.max(1, Math.trunc(Number(process.env.GATEWAY_MAX_USER_BOTS) || 10))
+
+function runtimeKindOf(item: CatalogItem): 'local' | 'remote' {
+  const def = item.definition as Record<string, unknown> | undefined
+  return item.scope === 'user' && def?.runtimeKind === 'local' ? 'local' : 'remote'
+}
+
+async function botRuntime(db: RouteCtx['db'], account: Account, item: CatalogItem) {
+  if (runtimeKindOf(item) === 'remote') return pairRuntime(db, account, item.id)
+  const online = localRuntimeOnline(account.id, item.id)
+  return {
+    kind: 'local' as const,
+    status: online ? 'ready' : 'none',
+    machineLink: online ? 'online' : 'offline',
+    workspace: 'desktop',
+  }
+}
 /**
  * 「数这个人有几个 Bot、再插一个」那一段的 advisory lock 键。两条建 Bot 的路（这里的
  * POST /runtime/bots 和 channels.ts 绑 Telegram 时顺手建的那颗）数的是同一个配额，
@@ -1107,7 +1125,10 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
   router.post('/runtime/deploy', async (req, res) => {
     const account = await requireUser(req, db, keys)
     requireSeat(account)
-    const out = await deploySeat(db, keys, account, deployOptsOf(req))
+    const opts = deployOptsOf(req)
+    const item = await visibleBotOf(db, account, opts.botId)
+    if (runtimeKindOf(item) === 'local') throw new HttpError(409, '本地 Bot 由 Satuwork Desktop 启动，不能部署到远程机器')
+    const out = await deploySeat(db, keys, account, opts)
     if (!out.ok) throw new HttpError(out.status, out.error)
     await db.audit({
       companyId: account.companyId!,
@@ -1141,7 +1162,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       (await db.botsFor(account.companyId, account.id)).map(async (item) => ({
         ...publicBot(item, pinned, tpl),
         channel: channelByBot.get(item.id) ?? null,
-        runtime: await pairRuntime(db, account, item.id),
+        runtime: await botRuntime(db, account, item),
       })),
     )
     json(res, 200, { bots, quota: { used: await db.countUserBots(account.id), max: MAX_USER_BOTS } })
@@ -1178,6 +1199,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       extraPrompt: extraPromptOf(body.extraPrompt),
       icon: botIconOf(body.icon, 'company'),
       enabled: true,
+      runtimeKind: body.runtimeKind === 'local' ? 'local' : 'remote',
     }
     const name = botNameOf(body.name)
     // 数和插放同一个事务、先拿锁（照 channels.ts 绑 Telegram 那条的写法）：不锁的话两个
@@ -1213,7 +1235,9 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
      * 这个 catch 只兜预料之外的那些。
      */
     let started: Awaited<ReturnType<typeof startSeatDeploy>>
-    try {
+    if (runtimeKindOf(item) === 'local') {
+      started = { ok: false, status: 200, error: '', runtime: undefined }
+    } else try {
       started = await startSeatDeploy(db, account, { botId: item.id })
     } catch (e) {
       console.warn(`satuwork-gateway: Bot ${item.id} 建好了但没能开装：${e instanceof Error ? e.message : String(e)}`)
@@ -1241,10 +1265,12 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const { pinned, tpl } = await botContext(db, account.companyId)
     // 席位那一份同理：读不出来就当没有（界面照旧从轮询那条路要），不能因此把 201 变成
     // 500——这一整段之后没有任何一件事值得让「建 Bot」失败。
-    const runtime = await pairRuntime(db, account, item.id).catch(() => null)
+    const runtime = await botRuntime(db, account, item).catch(() => null)
     json(res, 201, {
       bot: { ...publicBot(item, pinned, tpl), runtime },
-      deploy: started.ok ? { started: started.installing } : { started: false, error: started.error },
+      deploy: runtimeKindOf(item) === 'local'
+        ? { started: false, local: true }
+        : started.ok ? { started: started.installing } : { started: false, error: started.error },
     })
   })
 
@@ -1275,7 +1301,53 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
       detail: { id: item.id, name: next.name },
     })
     const { pinned, tpl } = await botContext(db, account.companyId)
-    json(res, 200, { bot: { ...publicBot(next, pinned, tpl), runtime: await pairRuntime(db, account, next.id) } })
+    json(res, 200, { bot: { ...publicBot(next, pinned, tpl), runtime: await botRuntime(db, account, next) } })
+  })
+
+  /** Desktop 启动本地进程所需的短路径。只给本人自己的 local Bot。 */
+  router.post('/runtime/bots/:id/local-bootstrap', async (req, res) => {
+    const account = await requireUser(req, db, keys)
+    const item = await ownBotOf(db, account, req.params.id)
+    if (runtimeKindOf(item) !== 'local') throw new HttpError(409, '这不是本地 Bot')
+    const secrets = await db.ensureAccountSecrets(account.id)
+    if (!secrets) throw new HttpError(409, '账号没有运行时凭证')
+    json(res, 200, {
+      botId: item.id,
+      gatewayUrl: originOf(req),
+      accessToken: secrets.accessToken,
+      apiKey: secrets.apiKey,
+    })
+  })
+
+  /**
+   * Desktop 的轻量更新探针。平台与架构由本机上报；没有对应包或已经是最新版都回 204。
+   * 下载仍走带 sat_ 鉴权的 internal 路由，manifest 本身不泄露运行时凭证。
+   */
+  router.get('/runtime/local-bot-release', async (req, res) => {
+    await requireSeatOnly(req, db)
+    const platform = String(req.query.get('platform') || '').trim().toLowerCase()
+    const arch = String(req.query.get('arch') || '').trim().toLowerCase()
+    if (!['darwin', 'windows', 'linux'].includes(platform)) throw new HttpError(400, '不支持这个 Desktop 平台')
+    if (!['x64', 'arm64'].includes(arch)) throw new HttpError(400, '不支持这个 Desktop 架构')
+    const latest = (await db.botReleases('local-bot')).find((release) => {
+      const target = localBotReleaseTarget(release.version)
+      return target?.platform === platform && target.arch === arch
+    })
+    const have = String(req.query.get('have') || '').trim()
+    if (!latest || latest.version === have) {
+      res.writeHead(204, { 'cache-control': 'no-store' })
+      res.end()
+      return
+    }
+    json(res, 200, {
+      version: latest.version,
+      sha256: latest.sha256,
+      size: latest.size,
+      url: `${originOf(req)}/internal/local-bot-releases/${encodeURIComponent(latest.version)}`,
+      minDesktopVersion: '0.1.0',
+      mandatory: false,
+      note: latest.note,
+    })
   })
 
   /** 删自己那一个：先冻结、跑删除终审，再由后台状态机拆席位并物理删除。 */
@@ -1316,7 +1388,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const bearerTok = await seatBearer(db, account.id)
     let r: Response
     try {
-      r = await fetch(url, {
+      r = await runtimeFetch(url, {
         headers: {
           authorization: bearerTok ? `Bearer ${bearerTok}` : '',
           accept: 'application/json',
@@ -1369,7 +1441,7 @@ export function attachRuntime(router: Router, ctx: RouteCtx) {
     const account = await requireUser(req, db, keys)
     const bot = await visibleBotOf(db, account, req.params.id)
     const { pinned, tpl } = await botContext(db, account.companyId)
-    json(res, 200, { bot: { ...publicBot(bot, pinned, tpl), runtime: await pairRuntime(db, account, bot.id) } })
+    json(res, 200, { bot: { ...publicBot(bot, pinned, tpl), runtime: await botRuntime(db, account, bot) } })
   })
 
   /**

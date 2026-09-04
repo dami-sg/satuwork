@@ -38,6 +38,15 @@ const SHA256_RE = /^[0-9a-f]{64}$/
 const ENTRY: Record<ReleaseKind, string> = {
   bot: 'bin/satuwork.mjs',
   manager: 'bin/satuwork-manager.mjs',
+  'local-bot': 'bin/satuwork.mjs',
+}
+
+const LOCAL_TARGET_RE = /-(darwin|windows|linux)-(x64|arm64)$/
+
+/** Desktop 本地包的目标平台写在版本尾部，发布与选择都只认这一处。 */
+export function localBotReleaseTarget(version: string): { platform: string; arch: string } | undefined {
+  const matched = LOCAL_TARGET_RE.exec(String(version || ''))
+  return matched ? { platform: matched[1], arch: matched[2] } : undefined
 }
 
 function uploadLimit(): number {

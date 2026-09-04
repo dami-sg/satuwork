@@ -430,6 +430,10 @@ export function apply(ctx: Context) {
     return
   }
 
+  // 本地 Bot 由反向通道登记虚拟 host。把 127.0.0.1 上报给 Gateway 会覆盖那条路由，
+  // Gateway 随后只会连到它自己机器的 loopback。
+  if ((process.env.SATUWORK_RUNTIME_KIND || '').trim() === 'local') return
+
   const started = Date.now()
   let delay = 0
   let timer: ReturnType<typeof setTimeout> | undefined

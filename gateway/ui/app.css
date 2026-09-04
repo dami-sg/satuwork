@@ -178,6 +178,30 @@ aside:not(:has(.satu-botlist)) .satu-navfoot { flex: 0 1 auto; min-height: 0; ov
 .satu-botmain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .satu-botline { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 
+/* 本地 Bot 是运行边界，不是一句次要说明。徽标在侧栏和会话顶栏复用，使用有底色、有
+   描边的形状，避免像原来那行 10px 灰字一样和摘要混在一起。 */
+.satu-localtag {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--color-accent-300);
+  border-radius: 999px;
+  background: var(--color-accent-100);
+  color: var(--color-accent-800);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.2;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.satu-localtag[data-compact] { padding: 1px 5px; font-size: 9.5px; }
+.satu-botrow[aria-current="true"] .satu-localtag {
+  border-color: color-mix(in srgb, var(--color-bg) 58%, transparent);
+  background: color-mix(in srgb, var(--color-bg) 18%, transparent);
+  color: var(--color-bg);
+}
+
 /* ── 状态点 ────────────────────────────────────────────────────────
    三态靠**形状**分，不只靠颜色：空闲是空心圈、执行中是实心并闪、待人工是实心琥珀。
    只用颜色的话，色觉障碍的人看到的是三个一模一样的点；而且侧栏选中行会整条染成

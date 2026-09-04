@@ -400,8 +400,9 @@ export function seatRuntimeOf(r: Row): SeatRuntime {
   }
 }
 export function botReleaseOf(r: Row): BotRelease {
+  const kind = str(r.kind || 'bot')
   return {
-    kind: str(r.kind || 'bot') === 'manager' ? 'manager' : 'bot',
+    kind: kind === 'manager' || kind === 'local-bot' ? kind : 'bot',
     version: str(r.version),
     sha256: str(r.sha256),
     size: num(r.size),

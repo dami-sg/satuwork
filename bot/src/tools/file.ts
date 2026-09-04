@@ -91,13 +91,13 @@ function globMatcher(glob: string): (rel: string) => boolean {
  *
  * `path` 直接指到一个文件时不看隐藏与否——那是模型明确点名要的那一个。
  */
-async function* filesUnder(target: string, hidden: boolean): AsyncGenerator<string> {
+async function* filesUnder(target: string, hidden: boolean, approvedLink?: (path: string) => boolean): AsyncGenerator<string> {
   const info = await stat(target).catch(() => fail(`路径不存在：${target}`))
   if (info.isFile()) {
     yield target
     return
   }
-  yield* walkFiles(target, { left: MAX_WALK_FILES }, hidden)
+  yield* walkFiles(target, { left: MAX_WALK_FILES }, hidden, approvedLink)
 }
 
 /** 模式是不是在点名要隐藏文件。看的是最后一段——`src/.env` 也算。 */
@@ -112,10 +112,10 @@ function wantsHidden(glob?: string): boolean {
  * 底下有哪些目录。少了它，模型看不见空目录，也不知道该往哪一层钻。一行的成本，`ls`
  * 的那半个用途就回来了。
  */
-async function subdirsOf(dir: string): Promise<string[]> {
+async function subdirsOf(dir: string, approvedLink?: (path: string) => boolean): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[])
   return entries
-    .filter((e) => e.isDirectory() && !SKIPPED_DIRS.has(e.name) && !e.name.startsWith('.'))
+    .filter((e) => (e.isDirectory() || (e.isSymbolicLink() && approvedLink?.(join(dir, e.name)))) && !SKIPPED_DIRS.has(e.name) && !e.name.startsWith('.'))
     .map((e) => e.name)
     .sort((a, b) => a.localeCompare(b))
     .slice(0, MAX_SUBDIRS)
@@ -389,7 +389,7 @@ export function apply(ctx: Context) {
         if (!info.isDirectory()) fail(`${show(base)} 不是目录，找文件要从目录开始。`)
         const match = globMatcher(pattern)
         const found: { rel: string; mtime: number }[] = []
-        for await (const file of walkFiles(base, { left: MAX_WALK_FILES }, wantsHidden(pattern))) {
+        for await (const file of walkFiles(base, { left: MAX_WALK_FILES }, wantsHidden(pattern), (path) => ctx.workspace.isApprovedLink(path))) {
           // 模式按「相对搜索起点」匹配，展示按「相对工作区根」——前者是模型写模式时
           // 心里想的，后者才能直接喂回 read_file。
           if (!match(relative(base, file).split(sep).join('/'))) continue
@@ -398,7 +398,7 @@ export function apply(ctx: Context) {
         }
         found.sort((a, b) => b.mtime - a.mtime)
         const page = found.slice(skip, skip + cap)
-        const dirs = await subdirsOf(base)
+        const dirs = await subdirsOf(base, (path) => ctx.workspace.isApprovedLink(path))
         const foot = dirs.length ? `\n这一层的子目录：${dirs.map((d) => `${d}/`).join('、')}` : ''
         if (!page.length) {
           const why = found.length
@@ -429,7 +429,7 @@ export function apply(ctx: Context) {
       let total = 0
       let stopped = false
 
-      outer: for await (const file of filesUnder(base, wantsHidden(fileGlob))) {
+      outer: for await (const file of filesUnder(base, wantsHidden(fileGlob), (path) => ctx.workspace.isApprovedLink(path))) {
         if (match && !match(relative(base, file).split(sep).join('/'))) continue
         const s = await stat(file).catch(() => undefined)
         if (!s || s.size > MAX_GREP_FILE_BYTES) continue

@@ -392,8 +392,13 @@ export interface SeatRuntime {
   deployStartedAt: number | null
 }
 
-/** 发布包的种类。bot 装到席位上，manager 是机器管家自己。 */
-export type ReleaseKind = 'bot' | 'manager'
+/**
+ * 发布包的种类。
+ *
+ * `local-bot` 不能复用服务器的 `bot`：两者都带 esbuild 原生依赖，前者按 Desktop 的
+ * 操作系统 + 架构构建，后者永远是 Linux 席位包。
+ */
+export type ReleaseKind = 'bot' | 'manager' | 'local-bot'
 
 /**
  * 计费明细一页的默认条数与硬上限。
