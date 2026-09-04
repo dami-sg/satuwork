@@ -686,26 +686,7 @@ export class AgentService extends Service {
       } as any)
 
       this.live.set(child, agent)
-      const isMcp = (t: { name: string }) => t.name.startsWith('mcp_')
-      const off = agent.subscribe(
-        this.projector(child, 1, {
-          provider,
-          model: modelId,
-          system: system.text,
-          tools: toolSchemas,
-          contextWindow: this.windowOf(provider, modelId),
-          reasoningEffort,
-          sections: {
-            system: estTokens(system.base),
-            skills: estTokens(system.skills),
-            // 记忆单独一格：它和 Skill 都在提示词末尾，混着报的话，界面上那颗 chip
-            // 说不清「今天忽然变大」是有人加了 Skill 还是 Bot 自己记了十条东西。
-            memory: estTokens(system.memory),
-            builtinTools: estTokens(toolsText(toolSchemas.filter((t) => !isMcp(t)))),
-            mcpTools: estTokens(toolsText(toolSchemas.filter(isMcp))),
-          },
-        }),
-      )
+      const off = agent.subscribe(this.projector(child, 1, this.turnMeta(provider, modelId, system, toolSchemas, reasoningEffort)))
 
       /**
        * 墙钟。Hermes 那边明确不设，我们必须设——他们的委派在后台，我们的主轮真的
@@ -1507,26 +1488,7 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
     } as any)
 
     this.live.set(sessionId, agent)
-    const isMcp = (t: { name: string }) => t.name.startsWith('mcp_')
-    const off = agent.subscribe(
-      this.projector(sessionId, turn, {
-        provider,
-        model: modelId,
-        system: system.text,
-        tools: toolSchemas,
-        contextWindow: this.windowOf(provider, modelId),
-        reasoningEffort,
-        sections: {
-          system: estTokens(system.base),
-          skills: estTokens(system.skills),
-          // 记忆单独一格：它和 Skill 都在提示词末尾，混着报的话，界面上那颗 chip
-          // 说不清「今天忽然变大」是有人加了 Skill 还是 Bot 自己记了十条东西。
-          memory: estTokens(system.memory),
-          builtinTools: estTokens(toolsText(toolSchemas.filter((t) => !isMcp(t)))),
-          mcpTools: estTokens(toolsText(toolSchemas.filter(isMcp))),
-        },
-      }),
-    )
+    const off = agent.subscribe(this.projector(sessionId, turn, this.turnMeta(provider, modelId, system, toolSchemas, reasoningEffort)))
 
     let reason: 'completed' | 'error' | 'aborted' | 'capped' = 'completed'
     const startedAt = Date.now()
@@ -2166,6 +2128,39 @@ ${tail}` : base, base, skills: composed.skills, memory: composed.memory }
    * 名称对不上要留意：pi 的一个 **turn** 是「一次模型调用加它的工具」，也就是我们
    * 的 **step**；我们的 turn 是一次用户输入引发的全部工作。
    */
+  /**
+   * 送给 projector 的那份「这一轮用了什么」：模型、提示词、工具，以及提示词各段占多少。
+   *
+   * 主轮和子代理两条起跑路径共用。分开写过，结果是给子代理加记忆那次只改了主轮那一份，
+   * 界面上子任务的 chip 一直把记忆算进 Skill 里——数字不报错，只是一直不对。
+   */
+  private turnMeta(
+    provider: string,
+    modelId: string,
+    system: { text: string; base: string; skills: string; memory: string },
+    toolSchemas: { name: string; description: string }[],
+    reasoningEffort: ReasoningEffort,
+  ) {
+    const isMcp = (t: { name: string }) => t.name.startsWith('mcp_')
+    return {
+      provider,
+      model: modelId,
+      system: system.text,
+      tools: toolSchemas,
+      contextWindow: this.windowOf(provider, modelId),
+      reasoningEffort,
+      sections: {
+        system: estTokens(system.base),
+        skills: estTokens(system.skills),
+        // 记忆单独一格：它和 Skill 都在提示词末尾，混着报的话，界面上那颗 chip
+        // 说不清「今天忽然变大」是有人加了 Skill 还是 Bot 自己记了十条东西。
+        memory: estTokens(system.memory),
+        builtinTools: estTokens(toolsText(toolSchemas.filter((t) => !isMcp(t)))),
+        mcpTools: estTokens(toolsText(toolSchemas.filter(isMcp))),
+      },
+    }
+  }
+
   private projector(
     sessionId: string,
     turn: number,
@@ -3219,20 +3214,33 @@ function safeParse(s: string): unknown {
  * 按了停止）。子会话没建、事件没写，所以这里也不能报出一个 child——空串是诚实的。
  */
 function abortedOutcome(spec: TaskSpec, taskId: string, startedAt: number): TaskOutcome {
+  return { ...blankOutcome(spec, 'aborted', '还没开始就被停止了。'), taskId, ms: Date.now() - startedAt }
+}
+
+/**
+ * 一份「什么都没跑成」的结果。
+ *
+ * 两种没跑成共用：**没起来**（delegate 那边接住了异常，子会话可能都没建）和
+ * **还没开跑就被停了**。两边都要交出一份形状完整的 TaskOutcome——模型下一步要靠
+ * `state` 和 `summary` 决定是重派还是换做法，缺一格它就得去猜。
+ *
+ * `child` 一律空串：子会话没建出来，报一个 id 出去是骗人的。
+ */
+export function blankOutcome(spec: TaskSpec, state: TaskOutcome['state'], summary: string): TaskOutcome {
   return {
     index: spec.index,
-    taskId,
+    taskId: '',
     child: '',
     goal: spec.goal,
-    state: 'aborted',
-    summary: '还没开始就被停止了。',
+    state,
+    summary,
     files: [],
     steps: 0,
     toolCalls: 0,
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, cost: 0 },
     model: { role: spec.modelRole, provider: '', id: '' },
     handedOver: [],
-    ms: Date.now() - startedAt,
+    ms: 0,
   }
 }
 

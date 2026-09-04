@@ -6,8 +6,16 @@ function mark(text, alt) {
   return `<span class="satu-providermark" style="${style}">${esc(String(text || '?').slice(0, 2).toUpperCase())}</span>`
 }
 
-/** 登录页和创建页共用左半边，只有右半边那张卡不一样。 */
-function authAside() {
+/**
+ * 登录、创建管理员、接受邀请这三屏共用的左半边。
+ *
+ * 只有中间那两句文案随屏变，其余（底纹、logo、题图、页脚）三屏一模一样——所以文案
+ * 走参数，版式留在这一个地方。加入邀请页原先自己抄了一份，改一次 logo 要改两处。
+ */
+function authAside(
+  title = t('Satuwork 控制面。按账号角色进入系统控制台或公司后台。'),
+  sub = t('日常任务模型和 utility 模型由系统管理员配置。供应商密钥保存后不会回显，也不会下发到 Bot。'),
+) {
   return `
     <div class="satu-authside">
       <div style="position: absolute; top: -60px; right: -60px; width: 220px; height: 220px; border-radius: 50%; background: var(--color-accent-2-200); opacity: 0.6;"></div>
@@ -19,8 +27,8 @@ function authAside() {
         <div style="width: 100%; aspect-ratio: 4/3; border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-lg);">
           <img src="/assets/login-hero.png" alt="" style="width: 100%; height: 100%; object-fit: cover;">
         </div>
-        <p style="font-family: var(--font-heading); font-size: 26px; line-height: 1.2; margin: 0;">${t('Satuwork 控制面。按账号角色进入系统控制台或公司后台。')}</p>
-        <p style="margin: 0; color: color-mix(in srgb, var(--color-text) 65%, transparent); font-size: 14px; line-height: 1.6;">${t('日常任务模型和 utility 模型由系统管理员配置。供应商密钥保存后不会回显，也不会下发到 Bot。')}</p>
+        <p style="font-family: var(--font-heading); font-size: 26px; line-height: 1.2; margin: 0;">${title}</p>
+        <p style="margin: 0; color: color-mix(in srgb, var(--color-text) 65%, transparent); font-size: 14px; line-height: 1.6;">${sub}</p>
       </div>
       <div style="position: relative; display: flex; gap: var(--space-4); font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent);">
         <span>© 2026 Satuwork</span>

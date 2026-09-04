@@ -203,25 +203,53 @@ function connectorEditModal() {
   </div>`
 }
 
-function ownerConnectorsPage() {
-  const list = state.connectors || []
-  const rows = list
-    .map(
-      (c) => `<div class="satu-provrow" style="grid-template-columns: 1fr auto auto auto;">
+/**
+ * 「添加账号」那一行。owner 详情页和员工侧栏各用一次，逐字相同。
+ *
+ * 单独收起来是因为它其实是一份**契约**：`data-input="conn-label"` 和
+ * `data-act="conn-add-account"` 要和 app.js 的事件委托对上，改名字得两头一起改。
+ */
+function addAccountRow(id) {
+  return `<div style="padding: var(--space-3) 0; display: flex; align-items: center; gap: var(--space-2);">
+      <input class="input" style="max-width: 200px;" data-input="conn-label" placeholder="${esc(t('账号名，如 personal'))}">
+      <button type="button" class="btn btn-secondary" data-act="conn-add-account" data-id="${esc(id)}">${t('添加账号')}</button>
+    </div>`
+}
+
+/**
+ * 连接器名单里的一行：左边是 logo + 名字 + 一句小字，右边几格由调用方给。
+ *
+ * owner 那张（上架管理）和 admin 那张（本公司禁用）左半边一模一样，右半边完全不同
+ * ——所以左半边留在这儿，右半边当参数传。
+ */
+function connectorRow(c, sub, cells) {
+  return `<div class="satu-provrow" style="grid-template-columns: 1fr auto auto auto;">
       <div style="min-width: 0; display: flex; align-items: center; gap: var(--space-3);">
         ${connectorLogo(c)}
         <div style="min-width: 0;">
           <div style="font-size: 14px; font-weight: 600;">${esc(c.name)}</div>
-          <div style="font-size: 12px; color: var(--muted-foreground);">${esc(c.vendor)} · ${esc(c.toolkit)}${c.description ? ` · ${esc(c.description)}` : ''}</div>
+          <div style="font-size: 12px; color: var(--muted-foreground);">${sub}</div>
         </div>
       </div>
-      ${c.authReady ? `<span class="tag tag-accent">${t('可授权')}</span>` : `<span class="tag">${t('缺 auth config')}</span>`}
+      ${cells}
+    </div>`
+}
+
+function ownerConnectorsPage() {
+  const list = state.connectors || []
+  const rows = list
+    .map(
+      (c) =>
+        connectorRow(
+          c,
+          `${esc(c.vendor)} · ${esc(c.toolkit)}${c.description ? ` · ${esc(c.description)}` : ''}`,
+          `${c.authReady ? `<span class="tag tag-accent">${t('可授权')}</span>` : `<span class="tag">${t('缺 auth config')}</span>`}
       ${c.enabled ? '' : `<span class="tag">${t('已隐藏')}</span>`}
       <div style="display: flex; gap: var(--space-2);">
         <button type="button" class="btn btn-ghost" data-act="conn-edit" data-id="${esc(c.id)}">${t('编辑')}</button>
         <button type="button" class="satu-linkbtn" data-act="conn-unpublish" data-id="${esc(c.id)}">${t('下架')}</button>
-      </div>
-    </div>`,
+      </div>`,
+        ),
     )
     .join('')
   const ready = connectorVendor()?.configured
@@ -408,10 +436,7 @@ function connectorDetailPage() {
                 <h2 style="font-size: 13px; font-weight: 600; color: var(--muted-foreground); margin: 0 0 var(--space-2);">${t('账号')}</h2>
                 <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover); padding: 0 var(--space-4);">
                   ${conns.map((x) => connectionRow(x, c.id)).join('') || ''}
-                  <div style="padding: var(--space-3) 0; display: flex; align-items: center; gap: var(--space-2);">
-                    <input class="input" style="max-width: 200px;" data-input="conn-label" placeholder="${esc(t('账号名，如 personal'))}">
-                    <button type="button" class="btn btn-secondary" data-act="conn-add-account" data-id="${esc(c.id)}">${t('添加账号')}</button>
-                  </div>
+                  ${addAccountRow(c.id)}
                 </div>
                 <p style="margin: var(--space-2) 0 0; font-size: 12px; color: var(--muted-foreground);">
                   ${t('账号名会出现在工具名里（如 gmail_personal），模型靠它判断该用哪一个。')}
@@ -457,15 +482,11 @@ function adminConnectorsPage() {
   const stats = state.connectorStats
   const rows = list
     .map(
-      (c) => `<div class="satu-provrow" style="grid-template-columns: 1fr auto auto auto;">
-      <div style="min-width: 0; display: flex; align-items: center; gap: var(--space-3);">
-        ${connectorLogo(c)}
-        <div style="min-width: 0;">
-          <div style="font-size: 14px; font-weight: 600;">${esc(c.name)}</div>
-          <div style="font-size: 12px; color: var(--muted-foreground);">${esc(c.toolkit)}${c.blocked && c.blockedReason ? ` · ${esc(c.blockedReason)}` : ''}</div>
-        </div>
-      </div>
-      <span style="font-size: 13px; color: var(--muted-foreground);">${t(`${c.installs} 人装了`)}</span>
+      (c) =>
+        connectorRow(
+          c,
+          `${esc(c.toolkit)}${c.blocked && c.blockedReason ? ` · ${esc(c.blockedReason)}` : ''}`,
+          `<span style="font-size: 13px; color: var(--muted-foreground);">${t(`${c.installs} 人装了`)}</span>
       <span style="font-size: 13px; color: var(--muted-foreground);">${t(`${c.connections} 个已连接`)}</span>
       <div style="display: flex; gap: var(--space-2);">
         ${
@@ -473,8 +494,8 @@ function adminConnectorsPage() {
             ? `<button type="button" class="btn btn-ghost" data-act="conn-unblock" data-id="${esc(c.id)}">${t('解禁')}</button>`
             : `<button type="button" class="satu-linkbtn" data-act="conn-block" data-id="${esc(c.id)}">${t('禁用')}</button>`
         }
-      </div>
-    </div>`,
+      </div>`,
+        ),
     )
     .join('')
   const usage = stats
@@ -670,10 +691,7 @@ function pluginDetailBody() {
         <h3 style="font-size: 13px; font-weight: 600; color: var(--muted-foreground); margin: 0 0 var(--space-2);">${t('账号')}</h3>
         <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 0 var(--space-4);">
           ${conns.map((x) => connectionRow(x, c.id)).join('')}
-          <div style="padding: var(--space-3) 0; display: flex; align-items: center; gap: var(--space-2);">
-            <input class="input" style="max-width: 200px;" data-input="conn-label" placeholder="${esc(t('账号名，如 personal'))}">
-            <button type="button" class="btn btn-secondary" data-act="conn-add-account" data-id="${esc(c.id)}">${t('添加账号')}</button>
-          </div>
+          ${addAccountRow(c.id)}
         </div>
         <p style="margin: var(--space-2) 0 0; font-size: 12px; color: var(--muted-foreground);">
           ${t('点「添加账号」会新开一页去授权，这一边不动；授权完关掉那页就行。账号名会出现在工具名里（如 gmail_personal），模型靠它判断该用哪一个。', 'Adding an account opens authorization in a new tab and leaves this one alone — close that tab when you are done. The label shows up in the tool name (gmail_personal), which is how the model tells accounts apart.')}

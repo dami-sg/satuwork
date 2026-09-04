@@ -113,7 +113,6 @@ export const PLAN_PERIODS: PlanPeriod[] = ['month', 'quarter', 'year']
  * 充值单：只有金额和备注，seats/bonus 是 0，`endAt` 等于 `startAt`（充值没有账期）。
  */
 export type OrderKind = 'plan' | 'topup'
-export const ORDER_KINDS: OrderKind[] = ['plan', 'topup']
 
 /** 付款状态。只有这两种：钱到了没有。退款、部分付款这些还没有，别提前造。 */
 export type PayStatus = 'unpaid' | 'paid'

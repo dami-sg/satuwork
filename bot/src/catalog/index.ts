@@ -648,6 +648,28 @@ export class CatalogService extends Service {
   }
 
   /**
+   * 目录这一份里没有的，从本地缓存里删掉。记忆和 Skill 两条同步路共用。
+   *
+   * `since` 是这份响应的发车时刻：比它还新写下的行豁免掉——那不是「被删了」，是
+   * 「它还没赶上这一班」。豁免记号（`noted`）**只在全量同步里清**：`noteSkill` 自己
+   * 就是一次 `prune: false` 的同步，放到剪枝之外清会把刚设下的记号当场删掉，豁免
+   * 等于没写（第一版真踩到过）。
+   */
+  private prune(
+    col: { list(): { value: { id: string } }[]; delete(id: string): void },
+    items: { id: string }[],
+    since: number,
+  ) {
+    const live = new Set(items.map((i) => i.id))
+    for (const row of col.list()) {
+      if (live.has(row.value.id)) continue
+      if ((this.noted.get(row.value.id) ?? 0) > since) continue
+      col.delete(row.value.id)
+    }
+    for (const i of items) this.noted.delete(i.id)
+  }
+
+  /**
    * 把这一份记忆落进本地缓存。
    *
    * **默认按全集处理**：Gateway 上没有的那些要跟着删掉。少了这一步，人在界面上删掉
@@ -663,16 +685,7 @@ export class CatalogService extends Service {
     const col = this.ctx.storage.collection<CachedMemory>('memories')
     const now = Date.now()
     if (opts.prune !== false) {
-      const live = new Set(items.map((m) => m.id))
-      const since = opts.since ?? now
-      for (const row of col.list()) {
-        if (live.has(row.value.id)) continue
-        // 这份响应发车时，那条还不存在——不是「被删了」，是「它还没赶上这一班」。
-        const wroteAt = this.noted.get(row.value.id) ?? 0
-        if (wroteAt > since) continue
-        col.delete(row.value.id)
-      }
-      for (const m of items) this.noted.delete(m.id)
+      this.prune(col, items, opts.since ?? now)
     }
     for (const m of items) {
       const prev = col.get(m.id)
@@ -698,22 +711,7 @@ export class CatalogService extends Service {
     const col = this.ctx.storage.collection<CachedSkill>('skills')
     const now = Date.now()
     if (opts.prune !== false) {
-      const live = new Set(items.map((s) => s.id))
-      const since = opts.since ?? now
-      for (const row of col.list()) {
-        if (live.has(row.value.id)) continue
-        // 这份响应发车时，那条还不存在——不是「被删了」，是「它还没赶上这一班」。
-        const wroteAt = this.noted.get(row.value.id) ?? 0
-        if (wroteAt > since) continue
-        col.delete(row.value.id)
-      }
-      /**
-       * 记号只在**全量同步**里清：目录这一份认下了的，往后不用再豁免。
-       *
-       * **不能放在剪枝之外清**——`noteSkill` 自己就是一次 `prune: false` 的同步，
-       * 那样它会把刚设下的记号当场删掉，豁免等于没写（这条是第一版真踩到的）。
-       */
-      for (const s of items) this.noted.delete(s.id)
+      this.prune(col, items, opts.since ?? now)
     }
     for (const s of items) {
       const prev = col.get(s.id)

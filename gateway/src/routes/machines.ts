@@ -10,7 +10,7 @@ import { bodyOf, intField, strField } from '../lib/validate.ts'
 import { installScript } from '../install.ts'
 import { proxyJson, proxySse } from '../lib/runtime.ts'
 import { parseBotVersion, publicBotRelease, storeUploadedRelease } from '../releases.ts'
-import { requireOrg, requireOwner, requireReleaseAuthor, requireUser } from '../lib/guards.ts'
+import { requireOrgUser, requireOwnerUser, requireReleaseAuthor } from '../lib/guards.ts'
 import { MANAGER_VACUUM_TIMEOUT_MS, MAX_LOG_CAP_MB, METRIC_RETENTION_MS, MINUTE_MS } from '../lib/telemetry.ts'
 import { signDesktopTicket } from '../crypto.ts'
 import { type Account, type CatalogItem, type Machine, type SeatRuntime } from '../db.ts'
@@ -19,8 +19,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
   const { db, keys } = ctx
 
   router.get('/platform/orgs/:id/machine', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const loads = await machineLoads(db, company.id)
@@ -60,8 +59,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * seatId 必须是**这台机器上**的：它会进 systemd 单元名，不能拿别处的值来拼。
    */
   router.get('/platform/orgs/:id/machines/:machineId/logs', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const machine = await machineOfOrg(db, company.id, req.params.machineId)
@@ -94,8 +92,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 打到空处，而且再也找不回来是哪台。
    */
   router.delete('/platform/orgs/:id/machines/:machineId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const machine = await machineOfOrg(db, company.id, req.params.machineId)
@@ -117,8 +114,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
 
   /** 改一台机器的账号容量。调小到低于当前占用不拦——已经在上面的账号不会被赶走。 */
   router.put('/platform/orgs/:id/machines/:machineId/capacity', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOfOrg(db, req.params.id, req.params.machineId)
     const maxAccounts = intField(bodyOf(req), 'maxAccounts')
     if (maxAccounts == null || maxAccounts < 1 || maxAccounts > 1000) {
@@ -145,8 +141,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 传空串 = 不再管这台机器的时区（不会把机器改回去，只是不再下发）。
    */
   router.put('/platform/orgs/:id/machines/:machineId/timezone', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOfOrg(db, req.params.id, req.params.machineId)
     const timezone = normalizeTimezone(strField(bodyOf(req), 'timezone', false))
     if (timezone === undefined) throw new HttpError(400, '不认识这个时区，要填 IANA 名，例如 Asia/Shanghai')
@@ -174,8 +169,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * - `kind: 'bot'` 走已有的批量重部署，逐个席位推过去。
    */
   router.post('/platform/orgs/:id/machines/:machineId/upgrade', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const machine = await machineOfOrg(db, company.id, req.params.machineId)
@@ -206,8 +200,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 不是这里填进去的东西。换 IP、换端口时用它；换机器请重新配对。
    */
   router.put('/platform/orgs/:id/machine', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const body = bodyOf(req)
@@ -239,8 +232,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 都能用的码，谁也说不清哪台机器是拿哪张进来的。
    */
   router.post('/platform/orgs/:id/pairing-code', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const now = Date.now()
@@ -368,8 +360,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
 
   /** 平台上所有机器。列表页一次拉齐，不分页——机器是几十台的量级，不是几万条。 */
   router.get('/platform/machines', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     await db.sweepRemovedMachines(Date.now() - MACHINE_TOMBSTONE_TTL)
     const latest = await releaseLatest()
     const rows = await db.allMachines()
@@ -399,8 +390,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 公司 id。清单只有 id / 名字 / slug，没有别的。
    */
   router.get('/platform/machines/:id', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const latest = await releaseLatest()
     const load = await machineLoadOf(db, machine)
@@ -439,8 +429,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 配对时签发的 `smt_`。换 IP、换端口用它；换机器请重新配对。
    */
   router.put('/platform/machines/:id/host', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const raw = strField(bodyOf(req), 'host', false)
     if (!raw) throw new HttpError(400, 'host 不能为空')
@@ -454,8 +443,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
 
   /** 改账号容量。调小到低于当前占用不拦——已经在上面的账号不会被赶走。 */
   router.put('/platform/machines/:id/capacity', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const maxAccounts = intField(bodyOf(req), 'maxAccounts')
     if (maxAccounts == null || maxAccounts < 1 || maxAccounts > 1000) {
@@ -468,8 +456,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
 
   /** 设时区。只是把期望值钉在这里，真正改的是机器上的管家，下一轮心跳才知道成没成。 */
   router.put('/platform/machines/:id/timezone', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const timezone = normalizeTimezone(strField(bodyOf(req), 'timezone', false))
     if (timezone === undefined) throw new HttpError(400, '不认识这个时区，要填 IANA 名，例如 Asia/Shanghai')
@@ -489,8 +476,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 闲着的机器，结论正相反。
    */
   router.get('/platform/machines/:id/metrics', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const from = Math.trunc(Number(req.query.get('from')))
     const to = Math.trunc(Number(req.query.get('to')))
@@ -565,8 +551,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 谁也没按过的机器上把清理静默关掉，而盘写满时连日志都写不进去，事后连查都没得查。
    */
   router.put('/platform/machines/:id/log-cap', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const logCapMb = logMbField(bodyOf(req), 'logCapMb') ?? null
     const next = await db.updateMachine(machine.id, { logCapMb })
@@ -592,8 +577,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 复盘的材料——谁在什么时候按的，得留得下来。
    */
   router.post('/platform/machines/:id/logs/vacuum', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     if (!machine.host) throw new HttpError(503, INSTANCE_DOWN)
     const keepMb = logMbField(bodyOf(req), 'keepMb')
@@ -616,8 +600,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
 
   /** 钉一个管家版本。换版、自检、失败回滚都在机器上做，这里只下指令。 */
   router.post('/platform/machines/:id/upgrade', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     if (!machinePaired(machine)) throw new HttpError(409, '这台机器还没有配对')
     const requested = strField(bodyOf(req), 'version', false)
@@ -641,8 +624,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 让它更慢，还把失败搅在一起看不清是哪一个。
    */
   router.post('/platform/machines/:id/runtime/update', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const body = bodyOf(req)
     /**
@@ -755,8 +737,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 说不清了。要改归属，先把席位拆干净。
    */
   router.put('/platform/machines/:id/company', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const wanted = strField(bodyOf(req), 'companyId', false)
     const target = wanted ? await db.company(wanted) : undefined
@@ -811,8 +792,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 走审计，理由和公司侧那条一样：席位的日志里有员工的对话正文和 bot 执行过的命令。
    */
   router.get('/platform/machines/:id/logs', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     if (!machine.host) throw new HttpError(503, INSTANCE_DOWN)
     const seatId = (req.query.get('seatId') || '').trim()
@@ -846,8 +826,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 重新分配就会撞上——所以重新配对之前得先上去把旧席位清干净。
    */
   router.delete('/platform/machines/:id', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const seats = await db.seatRuntimesOfMachine(machine.id)
     // 机器还在线才立墓碑：它下一轮心跳（≤30 秒）就会收到信，自己停席位、停自己、
@@ -894,8 +873,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 界面上却什么都没变。
    */
   router.delete('/platform/machines/:id/seats/:seatId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const machine = await machineOr404(req.params.id)
     const seat = await db.seatRuntimeBySeatId(req.params.seatId)
     if (!seat || seat.machineId !== machine.id) throw new HttpError(404, '这台机器上没有这个席位')
@@ -965,8 +943,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
    * 走审计：这是「看别人的屏幕」，必须留痕。票只活五分钟。
    */
   router.get('/platform/desktop-ticket', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const seatId = (req.query.get('seatId') || '').trim()
     if (!seatId) throw new HttpError(400, 'seatId 不能为空')
     /**
@@ -1067,8 +1044,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
   })
 
   router.post('/platform/orgs/:id/runtime/update', async (req, res) => {
-    const actor = await requireUser(req, db, keys)
-    requireOrg(actor, req.params.id, true)
+    const actor = await requireOrgUser(req, db, keys, req.params.id, true)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const body = bodyOf(req)
@@ -1134,8 +1110,7 @@ export function attachMachines(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/platform/orgs/:id/accounts/:accountId/runtime', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const row = await db.account(req.params.accountId)

@@ -5,7 +5,7 @@ import type { RouteCtx } from './ctx.ts'
 import { COMPANY_BOT_ICONS, CatalogOwner, skillDisplayNames, skillFiles, skillModeOf, escalateToOf, DEFAULT_BOT_PROMPT, GLOBAL_BOT_ICONS, GLOBAL_OWNER, LEGACY_BOT_ICONS, MCP_KINDS, MCP_PERMS, McpKind, SkillSource, asDef, assignedIds, botBrowserOf, botDefOf, botGuardsOf, botIconOf, botMemoryOf, botNameOf, companyOwner, defaultBotModel, envOf, filesOf, iconSetFor, knownTags, namedOf, publicBot, publicCatalog, publicServer, publicSkill, rememberTags, tagsOf, trimStr } from '../lib/catalog.ts'
 import { HttpError, type Req, type Router, json } from '../http.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
-import { kindOf, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
+import { kindOf, requireOrgUser, requireOwner, requireOwnerUser, requireUser } from '../lib/guards.ts'
 import { type Account, type CatalogItem, type CatalogKind } from '../db.ts'
 import { requestBotDeletion } from '../conversation-audit.ts'
 
@@ -206,8 +206,7 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       return GLOBAL_OWNER
     },
     async write(req) {
-      const account = await requireUser(req, db, keys)
-      requireOwner(account)
+      const account = await requireOwnerUser(req, db, keys)
       return { account, owner: GLOBAL_OWNER }
     },
     async ensure() {},
@@ -221,13 +220,11 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
   const COMPANY_SCOPE: CatalogRouteScope = {
     base: '/orgs/:id',
     async read(req) {
-      const account = await requireUser(req, db, keys)
-      requireOrg(account, req.params.id)
+      await requireOrgUser(req, db, keys, req.params.id)
       return companyOwner(req.params.id)
     },
     async write(req) {
-      const account = await requireUser(req, db, keys)
-      requireOrg(account, req.params.id, true)
+      const account = await requireOrgUser(req, db, keys, req.params.id, true)
       return { account, owner: companyOwner(req.params.id) }
     },
     async ensure(req) {
@@ -563,13 +560,11 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
   for (const name of ['models'] as const) {
     const kind = kindOf(name)
     router.get(`/orgs/:id/${name}`, async (req, res) => {
-      const account = await requireUser(req, db, keys)
-      requireOrg(account, req.params.id)
+      await requireOrgUser(req, db, keys, req.params.id)
       json(res, 200, { items: (await db.companyCatalog(kind, req.params.id)).map(publicCatalog) })
     })
     router.post(`/orgs/:id/${name}`, async (req, res) => {
-      const account = await requireUser(req, db, keys)
-      requireOrg(account, req.params.id, true)
+      const account = await requireOrgUser(req, db, keys, req.params.id, true)
       if (!await db.company(req.params.id)) throw new HttpError(404, '公司不存在')
       const body = bodyOf(req)
       const name = strField(body, 'name')
@@ -585,15 +580,13 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       json(res, 201, { item: publicCatalog(item) })
     })
     router.get(`/orgs/:id/${name}/:itemId`, async (req, res) => {
-      const account = await requireUser(req, db, keys)
-      requireOrg(account, req.params.id)
+      await requireOrgUser(req, db, keys, req.params.id)
       const item = await db.catalog(req.params.itemId)
       if (!item || item.kind !== kind || item.companyId !== req.params.id) throw new HttpError(404, '目录项不存在')
       json(res, 200, { item: publicCatalog(item) })
     })
     router.patch(`/orgs/:id/${name}/:itemId`, async (req, res) => {
-      const account = await requireUser(req, db, keys)
-      requireOrg(account, req.params.id, true)
+      const account = await requireOrgUser(req, db, keys, req.params.id, true)
       const item = await db.catalog(req.params.itemId)
       if (!item || item.kind !== kind || item.companyId !== req.params.id) throw new HttpError(404, '目录项不存在')
       const body = bodyOf(req)
@@ -609,8 +602,7 @@ export function attachCatalog(router: Router, ctx: RouteCtx) {
       json(res, 200, { item: publicCatalog(next) })
     })
     router.delete(`/orgs/:id/${name}/:itemId`, async (req, res) => {
-      const account = await requireUser(req, db, keys)
-      requireOrg(account, req.params.id, true)
+      const account = await requireOrgUser(req, db, keys, req.params.id, true)
       const item = await db.catalog(req.params.itemId)
       if (!item || item.kind !== kind || item.companyId !== req.params.id) throw new HttpError(404, '目录项不存在')
       await db.deleteCatalog(item.id)

@@ -135,6 +135,26 @@ export function losingAdmin(row: Account, nextRole: Role, nextStatus: AccountSta
   return row.role === 'admin' && row.status !== 'disabled' && (nextRole !== 'admin' || nextStatus === 'disabled')
 }
 
+/**
+ * 「取登录态」+「判角色」这两步在路由里永远连着出现，合成一句。
+ *
+ * 拆成两行不是为了灵活——118 处调用点没有一处只做前半步。分开写的代价是：漏掉第二行
+ * 不会有任何报错，那条路由就此对所有人敞开，而 diff 上看不出少了什么。合成一句之后，
+ * 「谁能调这条」写在函数名里，漏不掉。
+ */
+export async function requireOwnerUser(req: Req, db: Db, keys: JwtKeys): Promise<Account> {
+  const account = await requireUser(req, db, keys)
+  requireOwner(account)
+  return account
+}
+
+/** 同上，公司这一层。owner 照旧一路放行（见 requireOrg）。 */
+export async function requireOrgUser(req: Req, db: Db, keys: JwtKeys, orgId: string, admin = false): Promise<Account> {
+  const account = await requireUser(req, db, keys)
+  requireOrg(account, orgId, admin)
+  return account
+}
+
 export function requireOrg(account: Account, orgId: string, admin = false): void {
   if (account.role === 'owner') return
   if (account.companyId !== orgId) throw new HttpError(403, '不属于这家公司')

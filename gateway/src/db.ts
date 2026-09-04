@@ -3510,24 +3510,15 @@ export class Db {
     botName: string
     accountName: string
     retentionDays: number
-    items: Array<{
-      itemKey: string
-      firstSeq: number
-      lastSeq: number
-      startedAt: number | null
-      endedAt: number | null
-      taskSummary: string
-      timeline: { at: number; action: string }[]
-      userQuestion: string
-      modelAnswer: string
-      finalResult: string
-      outcome: ConversationAuditOutcome
-      modelScore: number | null
-      scoreBreakdown: Record<string, number>
-      scoreConfidence: number | null
-      evidence: string[]
-      riskFlags: string[]
-    }>
+    /**
+     * 一条审计条目的**正文**：身份（id / batchId / 那几个快照名）和时间戳由这一层
+     * 自己填，调用方只给内容。
+     *
+     * 用 Omit 而不是把字段再抄一遍：往 ConversationAuditItem 上加一格正文字段时，
+     * 这里会当场编译不过，逼调用方补上。抄一份的话加了也不报错，那一格只是在这条
+     * 写入路上永远是空的。
+     */
+    items: Array<Omit<ConversationAuditItem, 'id' | 'batchId' | 'companyId' | 'accountId' | 'botId' | 'sessionId' | 'botNameSnapshot' | 'accountNameSnapshot' | 'createdAt' | 'expiresAt'>>
   }): Promise<ConversationAuditBatch> {
     return this.tx(async () => {
       const cur = await this.conversationAuditBatch(input.id)

@@ -7,21 +7,19 @@ import { MIN_PASSWORD, hashPassword } from '../crypto.ts'
 import { amountMilsOf, bodyOf, bonusMilsOf, dateMsOf, endOfPeriod, payStatusOf, periodOf, seatsOf, strField } from '../lib/validate.ts'
 import { balanceOf, orderKindOf, publicInvoice, publicPlanOrder, publicPlanSku, publicTopup, syncInvoiceOfOrder, syncTopupOfOrder } from '../lib/billing.ts'
 import { emailOf, expiresAtOf, orgSummary, patchAccount, phoneOf, publicAccount, publicCompany, publicPlan, slugOf, websiteOf } from '../lib/org.ts'
-import { requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
+import { requireOrgUser, requireOwnerUser } from '../lib/guards.ts'
 import { type PlanSku } from '../db.ts'
 
 export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
   const { db, keys, meter } = ctx
 
   router.get('/platform/orgs', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     json(res, 200, { orgs: await Promise.all((await db.companies()).map((c) => orgSummary(db, c))) })
   })
 
   router.get('/platform/accounts', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const companies = new Map((await db.companies()).map((c) => [c.id, c]))
     json(res, 200, {
       accounts: (await db.accountsAll()).map((a) => {
@@ -35,8 +33,7 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/platform/accounts/:id', async (req, res) => {
-    const actor = await requireUser(req, db, keys)
-    requireOwner(actor)
+    await requireOwnerUser(req, db, keys)
     const row = await db.account(req.params.id)
     if (!row) throw new HttpError(404, '账号不存在')
     const company = row.companyId ? await db.company(row.companyId) : undefined
@@ -60,8 +57,7 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
    * 两份的那天起它们就开始各自漂移。
    */
   router.patch('/platform/accounts/:id', async (req, res) => {
-    const actor = await requireUser(req, db, keys)
-    requireOwner(actor)
+    const actor = await requireOwnerUser(req, db, keys)
     const row = await db.account(req.params.id)
     if (!row) throw new HttpError(404, '账号不存在')
     const { account, patch } = await patchAccount(db, actor, row, bodyOf(req))
@@ -76,8 +72,7 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
   })
 
   router.post('/platform/orgs', async (req, res) => {
-    const actor = await requireUser(req, db, keys)
-    requireOwner(actor)
+    const actor = await requireOwnerUser(req, db, keys)
     const body = bodyOf(req)
     const name = strField(body, 'name')
     const slug = slugOf(strField(body, 'slug'))
@@ -110,8 +105,7 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
   })
 
   router.put('/platform/orgs/:id/plan', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     if (!await db.company(req.params.id)) throw new HttpError(404, '公司不存在')
     const body = bodyOf(req)
     const cur = await db.plan(req.params.id)
@@ -143,22 +137,19 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
    * 这里改的是「卖什么」，改价不会动已经开出去的公司席位。
    */
   router.get('/platform/plans', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     json(res, 200, { plans: (await db.planSkus()).map(publicPlanSku) })
   })
 
   router.get('/platform/plans/:id', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const plan = await db.planSku(req.params.id)
     if (!plan) throw new HttpError(404, '套餐不存在')
     json(res, 200, { plan: publicPlanSku(plan) })
   })
 
   router.post('/platform/plans', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const body = bodyOf(req)
     const name = strField(body, 'name')
     // 英文名选填：留空的话英文界面回落到中文名，总比显示空白强。
@@ -180,8 +171,7 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
   })
 
   router.put('/platform/plans/:id', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const cur = await db.planSku(req.params.id)
     if (!cur) throw new HttpError(404, '套餐不存在')
     const body = bodyOf(req)
@@ -216,23 +206,20 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
    * 下单时把套餐内容抄一份进订单——之后改价目表不会改写已经开出去的订单。
    */
   router.get('/platform/orders', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const companies = new Map((await db.companies()).map((c) => [c.id, c]))
     json(res, 200, { orders: (await db.planOrders()).map((o) => publicPlanOrder(o, companies.get(o.companyId))) })
   })
 
   router.get('/platform/orders/:id', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const order = await db.planOrder(req.params.id)
     if (!order) throw new HttpError(404, '订单不存在')
     json(res, 200, { order: publicPlanOrder(order, await db.company(order.companyId)) })
   })
 
   router.post('/platform/orders', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const body = bodyOf(req)
     const company = await db.company(strField(body, 'companyId'))
     if (!company) throw new HttpError(404, '公司不存在')
@@ -322,8 +309,7 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
   })
 
   router.put('/platform/orders/:id', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const cur = await db.planOrder(req.params.id)
     if (!cur) throw new HttpError(404, '订单不存在')
     const body = bodyOf(req)
@@ -407,8 +393,7 @@ export function attachPlatformOrgs(router: Router, ctx: RouteCtx) {
    */
   /** 某家公司的充值明细 + 两笔余额。公司管理员看得到自己家的。 */
   router.get('/orgs/:id/topups', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    const account = await requireOrgUser(req, db, keys, req.params.id, true)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const rows = await db.topupsOfCompany(company.id)

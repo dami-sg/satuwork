@@ -1,24 +1,7 @@
 /** 加入邀请页、审计总结，以及平台侧的公司、机器、发布包。 */
 function joinView() {
   const inv = state.joinInvite || { loading: true }
-  const side = `
-    <div class="satu-authside">
-      <div style="position: absolute; top: -60px; right: -60px; width: 220px; height: 220px; border-radius: 50%; background: var(--color-accent-2-200); opacity: 0.6;"></div>
-      <div style="position: relative; display: flex; align-items: center; gap: var(--space-2);">
-        <img src="/assets/satuwork-logo.png" alt="Satuwork" style="width: 34px; height: 34px; border-radius: 999px;">
-        <span style="font-family: var(--font-heading); font-size: 20px;">Satuwork</span>
-      </div>
-      <div style="position: relative; display: flex; flex-direction: column; gap: var(--space-4); max-width: 440px;">
-        <div style="width: 100%; aspect-ratio: 4/3; border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-lg);">
-          <img src="/assets/login-hero.png" alt="" style="width: 100%; height: 100%; object-fit: cover;">
-        </div>
-        <p style="font-family: var(--font-heading); font-size: 26px; line-height: 1.2; margin: 0;">${t('加入同事的工作区，设置你自己的口令。')}</p>
-        <p style="margin: 0; color: color-mix(in srgb, var(--color-text) 65%, transparent); font-size: 14px; line-height: 1.6;">${t('管理员从头到尾看不到你的口令。链接只用一次。')}</p>
-      </div>
-      <div style="position: relative; display: flex; gap: var(--space-4); font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent);">
-        <span>© 2026 Satuwork</span>
-      </div>
-    </div>`
+  const side = authAside(t('加入同事的工作区，设置你自己的口令。'), t('管理员从头到尾看不到你的口令。链接只用一次。'))
   let inner
   if (inv.loading) {
     inner = `<p style="margin: 0; color: var(--muted-foreground);">${t('载入邀请…')}</p>`
@@ -628,19 +611,7 @@ function companyDetailPage() {
     </div>`
     })
     .join('')
-  const invoiceRows = invoices
-    .map(
-      (b) => `<div class="satu-billrow">
-        <span style="font-size: 13.5px;">${esc(b.period)}</span>
-        <span style="font-size: 13.5px;">${esc(b.amount)}</span>
-        <span class="tag tag-accent-2">${esc(b.status)}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(b.paid)}</span>
-        <span></span>
-      </div>`,
-    )
-    .join('')
-  const empty = (msg) =>
-    `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${esc(msg)}</div>`
+  const invoiceRows = invoices.map((b) => invoiceRow(b)).join('')
   return `
     <div class="gw-page">
       <div class="gw-page-inner">
@@ -714,7 +685,7 @@ function companyDetailPage() {
             <div class="satu-memberhead" style="grid-template-columns: ${envCols};">
               <span>${t('成员')}</span><span>${t('角色')}</span><span>${t('状态')}</span><span>${t('最近活跃')}</span><span>${t('环境')}</span><span></span>
             </div>
-            ${memberRows || empty(t('还没有成员'))}
+            ${memberRows || emptyBox(t('还没有成员'))}
           </div>
         </div>
         <div class="satu-panel">
@@ -731,15 +702,7 @@ function companyDetailPage() {
         </div>
         ${balancePanel()}
         ${topupRecordsPanel()}
-        <div style="display: flex; flex-direction: column; gap: var(--space-3);">
-          <h2 style="font-size: 18px; margin: 0;">${t('订阅账单')}</h2>
-          <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
-            <div class="satu-billhead">
-              <span>${t('账期')}</span><span>${t('金额')}</span><span>${t('状态')}</span><span>${t('付款时间')}</span><span></span>
-            </div>
-            ${invoiceRows || empty(t('还没有订阅账单。支付接上之后，账期会列在这里。'))}
-          </div>
-        </div>
+        ${billTable(t('订阅账单'), [t('账期'), t('金额'), t('状态'), t('付款时间'), ''], invoiceRows, t('还没有订阅账单。支付接上之后，账期会列在这里。'))}
         ${chargeTable('org', state.org?.id || '')}
         ${seatEnvModal()}
       </div>

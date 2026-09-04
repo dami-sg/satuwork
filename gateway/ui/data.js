@@ -500,6 +500,35 @@ async function loadBots() {
 }
 
 /**
+ * 模版草稿和 Bot 草稿共有的那一段：行为边界、浏览器、Skill 开关、记忆设置。
+ *
+ * 这十一格两边**必须**一模一样——它们提交回去走的是同一套字段。分开写过一阵子，
+ * 结果是加一档记忆 TTL 只改了其中一边，公司模版那一屏存下去就把值悄悄改回默认。
+ */
+function behaviorDraft(src) {
+  const saved = src.guards && typeof src.guards === 'object' ? src.guards : {}
+  const br = src.browser && typeof src.browser === 'object' ? src.browser : {}
+  const mem = src.memory && typeof src.memory === 'object' ? src.memory : {}
+  return {
+    // 行为边界：文案在这边（要跟着界面语言走），开关从服务端来，按 id 贴回去。
+    guards: DEFAULT_BOT_GUARDS.map((g) => ({ ...g, on: typeof saved[g.id] === 'boolean' ? saved[g.id] : g.on })),
+    // 站点在草稿里是一整段文本（一行一个），保存时才切成数组——输入框里敲到一半的
+    // 那一行不该在每次按键时都被切一次、归一化一次，光标会跳。
+    browserOn: br.on === true,
+    browserSites: (Array.isArray(br.sites) ? br.sites : []).join('\n'),
+    // 缺字段按开算：老模版没存过这个键，而它在服务端的默认就是开的。
+    selfSkills: src.selfSkills !== false,
+    memoryOn: mem.on !== false,
+    scope: MEMORY_SCOPES.includes(mem.scope) ? mem.scope : '所属分组',
+    kinds: Array.isArray(mem.kinds) ? mem.kinds.filter((k) => MEMORY_KINDS.includes(k)) : ['偏好', '事实'],
+    ttl: MEMORY_TTLS.includes(mem.ttl) ? mem.ttl : '90 天',
+    cap: Number.isFinite(Number(mem.cap)) && mem.cap ? Number(mem.cap) : 20,
+    confirmOn: mem.confirm !== false,
+    piiOn: mem.pii !== false,
+  }
+}
+
+/**
  * 公司的 Bot 模版。管理员那一页编辑的就是它，员工那边只读着看「我的 Bot 继承了什么」。
  *
  * 草稿和 state.template 分开放：改了一半还没保存的时候，版本号那一栏要显示的是**已经
@@ -522,29 +551,13 @@ async function loadBotTemplate() {
 
 function draftFromTemplate(tpl) {
   if (!tpl) return null
-  const saved = tpl.guards && typeof tpl.guards === 'object' ? tpl.guards : {}
-  const br = tpl.browser && typeof tpl.browser === 'object' ? tpl.browser : {}
-  const mem = tpl.memory && typeof tpl.memory === 'object' ? tpl.memory : {}
   return {
     prompt: tpl.prompt || '',
     escalate: tpl.escalate || '',
     escalateTo: tpl.escalateTo || 'owner',
     skills: Array.isArray(tpl.skills) ? tpl.skills.slice() : [],
     mcps: Array.isArray(tpl.mcps) ? tpl.mcps.slice() : [],
-    guards: DEFAULT_BOT_GUARDS.map((g) => ({ ...g, on: typeof saved[g.id] === 'boolean' ? saved[g.id] : g.on })),
-    // 站点在草稿里是一整段文本（一行一个），保存时才切成数组——输入框里敲到一半的
-    // 那一行不该在每次按键时都被切一次、归一化一次，光标会跳。
-    browserOn: br.on === true,
-    browserSites: (Array.isArray(br.sites) ? br.sites : []).join('\n'),
-    // 缺字段按开算：老模版没存过这个键，而它在服务端的默认就是开的。
-    selfSkills: tpl.selfSkills !== false,
-    memoryOn: mem.on !== false,
-    scope: MEMORY_SCOPES.includes(mem.scope) ? mem.scope : '所属分组',
-    kinds: Array.isArray(mem.kinds) ? mem.kinds.filter((k) => MEMORY_KINDS.includes(k)) : ['偏好', '事实'],
-    ttl: MEMORY_TTLS.includes(mem.ttl) ? mem.ttl : '90 天',
-    cap: Number.isFinite(Number(mem.cap)) && mem.cap ? Number(mem.cap) : 20,
-    confirmOn: mem.confirm !== false,
-    piiOn: mem.pii !== false,
+    ...behaviorDraft(tpl),
   }
 }
 
@@ -558,10 +571,6 @@ async function loadSkills() {
 }
 
 function draftFromBot(bot) {
-  // 行为边界：文案在这边（要跟着界面语言走），开关从服务端来，按 id 贴回去。
-  const saved = bot.guards && typeof bot.guards === 'object' ? bot.guards : {}
-  const br = bot.browser && typeof bot.browser === 'object' ? bot.browser : {}
-  const mem = bot.memory && typeof bot.memory === 'object' ? bot.memory : {}
   return {
     name: bot.name || '',
     description: bot.description || '',
@@ -575,26 +584,15 @@ function draftFromBot(bot) {
     mcps: Array.isArray(bot.mcps) ? bot.mcps.slice() : [],
     groups: [],
     kbs: [],
-    guards: DEFAULT_BOT_GUARDS.map((g) => ({ ...g, on: typeof saved[g.id] === 'boolean' ? saved[g.id] : g.on })),
-    browserOn: br.on === true,
-    browserSites: (Array.isArray(br.sites) ? br.sites : []).join('\n'),
-    // 缺字段按开算：老模版没存过这个键，而它在服务端的默认就是开的。
-    selfSkills: bot.selfSkills !== false,
     escalate: bot.escalate || '',
     escalateTo: bot.escalateTo || 'owner',
     /**
-     * **不在这儿垫一个空数组。** 垫了的话「还没拉过记忆」和「真的一条都没有」就长得
-     * 一模一样，而「已存记忆」那一格照着它画出来的空列表是假的——公司模版那一屏和
-     * owner 那条路都不拉记忆，人看到的会是一句斩钉截铁的「还没有记下任何事实」。
+     * **不在这儿垫一个空 memories 数组。** 垫了的话「还没拉过记忆」和「真的一条都没有」
+     * 就长得一模一样，而「已存记忆」那一格照着它画出来的空列表是假的——公司模版那一屏
+     * 和 owner 那条路都不拉记忆，人看到的会是一句斩钉截铁的「还没有记下任何事实」。
      * 留成 undefined，那一格自己就不画了（见 pages-bots.js 的 storedMemories）。
      */
-    memoryOn: mem.on !== false,
-    scope: MEMORY_SCOPES.includes(mem.scope) ? mem.scope : '所属分组',
-    kinds: Array.isArray(mem.kinds) ? mem.kinds.filter((k) => MEMORY_KINDS.includes(k)) : ['偏好', '事实'],
-    ttl: MEMORY_TTLS.includes(mem.ttl) ? mem.ttl : '90 天',
-    cap: Number.isFinite(Number(mem.cap)) && mem.cap ? Number(mem.cap) : 20,
-    confirmOn: mem.confirm !== false,
-    piiOn: mem.pii !== false,
+    ...behaviorDraft(bot),
   }
 }
 

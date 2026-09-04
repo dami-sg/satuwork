@@ -1464,19 +1464,10 @@ function billingPage() {
         `<button type="button" class="satu-assignee" style="padding: 5px 14px;" aria-pressed="${String(tab === item.key)}" data-act="billing-tab" data-tab="${item.key}">${t(item.label)}</button>`,
     )
     .join('')
-  const invoiceRows = invoices
-    .map(
-      (b) => `<div class="satu-billrow">
-        <span style="font-size: 13.5px;">${esc(b.period)}</span>
-        <span style="font-size: 13.5px;">${esc(b.amount)}</span>
-        <span class="tag tag-accent-2">${esc(b.status)}</span>
-        <span style="font-size: 13px; color: var(--muted-foreground);">${esc(b.paid)}</span>
-        <div style="display: flex; align-items: center; gap: var(--space-3); justify-content: flex-end;">
-          <button type="button" class="satu-linkbtn" disabled title="${esc(t('发票开具还没做'))}">${t('发票')}</button>
-        </div>
-      </div>`,
-    )
-    .join('')
+  const invoiceTail = `<div style="display: flex; align-items: center; gap: var(--space-3); justify-content: flex-end;">
+      <button type="button" class="satu-linkbtn" disabled title="${esc(t('发票开具还没做'))}">${t('发票')}</button>
+    </div>`
+  const invoiceRows = invoices.map((b) => invoiceRow(b, invoiceTail)).join('')
   const topupRows = topups
     .map(
       (row) => `<div class="satu-billrow">
@@ -1488,8 +1479,6 @@ function billingPage() {
       </div>`,
     )
     .join('')
-  const empty = (msg) =>
-    `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${esc(msg)}</div>`
   const subBody = `
         <div style="display: flex; flex-direction: column; gap: var(--space-6);">
           <div class="satu-panel">
@@ -1515,15 +1504,7 @@ function billingPage() {
               <button type="button" class="satu-switch" aria-pressed="${String(renewing)}" aria-label="${esc(t('自动续订'))}" data-act="billing-autorenew"><span></span></button>
             </div>
           </div>
-          <div style="display: flex; flex-direction: column; gap: var(--space-3);">
-            <h2 style="font-size: 18px; margin: 0;">${t('订阅账单')}</h2>
-            <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
-              <div class="satu-billhead">
-                <span>${t('账期')}</span><span>${t('金额')}</span><span>${t('状态')}</span><span>${t('付款时间')}</span><span></span>
-              </div>
-              ${invoiceRows || empty(t('还没有订阅账单。支付接上之后，账期会列在这里。'))}
-            </div>
-          </div>
+          ${billTable(t('订阅账单'), [t('账期'), t('金额'), t('状态'), t('付款时间'), ''], invoiceRows, t('还没有订阅账单。支付接上之后，账期会列在这里。'))}
         </div>`
   // 余额跟两个 tab 都有关（订阅送的 + 自己充的），所以提到 tab 上面，切 tab 也不换走。
   //
@@ -1568,15 +1549,7 @@ function billingPage() {
         ${creditWarning(balance)}`
   const topupBody = `
         <div style="display: flex; flex-direction: column; gap: var(--space-6);">
-          <div style="display: flex; flex-direction: column; gap: var(--space-3);">
-            <h2 style="font-size: 18px; margin: 0;">${t('充值记录')}</h2>
-            <div style="border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--popover);">
-              <div class="satu-billhead">
-                <span>${t('时间')}</span><span>${t('金额')}</span><span>${t('状态')}</span><span>${t('备注')}</span><span></span>
-              </div>
-              ${topupRows || empty(t('还没有充值记录。'))}
-            </div>
-          </div>
+          ${billTable(t('充值记录'), [t('时间'), t('金额'), t('状态'), t('备注'), ''], topupRows, t('还没有充值记录。'))}
         </div>`
   return `
     <div class="gw-page">
@@ -1632,8 +1605,6 @@ function usagePage() {
   const byKind = Array.isArray(data.byKind) ? data.byKind : []
   const byMember = Array.isArray(data.byMember) ? data.byMember : []
   const seats = Number(data.seats) || 0
-  const empty = (msg) =>
-    `<div style="padding: var(--space-6); text-align: center; font-size: 13px; color: var(--muted-foreground);">${esc(msg)}</div>`
   const pills = ranges
     .map(
       (r) =>
@@ -1671,18 +1642,18 @@ function usagePage() {
           <div class="satu-bars">${cols}</div>`
       })()
     : `<span class="satu-panel-title">${t('每日任务执行量')}</span>
-          ${empty(t('这个时间段里还没有调用。'))}`
+          ${emptyBox(t('这个时间段里还没有调用。'))}`
   const agentBody = byAgent.length
     ? byAgent.map((a) => usageMeter(a.name, a.value, a.pct, false, false)).join('')
     // 「没有数」和「这一维盖不全」是两件事。模型调用还带不上 Bot 标识（Gateway 收到的
     // 是一个 OpenAI 兼容请求，里面没有会话这个概念），所以这一块空着多半不是没用过。
-    : empty(t('模型调用还没带上 Bot 标识，这里只数带得上的那些（连接器）。'))
+    : emptyBox(t('模型调用还没带上 Bot 标识，这里只数带得上的那些（连接器）。'))
   const modelBody = byModel.length
     ? byModel.map((m) => usageMeter(m.name, m.value, m.pct, true, true)).join('')
-    : empty(t('这个时间段里还没有模型调用。'))
+    : emptyBox(t('这个时间段里还没有模型调用。'))
   const kindBody = byKind.length
     ? byKind.map((k) => usageMeter(k.name, k.value, k.pct, false, false)).join('')
-    : empty(t('这个时间段里还没有计费记录。'))
+    : emptyBox(t('这个时间段里还没有计费记录。'))
   const memberRows = byMember
     .map((m) => {
       // 「已离职员工」是服务端兜出来的合计行，不是某个人——它的名字要翻译，真人的
@@ -1754,7 +1725,7 @@ function usagePage() {
               ${/* 「失败率」那一列永远是 —（从来没接过），换成真的能填上的东西。 */ ''}
               <span>${t('成员')}</span><span>${t('任务')}</span><span>Tokens</span><span>${t('金额')}</span><span>${t('最近使用')}</span>
             </div>
-            ${memberRows || empty(t('还没有成员。'))}
+            ${memberRows || emptyBox(t('还没有成员。'))}
           </div>
         </div>
         ${chargeTable((isAdmin() || isOwner()) && orgId() ? 'org' : 'me')}

@@ -70,10 +70,6 @@ function cachePut(key: string, value: unknown) {
   }
 }
 
-/** e2e 用：把缓存清空。生产没人调。 */
-export function clearWebCache() {
-  cache.clear()
-}
 
 async function settingsOf(db: Db): Promise<{ web: WebToolsSettings }> {
   const s = await db.platformSettings()

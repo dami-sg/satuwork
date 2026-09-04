@@ -786,25 +786,36 @@ async function saveCred(provider, secret, credId) {
   }
 }
 
+/**
+ * 公司资料那张表单里，三处提交都要送的那七格。
+ *
+ * 三处（建公司、平台侧改公司、公司自己改资料）本来各列一遍，加一格就得记得三处都加
+ * ——漏了不会报错，只是那一格在其中一条路上永远存不进去。各自额外要送的（accessUrl、
+ * handoffWebhook、管理员账号）留在调用点上，因为它们本来就只属于其中一条路。
+ */
+function orgProfileFields(fd) {
+  return {
+    name: String(fd.get('name') || '').trim(),
+    slug: String(fd.get('slug') || '').trim(),
+    contactName: String(fd.get('contactName') || '').trim(),
+    contactPhone: phoneValue(fd),
+    contactEmail: String(fd.get('contactEmail') || '').trim(),
+    address: String(fd.get('address') || '').trim(),
+    website: String(fd.get('website') || '').trim(),
+  }
+}
+
 async function saveCompany(e) {
   e.preventDefault()
   const fd = new FormData(e.target)
   const id = orgId()
-  const name = String(fd.get('name') || '').trim()
-  const slug = String(fd.get('slug') || '').trim()
   const accessUrl = String(fd.get('accessUrl') || '').trim()
   state.busy = true
   render()
   try {
     await api('PATCH', `/orgs/${encodeURIComponent(id)}`, {
-      name,
-      slug,
+      ...orgProfileFields(fd),
       accessUrl: accessUrl || null,
-      contactName: String(fd.get('contactName') || '').trim(),
-      contactPhone: phoneValue(fd),
-      contactEmail: String(fd.get('contactEmail') || '').trim(),
-      address: String(fd.get('address') || '').trim(),
-      website: String(fd.get('website') || '').trim(),
       handoffWebhook: String(fd.get('handoffWebhook') || '').trim(),
     })
     await loadOrg()
@@ -844,13 +855,7 @@ async function createOrg(e) {
   }
   state.orgCreateError = ''
   const body = {
-    name: String(fd.get('name') || '').trim(),
-    slug: String(fd.get('slug') || '').trim(),
-    contactName: String(fd.get('contactName') || '').trim(),
-    contactPhone: phoneValue(fd),
-    contactEmail: String(fd.get('contactEmail') || '').trim(),
-    address: String(fd.get('address') || '').trim(),
-    website: String(fd.get('website') || '').trim(),
+    ...orgProfileFields(fd),
     adminEmail: String(fd.get('adminEmail') || '').trim(),
     adminPassword,
   }
@@ -1516,13 +1521,7 @@ async function saveOrgProfile(e) {
   try {
     // 状态不在这张表单里：它单独一条 PATCH，改完立刻生效。
     await api('PATCH', `/orgs/${encodeURIComponent(id)}`, {
-      name: String(fd.get('name') || '').trim(),
-      slug: String(fd.get('slug') || '').trim(),
-      contactName: String(fd.get('contactName') || '').trim(),
-      contactPhone: phoneValue(fd),
-      contactEmail: String(fd.get('contactEmail') || '').trim(),
-      address: String(fd.get('address') || '').trim(),
-      website: String(fd.get('website') || '').trim(),
+      ...orgProfileFields(fd),
       accessUrl: accessUrl || null,
     })
     await loadOrgs()

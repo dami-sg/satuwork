@@ -17,9 +17,6 @@ export interface LlmTokens {
   cacheWriteTokens: number
 }
 
-export function emptyTokens(): LlmTokens {
-  return { promptTokens: 0, completionTokens: 0, cachedTokens: 0, cacheWriteTokens: 0 }
-}
 
 /**
  * 目录里的 `cost` + 平台覆盖 → 实际生效的四项单价。

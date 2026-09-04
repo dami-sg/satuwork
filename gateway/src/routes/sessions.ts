@@ -7,7 +7,7 @@ import { PULL_ERROR, pullSessionEvents } from '../lib/machines.ts'
 import { companyMachineOf } from '../deploy.ts'
 import { bodyOf, intField } from '../lib/validate.ts'
 import { modelProviderCreds, publicPlatformCred, publicSessionIndex, sessionCursorOf } from '../lib/org.ts'
-import { rangeQuery, requireOrg, requireUser } from '../lib/guards.ts'
+import { rangeQuery, requireOrgUser, requireUser } from '../lib/guards.ts'
 import { seatBearer, seatMachineOf } from '../lib/runtime.ts'
 import { sessionPageLimit } from '../db.ts'
 
@@ -17,8 +17,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   // ── 公司密钥。列表/详情只回 configured: true ────────────────────────
 
   router.get('/orgs/:id/credentials', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id)
+    await requireOrgUser(req, db, keys, req.params.id)
     // 和平台那条同一个口径：只报模型供应商。公司管理员这一屏就叫「供应商」，
     // 连接器和搜索后端漏进来同样是假供应商，而他连改都改不了。
     json(res, 200, { credentials: modelProviderCreds(await db.platformCredentials()).map(publicPlatformCred) })
@@ -30,8 +29,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/orgs/:id/credentials/:credId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id)
+    await requireOrgUser(req, db, keys, req.params.id)
     const provider = req.params.credId.startsWith('platform:') ? req.params.credId.slice('platform:'.length) : req.params.credId
     const row = await db.platformCredential(provider)
     if (!row) throw new HttpError(404, '密钥不存在')
@@ -51,8 +49,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   // ── 会话索引 / 按需拉全文。Gateway 只存指针，正文留在机器上。────────
 
   router.get('/orgs/:id/sessions', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    await requireOrgUser(req, db, keys, req.params.id, true)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const accountId = (req.query.get('accountId') || '').trim()
@@ -90,8 +87,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/orgs/:id/sessions/:sessionId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    const account = await requireOrgUser(req, db, keys, req.params.id, true)
     const company = await db.company(req.params.id)
     if (!company) throw new HttpError(404, '公司不存在')
     const row = await db.sessionIndex(req.params.sessionId)
@@ -127,8 +123,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/orgs/:id/audit', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    await requireOrgUser(req, db, keys, req.params.id, true)
     json(res, 200, {
       events: (await db.auditsOf(req.params.id)).map((e) => ({
         id: e.id,
@@ -143,8 +138,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   // ── 自动对话审计。结构化派生物在 Gateway，原始对话仍按上面的路径去席位拉。────
 
   router.get('/orgs/:id/conversation-audit-settings', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    await requireOrgUser(req, db, keys, req.params.id, true)
     if (!await db.company(req.params.id)) throw new HttpError(404, '公司不存在')
     const settings = (await db.settings(req.params.id)).conversationAudit
     const platform = await db.platformSettings()
@@ -152,8 +146,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   })
 
   router.patch('/orgs/:id/conversation-audit-settings', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    const account = await requireOrgUser(req, db, keys, req.params.id, true)
     if (!await db.company(req.params.id)) throw new HttpError(404, '公司不存在')
     const body = bodyOf(req)
     const role = String(body.modelRole ?? '')
@@ -178,8 +171,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/orgs/:id/conversation-audits', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    const account = await requireOrgUser(req, db, keys, req.params.id, true)
     const range = rangeQuery(req)
     const rawOutcome = (req.query.get('outcome') || '').trim()
     const outcomes = new Set(['completed', 'partial', 'failed', 'blocked', 'answered', 'unknown'])
@@ -215,8 +207,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/orgs/:id/conversation-audits/:itemId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    const account = await requireOrgUser(req, db, keys, req.params.id, true)
     const item = await db.conversationAuditItem(req.params.itemId)
     if (!item || item.companyId !== req.params.id) throw new HttpError(404, '审计条目不存在')
     const batch = await db.conversationAuditBatch(item.batchId)
@@ -237,8 +228,7 @@ export function attachSessions(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/orgs/:id/conversation-audit-coverage', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    await requireOrgUser(req, db, keys, req.params.id, true)
     const batches = await db.conversationAuditCoverageOfCompany(req.params.id)
     json(res, 200, {
       coverage: batches.map((b) => ({

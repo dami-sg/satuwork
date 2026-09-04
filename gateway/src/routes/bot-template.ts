@@ -9,7 +9,7 @@ import type { RouteCtx } from './ctx.ts'
 import { HttpError, type Router, json } from '../http.ts'
 import { applyTemplatePatch, botTemplateOf, defaultBotModel, ensureBotTemplate, publicTemplate } from '../lib/catalog.ts'
 import { bodyOf } from '../lib/validate.ts'
-import { requireOrg, requireUser } from '../lib/guards.ts'
+import { requireOrg, requireOrgUser } from '../lib/guards.ts'
 import { deploySeat } from '../deploy.ts'
 
 /** 一次「立刻下发」最多重铺多少个席位。超过的留给轮询自己跟上。 */
@@ -52,8 +52,7 @@ export function attachBotTemplate(router: Router, ctx: RouteCtx) {
    * 「你的 Bot 会继承这些」，看不到底座就等于让人蒙着眼睛建。
    */
   router.get('/orgs/:id/bot-template', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id)
+    const account = await requireOrgUser(req, db, keys, req.params.id)
     await ensureCompany(req.params.id)
     const item = await ensureBotTemplate(db, req.params.id)
     const tpl = botTemplateOf(item)
@@ -112,8 +111,7 @@ export function attachBotTemplate(router: Router, ctx: RouteCtx) {
    * template-save）；不带的调用方（脚本、e2e）按老样子直接覆盖，不强制。
    */
   router.put('/orgs/:id/bot-template', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.id, true)
+    const account = await requireOrgUser(req, db, keys, req.params.id, true)
     await ensureCompany(req.params.id)
     const item = await ensureBotTemplate(db, req.params.id)
     const body = bodyOf(req)
@@ -148,8 +146,7 @@ export function attachBotTemplate(router: Router, ctx: RouteCtx) {
    * 条请求拖到超时。
    */
   router.post('/orgs/:id/bot-template/redeploy', async (req, res) => {
-    const actor = await requireUser(req, db, keys)
-    requireOrg(actor, req.params.id, true)
+    const actor = await requireOrgUser(req, db, keys, req.params.id, true)
     await ensureCompany(req.params.id)
     const seats = (await db.seatRuntimesOf(req.params.id)).filter((s) => s.status === 'ready')
     if (seats.length > REDEPLOY_LIMIT) throw new HttpError(409, `席位太多（${seats.length} 个），请让它们自己跟上`)

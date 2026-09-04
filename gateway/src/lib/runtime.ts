@@ -323,6 +323,64 @@ export async function proxyUpload(
 }
 
 /**
+ * 上游把这次调用拒了：把它那份正文原样转出去。
+ *
+ * `passthrough` 是「这个状态码该原样交给浏览器」的白名单，其余一律 503。分开列是因为
+ * 两条代理的口径本来就不同：下载那条把 400/404 当业务答案，SSE 那条还要把 401/403
+ * 交出去（席位票过期了，前端要据此重取一张，收到 503 它只会当作实例挂了一直重连）。
+ *
+ * 上游正文认不出 JSON 时兜一句 INSTANCE_DOWN——**不能把原文透传**：那多半是一页
+ * HTML 错误页，前端 `res.json()` 会当场抛，人看到的是一次没有任何线索的失败。
+ */
+async function relayUpstreamError(res: ServerResponse, r: Response, passthrough: number[]) {
+  const text = await r.text().catch(() => '')
+  let parsed: unknown
+  try {
+    parsed = text ? JSON.parse(text) : { error: INSTANCE_DOWN }
+  } catch {
+    parsed = { error: INSTANCE_DOWN }
+  }
+  json(res, passthrough.includes(r.status) ? r.status : 503, parsed)
+}
+
+/**
+ * 一条上游 SSE 拆成一个个事件。
+ *
+ * 分帧规则收在这一处：CRLF 归一化、`\n\n` 分帧、一帧里可能有多行 `data:`、认不出
+ * JSON 的那一行跳过。两处消费者（例行任务等这一轮的结局、名册流往下转发）本来各写
+ * 一遍——而这几条每一条都是「写错了不报错、只是偶尔悄悄丢一帧」的那种规则。
+ *
+ * `stop` 在每次 read 之前问一次，位置和原来那两个 while 条件一致。
+ */
+export async function* sseEvents<T>(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  stop: () => boolean = () => false,
+): AsyncGenerator<T> {
+  const decoder = new TextDecoder()
+  let buf = ''
+  while (!stop()) {
+    const { done, value } = await reader.read()
+    if (done) return
+    buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+    let idx: number
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data: ')) continue
+        let ev: T
+        try {
+          ev = JSON.parse(line.slice(6)) as T
+        } catch {
+          continue
+        }
+        yield ev
+      }
+    }
+  }
+}
+
+/**
  * 把席位上的文件字节转给浏览器。预览和下载都走这条。
  *
  * **安全头在这里加，不在 bot 那边**：面向浏览器的是这一跳，源也是这一跳的源。
@@ -351,14 +409,7 @@ export async function proxyDownload(req: Req, res: ServerResponse, url: string, 
   }
   if (!r.ok || !r.body) {
     req.off('close', onClose)
-    const text = await r.text().catch(() => '')
-    let parsed: unknown
-    try {
-      parsed = text ? JSON.parse(text) : { error: INSTANCE_DOWN }
-    } catch {
-      parsed = { error: INSTANCE_DOWN }
-    }
-    json(res, r.status === 400 || r.status === 404 ? r.status : 503, parsed)
+    await relayUpstreamError(res, r, [400, 404])
     return
   }
   const type = r.headers.get('content-type') || 'application/octet-stream'
@@ -414,14 +465,7 @@ export async function proxySse(req: Req, res: ServerResponse, url: string, token
   }
   if (!r.ok || !r.body) {
     req.off('close', onClose)
-    const text = await r.text().catch(() => '')
-    let parsed: unknown
-    try {
-      parsed = text ? JSON.parse(text) : { error: INSTANCE_DOWN }
-    } catch {
-      parsed = { error: INSTANCE_DOWN }
-    }
-    json(res, r.status === 401 || r.status === 403 || r.status === 404 ? r.status : 503, parsed)
+    await relayUpstreamError(res, r, [401, 403, 404])
     return
   }
   res.writeHead(r.status, {

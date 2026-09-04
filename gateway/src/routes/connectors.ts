@@ -5,13 +5,13 @@
  * 后面的里程碑里接上。
  */
 import type { RouteCtx } from './ctx.ts'
-import { HttpError, json, type Router } from '../http.ts'
+import { HttpError, json, type Req, type Router } from '../http.ts'
 import { ProviderError, VENDORS, isVendor, providerFor, type ToolDef } from '../connectors/index.ts'
 import { MAX_TOOLS, applyConnectorPatch, blockMapOf, checkRecommended, connectorDefOf, matchTools, newConnectorDefinition, publicConnector, toolsOf } from '../lib/connectors.ts'
 import { toolModeOf } from '../lib/tool-search.ts'
 import { bodyOf, strField } from '../lib/validate.ts'
 import { isUniqueViolation } from '../db.ts'
-import { originOf, rangeQuery, requireOrg, requireOwner, requireUser } from '../lib/guards.ts'
+import { originOf, rangeQuery, requireOrgUser, requireOwnerUser, requireUser } from '../lib/guards.ts'
 import { COMPANY_CONNECTION_LABEL, CONNECTION_LABEL_RE, DEFAULT_CONNECTION_LABEL, type Account, type ConnectorConnection, type ConnectorDef, externalUserIdOf } from '../db.ts'
 import { publicConnection, publicInstall } from '../lib/connectors.ts'
 import { publicPlatformCred } from '../lib/org.ts'
@@ -40,8 +40,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
    * 没配密钥也照样返回这一行——不然 owner 那一屏连「还没配」都画不出来。
    */
   router.get('/platform/connector-vendors', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const vendors: unknown[] = []
     for (const vendor of VENDORS) {
       const provider = await providerFor(db, vendor)
@@ -57,8 +56,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   })
 
   router.put('/platform/connector-vendors/:vendor', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const vendor = req.params.vendor
     if (!isVendor(vendor)) throw new HttpError(404, '没有这家供应商')
     const existed = Boolean(await db.platformCredential(vendor))
@@ -73,8 +71,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   })
 
   router.delete('/platform/connector-vendors/:vendor', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const vendor = req.params.vendor
     if (!isVendor(vendor)) throw new HttpError(404, '没有这家供应商')
     if (!(await db.platformCredential(vendor))) throw new HttpError(404, '密钥不存在')
@@ -85,8 +82,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
 
   /** 拨一下看看通不通。**不抛错**：连不通本身就是要显示的结果。 */
   router.post('/platform/connector-vendors/:vendor/ping', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const vendor = req.params.vendor
     if (!isVendor(vendor)) throw new HttpError(404, '没有这家供应商')
     const provider = await providerFor(db, vendor)
@@ -99,13 +95,24 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
 
   // ── 供应商那边有什么（owner 上架时的选单）──────────────────────────
 
-  router.get('/platform/connector-toolkits', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+  /**
+   * 选单那两条的共同开场：认 owner、认 `?vendor=`、并确认那家配过密钥。
+   *
+   * 合在一起是因为这三道关卡必须同时成立才有下一步——少判一道的表现不是报错，
+   * 是拿着一份没有密钥的 provider 去调上游，报出来的会是一句供应商的 401。
+   */
+  async function ownerVendor(req: Req) {
+    await requireOwnerUser(req, db, keys)
     const vendor = (req.query.get('vendor') || VENDORS[0]).trim()
     if (!isVendor(vendor)) throw new HttpError(400, `没有这家供应商：${vendor}`)
     const provider = await providerFor(db, vendor)
     if (!provider.configured()) throw new HttpError(402, `还没配 ${vendor} 的密钥`)
+    return { vendor, provider }
+  }
+
+
+  router.get('/platform/connector-toolkits', async (req, res) => {
+    const { vendor, provider } = await ownerVendor(req)
     try {
       json(res, 200, { vendor, toolkits: await provider.listToolkits() })
     } catch (e) {
@@ -114,12 +121,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/platform/connector-toolkits/:slug/tools', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
-    const vendor = (req.query.get('vendor') || VENDORS[0]).trim()
-    if (!isVendor(vendor)) throw new HttpError(400, `没有这家供应商：${vendor}`)
-    const provider = await providerFor(db, vendor)
-    if (!provider.configured()) throw new HttpError(402, `还没配 ${vendor} 的密钥`)
+    const { vendor, provider } = await ownerVendor(req)
     try {
       json(res, 200, { vendor, toolkit: req.params.slug, tools: await provider.listTools(req.params.slug) })
     } catch (e) {
@@ -136,14 +138,12 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   }
 
   router.get('/platform/connectors', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     json(res, 200, { connectors: (await db.visibleCatalog('connector', null)).map(publicConnector) })
   })
 
   router.post('/platform/connectors', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const def = newConnectorDefinition(bodyOf(req))
     /**
      * 同一个 (vendor, toolkit) 只上架一次。
@@ -170,14 +170,12 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/platform/connectors/:connectorId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     json(res, 200, { connector: publicConnector(await globalConnector(req.params.connectorId)) })
   })
 
   router.patch('/platform/connectors/:connectorId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const item = await globalConnector(req.params.connectorId)
     const cur = connectorDefOf(item)
     // 带上上一版：没动推荐集的那些编辑（改名、改说明、上下架）不该被拖去核清单。
@@ -192,8 +190,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
    * `connector_calls` 存的是字面量 slug，没有外键，「上个月谁烧了多少」查得到。
    */
   router.delete('/platform/connectors/:connectorId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    const account = await requireOwnerUser(req, db, keys)
     const item = await globalConnector(req.params.connectorId)
     await db.deleteCatalog(item.id)
     await db.audit({ companyId: 'platform', accountId: account.id, action: 'connector.unpublish', detail: { id: item.id } })
@@ -616,8 +613,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
    * 都得先知道有人在用什么。
    */
   router.get('/orgs/:orgId/connectors', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.orgId, true)
+    await requireOrgUser(req, db, keys, req.params.orgId, true)
     const items = await db.visibleCatalog('connector', req.params.orgId)
     const blocks = blockMapOf(items)
     const installs = await db.connectorInstallsOfCompany(req.params.orgId)
@@ -646,8 +642,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
    * 每加一个连接器都要等管理员点一下，市场就没有意义了。
    */
   router.put('/orgs/:orgId/connectors/:connectorId/block', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.orgId, true)
+    const account = await requireOrgUser(req, db, keys, req.params.orgId, true)
     const items = await db.visibleCatalog('connector', req.params.orgId)
     const item = items.find((i) => i.id === req.params.connectorId && i.scope === 'global')
     if (!item) throw new HttpError(404, '没有这个连接器')
@@ -695,8 +690,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
    * 合成工具、计费、统计都不用分叉。差别只在谁能建、谁能删。
    */
   router.post('/orgs/:orgId/connectors/:connectorId/connections', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.orgId, true)
+    const account = await requireOrgUser(req, db, keys, req.params.orgId, true)
     const items = await db.visibleCatalog('connector', req.params.orgId)
     const item = items.find((i) => i.id === req.params.connectorId && i.scope === 'global')
     if (!item) throw new HttpError(404, '没有这个连接器')
@@ -753,8 +747,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   })
 
   router.delete('/orgs/:orgId/connectors/:connectorId/connections/:connectionId', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.orgId, true)
+    const account = await requireOrgUser(req, db, keys, req.params.orgId, true)
     const row = await db.connectorConnection(req.params.connectionId)
     if (!row || row.scope !== 'company' || row.companyId !== req.params.orgId || row.connectorId !== req.params.connectorId) {
       throw new HttpError(404, '没有这个连接')
@@ -825,8 +818,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   }
 
   router.get('/platform/connector-stats', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOwner(account)
+    await requireOwnerUser(req, db, keys)
     const range = rangeQuery(req)
     const rows = await db.connectorUsageByCompany(range)
     const companies = new Map((await db.companies()).map((c) => [c.id, c]))
@@ -856,8 +848,7 @@ export function attachConnectors(router: Router, ctx: RouteCtx) {
   })
 
   router.get('/orgs/:orgId/connector-stats', async (req, res) => {
-    const account = await requireUser(req, db, keys)
-    requireOrg(account, req.params.orgId, true)
+    await requireOrgUser(req, db, keys, req.params.orgId, true)
     const range = rangeQuery(req)
     const usage = await db.connectorUsage({ companyId: req.params.orgId }, range)
     const accounts = new Map((await db.accountsOf(req.params.orgId)).map((a) => [a.id, a]))
