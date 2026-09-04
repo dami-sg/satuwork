@@ -7,7 +7,7 @@ import { WorkspaceError } from '../workspace/index.ts'
 import { docKindOf, extractDocument } from '../workspace/extract.ts'
 import { CommandError, QUIET_MESSAGE, type ImageRef, type Mention, type MessageSource } from '../agent/index.ts'
 import { expiredMessage, returnMessage, type Disposition, type HandoffActor } from '../policy/handoff.ts'
-import { readTodos } from '../tools/todo.ts'
+import { clearSettledTodos, readTodos } from '../tools/todo.ts'
 import {
   channelCommand, channelMentionHelp, parseChannelMentions, withChannelTodos,
   type ChannelMentionCandidate,
@@ -265,6 +265,7 @@ export function apply(ctx: Context, _config: Config = {}) {
         else {
           try {
             const reset = await ctx.agents.resetContext(mapped.sessionId)
+            await clearSettledTodos(ctx, mapped.sessionId, `channel:${input.eventId}`)
             reply = `已开始新对话；上面的记录仍然保留，但接下来的上下文不再带入之前的 ${reset.droppedMessages} 条消息。`
           } catch (e) {
             // 命令拒绝是给用户看的业务结果，不能抛给 Dispatcher 让它无限重试。
@@ -301,6 +302,7 @@ export function apply(ctx: Context, _config: Config = {}) {
       return saveChannelResult(resultKey, result)
     }
     if (ctx.agents.isRunning(mapped.sessionId)) throw new Error('这条渠道会话仍在处理上一条消息')
+    await clearSettledTodos(ctx, mapped.sessionId, `channel:${input.eventId}`)
     let failure: Error | null = null
     try {
       await ctx.agents.send(mapped.sessionId, parsed.text, [], parsed.mentions, {

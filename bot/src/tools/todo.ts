@@ -71,6 +71,26 @@ export function readTodos(ctx: Context, sessionId: string): TodoItem[] {
 }
 
 /**
+ * 新一轮真正开始时收掉上一轮已经结束的清单。
+ *
+ * 未完成清单必须跨轮保留；全部 completed / cancelled 的清单则只在收口那次展示一次，
+ * 下一条消息进来便清掉。Telegram 和 Web 共用主会话，所以同时补一条空快照，让 Web
+ * 输入框上方的任务 dock 也立即消失，而不是等刷新后才跟持久化状态一致。
+ */
+export async function clearSettledTodos(ctx: Context, sessionId: string, callId: string): Promise<boolean> {
+  const col = ctx.storage.collection<TodoItem[]>(COLLECTION)
+  const items = col.get(sessionId) ?? []
+  if (!items.length || items.some((item) => item.status === 'pending' || item.status === 'in_progress')) return false
+  col.delete(sessionId)
+  try {
+    await ctx.sessions.append(sessionId, 'todo/list', { callId, items: [] })
+  } catch (e) {
+    ctx.logger?.warn?.(`todo: 已结束清单清空后，快照事件没写进去 ${(e as Error).message}`)
+  }
+  return true
+}
+
+/**
  * 状态别名。
  *
  * 通常的口径是「模型写错了参数就告诉它，让它改」（见 tools/common.ts），但这几个
